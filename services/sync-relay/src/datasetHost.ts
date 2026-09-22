@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { createDatasetHost, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
+import { createHash, randomUUID } from "node:crypto";
+import { createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
+import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision, verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
@@ -12,6 +13,7 @@ import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
 import { notFound } from "./errors";
+import { createDatasetFiles } from "./storage/datasetFiles";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const principalKey = (workspaceId: string, grantId: string, userId: string) => hash(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId]));
@@ -156,16 +158,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     return {workspaceId, datasetId: requested.datasetId, authorityRevision, capability: verified.capability, authority: verified.authority, candidate};
   }
   try {
+    const files = createDatasetFiles(storage, account, nowMs);
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
       accountCreation(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes, true); },
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
-      operationResources(_auth, request) {
-        return {accountAndAttach(allocation) {
-          if (allocation.attachedFileIds.length) throw new Error("Dataset attachments are not configured.");
-          account(request.workspaceId, request.datasetId, allocation.bytes);
-        }};
-      },
+      operationResources(_auth, request) { return files.resources(request, request.authority, request.input); },
     });
     storage.tx(() => storage.db.exec(`DROP TRIGGER IF EXISTS sync_relay_dataset_delete;
       CREATE TRIGGER sync_relay_dataset_delete
@@ -190,6 +188,36 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, publication,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      upload(auth: AppBackendAuth, publicationId: string, input: AppBackendUploadRequest, signal?: AbortSignal) {
+        const published = publication(auth, publicationId);
+        if (!published || published.authorityRevision !== input.authorityRevision) throw notFound();
+        const {workspaceId, datasetId, capability} = published;
+        const scope = {workspaceId, datasetId, revision: capability.revision, revisionSha256: capability.revisionSha256, access: {kind: "app" as const, appId: publicationId}};
+        let permitted: ReturnType<typeof host.authorize> | undefined;
+        for (const operation of capability.operations.filter(operation => !operation.readOnly)) {
+          try { permitted = host.authorize(auth, {...scope, operationId: operation.operationId}); break; }
+          catch (error) { if (!(error instanceof DatasetHostError) || error.code !== "not_authorized") throw error; }
+        }
+        if (!permitted) throw notFound();
+        const captured = permitted;
+        return files.upload(scope, captured.authority, input, () => {
+          signal?.throwIfAborted(); current();
+          const checked = host.authorize(auth, {...scope, operationId: captured.operation.operationId});
+          if (JSON.stringify(checked.authority) !== JSON.stringify(captured.authority)) throw notFound();
+          const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
+          if (!head || head.active !== 1 || head.approved_revision_hash !== scope.revisionSha256) throw notFound();
+        });
+      },
+      readFile(auth: AppBackendAuth, publicationId: string, input: {authorityRevision: number; fileId: string; operation: string; input: AppBackendJson}, signal?: AbortSignal) {
+        const published = publication(auth, publicationId);
+        if (!published || published.authorityRevision !== input.authorityRevision) throw notFound();
+        const {workspaceId, datasetId, capability} = published, operation = capability.operations.find(operation => operation.name === input.operation);
+        if (!operation?.readOnly) throw notFound();
+        host.authorize(auth, {workspaceId, datasetId, revision: capability.revision, revisionSha256: capability.revisionSha256, operationId: operation.operationId, access: {kind: "app", appId: publicationId}});
+        return host.readOperation(auth, {workspaceId, datasetId, revision: capability.revision, revisionSha256: capability.revisionSha256,
+          operationId: operation.operationId, input: input.input, idempotencyKey: randomUUID(), access: {kind: "app", appId: publicationId},
+          signal: AbortSignal.any([storage.unavailable, ...(signal ? [signal] : [])])}, result => files.readAttached({workspaceId, datasetId}, input.fileId, result));
       },
       bindPublication(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; publicationId: string}): void {
         owner(auth, input.workspaceId);

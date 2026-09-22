@@ -17,17 +17,20 @@ const definition: DatasetDefinition = {formatVersion: 1, datasetId: id(1), name:
   tables: [{tableId: id(2), name: "Requests", sqlName: "requests", primaryKey: "id", fields: [
     {fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true},
     {fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false},
+    {fieldId: id(7), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false},
   ]}], operations: [
     {operationId: id(5), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)]},
     {operationId: id(6), name: "read", label: "Read", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)]},
+    {operationId: id(8), name: "receipt", label: "Receipt", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(7)]},
   ]};
-const schemaSql = "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);";
-const operationSource = `globalThis.operations={submit(ctx,input){if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?)',[ctx.requestId,input.name]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');}};`;
+const schemaSql = "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
+const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({definition, revision: 1, schemaSql, operationSource});
 
 async function httpFixture() {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
-  const host = await f.storage.createDatasetHost({directory, limits, nowMs: () => 10, onShutdownError(error) {throw error;}});
+  let now = 10;
+  const host = await f.storage.createDatasetHost({directory, limits, nowMs: () => now, onShutdownError(error) {throw error;}});
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
   const linkKey = "dataset-http-test-key", token = "T".repeat(43);
   f.storage.mintLinkSession({session: {sessionId: "dataset-http", capabilityHash: hashLinkBearer(token, linkKey), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
@@ -46,17 +49,17 @@ async function httpFixture() {
   const activate = () => http(`${path}/activate`, {revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
   const invoke = (operationId = id(6), headers = {}) => http(`${path}/invoke`, {revision: 1, revisionSha256: revision.revisionSha256,
     operationId, input: {}, idempotencyKey: "read"}, headers);
-  function publish() {
+  function publish(sourceRevision?: string) {
     const previous = f.storage.readAppPublication({workspaceId: "w", publicationId: f.publicationId, ownerUserId: "owner", limits});
-    const capability = resolveAppDatasetCapability({kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(5), id(6)]}, revision);
-    const candidate = {...previous.candidate, files: previous.candidate.files.filter(file => file.path === "bundle.js"), capabilities: [capability]};
+    const capability = resolveAppDatasetCapability({kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(5), id(6), id(8)]}, revision);
+    const candidate = {...previous.candidate, ...(sourceRevision ? {sourceRevision} : {}), files: previous.candidate.files.filter(file => file.path === "bundle.js"), capabilities: [capability]};
     const digest = (domain: string, value: unknown) => createHash("sha256").update(JSON.stringify([domain, value])).digest("hex");
     candidate.bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
     candidate.buildDigest = digest("dohc-app-build-v1", {sourceDigest: candidate.sourceDigest, dependencyLockDigest: candidate.dependencyLockDigest,
       compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
     return f.storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate, blobs: [], limits, nowMs: 10}).publicationId;
   }
-  return {...f, host, http, path, activate, invoke, publish, publicHeaders};
+  return {...f, host, http, path, activate, invoke, publish, publicHeaders, advance(ms: number) {now += ms;}};
 }
 
 it("creates and manages one dataset through authenticated routes and the public app broker", async () => {
@@ -138,4 +141,83 @@ it("migrates through the owner route and removes retained history with dataset a
   for (const table of ["dohc_dataset_catalog_history", "dohc_dataset_checkpoint_history", "dohc_dataset_catalog", "dohc_dataset_journals"]) {
     expect(f.storage.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0);
   }
+});
+
+const upload = {authorityRevision: 1, idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png",
+  bytesBase64: Buffer.from([137,80,78,71,13,10,26,10,1,2,3]).toString("base64")};
+async function attachmentsFixture() {
+  const f = await httpFixture(); await f.activate(); const publicationId = f.publish();
+  const app = (action: string, body: unknown, headers = f.publicHeaders) => f.http(`link/app-publications/${publicationId}/backend/${action}`, body, headers);
+  const named = (action: string, body: unknown) => f.http(`w/app-publications/${publicationId}/backend/${action}`, body);
+  const bind = (enabled: boolean) => f.http(`${f.path}/binding`, {publicationId, enabled});
+  return {...f, app, named, bind, publicationId};
+}
+
+it("uploads and atomically attaches a receipt, then discloses bytes only through the approved read operation", async () => {
+  const f = await attachmentsFixture();
+  expect((await f.app("upload", upload)).status).toBe(404);
+  await f.bind(true);
+  const uploaded = await f.app("upload", upload); expect(uploaded.status).toBe(200);
+  const {file} = await uploaded.json();
+  expect(await (await f.app("upload", upload)).json()).toMatchObject({file, replayed: true});
+  expect((await f.app("upload", {...upload, name: "changed.png"})).status).toBe(409);
+  const read = {authorityRevision: 1, operation: "receipt", fileId: file.fileId, input: {fileId: file.fileId}};
+  expect((await f.named("file", read)).status).toBe(409);
+  const submit = {authorityRevision: 1, operation: "submit", input: {name: "Friend", fileId: file.fileId}, idempotencyKey: "receipt-submit"};
+  expect((await f.app("invoke", submit)).status).toBe(200);
+  const usage = f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!.storage_bytes;
+  expect(await (await f.app("invoke", submit)).json()).toMatchObject({replayed: true});
+  expect(f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!.storage_bytes).toBe(usage);
+  expect((await f.app("file", read)).status).toBe(404);
+  expect((await f.named("file", {...read, operation: "read"})).status).toBe(404);
+  expect(await (await f.named("file", read)).json()).toEqual({file, bytesBase64: upload.bytesBase64});
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('file-helper','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const helper = () => f.http(`w/app-publications/${f.publicationId}/backend/file`, read, {authorization: "Bearer helper", "x-dohc-dataset-grant": "file-helper"});
+  expect((await helper()).status).toBe(404);
+  await f.http(`${f.path}/grants`, {grantId: "file-helper", grant: {revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(8)], discover: false}});
+  expect(await (await helper()).json()).toEqual({file, bytesBase64: upload.bytesBase64});
+  await f.http(`${f.path}/grants`, {grantId: "file-helper", grant: null});
+  expect((await helper()).status).toBe(404);
+  await f.bind(false);
+  expect((await f.named("file", read)).status).toBe(404);
+  expect((await f.app("upload", upload)).status).toBe(404);
+});
+
+it("keeps staged files private to their caller and rolls attachment back with a refused operation", async () => {
+  const f = await attachmentsFixture(); await f.bind(true);
+  const {file} = await (await f.app("upload", upload)).json();
+  const submit = {authorityRevision: 1, operation: "submit", input: {name: "Other", fileId: file.fileId}, idempotencyKey: "submit"};
+  const second = {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)};
+  expect((await f.app("invoke", submit, second)).status).toBe(500);
+  const another = await (await f.app("upload", upload, second)).json();
+  expect(another.file.fileId).not.toBe(file.fileId);
+  const otherApp = f.publish("a".repeat(64));
+  await f.http(`${f.path}/binding`, {publicationId: otherApp, enabled: true});
+  expect((await f.http(`link/app-publications/${otherApp}/backend/invoke`, submit, f.publicHeaders)).status).toBe(500);
+  expect((await f.app("invoke", {...submit, input: {fileId: file.fileId}})).status).toBe(409);
+  expect(f.storage.db.prepare("SELECT attached_revision FROM sync_relay_dataset_files WHERE file_id=?").get(file.fileId)!.attached_revision).toBeNull();
+  const quota = f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes;
+  expect((await f.app("upload", {...upload, bytesBase64: Buffer.from("not a png").toString("base64")})).status).toBe(400);
+  expect(f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes).toBe(quota);
+  f.advance(86_400_001);
+  // Owner credentials remain valid after public link expiry and trigger bounded staged-file cleanup.
+  expect((await f.named("upload", {...upload, idempotencyKey: "owner-new"})).status).toBe(200);
+  expect(f.storage.db.prepare("SELECT file_id FROM sync_relay_dataset_files WHERE file_id=?").get(file.fileId)).toBeUndefined();
+  f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w'").run());
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(0);
+});
+
+it("bounds pending uploads and rolls quota refusals back without retaining file bytes", async () => {
+  const f = await attachmentsFixture(); await f.bind(true);
+  const owner = {kind: "named" as const, workspaceId: "w", userId: "owner"};
+  for (let n = 0; n < 32; n++) f.host.upload(owner, f.publicationId, {...upload, idempotencyKey: `pending-${n}`});
+  expect(() => f.host.upload(owner, f.publicationId, {...upload, idempotencyKey: "overflow"})).toThrow("Submit pending uploads");
+  expect(f.host.upload(owner, f.publicationId, {...upload, idempotencyKey: "pending-0"}).replayed).toBe(true);
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(32);
+  const quota = f.storage.options.workspaceQuotaBytes;
+  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='w'").run(quota));
+  expect((await f.app("upload", upload)).status).toBe(413);
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(32);
+  expect(f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes).toBe(quota);
 });

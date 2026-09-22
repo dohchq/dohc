@@ -3,7 +3,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
-import { parseAppBackendJson, parseAppBackendInvokeRequest } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { AppBackendRoute } from "./appBackendRoutes";
@@ -145,7 +145,15 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
           if (auth.kind !== "named") throw notFound();
           return {publicationId: route.publicationId, authorityRevision, files: published.candidate.files};
         }
-        const raw = await json(request, signal, 128 * 1024);
+        const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024);
+        if (route.action === "upload") {
+          let body; try {body = parseAppBackendUploadRequest(raw);} catch {throw badRequest("Invalid app upload.");}
+          return host.upload(auth, route.publicationId, body, signal);
+        }
+        if (route.action === "file") {
+          const body = record(raw, ["authorityRevision", "fileId", "operation", "input"]);
+          return host.readFile(auth, route.publicationId, {authorityRevision: positive(body.authorityRevision), fileId: text(body.fileId, 128), operation: text(body.operation), input: input(body.input)}, signal);
+        }
         if (route.action === "activate") {
           const body = record(raw, ["authorityRevision"]);
           if (body.authorityRevision !== authorityRevision) throw notFound();
