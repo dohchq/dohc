@@ -141,6 +141,17 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       request: { action: "export", workspaceId, datasetId: listed.datasets[0].datasetId, savePath } } }, { stateDir: workspace.homeDir });
     expect(result).toMatchObject({ kind: "exported", savedPath: savePath });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
+    await collection.getByRole("button", { name: "Archive", exact: true }).click();
+    await page.getByRole("dialog", { name: "Archive Equipment?" }).getByRole("button", { name: "Archive Collection" }).click();
+    await page.getByRole("button", { name: "Delete permanently…", exact: true }).click();
+    const deletion = page.getByRole("dialog", { name: "Delete Equipment permanently?" });
+    await expect(deletion).toContainText("This cannot be undone.");
+    await deletion.getByRole("checkbox", { name: "I understand that dohc cannot undo this deletion." }).check();
+    await deletion.getByRole("button", { name: "Delete Collection permanently", exact: true }).click();
+    await expect(deletion).toBeHidden();
+    const remaining = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list", includeArchived: true }), workspaceId);
+    expect(remaining).toMatchObject({ kind: "list", datasets: [] });
+    expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });
