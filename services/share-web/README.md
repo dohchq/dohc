@@ -102,6 +102,9 @@ do not share the invalid-credential allowance. The relay allows a burst of 960
 valid exchanges per grant and refills 16 per second. Both services bound all
 exchange probes to a burst of 2,400, refilling 40 per second, with 64 requests
 in flight. These budgets use the existing app and share-read admission sizes.
+Before spending the global allowance, each address has a burst of 600 probes,
+refilling ten per second, and at most 16 requests in flight. This preserves
+room for other networks during a flood or stalled request bodies from one address.
 Malformed viewer requests and invalid relay credentials use a separate per-IP
 allowance of 12, refilling 0.2 per second. Exhausted budgets return 429.
 The relay still performs a bounded credential lookup to distinguish a valid

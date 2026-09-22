@@ -1284,12 +1284,33 @@ describe("share-web sessions", () => {
     const gate=new Promise<void>(resolve=>{release=resolve;});
     const handler=createShareWebHandler({relayUrl:"http://relay.test",publicHosts:new Set([HOST]),nowMs:()=>1_000,
       fetchRelay:async()=>{calls++;await gate;return Response.json({ok:true,grantId:"grant",capabilityToken:CAP_ALPHA_1,capabilityExpiresAtMs:901_000});}});
-    const exchange=()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({secret:SECRET_ALPHA})}));
+    let address=0;
+    const exchange=()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":`192.0.${Math.floor(address/250)}.${address++%250}`},body:JSON.stringify({secret:SECRET_ALPHA})}));
     const pending=Array.from({length:64},()=>exchange());
     expect((await exchange()).status).toBe(429);
     release();expect((await Promise.all(pending)).every(response=>response.status===200)).toBe(true);
     for(let index=64;index<EXCHANGE_GLOBAL_BUCKET_CAPACITY;index++) expect((await exchange()).status).toBe(200);
     expect((await exchange()).status).toBe(429);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
+  });
+
+  it("keeps another network available during invalid floods and stalled bodies from one address", async () => {
+    let calls=0;
+    const handler=createShareWebHandler({relayUrl:"http://relay.test",publicHosts:new Set([HOST]),nowMs:()=>1_000,
+      fetchRelay:async request=>{calls++;return (await request.json()).secret===SECRET_ALPHA
+        ?Response.json({ok:true,grantId:"grant",capabilityToken:CAP_ALPHA_1,capabilityExpiresAtMs:901_000})
+        :new Response(null,{status:404});}});
+    const exchange=(ip:string,secret=SECRET_ALPHA)=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":ip},body:JSON.stringify({secret})}));
+    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network",SECRET_BETA)).status);
+    expect(calls).toBe(600);
+    expect((await exchange("other-network")).status).toBe(200);
+    const controller=new AbortController();
+    const pending=Array.from({length:16},()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json","x-dohc-share-web-client-ip":"slow-network"},
+      signal:controller.signal,body:new ReadableStream<Uint8Array>(),duplex:"half"} as RequestInit)));
+    try {
+      expect((await exchange("slow-network")).status).toBe(429);
+      expect((await exchange("other-network")).status).toBe(200);
+    } finally {controller.abort();await Promise.all(pending);}
+    expect((await exchange("slow-network")).status).toBe(200);
   });
 
   it("limits in-flight blob streams independently for each viewer session", async () => {

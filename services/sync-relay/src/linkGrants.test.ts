@@ -5571,6 +5571,30 @@ describe("relay link grants", () => {
     expect(limiter.size).toBe(2);
   });
 
+  it("preserves other networks' exchange allowance during invalid floods and stalled bodies", async () => {
+    const storage=await newStorage(),counted=countStorageCalls(storage,"findLinkGrantByCredentialHash");
+    const h=handler(counted.storage);await seedFileShare(h);
+    const created=await createLink(h),secret=linkSecret(created.url);
+    const exchange=(ip:string,value=secret)=>{
+      const input=request(null,"/sync/link-exchange",jsonBody({secret:value}));
+      input.headers.set("x-dohc-relay-client-ip",ip);return h(input);
+    };
+    const before=counted.calls.length;
+    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network","z".repeat(43))).status);
+    expect(counted.calls.length-before).toBe(600);
+    expect((await exchange("other-network")).status).toBe(200);
+    const controller=new AbortController();
+    const pending=Array.from({length:16},()=>{
+      const input=request(null,"/sync/link-exchange",{method:"POST",signal:controller.signal,body:new ReadableStream<Uint8Array>(),duplex:"half"} as RequestInit);
+      input.headers.set("x-dohc-relay-client-ip","slow-network");return h(input);
+    });
+    try {
+      expect((await exchange("slow-network")).status).toBe(429);
+      expect((await exchange("other-network")).status).toBe(200);
+    } finally {controller.abort();await Promise.all(pending);}
+    expect((await exchange("slow-network")).status).toBe(200);
+  });
+
   it("never writes a minted secret or capability to relay logs", async () => {
     const storage = await newStorage();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);

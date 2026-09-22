@@ -820,6 +820,8 @@ export function createShareWebApplication({
     EXCHANGE_MAX_IPS,
   );
   const exchangeGlobalRateLimiter = new TokenBucketLimiter(EXCHANGE_GLOBAL_BUCKET_CAPACITY, EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1);
+  const exchangeAddressProbes = new TokenBucketLimiter(600, 10, EXCHANGE_MAX_IPS);
+  const exchangeAddressInFlight = new Map<string, number>();
   let exchangesInFlight = 0;
   const blobProxyLimiter = new ShareWebInFlightLimiter(
     MAX_BLOB_PROXIES_PER_SESSION,
@@ -1100,7 +1102,10 @@ export function createShareWebApplication({
       const agent = pathname === "/api/mcp/exchange";
       if (agent && (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin || request.headers.get("sec-fetch-site") === "cross-site")) return refused();
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
-      if (exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused(429);
+      const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
+      if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
+          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused(429);
+      exchangeAddressInFlight.set(clientIp, addressPending + 1);
       exchangesInFlight++;
       try {
         const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : refused(429);
@@ -1170,7 +1175,11 @@ export function createShareWebApplication({
         } catch {
           return refused();
         }
-      } finally {exchangesInFlight--;}
+      } finally {
+        exchangesInFlight--;
+        const remaining = exchangeAddressInFlight.get(clientIp)! - 1;
+        if (remaining) exchangeAddressInFlight.set(clientIp, remaining); else exchangeAddressInFlight.delete(clientIp);
+      }
     }
 
     if (pathname === "/api/handoff" && request.method === "POST") {

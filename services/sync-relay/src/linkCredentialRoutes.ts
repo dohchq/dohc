@@ -1,4 +1,4 @@
-import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { LinkExchangeResult, PublicEditRelease } from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
@@ -103,12 +103,18 @@ export function createLinkCredentialRoutes(
     };
   };
 
+  // One network may host an event, but cannot spend the whole service budget.
+  const exchangeAddressProbes = new TokenBucketLimiter(600, 10, 10_000);
+  const exchangeAddressInFlight = new Map<string, number>();
   let exchangesInFlight = 0;
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     if (!linkKey) return refused();
     if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
-    if (exchangesInFlight >= 64 || !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+    const addressPending = exchangeAddressInFlight.get(ip) ?? 0;
+    if (addressPending >= 16 || exchangesInFlight >= 64 || !exchangeAddressProbes.allow(ip, nowMs()) ||
+        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+    exchangeAddressInFlight.set(ip, addressPending + 1);
     exchangesInFlight++;
     try {
 
@@ -208,7 +214,11 @@ export function createLinkCredentialRoutes(
         if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) return refused();
         throw error;
       }
-    } finally {exchangesInFlight--;}
+    } finally {
+      exchangesInFlight--;
+      const remaining = exchangeAddressInFlight.get(ip)! - 1;
+      if (remaining) exchangeAddressInFlight.set(ip, remaining); else exchangeAddressInFlight.delete(ip);
+    }
   };
 
   const respondToLinkRefresh = (request: Request): Response => {
