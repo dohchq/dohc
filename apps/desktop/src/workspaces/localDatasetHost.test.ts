@@ -110,8 +110,12 @@ describe("local dataset owner adapter", () => {
         for (let index = batch * 128; index < (batch + 1) * 128; index++) {
           await first.host.action(call(approved, id(6), `cache-${index}`, {name: `Item ${index}`}));
         }
-        // The read follows the maintenance job in this dataset's queue.
         expect((await first.host.query(call(approved, id(5)))).result).toHaveLength((batch + 1) * 128);
+        await vi.waitFor(() => {
+          const cache = db.prepare("SELECT cursor_json FROM dohc_dataset_materializations").get();
+          expect(cache && JSON.parse(String(cache.cursor_json)).revision).toBe((batch + 1) * 128);
+          expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+        });
         const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
         expect(caches).toHaveLength(1);
         expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);

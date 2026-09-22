@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
@@ -107,7 +107,7 @@ it("removes populated replay caches when their workspace is deleted", async () =
   }
   expect((await f.invoke(owner, id(6))).result).toHaveLength(128);
   const db = f.storage.db;
-  expect(db.prepare("SELECT count(*) n FROM dohc_dataset_materializations WHERE workspace_id=?").get("w")!.n).toBe(1);
+  await vi.waitFor(() => expect(db.prepare("SELECT count(*) n FROM dohc_dataset_materializations WHERE workspace_id=?").get("w")!.n).toBe(1));
   await f.host.close();
   f.storage.tx(() => db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id=?").run("w"));
   for (const table of ["dohc_dataset_materializations", "dohc_dataset_checkpoints", "dohc_dataset_events", "dohc_dataset_journals", "sync_relay_dataset_usage"]) {
@@ -142,6 +142,11 @@ it("charges only the current replay cache and retains retries across relay resta
       await f.invoke(owner, id(5), {name: `Person ${index}`}, undefined, `cache-${index}`);
     }
     expect((await f.invoke(owner, id(6))).result).toHaveLength((batch + 1) * 128);
+    await vi.waitFor(() => {
+      const cache = db.prepare("SELECT cursor_json FROM dohc_dataset_materializations").get();
+      expect(cache && JSON.parse(String(cache.cursor_json)).revision).toBe((batch + 1) * 128);
+      expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+    });
     const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
     expect(caches).toHaveLength(1);
     expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);
