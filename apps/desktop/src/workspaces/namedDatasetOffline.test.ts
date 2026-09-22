@@ -128,3 +128,10 @@ it("removes interrupted cache writes when signing out instead of leaving former 
   await f.registry().credentialsChanged(null);
   await expect(readFile(interrupted)).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+it("discards saved pages when a local share marker records narrower authority while offline", async () => {
+  const f = await fixture(); await f.data().describe(id(1)); await f.data().invoke(invocation);
+  const narrowed = f.registry().scope({ owner, binding: ["workspace", "share"], localAuthority: { access: "view", paths: ["narrower"] }, assertCurrent() {} });
+  expect(await narrowed.read(["describe", id(1)])).toBeNull();
+  await expect(readFile(join(f.directory, "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});

@@ -906,10 +906,10 @@ async function relayShareResponseWithCredentials(
   if (!credentials.relayUrl) throw new Error("Reconnect your sharing server, then try again.");
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${credentials.token}`);
-  const fetchResponse = () => relayShareFetch(`${normalizeServerUrl(credentials.relayUrl!)}${path}`, {
-    ...init, headers, redirect: "error", cache: "no-store", credentials: "omit",
+  const fetchResponse = (signal = init.signal) => relayShareFetch(`${normalizeServerUrl(credentials.relayUrl!)}${path}`, {
+    ...init, signal, headers, redirect: "error", cache: "no-store", credentials: "omit",
   });
-  const response = await (classifyNamedOffline ? namedDatasetFetch(fetchResponse) : fetchResponse());
+  const response = await (classifyNamedOffline ? namedDatasetFetch(fetchResponse, init.signal) : fetchResponse());
   if (response.status === 401) {
     await handleRelayUnauthorized({
       requestCredentials: credentials, currentCredentials: cachedCredentials,
@@ -4196,8 +4196,10 @@ function registerIpcHandlers(): void {
       await warmCredentialCache();
       const credentials = requireCredentials(cachedCredentials), credentialGeneration = credentialCacheGeneration;
       signal.throwIfAborted();
+      const marker = workspace.shareView as { shareId?: unknown; grantedSelector?: unknown; ended?: unknown } | null;
       const cache = namedDatasetPages.scope({ owner: datasetCopyOwnerKey(credentials),
-        binding: [workspace.workspaceId, workspace.rootPath, (workspace.shareView as { shareId?: unknown } | null)?.shareId, credentials.relayUrl],
+        binding: [workspace.workspaceId, workspace.rootPath, marker?.shareId, credentials.relayUrl],
+        localAuthority: [marker?.grantedSelector, marker?.ended ?? false],
         assertCurrent: () => { signal.throwIfAborted(); if (credentialGeneration !== credentialCacheGeneration) throw Error("Your server session changed. Reopen this workspace."); },
       });
       try { return createNamedDatasetData({ workspaceId: workspace.workspaceId, shareView: workspace.shareView, credentials, credentialGeneration, signal,

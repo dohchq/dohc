@@ -60,7 +60,7 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
       const data = () => createNamedDatasetData({ workspaceId: "local", shareView, credentials, signal: new AbortController().signal,
         credentialGeneration: 1, currentCredentialGeneration: () => 1, assertCurrent() {}, relayJson: async () => { throw Error("Unexpected transport"); },
         offline: { cache: registry.scope({ owner, binding: ["local", "s", origin], assertCurrent() {} }),
-          relayResponse: (credentials, path, init) => namedDatasetFetch(() => fetch(`${origin}${path}`, { ...init, headers: { ...init.headers, authorization: `Bearer ${credentials.token}` } })),
+          relayResponse: (credentials, path, init) => namedDatasetFetch(signal => fetch(`${origin}${path}`, { ...init, signal, headers: { ...init.headers, authorization: `Bearer ${credentials.token}` } }), init.signal),
         } });
       const workspace = { workspaceId: "local", shareView };
       const ipc = createDatasetHandler({
