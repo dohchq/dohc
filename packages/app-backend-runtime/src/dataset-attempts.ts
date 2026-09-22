@@ -12,7 +12,8 @@ function committedAttempt(db: JournalDb, scope: DatasetScope, row: Record<string
   const callerKey = digest([row.principal_key, {kind: "app", appId: row.app_id}]);
   const receipt = db.prepare(`SELECT r.payload_sha256,r.revision,e.operation,e.recorded_at_ms,json_array_length(e.attached_file_ids) AS attachment_count
     FROM dohc_dataset_receipts r JOIN dohc_dataset_events e ON e.workspace_id=r.workspace_id AND e.dataset_id=r.dataset_id AND e.revision=r.revision
-    WHERE r.workspace_id=? AND r.dataset_id=? AND r.caller_key=? AND r.idempotency_key=?`)
+    WHERE r.workspace_id=? AND r.dataset_id=? AND r.caller_key=? AND r.idempotency_key=?
+      AND e.caller_key=r.caller_key AND e.idempotency_key=r.idempotency_key AND e.payload_sha256=r.payload_sha256 AND e.result_json=r.result_json`)
     .get(scope.workspaceId, scope.datasetId, callerKey, attempt.idempotencyKey);
   return receipt?.payload_sha256 === digest([row.revision_sha256, row.operation_id, attempt.input]) ? receipt : undefined;
 }
