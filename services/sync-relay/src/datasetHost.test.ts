@@ -100,6 +100,22 @@ it.each([false, true])("reclaims abandoned checkpoint quota only with exclusive 
   expect(journal.checkpointStages({workspaceId: "w", authorize() {}})).toHaveLength(startupExclusive ? 0 : 1);
 });
 
+it("removes populated replay caches when their workspace is deleted", async () => {
+  const f = await fixture(true); await f.activate();
+  for (let index = 0; index < 128; index++) {
+    await f.invoke(owner, id(5), {name: `Person ${index}`}, undefined, `cache-${index}`);
+  }
+  expect((await f.invoke(owner, id(6))).result).toHaveLength(128);
+  const db = f.storage.db;
+  expect(db.prepare("SELECT count(*) n FROM dohc_dataset_materializations WHERE workspace_id=?").get("w")!.n).toBe(1);
+  await f.host.close();
+  f.storage.tx(() => db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id=?").run("w"));
+  for (const table of ["dohc_dataset_materializations", "dohc_dataset_checkpoints", "dohc_dataset_events", "dohc_dataset_journals", "sync_relay_dataset_usage"]) {
+    expect(db.prepare(`SELECT count(*) n FROM ${table} WHERE workspace_id=?`).get("w")!.n).toBe(0);
+  }
+  expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoint_chunks").get()!.n).toBe(0);
+}, 20_000);
+
 it("creates standalone data on the relay connection and recovers app writes after host restart", async () => {
   const f = await fixture(), before = workspaceUsageBytes(f.storage, "w");
   await f.activate();

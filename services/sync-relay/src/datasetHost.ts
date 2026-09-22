@@ -242,6 +242,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_attempts WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_cancelled_attempts WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_events WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_materializations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_journals WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN (
