@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
@@ -42,7 +42,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false, 
     return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
   } }, "owner", { workspaceId: "w" });
   if (sourceSuffix) files.set(initial.operationsPath, files.get(initial.operationsPath)! + sourceSuffix);
-  const first = await host.prepare({ descriptorPath: "people/dataset.json", adapter });
+  const first = await host.prepare({ descriptorPath: posix.join(posix.dirname(initial.schemaPath), "dataset.json"), adapter });
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
   const workspace = { workspaceId: "w" };
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
@@ -109,14 +109,14 @@ it("refuses a reviewed reversal after a new registration and preserves every reg
   const rows = (await f.host.query(call(final.revision, id(5)))).result as { rows: Array<{ values: Record<string, unknown> }> };
   expect(rows.rows[0]!.values[id(4)]).toBe("New submission");
 });
-it("keeps consecutive reversal sources beside earlier revisions without nesting paths", async () => {
-  const f = await fixture();
+it.each(["people/", ""])("keeps consecutive reversal sources beside earlier revisions under %s", async prefix => {
+  const f = await fixture({ ...definition, schemaPath: `${prefix}schema.sql`, operationsPath: `${prefix}operations.js` });
   let previous = f.revision;
   let current = (await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Full name" }))).revision;
   const paths = new Set<string>([f.revision.definition.schemaPath, current.definition.schemaPath]);
   for (let attempt = 0; attempt < 4; attempt++) {
     const review = await restore(f, previous.revisionSha256);
-    expect(review.revision.definition.schemaPath).toMatch(new RegExp(`^people/revisions/${current.revision + 1}-[^/]+/schema\\.sql$`));
+    expect(review.revision.definition.schemaPath).toMatch(new RegExp(`^${prefix}revisions/${current.revision + 1}-[^/]+/schema\\.sql$`));
     expect(paths.has(review.revision.definition.schemaPath)).toBe(false);
     paths.add(review.revision.definition.schemaPath);
     expect(review.revision.definition.datasetId).toBe(f.revision.datasetId);

@@ -115,7 +115,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       summary = `Add ${field.name}`;
     }
   }
-  const base = posix.dirname(original.schemaPath).split("/revisions/")[0]!;
+  const base = posix.dirname(original.schemaPath).split(/(?:^|\/)revisions\//)[0]!;
   const directory = posix.join(base, "revisions", `${input.revision.revision + 1}-${randomUUID()}`);
   definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(original.operationsPath)}`);
   const descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");

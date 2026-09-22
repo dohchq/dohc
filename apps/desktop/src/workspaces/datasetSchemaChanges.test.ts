@@ -76,6 +76,15 @@ const approve = async (setup: Awaited<ReturnType<typeof fixture>>, review: Await
   return result;
 };
 
+it("keeps schema edits beside revisions at the workspace root", () => {
+  const rootDefinition = { ...definition, schemaPath: "revisions/2-original/schema.sql", operationsPath: "revisions/2-original/operations.js" };
+  const generated = generateDatasetSources(rootDefinition);
+  const schemaSql = generated.files[rootDefinition.schemaPath]!, operationSource = generated.files[rootDefinition.operationsPath]!;
+  const revision = describeDatasetRevision({ definition: rootDefinition, revision: 2, schemaSql, operationSource });
+  const next = generateDatasetSchemaChange({ revision, schemaSql, operationSource, change: { kind: "renameCollection", name: "Guests" } });
+  expect(next.definition.schemaPath).toMatch(/^revisions\/3-[^/]+\/schema\.sql$/);
+});
+
 it("adds a required defaulted field through captured approval and keeps row IDs, values and stable operation IDs", async () => {
   const f = await fixture();
   const added = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Camera" } }, "first"));
