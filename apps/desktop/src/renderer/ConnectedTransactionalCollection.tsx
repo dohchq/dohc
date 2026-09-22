@@ -17,6 +17,7 @@ import { DatasetTransferDialog } from "./DatasetTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
+import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -47,6 +48,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [managingAccess, setManagingAccess] = useState(false);
   const [exportingRecovery, setExportingRecovery] = useState(false);
   const [archiving, setArchiving] = useState(false), [restoring, setRestoring] = useState(false);
+  const [deletingCollection, setDeletingCollection] = useState(false), [deleted, setDeleted] = useState(false);
   const restoreLock = useRef(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
@@ -79,6 +81,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     if (sequence === request.current) setCopy(result.copy);
     return result;
   };
+  async function exportRecovery(signal: AbortSignal) {
+    signal.throwIfAborted();
+    const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
+    signal.throwIfAborted();
+    if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again.");
+    return result.savedPath;
+  }
+  if (deleted) return <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">Collection deleted</div>;
   if (!dataset) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <span className="text-sm text-muted">{loading ? "Opening collection…" : "Open this collection to see its records."}</span>
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
@@ -94,7 +104,29 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     } catch (error) { if (sequence === request.current) onError("Could not restore this Collection.", error, () => { void restore(); }); }
     finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
   }
-  if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}{owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}<SecondaryButton disabled={loading} onClick={() => void refresh()}>Refresh</SecondaryButton></div>;
+  if (dataset.archived) return <><div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+    <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
+    <p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>
+    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}
+    {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
+    <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
+    {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}
+  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name}
+    onClose={() => setDeletingCollection(false)} onError={onError} onExport={exportRecovery} onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
+    onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
+    onLoad={async (input, signal) => {
+      signal.throwIfAborted();
+      const result = await bridge().dataset({ ...input, action: "deletePreview" });
+      signal.throwIfAborted();
+      if (result.kind !== "delete-preview") throw Error("dohc could not read the deletion preview. Try again.");
+      return result;
+    }} onDelete={async (input, signal) => {
+      signal.throwIfAborted();
+      const result = await bridge().dataset({ ...input, action: "delete" });
+      signal.throwIfAborted();
+      if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
+      return result;
+    }} />}</>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
     activeView={owner ? activeView : null}
     viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
@@ -199,8 +231,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
     {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
       onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
-      onExport={async signal => { signal.throwIfAborted(); const result = await bridge().dataset({ action: "export", workspaceId, datasetId }); signal.throwIfAborted();
-        if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again."); return result.savedPath; }} />}
+      onExport={exportRecovery} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
