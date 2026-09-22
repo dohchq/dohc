@@ -7,6 +7,7 @@ import { AppBackendRuntimeError } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import { replayThroughShadow } from "./replay.js";
+import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
@@ -161,6 +162,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
   }
   if (command.kind==="migrateCheckpoint") {
     noLinks(command.input.path,true);
+    if(command.input.reportPath) noLinks(command.input.reportPath,true);
     const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
     let copy:DatabaseSync | undefined, outputReserved=false, succeeded=false;
     try {
@@ -176,13 +178,15 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       if (copy.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(marker)) reject("invalid_checkpoint","Migration introduced internal metadata.");
       verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql);
       copy.exec("COMMIT");
+      const report=command.input.reportPath ? createMigrationPreviewReport({before:db,after:copy,beforeTables:config.tables,
+        afterTables:command.input.tables,path:command.input.reportPath,maxBytes:config.limits.databaseBytes}) : undefined;
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
       copy.prepare("VACUUM INTO ?").run(command.input.path);
       succeeded=true;
-      return {path:command.input.path,cursor:{...cursor}};
+      return {path:command.input.path,cursor:{...cursor},...(report ? {report} : {})};
     } finally {
       if (copy) {copy.setAuthorizer(null);copy.close();}
-      for (const path of [copyPath,copyPath+"-journal",...(outputReserved && !succeeded ? [command.input.path] : [])]) {
+      for (const path of [copyPath,copyPath+"-journal",...(outputReserved && !succeeded ? [command.input.path] : []),...(!succeeded && command.input.reportPath ? [command.input.reportPath] : [])]) {
         try {unlinkSync(path);} catch (error) {if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error;}
       }
     }

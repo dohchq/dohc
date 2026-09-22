@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
-import { createDatasetSupervisor, type DatasetInvocation, type DatasetMigration } from "./supervisor.ts";
+import { createDatasetSupervisor, type DatasetInvocation, type DatasetMigration, type DatasetSupervisorOptions } from "./supervisor.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -21,7 +21,7 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[] } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];migrationStorage?:DatasetSupervisorOptions["migrationStorage"];nowMs?:()=>number } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
@@ -42,7 +42,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
-    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers });
+    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,migrationStorage:options.migrationStorage,nowMs:options.nowMs });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
@@ -58,6 +58,49 @@ function migration(f:Awaited<ReturnType<typeof fixture>>,overrides:Partial<Datas
     source:source.replace("INSERT INTO items VALUES(?,?)","INSERT INTO items(id,value) VALUES(?,?)"),
     migrationSql:"ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE items SET note='migrated';",...overrides};
 }
+
+it("previews actual changed values and approves the exact candidate without running SQL twice",async()=>{
+  let executions=0,reserved=0;
+  const f=await fixture({migrationStorage:{authorize(){},account({bytes}){reserved+=bytes;}},launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")executions++;controls.deliver();})});
+  await f.invoke({id:"one",value:"original"});
+  const input=migration(f,{migrationSql:"ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE items SET value=lower(hex(randomblob(12))),note='previewed';"});
+  const candidate=await f.supervisor.prepareMigration({...input,authorityKey:"owner-v1"});
+  expect(reserved).toBeGreaterThan(128*1024*1024);
+  expect(candidate.preview.tables).toEqual([{table:"items",beforeRows:1,afterRows:1,changedRows:1}]);
+  const change=candidate.preview.firstPage.changes[0]!;
+  expect(change.before).toEqual({id:"one",value:"original"});expect(change.after).toMatchObject({id:"one",note:"previewed"});
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"one",value:"original"}]);
+  const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner-v1",authorize:f.authorize};
+  expect(f.supervisor.migrationPreviewPage(access)).toEqual(candidate.preview.firstPage);
+  await f.supervisor.approveMigration({...access,checkpointSha256:candidate.checkpointSha256});
+  expect(executions).toBe(1);expect(reserved).toBe(0);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([change.after]);
+  expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("unavailable");
+});
+
+it("rejects changed owner and stale data and replaces a discarded candidate without leaks",async()=>{
+  let balance=0;
+  const f=await fixture({migrationStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
+  await f.invoke({id:"one",value:"original"});
+  const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner-v1"});
+  const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner-v1",authorize:f.authorize};
+  expect(()=>f.supervisor.migrationPreviewPage({...access,authorityKey:"other"})).toThrow("unavailable");
+  await f.invoke({id:"two",value:"changed"},{idempotencyKey:"second"});
+  await expect(f.supervisor.approveMigration({...access,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("Dataset changed");
+  const replacement=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner-v1"});
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(2);
+  await f.supervisor.discardMigration({...access,candidateId:replacement.candidateId});expect(balance).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+});
+
+it("refuses an expired preview and releases its reservation on explicit discard",async()=>{
+  let now=100,balance=0;
+  const f=await fixture({nowMs:()=>now,migrationStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
+  const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner"});now=candidate.expiresAtMs;
+  const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize};
+  expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("expired");
+  await f.supervisor.discardMigration(access);expect(balance).toBe(0);
+});
 
 function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void): AppRuntimeLauncher {
   return options => {

@@ -6,6 +6,8 @@ import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import { acquireSupervisorOwnership } from "./worker-ownership.js";
+import { readMigrationPreviewReportPage, type MigrationPreviewReportPage, type MigrationPreviewTableSummary } from "./migration-preview-report.js";
+export type { MigrationPreviewValue, MigrationPreviewChange, MigrationPreviewTableSummary, MigrationPreviewReportPage } from "./migration-preview-report.js";
 
 interface DatasetAccess {
   scope: DatasetScope;
@@ -41,6 +43,40 @@ export interface DatasetMigration extends DatasetAccess {
   accountStage?: (allocation: Readonly<CheckpointStageAllocation>) => unknown;
 }
 export interface DatasetInvocationResult { result: JsonValue; revision: number; replayed: boolean }
+export interface DatasetMigrationCandidate {
+  candidateId: string;
+  expected: DatasetCursor;
+  approvedRevisionHash: string;
+  checkpointSha256: string;
+  expiresAtMs: number;
+  preview: { tables: MigrationPreviewTableSummary[]; firstPage: MigrationPreviewReportPage };
+}
+export interface DatasetMigrationCandidateAccess extends DatasetAccess {
+  candidateId: string;
+  /** Fresh host-derived owner and lifecycle identity, never supplied by the browser. */
+  authorityKey: string;
+}
+export interface DatasetMigrationApproval extends DatasetMigrationCandidateAccess {
+  checkpointSha256: string;
+  account?: TransitionCheckpointInput["account"];
+  accountStage?: DatasetMigration["accountStage"];
+}
+type Candidate = {
+  result: DatasetMigrationCandidate;
+  authorityKey: string;
+  directory: string;
+  path: string;
+  reportPath: string;
+  capacityBytes: number;
+  source: string;
+  schemaSql: string;
+  definitionJson: string;
+  timer: ReturnType<typeof setTimeout>;
+  committed?: DatasetCursor;
+  busy?: boolean;
+  reservations:CheckpointStage[];
+  filesRemoved?:boolean;
+};
 export interface DatasetSupervisorOptions {
   journal: DatasetJournal;
   /** Private host-owned directory, never an app-supplied path. */
@@ -50,6 +86,8 @@ export interface DatasetSupervisorOptions {
   idleMs?: number;
   queueMs?: number;
   nowMs?: () => number;
+  /** Host-lifetime maintenance authority and quota, independent of any request credential. */
+  migrationStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
 type Job = { bytes: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
@@ -74,8 +112,41 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const root = await realpath(options.directory);
   const ownership=await acquireSupervisorOwnership(root);
   const lanes = new Map<string, Lane>();
+  const candidates = new Map<string, Candidate>();
+  const candidateCleanup = new Set<Promise<void>>();
+  let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0;
   const now = options.nowMs ?? Date.now;
+
+  async function dropCandidate(candidate: Candidate) {
+    if(candidates.get(candidate.result.candidateId)!==candidate)return;
+    clearTimeout(candidate.timer);
+    const removing=candidate.filesRemoved?Promise.resolve():removeDirectory(candidate.directory); candidateCleanup.add(removing);
+    try {
+      await removing;
+      candidate.filesRemoved=true;
+      if(options.migrationStorage)while(candidate.reservations.length) {
+        try {options.journal.discardCheckpoint({stage:candidate.reservations[0]!,...options.migrationStorage});candidate.reservations.shift();}
+        catch(error) {if(!closed)throw error;break;} // Closed authority leaves durable reservations for exclusive startup maintenance.
+      }
+      candidates.delete(candidate.result.candidateId);
+    }finally{candidateCleanup.delete(removing);}
+  }
+  function expireCandidate(candidate:Candidate) {
+    if(candidate.busy) {candidate.timer=setTimeout(()=>expireCandidate(candidate),1000);candidate.timer.unref();return;}
+    void dropCandidate(candidate).catch(()=>{});
+  }
+  function findCandidate(input:DatasetMigrationCandidateAccess,checkHead=true):Candidate {
+    standing(input);
+    const candidate=candidates.get(input.candidateId);
+    if(!candidate||candidate.authorityKey!==input.authorityKey||candidate.result.expected.workspaceId!==input.scope.workspaceId||candidate.result.expected.datasetId!==input.scope.datasetId)throw new Error("Migration preview is unavailable. Preview it again.");
+    if(checkHead&&candidate.result.expiresAtMs<=now())throw new Error("Migration preview expired. Preview it again.");
+    if(checkHead) {
+      const current=head(input),expected=candidate.committed??candidate.result.expected;
+      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed after this preview. Preview it again.");
+    }
+    return candidate;
+  }
 
   async function removeDirectory(path: string): Promise<void> {
     await ownership.removeDirectory(path);
@@ -222,18 +293,70 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     }
   }
 
-  async function migrate(lane: Lane, input: DatasetMigration): Promise<DatasetCursor> {
+  async function prepareMigration(lane:Lane,input:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
+    for(const previous of candidates.values())if(previous.result.expected.workspaceId===input.scope.workspaceId&&previous.result.expected.datasetId===input.scope.datasetId)await dropCandidate(previous);
+    if(candidates.size+preparingCandidates>=4)throw new Error("Too many migration previews. Discard a preview before continuing.");
+    if([...candidates.values()].some(candidate=>candidate.result.expected.workspaceId===input.scope.workspaceId&&candidate.result.expected.datasetId===input.scope.datasetId))throw new Error("This dataset already has a migration preview. Discard it first.");
+    const captured=head(input);
+    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed before preview. Preview it again.");
+    preparingCandidates++;
+    let worker:Worker|undefined,directory:string|undefined;
+    const reservations:CheckpointStage[]=[];
+    const abort=()=>{void worker?.runtime.abort("Dataset migration preview was cancelled.").catch(()=>{});};
+    try {
+      if(input.accountStage&&!options.migrationStorage)throw new Error("Migration previews require host-lifetime storage accounting.");
+      if(options.migrationStorage)for(let index=0;index<2;index++)reservations.push(options.journal.stageCheckpoint({scope:input.scope,expectedBytes:captured.capacityBytes,
+        sha256:digest(`migration-preview-reservation-${randomUUID()}`),authorize:()=>standing(input),account:options.migrationStorage.account}));
+      worker=await recover(lane,input);standing(input);
+      input.signal?.addEventListener("abort",abort,{once:true});
+      directory=await ownership.createDirectory();
+      const path=join(directory,"candidate.sqlite"),reportPath=join(directory,"report.jsonl");
+      const migrated=await worker.runtime.migrateCheckpoint({path,reportPath,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
+      if(migrated.path!==path||!migrated.report||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration preview differs from its source dataset.");
+      const info=await lstat(path),reportInfo=await lstat(reportPath);
+      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>captured.capacityBytes||!reportInfo.isFile()||reportInfo.isSymbolicLink()||reportInfo.size!==migrated.report.bytes||reportInfo.size>captured.capacityBytes)throw new Error("Migration preview exceeds its storage reservation.");
+      const hash=createHash("sha256"),file=await open(path,"r"),buffer=Buffer.alloc(1024*1024);
+      try {for(let offset=0;offset<info.size;) {standing(input);const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);if(!result.bytesRead)throw new Error("Migration preview is truncated.");hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;}}finally{await file.close();}
+      standing(input);if(!sameCursor(head(input).cursor,captured.cursor))throw new Error("Dataset changed during preview. Preview it again.");
+      const result:DatasetMigrationCandidate={candidateId:randomUUID(),expected:{...captured.cursor},approvedRevisionHash:input.approvedRevisionHash,
+        checkpointSha256:hash.digest("hex"),expiresAtMs:now()+10*60_000,preview:{tables:migrated.report.tables,firstPage:readMigrationPreviewReportPage({path:reportPath,limit:100})}};
+      const candidate:Candidate={result,authorityKey:input.authorityKey,directory,path,reportPath,capacityBytes:captured.capacityBytes,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,timer:undefined!,reservations:[...reservations]};
+      candidate.timer=setTimeout(()=>expireCandidate(candidate),10*60_000);candidate.timer.unref();candidates.set(result.candidateId,candidate);directory=undefined;
+      reservations.length=0;return structuredClone(result);
+    }catch(error){await stopWorker(lane);standing(input);throw error;}
+    finally{
+      preparingCandidates--;input.signal?.removeEventListener("abort",abort);if(directory)await removeDirectory(directory);
+      if(options.migrationStorage)for(const stage of reservations)try{options.journal.discardCheckpoint({stage,...options.migrationStorage});}catch{}
+    }
+  }
+
+  async function approveMigration(lane:Lane,input:DatasetMigrationApproval):Promise<DatasetCursor> {
+    const candidate=findCandidate(input);
+    if(candidate.result.checkpointSha256!==input.checkpointSha256)throw new Error("Migration preview changed. Preview it again.");
+    if(candidate.committed)return {...candidate.committed};
+    candidate.busy=true;
+    try {
+      const result=await migrate(lane,{...input,expected:candidate.result.expected,newTables:input.tables,source:candidate.source,schemaSql:candidate.schemaSql,
+        definitionJson:candidate.definitionJson,approvedRevisionHash:candidate.result.approvedRevisionHash,migrationSql:""},candidate.path,candidate.result.checkpointSha256);
+      candidate.committed=result;await dropCandidate(candidate);return {...result};
+    }finally{candidate.busy=false;}
+  }
+
+  async function migrate(lane: Lane, input: DatasetMigration, candidatePath?:string, checkpointSha256?:string): Promise<DatasetCursor> {
     if(input.account&&!input.accountStage)throw new Error("Dataset migration requires checkpoint staging quota accounting.");
     const captured=head(input);
     if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed after the migration was approved. Preview it again.");
     let worker:Worker|undefined,stage:CheckpointStage|undefined;
     const abort=()=>{void worker?.runtime.abort("Dataset migration was cancelled.").catch(()=>{});};
     try {
-      worker=await recover(lane,input);standing(input);
-      input.signal?.addEventListener("abort",abort,{once:true});
-      const path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
-      const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
-      if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration checkpoint differs from its source dataset.");
+      let path=candidatePath;
+      if(!path) {
+        worker=await recover(lane,input);standing(input);
+        input.signal?.addEventListener("abort",abort,{once:true});
+        path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
+        const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
+        if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration checkpoint differs from its source dataset.");
+      }
       const info=await lstat(path);
       if(!info.isFile()||info.size<100||info.size>captured.capacityBytes)throw new Error("Migration checkpoint exceeds its storage reservation.");
       const file=await open(path,"r");
@@ -244,7 +367,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           if(!read.bytesRead)throw new Error("Migration checkpoint is truncated.");
           hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;
         }
-        stage=options.journal.stageCheckpoint({scope:input.scope,expectedBytes:info.size,sha256:hash.digest("hex"),authorize:()=>standing(input),account:input.accountStage});
+        const sha256=hash.digest("hex");
+        if(checkpointSha256&&sha256!==checkpointSha256)throw new Error("Migration preview checkpoint changed.");
+        stage=options.journal.stageCheckpoint({scope:input.scope,expectedBytes:info.size,sha256,authorize:()=>standing(input),account:input.accountStage});
         for(let index=0,offset=0;offset<info.size;index++) {
           const length=Math.min(buffer.byteLength,info.size-offset);let readBytes=0;
           while(readBytes<length) {
@@ -333,7 +458,43 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       }
     })();
   }
+  function migrationInput(raw:DatasetMigration):DatasetMigration {
+    const input:DatasetMigration={...raw,scope:copyScope(raw.scope),expected:{...copyScope(raw.expected),hostEpoch:raw.expected.hostEpoch,
+      approvedRevisionHash:raw.expected.approvedRevisionHash,revision:raw.expected.revision,digest:raw.expected.digest},tables:approvedTables(raw.tables),newTables:approvedTables(raw.newTables),
+      source:boundedText(raw.source,DEFAULT_LIMITS.sourceBytes,"Dataset source"),schemaSql:boundedText(raw.schemaSql,DEFAULT_LIMITS.sourceBytes,"Dataset schema"),
+      definitionJson:boundedText(raw.definitionJson,256*1024,"Dataset definition"),migrationSql:boundedText(raw.migrationSql,DEFAULT_LIMITS.sourceBytes,"Dataset migration")};
+    if(!/^[a-f0-9]{64}$/.test(input.approvedRevisionHash)||input.expected.workspaceId!==input.scope.workspaceId||input.expected.datasetId!==input.scope.datasetId)throw new Error("Invalid migration authority.");
+    JSON.parse(input.definitionJson);return input;
+  }
+  function candidateInput<T extends DatasetMigrationCandidateAccess>(raw:T):T {
+    return {...raw,scope:copyScope(raw.scope),tables:approvedTables(raw.tables),candidateId:boundedText(raw.candidateId,128,"Migration candidate"),authorityKey:boundedText(raw.authorityKey,4096,"Migration authority")};
+  }
   return {
+    /** Called only after durable dataset deletion reclaimed all checkpoint reservations. */
+    async retireMigrationCandidates(scope:DatasetScope):Promise<void> {
+      const key=copyScope(scope);
+      for(const candidate of candidates.values())if(candidate.result.expected.workspaceId===key.workspaceId&&candidate.result.expected.datasetId===key.datasetId) {
+        candidate.reservations.length=0;await dropCandidate(candidate);
+      }
+    },
+    prepareMigration(raw:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
+      try {
+        const input={...migrationInput(raw),authorityKey:boundedText(raw.authorityKey,4096,"Migration authority")};
+        return enqueue(input,Buffer.byteLength(JSON.stringify([input.source,input.schemaSql,input.definitionJson,input.migrationSql])),lane=>prepareMigration(lane,input));
+      }catch(error){return Promise.reject(error);}
+    },
+    approveMigration(raw:DatasetMigrationApproval):Promise<DatasetCursor> {
+      try {const input=candidateInput(raw);return enqueue(input,1024,lane=>approveMigration(lane,input));}catch(error){return Promise.reject(error);}
+    },
+    migrationPreviewPage(raw:DatasetMigrationCandidateAccess & {after?:string;limit?:number}):MigrationPreviewReportPage {
+      const input=candidateInput(raw),candidate=findCandidate(input);
+      const page=readMigrationPreviewReportPage({path:candidate.reportPath,after:raw.after,limit:raw.limit});
+      standing(input);return page;
+    },
+    async discardMigration(raw:DatasetMigrationCandidateAccess):Promise<void> {
+      const input=candidateInput(raw),candidate=findCandidate(input,false);
+      return enqueue(input,1024,async()=>{standing(input);await dropCandidate(candidate);});
+    },
     invoke(raw: DatasetInvocation): Promise<DatasetInvocationResult> {
       try {
         if (raw.files && (!Array.isArray(raw.files) || raw.files.length > 32)) throw new Error("Too many files in dataset operation.");
@@ -352,12 +513,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     },
     migrate(raw:DatasetMigration):Promise<DatasetCursor> {
       try {
-        const input:DatasetMigration={...raw,scope:copyScope(raw.scope),expected:{...copyScope(raw.expected),hostEpoch:raw.expected.hostEpoch,
-          approvedRevisionHash:raw.expected.approvedRevisionHash,revision:raw.expected.revision,digest:raw.expected.digest},tables:approvedTables(raw.tables),newTables:approvedTables(raw.newTables),
-          source:boundedText(raw.source,DEFAULT_LIMITS.sourceBytes,"Dataset source"),schemaSql:boundedText(raw.schemaSql,DEFAULT_LIMITS.sourceBytes,"Dataset schema"),
-          definitionJson:boundedText(raw.definitionJson,256*1024,"Dataset definition"),migrationSql:boundedText(raw.migrationSql,DEFAULT_LIMITS.sourceBytes,"Dataset migration")};
-        if(!/^[a-f0-9]{64}$/.test(input.approvedRevisionHash)||input.expected.workspaceId!==input.scope.workspaceId||input.expected.datasetId!==input.scope.datasetId)throw new Error("Invalid migration authority.");
-        JSON.parse(input.definitionJson);
+        const input=migrationInput(raw);
         const bytes=Buffer.byteLength(JSON.stringify([input.scope,input.expected,input.tables,input.newTables,input.source,input.schemaSql,input.definitionJson,input.migrationSql]));
         return enqueue(input,bytes,lane=>migrate(lane,input));
       }catch(error){return Promise.reject(error);}
@@ -385,9 +541,13 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("Dataset host closed.")); }
       }
       const results=await Promise.allSettled([...lanes.values()].map(async lane => { await lane.done; await stopWorker(lane); }));
+      const candidateResults=await Promise.allSettled([...candidates.values()].map(dropCandidate));
+      const cleanupResults=await Promise.allSettled([...candidateCleanup]);
       lanes.clear();ownership.close();
       const failed=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");
       if(failed)throw failed.reason;
+      const cleanupFailed=[...candidateResults,...cleanupResults].find((result):result is PromiseRejectedResult=>result.status==="rejected");
+      if(cleanupFailed)throw cleanupFailed.reason;
     },
   };
 }

@@ -5,7 +5,7 @@ export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
-import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } from "./supervisor.js";
+import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration, createDatasetSupervisor, DatasetMigrationCandidate } from "./supervisor.js";
 import type { JsonValue } from "./protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";
@@ -36,7 +36,7 @@ export interface DatasetHostOptions<Context> {
   db: JournalDb;
   transaction: <T>(run: () => T) => T;
   journal: DatasetJournal;
-  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>; migrate(input: DatasetMigration): Promise<DatasetCursor>; retire?(scope: DatasetScope): Promise<void> };
+  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>; migrate(input: DatasetMigration): Promise<DatasetCursor>; retire?(scope: DatasetScope): Promise<void> } & Partial<Pick<Awaited<ReturnType<typeof createDatasetSupervisor>>, "prepareMigration"|"approveMigration"|"migrationPreviewPage"|"discardMigration">>;
   /** Synchronous. Validate current workspace membership or current app credential here. */
   /** datasetId is absent only for workspace catalog discovery. */
   resolveAuthority(context: Context, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority;
@@ -111,6 +111,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
+  const migrationCandidates=new Map<string,{candidate:DatasetMigrationCandidate;authorityKey:string;approved:DatasetRevision;previous:DatasetRevision;schemaSql:string;source:string}>();
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
   transaction(() => db.exec(`
@@ -273,6 +274,52 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       } });
       await options.supervisor.retire?.(key);
       return { deleted: true as const, datasetId: key.datasetId };
+    },
+    async prepareMigration(context:Context,raw:MigrateDatasetInput):Promise<DatasetMigrationCandidate> {
+      if(!options.supervisor.prepareMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      const approved=verifyDatasetArtifacts(raw),key=scope({workspaceId:raw.workspaceId,datasetId:approved.datasetId}),previous=revision(key),expected={...raw.expected};
+      live(key);const generation=lifecycle(key).generation,ownerToken=JSON.stringify(owner(context,key)),authorityKey=hash(JSON.stringify([ownerToken,generation]));
+      if(expected.workspaceId!==key.workspaceId||expected.datasetId!==key.datasetId||expected.approvedRevisionHash!==previous.revisionSha256||approved.revision!==previous.revision+1)throw new DatasetHostError("conflict","Dataset revision transition does not match the current approval.");
+      const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(lifecycle(key).generation!==generation||JSON.stringify(owner(context,key))!==ownerToken)denied();assertDatasetAttemptsCommitted(db,key);};
+      authorize();const schemaSql=raw.schemaSql,source=raw.operationSource,migrationSql=text(raw.migrationSql,256*1024),compiled=await compile(source,approved.definition.operationsPath);authorize();
+      const candidate=await options.supervisor.prepareMigration({scope:key,expected,tables:previous.definition.tables.map(table=>table.sqlName),newTables:approved.definition.tables.map(table=>table.sqlName),
+        schemaSql,source:compiled,definitionJson:JSON.stringify(approved),approvedRevisionHash:approved.revisionSha256,migrationSql,authorize,authorityKey,signal:raw.signal,
+        ...(options.accountCheckpointStage?{accountStage:allocation=>synchronous(()=>options.accountCheckpointStage!(context,allocation))}:{})});
+      for(const [id,saved] of migrationCandidates)if(saved.candidate.expiresAtMs<=Date.now()||(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId))migrationCandidates.delete(id);
+      migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
+    },
+    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
+      if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));
+      if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","Migration preview is unavailable. Preview it again.");
+      const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
+      const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();assertDatasetAttemptsCommitted(db,key);};
+      authorize();
+      const cursor=await options.supervisor.approveMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,checkpointSha256:raw.checkpointSha256,authorityKey,authorize,signal:raw.signal,
+        accountStage(allocation){if(options.accountCheckpointStage)synchronous(()=>options.accountCheckpointStage!(context,allocation));},
+        account(allocation){
+          const row=db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+          if(!row||parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256!==saved.previous.revisionSha256)throw new DatasetHostError("conflict","Dataset approval changed during migration.");
+          const revisionJson=JSON.stringify(saved.approved),artifactsJson=JSON.stringify({schemaSql:saved.schemaSql,operationSource:saved.source}),delta=Buffer.byteLength(revisionJson)+Buffer.byteLength(artifactsJson)+256;
+          if(options.accountMigration)synchronous(()=>options.accountMigration!(context,{...key,bytes:allocation.bytes-allocation.stagedCreditBytes+delta,capacityBytes:allocation.capacityBytes,capacityDeltaBytes:allocation.capacityDeltaBytes}));
+          db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,saved.previous.revision,row.revision_json,row.artifacts_json);
+          db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson,artifactsJson,key.workspaceId,key.datasetId);
+        }});
+      migrationCandidates.delete(raw.candidateId);return {revision:saved.approved,cursor};
+    },
+    migrationPreviewPage(context:Context,raw:DatasetScope & {candidateId:string;after?:string;limit?:number;signal?:AbortSignal}) {
+      if(!options.supervisor.migrationPreviewPage)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));if(!saved)throw new DatasetHostError("conflict","Migration preview is unavailable.");
+      const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
+      const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();};
+      return options.supervisor.migrationPreviewPage({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,authorityKey,authorize,signal:raw.signal,after:raw.after,limit:raw.limit});
+    },
+    async discardMigration(context:Context,raw:DatasetScope & {candidateId:string;signal?:AbortSignal}):Promise<void> {
+      if(!options.supervisor.discardMigration)throw new DatasetHostError("invalid","Migration previews are unavailable.");
+      const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));owner(context,key);if(!saved)return;
+      const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
+      await options.supervisor.discardMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,authorityKey,signal:raw.signal,authorize(){raw.signal?.throwIfAborted();owner(context,key);}});
+      migrationCandidates.delete(raw.candidateId);
     },
     archiveDataset(context: Context, raw: DatasetScope & { reason?: string }) {
       const key = scope(raw), reason = raw.reason === undefined ? "archived by owner" : text(raw.reason, 1024);

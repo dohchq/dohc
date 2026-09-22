@@ -271,6 +271,30 @@ it("accounts binding and grant replacements by retained size and rolls back quot
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(initial);
 });
 
+it("exposes complete migration previews only to the current owner and commits the reviewed values",async()=>{
+  const f=await fixture();await f.activate();await f.invoke("owner",id(6),{value:"saved"});
+  const expected=f.host.approvedArtifacts("owner",scope).cursor;
+  const revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const input={workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"UPDATE items SET value=lower(hex(randomblob(12)));"};
+  await expect(f.host.prepareMigration("helper",input)).rejects.toThrow();
+  const candidate=await f.host.prepareMigration("owner",input),request={...scope,candidateId:candidate.candidateId};
+  expect(()=>f.host.migrationPreviewPage("helper",request)).toThrow();
+  expect(f.host.migrationPreviewPage("owner",request)).toEqual(candidate.preview.firstPage);
+  expect((await f.invoke("owner",id(7))).result).toMatchObject([{value:"saved"}]);
+  const result=await f.host.approveMigration("owner",{...request,checkpointSha256:candidate.checkpointSha256});
+  expect(result.revision).toEqual(revision);
+  const rows=await f.host.invoke("owner",{...scope,revision:2,revisionSha256:revision.revisionSha256,operationId:id(9),input:{},idempotencyKey:"after"});
+  expect(rows.result).toEqual([candidate.preview.firstPage.changes[0]!.after]);
+});
+
+it("invalidates prepared migration authority after archive and restore",async()=>{
+  const f=await fixture();await f.activate();
+  const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const candidate=await f.host.prepareMigration("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"SELECT 1;"});
+  f.host.archiveDataset("owner",scope);f.host.restoreDataset("owner",scope);
+  await expect(f.host.approveMigration("owner",{...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("not permitted");
+});
+
 it("migrates records atomically and retains stale grants for explicit reapproval", async () => {
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "saved" });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7)]) });

@@ -4,6 +4,7 @@ import { approvedTables, boundedText, runtimeLimits } from "./protocol.js";
 import type { AppOperationFile, AppOperationRefusal, JsonValue, RuntimeLimits } from "./protocol.js";
 import type { GuestRequest } from "./guest.js";
 import type { WorkerOwnership } from "./worker-ownership.js";
+import type { MigrationPreviewTableSummary } from "./migration-preview-report.js";
 
 export interface DatasetScope { workspaceId: string; datasetId: string; hostEpoch: string; approvedRevisionHash: string }
 export interface DatasetCursor { revision: number; digest: string }
@@ -51,7 +52,8 @@ export interface CommittedChangeset extends DatasetCursor {
 }
 export const REPLAY_BATCH_EVENTS=64;
 export const REPLAY_BATCH_BYTES=32*1024*1024;
-export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string }
+export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string; reportPath?:string }
+export interface MigratedCheckpoint { path:string; cursor:DatasetCursor; report?: { tables:MigrationPreviewTableSummary[]; bytes:number } }
 export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"prepare";expected:DatasetCursor;guest:GuestRequest}
@@ -62,7 +64,7 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"snapshot";path:string}
   | {kind:"migrateCheckpoint";input:MigrateCheckpointInput}
   | {kind:"close"};
-export type PersistentResult = DatasetCursor | PreparedOperation | {path:string;cursor:DatasetCursor} | null;
+export type PersistentResult = DatasetCursor | PreparedOperation | MigratedCheckpoint | null;
 export type PersistentReply = {id:number;ok:true;result:PersistentResult}
   | {id:number;ok:false;error:string;code:string;refusal?:AppOperationRefusal};
 

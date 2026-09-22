@@ -151,6 +151,25 @@ Its filter includes tables when the callback returns true. Tests cover admitted 
 
 ## Approved schema transitions
 
+The owner first prepares a migration preview. Authored SQL runs once against a disposable copy, then schema and integrity checks run.
+The preview lists every changed row's before and after values, with pages capped at 100 records and 256 KiB.
+Primary keys identify records. Changed primary-key definitions appear as deletions and insertions rather than guessed matches.
+Integer and blob values retain their SQLite types in the report. Conversion and constraint failures stop preparation before approval.
+
+Approval verifies the current owner, lifecycle generation, source cursor, and candidate checksum before committing those exact checkpoint bytes.
+It does not execute the migration SQL again. Other writes invalidate the preview. A changed owner or archived-and-restored dataset requires a new preview.
+There are at most four previews per host and one per dataset. Previews expire after ten minutes and are discarded on host shutdown.
+The owner can discard a preview earlier. A new preview replaces the dataset's previous preview after fresh authorization.
+
+Preparation reserves twice the dataset's capacity for its private checkpoint and report before creating them.
+Each file is bounded by the dataset capacity. Approval separately reserves the journal checkpoint while both copies exist.
+Deletion of preview files releases the reservations. If closed storage refuses a refund, exclusive startup maintenance reclaims the durable reservation.
+Preview files use supervised ownership directories, so startup removes files left by a crash before admitting work.
+
+A source row larger than 128 KiB, a report record larger than 256 KiB, or a report larger than dataset capacity refuses preparation.
+These limits never truncate reviewed values. Larger migrations need a future chunked-value report or a larger supported storage envelope.
+The existing worker deadline also applies to migration and report generation. These are resource limits, not support for every possible migration.
+
 `migrateCheckpoint({path,schemaSql,tables,migrationSql})` applies an owner-approved migration to a disposable copy of the idle materialization.
 The host must obtain approval for the new rules and warn before destructive changes. The worker does not grant that approval.
 Migration SQL has the source byte limit and the worker execution deadline. It cannot attach databases, access files, change transaction control, or create temporary objects.

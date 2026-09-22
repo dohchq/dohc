@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
-import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
+import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
@@ -140,10 +140,11 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       }catch(error){fail(error instanceof Error?error:new Error(String(error)));throw error;}
     },
     async snapshot(path:string):Promise<{path:string;cursor:DatasetCursor}> {return await send({kind:"snapshot",path:trustedPath(path)}) as {path:string;cursor:DatasetCursor};},
-    async migrateCheckpoint(input:MigrateCheckpointInput):Promise<{path:string;cursor:DatasetCursor}> {
+    async migrateCheckpoint(input:MigrateCheckpointInput):Promise<MigratedCheckpoint> {
       return await send({kind:"migrateCheckpoint",input:{path:trustedPath(input.path),tables:approvedTables(input.tables),
         schemaSql:boundedText(input.schemaSql,config.limits.sourceBytes,"Database schema"),
-        migrationSql:boundedText(input.migrationSql,config.limits.sourceBytes,"Database migration")}}) as {path:string;cursor:DatasetCursor};
+        migrationSql:boundedText(input.migrationSql,config.limits.sourceBytes,"Database migration"),
+        ...(input.reportPath ? {reportPath:trustedPath(input.reportPath)} : {})}}) as MigratedCheckpoint;
     },
     async abort(reason="The dataset operation was cancelled."):Promise<void> {
       closing=true;fail(new PersistentRuntimeError("worker_aborted",reason));
