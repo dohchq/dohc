@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
-import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
+import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
 import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
@@ -49,9 +49,10 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(stopped) return Promise.reject(stopped);
     if(closing && command.kind!=="close") return Promise.reject(new PersistentRuntimeError("worker_closed","The dataset worker is closing."));
     if(queue.length+(active?1:0)>=64) return Promise.reject(new PersistentRuntimeError("queue_full","The dataset worker queue is full."));
-    const bytes=command.kind==="apply" ? command.input.changeset.byteLength : Buffer.byteLength(JSON.stringify(command));
+    const bytes=command.kind==="apply" ? command.input.changeset.byteLength : command.kind==="applyBatch" ? command.input.reduce((sum,event)=>sum+event.changeset.byteLength+256,0) : Buffer.byteLength(JSON.stringify(command));
     if(retainedBytes+bytes>129*1024*1024) return Promise.reject(new PersistentRuntimeError("queue_full","The dataset worker queue byte limit is full."));
     if(command.kind==="apply") command={...command,input:{...command.input,changeset:Uint8Array.from(command.input.changeset)}};
+    if(command.kind==="applyBatch") command={...command,input:command.input.map(event=>({...event,changeset:Uint8Array.from(event.changeset)}))};
     retainedBytes+=bytes;
     return new Promise((resolve,rejectEntry)=>{
       const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,timer:setTimeout(()=>{
@@ -122,6 +123,21 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       checkCursor(event);checkDigest(event.previousDigest);checkDigest(event.changesetSha256);
       if(!(event.changeset instanceof Uint8Array) || event.changeset.byteLength>config.limits.databaseBytes || digest(event.changeset)!==event.changesetSha256) reject("invalid_input","Invalid committed changeset.");
       return await send({kind:"apply",input:{...event}}) as DatasetCursor;
+    },
+    async applyBatch(events:CommittedChangeset[]):Promise<DatasetCursor> {
+      if(!Array.isArray(events)||!events.length||events.length>REPLAY_BATCH_EVENTS)reject("invalid_input","Invalid replay batch size.");
+      let bytes=0;
+      for(let index=0;index<events.length;index++) {
+        const event=events[index];checkCursor(event);checkDigest(event.previousDigest);checkDigest(event.changesetSha256);
+        if(!(event.changeset instanceof Uint8Array)||event.changeset.byteLength>config.limits.databaseBytes||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES||digest(event.changeset)!==event.changesetSha256)reject("invalid_input","Invalid replay batch changeset.");
+        if(index&&(event.revision!==events[index-1].revision+1||event.previousDigest!==events[index-1].digest))reject("invalid_input","Replay batch is not contiguous.");
+      }
+      const input=events.map(event=>({revision:event.revision,digest:event.digest,previousDigest:event.previousDigest,changesetSha256:event.changesetSha256,changeset:event.changeset})),last=input.at(-1)!;
+      try {
+        const result=await send({kind:"applyBatch",input}) as DatasetCursor;
+        if(!result||result.revision!==last.revision||result.digest!==last.digest)throw new PersistentRuntimeError("worker_protocol","Invalid replay batch cursor.");
+        return result;
+      }catch(error){fail(error instanceof Error?error:new Error(String(error)));throw error;}
     },
     async snapshot(path:string):Promise<{path:string;cursor:DatasetCursor}> {return await send({kind:"snapshot",path:trustedPath(path)}) as {path:string;cursor:DatasetCursor};},
     async migrateCheckpoint(input:MigrateCheckpointInput):Promise<{path:string;cursor:DatasetCursor}> {

@@ -4,7 +4,7 @@ import { DatabaseSync, constants } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { authorize, evaluate } from "./guest.js";
 import { AppBackendRuntimeError } from "./protocol.js";
-import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
+import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import { replayThroughShadow } from "./replay.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
@@ -104,6 +104,14 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
   }
   requireIdle();
+  if(command.kind==="applyBatch") {
+    if(!Array.isArray(command.input)||!command.input.length||command.input.length>REPLAY_BATCH_EVENTS)reject("invalid_input","Invalid replay batch size.");
+    let bytes=0;
+    for(const event of command.input)if(!(event.changeset instanceof Uint8Array)||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES)reject("invalid_input","Invalid replay batch bytes.");
+    // Each event retains the same validation and atomic rows/cursor commit as individual recovery.
+    for(const event of command.input)await handle({kind:"apply",input:event});
+    return {...cursor};
+  }
   if (command.kind==="prepare") {
     expectCursor(command.expected);
     db.exec(command.guest.readOnly ? "BEGIN" : "BEGIN IMMEDIATE");transaction=true;
@@ -197,7 +205,7 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
   } catch (error) {
     // An invalid command must not silently discard an already prepared operation.
     if (transaction && !pending) rollback();
-    if(message.command.kind==="open") {db?.setAuthorizer(null);db?.close();db=undefined;lease?.close();lease=undefined;}
+    if(message.command.kind==="open"||message.command.kind==="applyBatch") {db?.setAuthorizer(null);db?.close();db=undefined;lease?.close();lease=undefined;}
     send({id:message.id,ok:false,error:error instanceof Error ? error.message.slice(0,1024) : "Dataset operation failed.",
       code:error instanceof PersistentRuntimeError ? error.code : "operation_failed",
       ...(error instanceof AppBackendRuntimeError ? {refusal:error.refusal} : {})});

@@ -160,10 +160,10 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (!page.events.length) throw new Error("Dataset recovery history is incomplete.");
       for (const event of page.events) {
         if (event.cursor.revision > current.cursor.revision) throw new Error("Dataset head changed during recovery.");
-        await worker.runtime.apply({ ...event.cursor, previousDigest: event.previousDigest, changeset: event.changeset, changesetSha256: event.changesetSha256 });
-        worker.cursor = event.cursor;
-        standing(input);
       }
+      await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})));
+      worker.cursor=page.events.at(-1)!.cursor;
+      standing(input);
     }
     return worker;
   }

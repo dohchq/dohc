@@ -139,6 +139,34 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("replays a bounded batch in order and retains constraints for later writes",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open(),recovered=await open();
+      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
+      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
+      expect(await recovered.applyBatch([first,second])).toEqual({revision:2,digest:second.digest});
+      expect((await recovered.prepare({...operation(second),readOnly:true})).result).toEqual([{id:1,value:'first'},{id:2,value:'second'}]);
+      const third=await recovered.prepare(operation(second,{id:3,value:'third'}));
+      expect(third.result).toHaveLength(3);await recovered.discard(third.proposalId);
+      await expect(recovered.applyBatch([])).rejects.toMatchObject({code:'invalid_input'});
+      await expect(recovered.applyBatch(Array(65).fill(second))).rejects.toMatchObject({code:'invalid_input'});
+      await expect(recovered.applyBatch([second,first])).rejects.toMatchObject({code:'invalid_input'});
+    });
+  });
+
+  it("kills a partially applied batch and recovers again from the authority checkpoint",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open(),recovered=await open();
+      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
+      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
+      const conflict={...second,changeset:first.changeset,changesetSha256:first.changesetSha256};
+      await expect(recovered.applyBatch([first,conflict])).rejects.toMatchObject({code:'invalid_changeset'});
+      await expect(recovered.prepare({...operation(second),readOnly:true})).rejects.toThrow();
+      const reopened=await open();await reopened.applyBatch([first,second]);
+      expect((await reopened.prepare({...operation(second),readOnly:true})).result).toEqual([{id:1,value:'first'},{id:2,value:'second'}]);
+    });
+  });
+
   it("rejects internal-table changesets without partially applying admitted rows",async()=>{
     await fixture(async({open})=>{
       const worker=await open();

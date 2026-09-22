@@ -49,6 +49,8 @@ export interface CommittedChangeset extends DatasetCursor {
   changesetSha256: string;
   changeset: Uint8Array;
 }
+export const REPLAY_BATCH_EVENTS=64;
+export const REPLAY_BATCH_BYTES=32*1024*1024;
 export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string }
 export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
@@ -56,6 +58,7 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"finalize";input:FinalizeOperation}
   | {kind:"discard";proposalId:string}
   | {kind:"apply";input:CommittedChangeset}
+  | {kind:"applyBatch";input:CommittedChangeset[]}
   | {kind:"snapshot";path:string}
   | {kind:"migrateCheckpoint";input:MigrateCheckpointInput}
   | {kind:"close"};
