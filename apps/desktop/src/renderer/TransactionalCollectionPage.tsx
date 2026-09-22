@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
@@ -15,6 +15,7 @@ import {
 } from "./transactionalCollectionModel";
 
 export type { TransactionalDatasetDescription, TransactionalRow } from "./transactionalCollectionModel";
+const TransactionalCollectionViews = lazy(() => import("./TransactionalCollectionViews").then(module => ({default: module.TransactionalCollectionViews})));
 export interface TransactionalInvoke {
   workspaceId: string;
   datasetId: string;
@@ -48,7 +49,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onExportRecovery?(): void;
   onArchive?(): void;
 }
-type Query = { after: TransactionalCursor | null; search: string; filters?: Array<{ fieldId: string; value: AppBackendJson }>; sort?: { fieldId: string; direction: "asc" | "desc" } };
+type Query = { after: TransactionalCursor | null; search: string; filters?: CollectionTableView["filters"]; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
 type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke; invalidated?: boolean };
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
@@ -107,8 +108,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
   const canCreate = create && createFields.every(canInput);
   const scope: CollectionResourceScope = { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256 };
+  const [localView, setLocalView] = useState<CollectionTableView | null>(null);
+  const selectedView = localView ?? props.activeView;
+  useLayoutEffect(() => { setLocalView(null); }, [props.activeView]);
   const [page, setPage] = useState<TransactionalPage | null>(null);
   const [busy, setBusy] = useState(false);
+  const [visualBusy, setVisualBusy] = useState(false), [visualRefresh, setVisualRefresh] = useState(0);
+  const visual = selectedView?.kind === "board" || selectedView?.kind === "calendar";
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState<Query>({ after: null, search: "" });
   const [previous, setPrevious] = useState<Array<TransactionalCursor | null>>([]);
@@ -136,6 +142,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   async function load(next: Query, history = previous): Promise<void> {
     if (!read || !alive.current) return;
     setDetails(null);
+    if (visual) { setQuery(next); setVisualRefresh(value => value + 1); return; }
     readActive.current?.abort();
     const abort = new AbortController(); readActive.current = abort;
     const mine = ++sequence.current;
@@ -160,7 +167,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   const contractKey = JSON.stringify([dataset.revision, dataset.revisionSha256, dataset.operations, props.copy?.offline ?? false]);
   const priorContract = useRef(contractKey);
-  const activeViewKey = JSON.stringify([props.activeView ?? null, contractKey]);
+  const activeViewKey = JSON.stringify([selectedView ?? null, contractKey]);
   useLayoutEffect(() => {
     if (priorContract.current === contractKey) return;
     priorContract.current = contractKey;
@@ -174,7 +181,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     setPage(null); setUndo(null); setEditor(null); setDetails(null);
   }, [contractKey]);
   useEffect(() => {
-    const view = props.activeView;
+    const view = selectedView;
     setPage(null);
     setSearch(view?.search ?? "");
     void load({ after: null, search: view?.search ?? "", filters: view?.filters, sort: view?.sort ?? undefined }, []);
@@ -234,11 +241,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
-  const disabled = busy || pending !== null || resourceBusy;
-  const readDisabled = busy || resourceBusy;
+  const disabled = busy || visualBusy || pending !== null || resourceBusy;
+  const readDisabled = busy || visualBusy || resourceBusy;
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
+  const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
   const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || canCreateForm || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
@@ -246,6 +254,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </header>
     <div className="flex flex-wrap items-center gap-2">
       {props.viewControls?.(disabled || editor !== null)}
+      <select aria-label="Collection layout" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor !== null} value={selectedView?.kind ?? "table"} onChange={event => {
+        const kind = event.target.value as CollectionTableView["kind"];
+        setLocalView({viewId:"local",name:"Current view",search:query.search,filters:query.filters??[],sort:query.sort??null,kind,
+          ...(kind==="board"?{groupBy:fields.find(field=>field.type==="select")?.fieldId??fields.find(supportsSort)?.fieldId}:{}),
+          ...(kind==="calendar"?{dateField:fields.find(field=>field.type==="date")?.fieldId}:{})});
+      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar" disabled={!fields.some(field=>field.type==="date")}>Calendar</option></select>
+      {selectedView?.kind==="board" ? <select aria-label="Group board by" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.groupBy??""} onChange={event=>setLocalView({...selectedView,groupBy:event.target.value})}>{fields.filter(supportsSort).map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
+      {selectedView?.kind==="calendar" ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.dateField??""} onChange={event=>setLocalView({...selectedView,dateField:event.target.value})}>{fields.filter(field=>field.type==="date").map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
       {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
       {hasManagement ? <details className="group relative" onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
@@ -271,20 +287,27 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </form>
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
-    {page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
-    {page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
+    {visual && selectedView ? <Suspense fallback={<p role="status" className="text-sm text-muted">Opening view…</p>}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh}
+      disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={onError}
+      read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
+      onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
+      canMove={fieldId=>!props.copy?.offline&&operations.some(operation=>operation.kind==="edit"&&!operation.readOnly&&operation.fieldIds.includes(fieldId))}
+      onMove={(row,fieldId,value)=>{const operation=operations.find(operation=>operation.kind==="edit"&&!operation.readOnly&&operation.fieldIds.includes(fieldId));if(!operation||disabled)return;
+        void execute({operation,input:{id:row.id,expectedVersion:row.version,values:{[fieldId]:value}},key:crypto.randomUUID(),label:"Moved the record"});}} /></Suspense> : null}
+    {!visual && page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
+    {!visual && page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
         {supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
       </th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
-        const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile;
+        const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
+        }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
       })}<td className="px-3 py-2"><div className="flex gap-2"><SecondaryButton size="compact" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}>Details</SecondaryButton>{remove && confirmDelete ? <SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
-    {page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
+    {!visual && page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError}
       onClose={() => { setDetails(null); trigger.current?.focus(); }}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}

@@ -6,7 +6,8 @@ import { bridge } from "./bridge";
 const id = z.string().uuid();
 const scalar = z.union([z.string().max(4096),z.number().finite(),z.boolean(),z.null()]);
 export const CollectionTableView = z.object({
-  viewId:id, name:z.string().trim().min(1).max(100), kind:z.literal("table"), search:z.string().max(200),
+  viewId:id, name:z.string().trim().min(1).max(100), kind:z.enum(["table","board","calendar"]), search:z.string().max(200),
+  groupBy:id.optional(), dateField:id.optional(),
   filters:z.array(z.object({fieldId:id,value:z.union([scalar,z.array(scalar).max(100)])}).strict()).max(20),
   sort:z.object({fieldId:id,direction:z.enum(["asc","desc"])}).strict().nullable(),
 }).strict();
@@ -25,6 +26,11 @@ export function validateTableView(view:CollectionTableView,dataset:DatasetDescri
   const table=dataset.tables.find(table=>table.tableId===tableId), read=dataset.operations.find(operation=>operation.tableId===tableId&&operation.kind==="read"&&operation.readOnly);
   if(!table||!read)throw Error("This Collection has no permitted read action.");
   const fields=table.fields.filter(field=>read.fieldIds.includes(field.fieldId));
+  if(view.kind==="board") {
+    const field=fields.find(field=>field.fieldId===view.groupBy);
+    if(!field||!supportsSort(field))throw Error("Choose a readable field to group this board.");
+  }
+  if(view.kind==="calendar"&&!fields.some(field=>field.fieldId===view.dateField&&field.type==="date"))throw Error("Choose a readable date field for this calendar.");
   for(const filter of view.filters) {
     const field=fields.find(field=>field.fieldId===filter.fieldId);
     if(!field)throw Error("This view uses a field you cannot read. Edit the view before opening it.");
