@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
-import { parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription } from "@dohc/security-contract/dataset";
+import { parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference } from "@dohc/security-contract/dataset";
 
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -26,9 +26,19 @@ const revision = z.unknown().transform((value, context) => {
 });
 export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
   revision: z.number().int().nonnegative(), digest: sha256 }).strict();
+export const DatasetDataGrant = z.object({ revision: z.number().int().positive(), revisionSha256: sha256,
+  operationIds: z.array(identity).min(1).max(128), discover: z.boolean() }).strict();
+export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("data"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: DatasetDataGrant }).strict(),
+  z.object({ kind: z.literal("app"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: z.unknown().transform(value => parseDatasetBindingReference(value)) }).strict(),
+])).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
+export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe") }).strict(),
+  z.object({ ...selection, action: z.literal("permissions"), after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
+  z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant }).strict(),
+  z.object({ ...selection, action: z.literal("removeGrant"), principalKey: z.string().min(1).max(256) }).strict(),
   z.object({ ...pinned, action: z.literal("upload"), fieldId: identity, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
     name: z.string().min(1).max(255), contentType: z.string().min(1).max(128), bytesBase64: fileBytes }).strict(),
   z.object({ ...pinned, action: z.literal("file"), fileId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/) }).strict(),
@@ -66,6 +76,8 @@ const description = z.unknown().transform((value, context) => {
 export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description }).strict(),
+  DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
+  z.object({ kind: z.literal("grant-updated") }).strict(),
   z.object({ kind: z.literal("form-created"), appRoot: z.string().min(1).max(900), paths: z.array(z.string().min(1).max(1024)).min(1).max(4) }).strict(),
   DatasetPreparation.extend({ kind: z.literal("prepared") }).strict(),
   z.object({ kind: z.literal("approved"), revision }).strict(),

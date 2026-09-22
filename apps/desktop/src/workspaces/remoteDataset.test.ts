@@ -31,6 +31,17 @@ function fixture() {
 }
 
 describe("remote Collection authority", () => {
+  it("pins explicit data grants and can remove a stored principal after its source share ends", async () => {
+    const f = fixture(), grant = { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(4)], discover: true };
+    f.relay.mockResolvedValueOnce({ ok: true });
+    await f.data.setGrant!({ action: "setGrant", workspaceId: "workspace", datasetId: id(1), grantId: "accepted-share", grant });
+    expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ grantId: "accepted-share", grant });
+    f.relay.mockResolvedValueOnce({ permissions: [{ kind: "data", principal: "stored-principal", current: false, metadata: grant }], nextCursor: null });
+    expect((await f.data.permissions!({ action: "permissions", workspaceId: "workspace", datasetId: id(1) })).permissions[0]?.current).toBe(false);
+    f.relay.mockResolvedValueOnce({ ok: true });
+    await f.data.setGrant!({ action: "removeGrant", workspaceId: "workspace", datasetId: id(1), principalKey: "stored-principal" });
+    expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ principalKey: "stored-principal", grant: null });
+  });
   it("reads approved artifacts and invokes exactly the requested revision without local fallback", async () => {
     const f = fixture();
     expect(await f.data.list({ limit: 10 })).toEqual({ datasets: [description], nextCursor: null });

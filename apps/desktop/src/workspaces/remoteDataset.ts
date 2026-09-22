@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -18,6 +18,8 @@ export interface OwnerDatasetData {
   invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
   upload(input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; replayed: boolean }>;
   file(input: Extract<DatasetRequest, { action: "file" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; bytesBase64: string }>;
+  permissions?(input: Extract<DatasetRequest, { action: "permissions" }>): Promise<DatasetPermissionsPage>;
+  setGrant?(input: Extract<DatasetRequest, { action: "setGrant" | "removeGrant" }>): Promise<void>;
 }
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -45,6 +47,17 @@ export function createRemoteDatasetData(input: {
     signal.throwIfAborted(); return value;
   });
   return {
+    async permissions(value) {
+      const query = new URLSearchParams();
+      if (value.after) query.set("after", value.after);
+      if (value.limit) query.set("limit", String(value.limit));
+      return DatasetPermissionsPage.parse(await request(`${path(value.datasetId)}/permissions${query.size ? `?${query}` : ""}`));
+    },
+    async setGrant(value) {
+      const result = await request(`${path(value.datasetId)}/grant`, value.action === "setGrant"
+        ? { grantId: value.grantId, grant: value.grant } : { principalKey: value.principalKey, grant: null });
+      z.object({ ok: z.literal(true) }).strict().parse(result);
+    },
     async list(page) {
       const query = new URLSearchParams();
       if (page.after) query.set("after", identity.parse(page.after));
@@ -182,5 +195,15 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     invoke: async value => (await target(value.datasetId)).invoke(value),
     upload: async value => (await target(value.datasetId)).upload(value),
     file: async value => (await target(value.datasetId)).file(value),
+    permissions: async value => {
+      const authority = await target(value.datasetId);
+      if (!("permissions" in authority) || !authority.permissions) throw new Error("Publish this Collection before managing shared access.");
+      return authority.permissions(value);
+    },
+    setGrant: async value => {
+      const authority = await target(value.datasetId);
+      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("Publish this Collection before managing shared access.");
+      await authority.setGrant(value);
+    },
   };
 }

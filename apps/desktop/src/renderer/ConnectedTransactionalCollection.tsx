@@ -3,6 +3,7 @@ import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { bridge } from "./bridge";
 import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { CollectionActionDialog } from "./CollectionActionDialog";
+import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -27,6 +28,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [transferringCsv, setTransferringCsv] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
+  const [managingAccess, setManagingAccess] = useState(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
@@ -62,6 +64,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     onCreateForm={() => setCreatingForm(true)}
     onTransferCsv={() => setTransferringCsv(true)}
     onReviewSchema={() => setReviewingSchema(true)}
+    onManageAccess={() => setManagingAccess(true)}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {
@@ -117,6 +120,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
         return result;
       }} />}
+    {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}

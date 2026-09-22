@@ -102,7 +102,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   const lifetime = new AbortController(), active = new Set<Promise<unknown>>();
   const owner: OwnerContext = { owner: true };
   const workspaceId = options.workspaceId;
-  const ownerId = `local:${digest(workspaceId)}`;
+  // Owner retries must retain their identity when a fenced local dataset moves to the relay.
+  // The workspace owns this identity, so it does not depend on a device or account session.
+  const ownerId = digest(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
   const pending = new Map<string, { preparation: LocalDatasetPreparation; schemaSql: string; operationSource: string; expires: number }>();
   function assertCurrent() {
     if (closed) throw new Error("This Collection session ended. Reopen the workspace.");

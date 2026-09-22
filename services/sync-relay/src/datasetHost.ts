@@ -17,6 +17,7 @@ import { createDatasetFiles } from "./storage/datasetFiles";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const principalKey = (workspaceId: string, grantId: string, userId: string) => hash(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId]));
+const ownerPrincipalKey = (workspaceId: string) => hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
 export interface RelayDatasetHostOptions {
   storage: StorageContext;
   directory: string;
@@ -70,7 +71,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   function owner(auth: AppBackendAuth, workspaceId: string): DatasetAuthority {
     current();
     if (auth.kind !== "named" || auth.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, auth.userId)) throw notFound();
-    return {caller: {kind: "owner", userId: auth.userId}, principalKey: principalKey(workspaceId, "owner", auth.userId)};
+    return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId)};
   }
   function named(workspaceId: string, grantId: string, userId: string): DatasetAuthority {
     const result = authorizeShareGrantAction({storage, grantId, principalKind: "user", principalUserId: userId, action: "read"});

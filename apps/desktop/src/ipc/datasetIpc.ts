@@ -30,9 +30,17 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "permissions", "setGrant", "removeGrant"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
+      if (input.action === "permissions") {
+        if (!("permissions" in data) || !data.permissions) throw new Error("Publish this Collection before managing shared access.");
+        const result = await data.permissions(input); current(); return { kind: "permissions" as const, ...result };
+      }
+      if (input.action === "setGrant" || input.action === "removeGrant") {
+        if (!("setGrant" in data) || !data.setGrant) throw new Error("Publish this Collection before managing shared access.");
+        await data.setGrant(input); current(); return { kind: "grant-updated" as const };
+      }
       if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
       if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
       if (input.action === "upload") {
