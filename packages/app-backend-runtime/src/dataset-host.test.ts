@@ -215,3 +215,18 @@ it("rolls back migration approval when accounting refuses and rejects a stale pr
   await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow();
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "new record" }]);
 });
+
+it("commits app publication with its binding and rolls both back on failure", async () => {
+  const f = await fixture(); await f.activate();
+  f.db.exec("CREATE TABLE publications(id TEXT PRIMARY KEY);");
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => {
+    f.db.prepare("INSERT INTO publications VALUES('form')").run(); throw new Error("publication failed");
+  })).toThrow("publication failed");
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(0);
+  expect(f.host.permissions("owner", scope).permissions).toEqual([]);
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, async () => {})).toThrow("synchronous");
+  expect(f.host.permissions("owner", scope).permissions).toEqual([]);
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => { f.db.prepare("INSERT INTO publications VALUES('form')").run(); });
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(1);
+  expect(f.host.permissions("owner", scope).permissions).toHaveLength(1);
+});
