@@ -62,7 +62,12 @@ export function createRemoteDatasetData(input: {
     },
     async archive(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/archive`, {})); },
     async restore(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/restore`, {})); },
-    async pendingAttempts(value) { const query = new URLSearchParams(); if(value.after)query.set("after",String(value.after)); if(value.limit)query.set("limit",String(value.limit)); return DatasetPendingAttemptsPage.parse(await request(`${path(value.datasetId)}/pending-attempts${query.size ? `?${query}` : ""}`)); },
+    async pendingAttempts(value) {
+      const query = new URLSearchParams(); if(value.after !== undefined)query.set("after",String(value.after)); if(value.limit)query.set("limit",String(value.limit));
+      const result = DatasetPendingAttemptsPage.parse(await request(`${path(value.datasetId)}/pending-attempts${query.size ? `?${query}` : ""}`));
+      if (result.datasetId !== value.datasetId || result.nextAfter !== null && result.nextAfter <= (value.after ?? 0)) throw new Error("The server returned a different pending submission page.");
+      return result;
+    },
     async reconcileAttempt(value) { return z.object({ cleared: z.literal(true) }).strict().parse(await request(`${path(value.datasetId)}/reconcile-attempt`, { reference: value.reference, acknowledge: value.acknowledge })); },
     async permissions(value) {
       const query = new URLSearchParams();
