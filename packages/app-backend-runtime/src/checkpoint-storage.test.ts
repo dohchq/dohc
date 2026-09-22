@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { createDatasetJournal, type JournalDb, type CheckpointStage } from "./journal.ts";
+import { createRecoveryInstaller } from "./recovery-install.ts";
 
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const chunkBytes = 1024 * 1024, scope = { workspaceId: "w", datasetId: "d" };
@@ -30,7 +31,7 @@ function fixture() {
   }
   let journal = createDatasetJournal({ db: wrapped, transaction });
   const account = ({ bytes }: { bytes: number }) => { db.prepare("UPDATE quota SET bytes=bytes+?").run(bytes); };
-  return { get journal() { return journal; }, get db() { return db; }, account, get largestRead() { return largestRead; },
+  return { get journal() { return journal; }, get db() { return db; }, account, transaction, get largestRead() { return largestRead; },
     reopen() { db.close(); db = new DatabaseSync(join(root, "journal.sqlite")); journal = createDatasetJournal({ db: wrapped, transaction }); },
     balance() { return Number(db.prepare("SELECT bytes FROM quota").get()!.bytes); } };
 }
@@ -124,4 +125,46 @@ it("does not run asynchronous staging accounting or retain thenable side effects
   expect(() => f.journal.stageCheckpoint({ ...input, account: allocation => { f.account(allocation); return { then() {} }; } })).toThrow("synchronous");
   expect(f.balance()).toBe(0);
   expect(f.journal.checkpointStages({ workspaceId: "w", authorize })).toEqual([]);
+});
+
+it("reclaims interrupted stages after restart in bounded pages while retaining recovery imports and active history", () => {
+  const f = fixture(), bytes = new Uint8Array(80).fill(7);
+  createRecoveryInstaller({ db: f.db, transaction: f.transaction, journal: f.journal });
+  const active = stage(f, bytes, false);
+  f.journal.initialize({ ...initialization, checkpoint: active });
+  const retained = [stage(f, bytes), stage(f, bytes)];
+  retained.forEach((entry, i) => f.db.prepare("INSERT INTO dohc_dataset_import_checkpoints VALUES(?,?,?,?)")
+    .run(`import-${i}`, entry.stageId, JSON.stringify(entry), i ? "head" : "history"));
+  stage(f, bytes);
+  f.journal.stageCheckpoint({ scope: { workspaceId: "another", datasetId: "d" }, expectedBytes: 80, sha256: hash(bytes), authorize, account: f.account });
+  const incomplete = f.journal.stageCheckpoint({ scope, expectedBytes: chunkBytes + 80, sha256: hash(new Uint8Array(chunkBytes + 80)), authorize, account: f.account });
+  f.journal.appendCheckpointChunk({ stage: incomplete, index: 0, bytes: new Uint8Array(chunkBytes), authorize });
+  f.reopen();
+  const retain = (entry: Readonly<CheckpointStage>) => Boolean(f.db.prepare("SELECT 1 FROM dohc_dataset_import_checkpoints WHERE stage_id=?").get(entry.stageId));
+  let after: string | undefined, reclaimed = 0, pages = 0;
+  do {
+    const result = f.journal.reclaimCheckpointStages({ after, limit: 2, authorize, account: f.account, retain });
+    after = result.after; reclaimed += result.reclaimed; pages++;
+  } while (after);
+  expect(reclaimed).toBe(3); expect(pages).toBe(3);
+  expect(f.journal.checkpointStages({workspaceId: "w", authorize}).map(s => s.stageId).sort()).toEqual(retained.map(s => s.stageId).sort());
+  expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoint_chunks").get()!.n).toBe(3);
+  expect(f.journal.checkpoint({ scope, authorize }).bytes).toEqual(bytes);
+  expect(f.balance()).toBe(2 * (80 + 128 + 512));
+  expect(f.journal.reclaimCheckpointStages({ authorize, account: f.account, retain }).reclaimed).toBe(0);
+  expect(f.balance()).toBe(2 * (80 + 128 + 512));
+});
+
+it("rolls back stage deletion and quota release together when startup accounting or standing fails", () => {
+  const f = fixture(), entry = stage(f, new Uint8Array(20)), before = f.balance();
+  expect(() => f.journal.reclaimCheckpointStages({ authorize, retain: () => false,
+    account(allocation) { f.account(allocation); throw new Error("quota failed"); },
+  })).toThrow("quota failed");
+  expect(f.balance()).toBe(before);
+  let calls = 0;
+  expect(() => f.journal.reclaimCheckpointStages({ authorize() { if (++calls === 3) throw new Error("closed"); }, retain: () => false, account: f.account })).toThrow("closed");
+  expect(f.balance()).toBe(before);
+  expect(f.journal.checkpointStages({workspaceId: "w", authorize})).toEqual([entry]);
+  expect(f.journal.reclaimCheckpointStages({authorize, retain: () => false, account: f.account}).reclaimed).toBe(1);
+  expect(f.balance()).toBe(0);
 });

@@ -125,7 +125,7 @@ This fallback runs only during replay and leaves ordinary writes unchanged. It u
 Replay and checkpoint integrity checks restore accepted state without reevaluating `CHECK` predicates, which can depend on time or randomness.
 The trusted host verifies journal and checkpoint identity before supplying them. Replay still checks keys and foreign keys; subsequent guest writes enforce `CHECK` again.
 `snapshot(path)` creates an exclusive SQLite checkpoint containing the current scope and cursor, then keeps the worker open.
-It refuses an existing destination. The host publishes the checkpoint and its manifest durably before retiring journal events.
+It refuses an existing destination. The host publishes the checkpoint and its manifest durably; accepted journal events remain retained.
 
 On deadline, process death, or protocol failure, the client fails closed and does not restart itself.
 Call `close`, then rebuild in a fresh directory from the authoritative checkpoint and journal.
@@ -166,3 +166,15 @@ The launcher starts the compiled `entryPath` with an empty environment and maps 
 The child accepts one request on `process.parentPort` and sends one reply.
 The utility-process adapter should send `{ kind: "close" }` after it receives the reply.
 The child exits after that close message.
+
+## Retention and startup maintenance
+
+The host retains committed events, schema checkpoints, and retry receipts within its storage quota. It does not compact history or expire accepted retry keys.
+Receipts still refer to their original events, and recovery exports require the complete revision chain. Removing either would break recovery or repeat protection.
+When quota is exhausted, further writes fail. An export preserves the data but does not release storage. Operators must provision capacity for retained history.
+
+Before admitting work, the local host reclaims abandoned checkpoint stages under its exclusive worker-directory lease.
+Configured relay deployments do the same under their deployment writer lock. Unlocked development relay storage skips this maintenance.
+Maintenance reads at most 100 manifests per page and yields between pages. Each deletion refunds its reservation in the same transaction.
+It preserves all active checkpoints and stages referenced by recovery imports, including installed imports awaiting a claim.
+Transfer archives, receipts, and recovery-import state have separate lifecycles and are not swept by checkpoint maintenance.

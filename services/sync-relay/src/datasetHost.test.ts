@@ -9,6 +9,7 @@ import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
+import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -34,11 +35,11 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 const scope = {workspaceId: "w", datasetId: definition.datasetId};
 const helper: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "helper", grantId: "helper-grant"};
 
-async function fixture() {
+async function fixture(startupExclusive = false) {
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
-  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, nowMs: () => 10, onShutdownError(error) {shutdownErrors.push(error);}});
+  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => 10, onShutdownError(error) {shutdownErrors.push(error);}});
   host = await create();
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25}); expect(shutdownErrors).toEqual([]);});
   const activate = () => host.activate(owner, {...scope, revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
@@ -65,6 +66,21 @@ async function fixture() {
   return {...base, get host() {return host;}, activate, invoke, publish, addHelper,
     async reopen() {await host.close(); host = await create();}};
 }
+
+it.each([false, true])("reclaims abandoned checkpoint quota only with exclusive startup ownership (%s)", async startupExclusive => {
+  const f = await fixture(startupExclusive); await f.activate(); await f.host.close();
+  const before = workspaceUsageBytes(f.storage, "w");
+  const journal = createDatasetJournal({ db: f.storage.db, transaction: work => f.storage.tx(work) });
+  let reserved = 0;
+  journal.stageCheckpoint({scope, expectedBytes: 10, sha256: createHash("sha256").update(new Uint8Array(10)).digest("hex"), authorize() {}, account({bytes}) {
+    reserved += bytes;
+    f.storage.db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?").run(bytes,scope.workspaceId,scope.datasetId);
+    f.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(bytes,scope.workspaceId);
+  }});
+  await f.reopen();
+  expect(workspaceUsageBytes(f.storage, "w")).toBe(before + (startupExclusive ? 0 : reserved));
+  expect(journal.checkpointStages({workspaceId: "w", authorize() {}})).toHaveLength(startupExclusive ? 0 : 1);
+});
 
 it("creates standalone data on the relay connection and recovers app writes after host restart", async () => {
   const f = await fixture(), before = workspaceUsageBytes(f.storage, "w");

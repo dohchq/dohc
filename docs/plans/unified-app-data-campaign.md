@@ -185,7 +185,8 @@ Exit: every applicable acceptance row below passes on the actual compiled app an
 - Test the agreed performance envelope below on ordinary hardware and the reference machine.
 - Run a sustained multi-app workload, repeated worker eviction/restart, bounded overload, and storage pressure.
 - Set measured storage/query/upload limits. Replace tiny experiment limits only where the new storage and recovery design supports the larger envelope.
-- Implement bounded history/checkpoint maintenance and retry-state retention. Never prune a key so that an old request can silently execute again.
+- Reclaim abandoned checkpoint stages at exclusive host startup, in bounded pages with atomic quota refunds. Preserve recovery-import stages.
+- Retain all committed history, schema checkpoints, and retry receipts within quota. Automatic history compaction is deferred: recovery needs the complete revision chain, and receipts refer to their original events. Quota exhaustion refuses writes; export alone does not release storage. This replaces the earlier history-maintenance target and requires review as a campaign scope change. Never prune a key so that an old request can silently execute again.
 - Complete a task-based usability pass with someone who did not implement the feature. Retain the task list, completion outcomes, observed help needed, and remaining friction. Fix setup dead ends and misleading success states.
 - Record shipped behavior, unsupported limits, and operator instructions. Publish performance claims only for the measured workload.
 

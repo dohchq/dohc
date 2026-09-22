@@ -34,6 +34,8 @@ export interface RelayDatasetHostOptions {
   maxParticipantsPerGrant?: number;
   compileOperations?: DatasetHostOptions<AppBackendAuth>["compileOperations"];
   onShutdownError(error: unknown): void;
+  /** The deployment writer lock must be held before startup stage maintenance runs. */
+  startupExclusive?: boolean;
 }
 
 /** The existing relay connection owns every authoritative dataset transaction. */
@@ -191,6 +193,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
     createRecoveryInstaller({db: storage.db, transaction, journal});
+    if (options.startupExclusive) {
+      let stageCursor: string | undefined;
+      do {
+        stageCursor = journal.reclaimCheckpointStages({after: stageCursor, authorize: current,
+          retain: stage => Boolean(storage.db.prepare("SELECT 1 FROM dohc_dataset_import_checkpoints WHERE stage_id=?").get(stage.stageId)),
+          account: allocation => account(allocation.scope.workspaceId, allocation.scope.datasetId, allocation.bytes),
+        }).after;
+        if (stageCursor) await new Promise<void>(resolve => setImmediate(resolve));
+      } while (stageCursor);
+    }
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
       recovery: {
         directory: recoveryDirectory, limits: {maxTotalBytes: storage.options.workspaceQuotaBytes},

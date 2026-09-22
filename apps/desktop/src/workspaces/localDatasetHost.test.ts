@@ -16,6 +16,7 @@ import { createSyncRelayHandler } from "../../../../services/sync-relay/src/serv
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget } from "./remoteDataset";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
+import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -66,6 +67,27 @@ async function activate(host: LocalDatasetHost, fixture = sources()) {
 }
 const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: string, idempotencyKey = "read", input = {}) =>
   ({datasetId: id(1), revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationId, idempotencyKey, input});
+
+it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
+  const first = await open(); await first.host.close();
+  const path = join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite");
+  const db = new DatabaseSync(path);
+  try {
+    const transaction = <T,>(work: () => T): T => { db.exec("BEGIN IMMEDIATE"); try {const value = work(); db.exec("COMMIT"); return value;} catch(error) {db.exec("ROLLBACK"); throw error;} };
+    const journal = createDatasetJournal({ db, transaction });
+    const scope = {workspaceId: "w", datasetId: id(1)};
+    const account = ({bytes}: {bytes: number}) => { db.prepare("UPDATE local_dataset_budget SET bytes=bytes+?").run(bytes); };
+    const pinned = journal.stageCheckpoint({scope,expectedBytes: 30,sha256: digest(new Uint8Array(30)),authorize() {},account});
+    db.prepare("INSERT INTO dohc_dataset_import_checkpoints VALUES(?,?,?,?)").run("pending-import",pinned.stageId,JSON.stringify(pinned),"head");
+    journal.stageCheckpoint({scope,expectedBytes: 100,sha256: digest(new Uint8Array(100)),authorize() {},account});
+  } finally { db.close(); }
+  const second = await open({workspaceRoot: first.workspaceRoot}); await second.host.close();
+  const result = new DatabaseSync(path);
+  try {
+    expect(result.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes).toBe(30 + 128 + 512);
+    expect(result.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n).toBe(1);
+  } finally { result.close(); }
+});
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const host of hosts.splice(0)) await host.close();

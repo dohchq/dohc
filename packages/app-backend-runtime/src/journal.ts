@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createCheckpointStorage, type CheckpointStage, type CheckpointStageAllocation } from "./checkpoint-storage.js";
+import { createCheckpointStorage, type CheckpointStage, type CheckpointStageAllocation, type ReclaimCheckpointStagesInput } from "./checkpoint-storage.js";
 export type { CheckpointStage, CheckpointStageAllocation } from "./checkpoint-storage.js";
 
 export interface JournalDb {
@@ -100,6 +100,8 @@ export interface DatasetJournal {
   sealCheckpoint(input: { stage: CheckpointStage; authorize: Authorize }): CheckpointStage;
   discardCheckpoint(input: { stage: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): void;
   checkpointStages(input: { workspaceId: string; after?: string; limit?: number; authorize: Authorize }): CheckpointStage[];
+  /** Startup only, while the host exclusively owns the store and has admitted no operations. */
+  reclaimCheckpointStages(input: ReclaimCheckpointStagesInput): { reclaimed: number; after: string | undefined };
   captureExport<T>(input: { scope: DatasetScope; authorize: Authorize; capture(cursor: DatasetCursor): T }): JournalExportCapture<T>;
   exportPage(input: { scope: DatasetScope; through: DatasetCursor; afterRevision: number; limit?: number; authorize: Authorize }): JournalExportRecord[];
   exportBlob(input: { scope: DatasetScope; record: JournalExportRecord; offset: number; length?: number; authorize: Authorize }): Uint8Array;
@@ -293,6 +295,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     sealCheckpoint: checkpoints.sealCheckpoint,
     discardCheckpoint: checkpoints.discardCheckpoint,
     checkpointStages: checkpoints.checkpointStages,
+    reclaimCheckpointStages: checkpoints.reclaimCheckpointStages,
     captureExport(input) {
       const key=scope(input.scope);
       return tx(()=>{

@@ -12,6 +12,14 @@ export interface CheckpointStage {
   sealed: boolean;
 }
 export interface CheckpointStageAllocation { bytes: number; scope: DatasetScope; stage: CheckpointStage }
+export interface ReclaimCheckpointStagesInput {
+  after?: string;
+  limit?: number;
+  authorize: () => unknown;
+  /** Checked inside each deletion transaction. Recovery imports retain their stages. */
+  retain: (stage: Readonly<CheckpointStage>) => boolean;
+  account: (allocation: Readonly<CheckpointStageAllocation>) => unknown;
+}
 type Authorize = () => unknown;
 type StageRow = { stage_id: string; workspace_id: string; dataset_id: string; byte_length: number; sha256: string; state: number; reserved_bytes: number; next_index: number };
 export const CHECKPOINT_CHUNK_BYTES = 1024 * 1024;
@@ -40,6 +48,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
       sha256 TEXT NOT NULL,state INTEGER NOT NULL CHECK(state IN(0,1,2)),reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>=0),
       next_index INTEGER NOT NULL CHECK(next_index>=0)) STRICT;
     CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoints_scope ON dohc_dataset_checkpoints(workspace_id,dataset_id,state,stage_id);
+    CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoints_staged ON dohc_dataset_checkpoints(stage_id) WHERE state!=2;
     CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_chunks (
       stage_id TEXT NOT NULL,chunk_index INTEGER NOT NULL CHECK(chunk_index>=0),bytes BLOB NOT NULL CHECK(length(bytes)>0 AND length(bytes)<=1048576),
       sha256 TEXT NOT NULL,PRIMARY KEY(stage_id,chunk_index),FOREIGN KEY(stage_id) REFERENCES dohc_dataset_checkpoints(stage_id)) STRICT;`)));
@@ -104,6 +113,14 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     });
   }
   function storageBytes(length: number) { return length + Math.ceil(length / CHECKPOINT_CHUNK_BYTES) * 128 + 512; }
+  function discard(value: StageRow, account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown) {
+    if (value.state === 2) throw new Error("Active checkpoints cannot be discarded.");
+    if (value.reserved_bytes && !account) throw new Error("Discarding this checkpoint requires quota accounting.");
+    const stage = manifest(value);
+    if (account) callback(() => account(Object.freeze({ bytes: -value.reserved_bytes, scope: Object.freeze({ ...stage.scope }), stage })));
+    db.prepare("DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id=?").run(value.stage_id);
+    db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE stage_id=?").run(value.stage_id);
+  }
   return {
     stageCheckpoint, appendCheckpointChunk, sealCheckpoint,
     discardCheckpoint(input: { stage: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }) {
@@ -111,13 +128,31 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
       const stage = structuredClone(input.stage);
       tx(() => {
         callback(input.authorize); const value = row(stage);
-        if (value.state === 2) throw new Error("Active checkpoints cannot be discarded.");
-        if (value.reserved_bytes && !input.account) throw new Error("Discarding this checkpoint requires quota accounting.");
-        if (input.account) callback(() => input.account!(Object.freeze({ bytes: -value.reserved_bytes, scope: Object.freeze({ ...stage.scope }), stage: manifest(value) })));
-        db.prepare("DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id=?").run(value.stage_id);
-        db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE stage_id=?").run(value.stage_id);
+        discard(value, input.account);
         callback(input.authorize);
       });
+    },
+    /** Startup only: the caller must exclusively own this store before admitting operations. */
+    reclaimCheckpointStages(input: ReclaimCheckpointStagesInput) {
+      synchronous(input.retain); synchronous(input.account);
+      const limit = input.limit ?? 100;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid checkpoint stage page size.");
+      const stages = tx(() => {
+        callback(input.authorize);
+        return db.prepare("SELECT * FROM dohc_dataset_checkpoints WHERE state!=2 AND stage_id>? ORDER BY stage_id LIMIT ?")
+          .all(input.after ?? "", limit).map(value => manifest(validateRow(value as StageRow)));
+      });
+      let reclaimed = 0;
+      for (const stage of stages) tx(() => {
+        callback(input.authorize);
+        const value = row(stage);
+        if (!callback(() => input.retain(Object.freeze(structuredClone(stage))))) {
+          discard(value, input.account);
+          reclaimed++;
+        }
+        callback(input.authorize);
+      });
+      return { reclaimed, after: stages.length === limit ? stages.at(-1)!.stageId : undefined };
     },
     checkpointStages(input: { workspaceId: string; after?: string; limit?: number; authorize: Authorize }) {
       const limit = input.limit ?? 100;

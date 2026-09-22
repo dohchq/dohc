@@ -11,6 +11,7 @@ import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-con
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
+import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
@@ -152,6 +153,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
     supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers });
     const resources = options.resources?.({ db, transaction });
+    createRecoveryInstaller({ db, transaction, journal });
+    // The supervisor owns this workspace's fixed worker directory before any caller can stage work.
+    let stageCursor: string | undefined;
+    do {
+      stageCursor = journal.reclaimCheckpointStages({ after: stageCursor, authorize: assertCurrent,
+        retain: stage => Boolean(db.prepare("SELECT 1 FROM dohc_dataset_import_checkpoints WHERE stage_id=?").get(stage.stageId)),
+        account(allocation) { charge(allocation.bytes); return resources?.accountCheckpointStage?.(owner, allocation); },
+      }).after;
+      if (stageCursor) await new Promise<void>(resolve => setImmediate(resolve));
+    } while (stageCursor);
     let apps: ReturnType<typeof createLocalDatasetApps>;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime,
