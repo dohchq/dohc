@@ -1,25 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
 import { createChatWrites, type ChatWriter, type ChatWriteStore } from "./chatWrites";
-import type { ResolvedChatRelayIdentity } from "./chatRelayIdentity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
-import { deferred } from "../testing/deferred";
+import { deferred, type Deferred } from "../testing/deferred";
 
 const PERSON: ChatWriter = { via: "renderer" };
 const AGENT: ChatWriter = { via: "cli", actor: "agent" };
-const credentials: CloudCredentials = {
-  serverUrl: "https://cloud.test", relayUrl: "https://relay.test", userId: "user-1",
-  email: "sam@test.invalid", token: "token",
-};
+const signedIn = (userId: string): CloudCredentials => ({
+  serverUrl: "https://cloud.test", relayUrl: "https://relay.test", userId,
+  email: `${userId}@test.invalid`, token: `token-${userId}`,
+});
 const joined: JoinedSharedChannel = {
   shareId: "share", channelWireId: "wire", access: "read-write", granterEmail: null,
   relayUrl: "https://relay.test", recipientUserId: "user-1",
 };
 
+// The async steps a write can await before its row. A test can hold one.
+type Pause = "channel" | "wire" | "warm" | "attachments" | "reactions";
+
 function fixture() {
   const events: string[] = [];
-  const row: Pick<RegistryEntry, "shareView" | "sharedChannels"> = {};
+  const holds = new Map<Pause, { entered: Deferred; held: Deferred }>();
+  async function reach(point: Pause) {
+    events.push(point);
+    const hold = holds.get(point);
+    if (!hold) return;
+    holds.delete(point);
+    hold.entered.resolve();
+    await hold.held.promise;
+  }
+  const row: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels"> = {
+    remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
+  };
   const reactions: ChatReaction[] = [];
   const message = (input: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
     ...input, id: "message", createdAtMs: 2,
@@ -29,8 +42,14 @@ function fixture() {
     })),
   });
   const store = {
-    findThreadChannelId: vi.fn(async () => "channel"),
-    getChannelWireId: vi.fn(async () => "wire"),
+    findThreadChannelId: vi.fn(async () => {
+      await reach("channel");
+      return "channel";
+    }),
+    getChannelWireId: vi.fn(async (): Promise<string | null> => {
+      await reach("wire");
+      return "wire";
+    }),
     createThread: vi.fn<ChatWriteStore["createThread"]>(async (input) => ({
       id: "file-thread", workspaceId: input.workspaceId, title: input.title, createdAtMs: 1,
       updatedAtMs: 1, linkedFile: { ...input.linkedFile, linkedAtMs: 1 },
@@ -46,10 +65,14 @@ function fixture() {
         message: message({ ...input, threadId: "thread" }),
       };
     }),
-    resolveChatDecision: vi.fn<ChatWriteStore["resolveChatDecision"]>(async (input) => ({
-      ...input, state: "resolved", atMs: 3,
-    })),
-    listReactions: vi.fn<ChatWriteStore["listReactions"]>(async () => [...reactions]),
+    resolveChatDecision: vi.fn<ChatWriteStore["resolveChatDecision"]>(async (input) => {
+      events.push("write");
+      return { ...input, state: "resolved", atMs: 3 };
+    }),
+    listReactions: vi.fn<ChatWriteStore["listReactions"]>(async () => {
+      await reach("reactions");
+      return [...reactions];
+    }),
     setReaction: vi.fn<ChatWriteStore["setReaction"]>(async (input) => {
       events.push(`react:${input.author.authorId}:${input.state}`);
       const reaction = { ...input, reactionId: `${input.author.authorId}:${input.emoji}`, atMs: 4 };
@@ -59,14 +82,10 @@ function fixture() {
       return reaction;
     }),
   };
-  const identity: { authorUserId?: string; joinedChannel: JoinedSharedChannel | null } = {
-    authorUserId: "user-1", joinedChannel: null,
-  };
-  const chatRelayIdentityFor = vi.fn(async (): Promise<ResolvedChatRelayIdentity> => {
-    events.push("identity");
-    return { ...identity };
+  let credentials: CloudCredentials | null = signedIn("user-1");
+  const warmCredentials = vi.fn(async () => {
+    await reach("warm");
   });
-  let current: CloudCredentials | null = credentials;
   const effects = {
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -75,8 +94,8 @@ function fixture() {
   };
   const writes = createChatWrites({
     findWorkspace: () => row,
-    chatRelayIdentityFor,
-    currentCredentials: () => current,
+    warmCredentials,
+    currentCredentials: () => credentials,
     localUserDisplayName: () => "Sam",
     agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-id",
@@ -84,17 +103,23 @@ function fixture() {
   });
   const place = { workspaceId: "workspace", store };
   const attachments = vi.fn(async () => {
-    events.push("attachments");
+    await reach("attachments");
     return [{ objectId: "object", pathHint: "notes.md" }];
   });
   return {
-    events, row, reactions, store, identity, chatRelayIdentityFor, effects, writes, place, attachments,
-    setCredentials: (value: CloudCredentials | null) => { current = value; },
+    events, row, reactions, store, warmCredentials, effects, writes, place, attachments,
+    setCredentials: (value: CloudCredentials | null) => { credentials = value; },
+    holdAt(point: Pause) {
+      const hold = { entered: deferred(), held: deferred() };
+      holds.set(point, hold);
+      return hold;
+    },
     // One call per write kind, each through the module's public interface.
     writeEach: {
       send: () => writes.sendMessage(place, { writer: PERSON, threadId: "thread", body: "Hi", resolveAttachments: attachments }),
       start: () => writes.startThread(place, { writer: AGENT, channelId: "channel", body: "Hi", resolveAttachments: attachments }),
       react: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "added" }),
+      toggle: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle" }),
       decide: () => writes.resolveDecision(place, { threadId: "thread", messageId: "question", resolvedByMessageId: "message" }),
     },
   };
@@ -108,13 +133,11 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 }
 
 describe("chat writes", () => {
-  it("writes a person's message under one verified identity and runs every message effect", async () => {
+  it("writes a person's message under the verified identity and runs every message effect", async () => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", parentMessageId: "parent", body: "Hello", resolveAttachments: test.attachments,
     });
-    // Identity before attachments, then both checks again before the row lands.
-    expect(test.events).toEqual(["identity", "attachments", "identity", "write"]);
     expect(test.store.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", parentMessageId: "parent", body: "Hello",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "user-1",
@@ -145,69 +168,34 @@ describe("chat writes", () => {
 
   it("omits the relay author for a signed-out message outside a joined channel", async () => {
     const test = fixture();
-    delete test.identity.authorUserId;
     test.setCredentials(null);
     await test.writeEach.send();
     expect(test.store.sendMessage.mock.calls[0]![0]).not.toHaveProperty("authorUserId");
   });
 
+  it("resolves the target's wire id once, and not at all without joined channels", async () => {
+    const test = fixture();
+    await test.writeEach.send();
+    await test.writeEach.toggle();
+    expect(test.store.findThreadChannelId).not.toHaveBeenCalled();
+    expect(test.store.getChannelWireId).not.toHaveBeenCalled();
+    test.row.sharedChannels = [joined];
+    test.events.length = 0;
+    await test.writeEach.send();
+    expect(test.events).toEqual(["channel", "wire", "warm", "attachments", "write"]);
+  });
+
   for (const grant of ["read-only", "ended"] as const) {
-    it.each(["send", "start", "react"] as const)(`refuses %s in a ${grant} joined channel before identity or any row`, async (kind) => {
+    it.each(["send", "start", "react", "decide"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
       await expect(test.writeEach[kind]()).rejects.toThrow("This shared channel is read-only for you.");
-      expect(test.chatRelayIdentityFor).not.toHaveBeenCalled();
       expect(test.attachments).not.toHaveBeenCalled();
-      expectNothingWritten(test);
-    });
-
-    it(`refuses a decision in a ${grant} joined channel before any row`, async () => {
-      const test = fixture();
-      test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
-      await expect(test.writeEach.decide()).rejects.toThrow("This shared channel is read-only for you.");
       expectNothingWritten(test);
     });
   }
 
-  // The grant check must be the last await before the row: a lookup that
-  // started under read-write cannot carry that grant into the write.
-  describe("a channel downgraded while identity resolves", () => {
-    function downgradeDuringLookup(test: ReturnType<typeof fixture>, lookup: number) {
-      let calls = 0;
-      test.chatRelayIdentityFor.mockImplementation(async () => {
-        calls += 1;
-        if (calls === lookup) test.row.sharedChannels = [{ ...joined, access: "read-only" }];
-        return { joinedChannel: null, authorUserId: "user-1" };
-      });
-    }
-
-    it("refuses a decision without a reply", async () => {
-      const test = fixture();
-      downgradeDuringLookup(test, 1);
-      await expect(test.writeEach.decide()).rejects.toThrow("This shared channel is read-only for you.");
-      expectNothingWritten(test);
-    });
-
-    it("refuses a decision that follows its reply", async () => {
-      const test = fixture();
-      downgradeDuringLookup(test, 1);
-      await expect(test.writes.resolveDecision(test.place, {
-        threadId: "thread", messageId: "question", resolvedByMessageId: "message",
-        reply: { authorUserId: "user-1" },
-      })).rejects.toThrow("This shared channel is read-only for you.");
-      expectNothingWritten(test);
-    });
-
-    it("refuses a message whose final lookup runs after attachments", async () => {
-      const test = fixture();
-      downgradeDuringLookup(test, 2);
-      await expect(test.writeEach.send()).rejects.toThrow("This shared channel is read-only for you.");
-      expect(test.events).toEqual(["attachments"]);
-      expectNothingWritten(test);
-    });
-  });
-
-  it.each(["send", "start", "react", "decide", "file"] as const)("refuses %s in a received share before the store", async (kind) => {
+  it.each(["send", "start", "react", "decide", "file"] as const)("refuses %s in a received share before any store read", async (kind) => {
     const test = fixture();
     test.row.shareView = {
       shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
@@ -220,110 +208,85 @@ describe("chat writes", () => {
     await expect(write).rejects.toThrow("Chats are read-only in this shared view.");
     expect(linkedFile).not.toHaveBeenCalled();
     expect(test.store.findThreadChannelId).not.toHaveBeenCalled();
-    expectNothingWritten(test);
-  });
-
-  it.each(["send", "react"] as const)("refuses %s when the session changes before the row lands", async (kind) => {
-    const test = fixture();
-    test.chatRelayIdentityFor
-      .mockResolvedValueOnce({ joinedChannel: null, authorUserId: "user-1" })
-      .mockResolvedValueOnce({ joinedChannel: null, authorUserId: "user-2" });
-    await expect(test.writeEach[kind]()).rejects.toThrow("Your server session changed. Try again.");
-    expectNothingWritten(test);
-  });
-
-  it("checks the grant again after attachments resolve", async () => {
-    const test = fixture();
-    test.attachments.mockImplementationOnce(async () => {
-      test.row.sharedChannels = [{ ...joined, access: "read-only" }];
-      return [];
-    });
-    await expect(test.writeEach.send()).rejects.toThrow("This shared channel is read-only for you.");
-    expect(test.attachments).toHaveBeenCalledOnce();
+    expect(test.warmCredentials).not.toHaveBeenCalled();
     expectNothingWritten(test);
   });
 
   it.each(["send", "start", "react", "decide"] as const)("requires the joined account to %s in a joined channel", async (kind) => {
     const test = fixture();
-    test.identity.joinedChannel = joined;
+    test.row.sharedChannels = [joined];
     test.setCredentials(null);
     await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to your server to send a message in this shared channel.");
     expect(test.attachments).not.toHaveBeenCalled();
     expectNothingWritten(test);
-    test.setCredentials({ ...credentials, userId: "user-2" });
+    test.setCredentials(signedIn("user-2"));
     await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to the account that joined this shared channel.");
     expectNothingWritten(test);
   });
 
-  it("reads the session only after the joined identity resolves", async () => {
-    const test = fixture();
-    const entered = deferred();
-    const held = deferred();
-    test.identity.joinedChannel = joined;
-    test.setCredentials(null);
-    test.chatRelayIdentityFor.mockImplementationOnce(async () => {
-      entered.resolve();
-      await held.promise;
-      return { joinedChannel: joined, authorUserId: "user-1" };
-    });
-    const sent = test.writeEach.send();
-    await entered.promise;
-    test.setCredentials(credentials);
-    held.resolve();
-    await expect(sent).resolves.toMatchObject({ authorUserId: "user-1" });
-  });
+  // Every await before a row is followed by a synchronous check of the grant
+  // and the session together. These change each one during each await.
+  describe("a change while a write awaits", () => {
+    const changes = {
+      "sign-out": {
+        apply: (test: ReturnType<typeof fixture>) => test.setCredentials(null),
+        refusal: "Sign in to your server to send a message in this shared channel.",
+      },
+      "account switch": {
+        apply: (test: ReturnType<typeof fixture>) => test.setCredentials(signedIn("user-2")),
+        refusal: "Sign in to the account that joined this shared channel.",
+      },
+      "read-only downgrade": {
+        apply: (test: ReturnType<typeof fixture>) => { test.row.sharedChannels = [{ ...joined, access: "read-only" }]; },
+        refusal: "This shared channel is read-only for you.",
+      },
+    };
+    const cases = [
+      ["send", ["wire", "warm", "attachments"]],
+      ["decide", ["wire", "warm"]],
+      ["toggle", ["wire", "warm", "reactions"]],
+    ] as const;
 
-  it("toggles a signed-out reaction under the install's local id without a relay author", async () => {
-    const test = fixture();
-    delete test.identity.authorUserId;
-    const toggle = () => test.writes.setReaction(test.place, {
-      writer: { via: "cli", actor: "human" }, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle",
-    });
-    expect(await toggle()).toMatchObject({ state: "added", author: { authorId: "local-id", kind: "human", displayName: "Sam" } });
-    expect(await toggle()).toMatchObject({ state: "removed" });
-    for (const [mutation] of test.store.setReaction.mock.calls) expect(mutation).not.toHaveProperty("replicationAuthorId");
-    expect(test.reactions).toEqual([]);
-  });
+    for (const [kind, points] of cases) {
+      for (const point of points) {
+        for (const [change, { apply, refusal }] of Object.entries(changes)) {
+          it(`refuses ${kind} after a ${change} while it awaits ${point}`, async () => {
+            const test = fixture();
+            test.row.sharedChannels = [joined];
+            const hold = test.holdAt(point);
+            const outcome = test.writeEach[kind]().catch((error: unknown) => error);
+            await hold.entered.promise;
+            apply(test);
+            hold.held.resolve();
+            expect(await outcome).toMatchObject({ message: refusal });
+            expectNothingWritten(test);
+          });
+        }
+      }
+    }
 
-  it("removes a signed-out reaction's local alias once signed in", async () => {
-    const test = fixture();
-    delete test.identity.authorUserId;
-    await test.writeEach.react();
-    test.identity.authorUserId = "user-1";
-    test.events.length = 0;
-    const removed = await test.writes.setReaction(test.place, {
-      writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "removed",
+    it.each([
+      ["a sign-out", null],
+      ["an account switch", signedIn("user-2")],
+    ] as const)("refuses a message after %s outside a joined channel", async (_change, next) => {
+      const test = fixture();
+      const hold = test.holdAt("attachments");
+      const outcome = test.writeEach.send().catch((error: unknown) => error);
+      await hold.entered.promise;
+      test.setCredentials(next);
+      hold.held.resolve();
+      expect(await outcome).toMatchObject({ message: "Your server session changed. Try again." });
+      expectNothingWritten(test);
     });
-    expect(removed.author.authorId).toBe("local-id");
-    expect(test.events).toEqual(["identity", "identity", "react:local-id:removed"]);
-    expect(test.reactions).toEqual([]);
-  });
 
-  it("removes both the alias and the signed-in reaction, checking the session between them", async () => {
-    const test = fixture();
-    delete test.identity.authorUserId;
-    await test.writeEach.react();
-    test.identity.authorUserId = "user-1";
-    await test.writeEach.react();
-    test.events.length = 0;
-    await test.writes.setReaction(test.place, {
-      writer: { via: "cli", actor: "human" }, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle",
-    });
-    expect(test.events).toEqual([
-      "identity", "identity", "react:local-id:removed", "identity", "react:user-1:removed",
-    ]);
-    expect(test.store.setReaction).toHaveBeenLastCalledWith(expect.objectContaining({ replicationAuthorId: "user-1" }));
-    expect(test.reactions).toEqual([]);
-  });
-
-  it("attributes an agent's reaction to the agent under the person's relay identity", async () => {
-    const test = fixture();
-    await test.writes.setReaction(test.place, {
-      writer: AGENT, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle",
-    });
-    expect(test.store.setReaction).toHaveBeenCalledWith({
-      workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
-      author: { authorId: "user-1", kind: "agent", displayName: "Nova" }, replicationAuthorId: "user-1",
+    it("refuses when a channel was joined after the target resolved without a lookup", async () => {
+      const test = fixture();
+      test.attachments.mockImplementationOnce(async () => {
+        test.row.sharedChannels = [joined];
+        return [];
+      });
+      await expect(test.writeEach.send()).rejects.toThrow("This shared channel changed. Try again.");
+      expectNothingWritten(test);
     });
   });
 
@@ -337,6 +300,71 @@ describe("chat writes", () => {
     await expect(decide()).rejects.toThrow("Your server session changed. Try again.");
     expectNothingWritten(test);
     await expect(decide("user-1")).resolves.toMatchObject({ state: "resolved" });
+  });
+
+  it("toggles a signed-out reaction under the install's local id without a relay author", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    const toggle = () => test.writes.setReaction(test.place, {
+      writer: { via: "cli", actor: "human" }, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle",
+    });
+    expect(await toggle()).toMatchObject({ state: "added", author: { authorId: "local-id", kind: "human", displayName: "Sam" } });
+    expect(await toggle()).toMatchObject({ state: "removed" });
+    for (const [mutation] of test.store.setReaction.mock.calls) expect(mutation).not.toHaveProperty("replicationAuthorId");
+    expect(test.reactions).toEqual([]);
+  });
+
+  it("removes a signed-out reaction's local alias once signed in", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await test.writeEach.react();
+    test.setCredentials(signedIn("user-1"));
+    const removed = await test.writes.setReaction(test.place, {
+      writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "removed",
+    });
+    expect(removed.author.authorId).toBe("local-id");
+    expect(test.store.setReaction).toHaveBeenLastCalledWith(expect.not.objectContaining({ replicationAuthorId: expect.anything() }));
+    expect(test.reactions).toEqual([]);
+  });
+
+  it("removes both the alias and the signed-in reaction", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await test.writeEach.react();
+    test.setCredentials(signedIn("user-1"));
+    await test.writeEach.react();
+    test.events.length = 0;
+    await test.writeEach.toggle();
+    expect(test.events).toEqual(["warm", "reactions", "react:local-id:removed", "react:user-1:removed"]);
+    expect(test.store.setReaction).toHaveBeenLastCalledWith(expect.objectContaining({ replicationAuthorId: "user-1" }));
+    expect(test.reactions).toEqual([]);
+  });
+
+  it("checks the session again before the second row of an alias removal", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    await test.writeEach.react();
+    test.setCredentials(signedIn("user-1"));
+    await test.writeEach.react();
+    const first = test.store.setReaction.getMockImplementation()!;
+    test.store.setReaction.mockImplementationOnce(async (input) => {
+      const reaction = await first(input);
+      test.setCredentials(signedIn("user-2"));
+      return reaction;
+    });
+    await expect(test.writeEach.toggle()).rejects.toThrow("Your server session changed. Try again.");
+    expect(test.reactions.map((reaction) => reaction.author.authorId)).toEqual(["user-1"]);
+  });
+
+  it("attributes an agent's reaction to the agent under the person's relay identity", async () => {
+    const test = fixture();
+    await test.writes.setReaction(test.place, {
+      writer: AGENT, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle",
+    });
+    expect(test.store.setReaction).toHaveBeenCalledWith({
+      workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
+      author: { authorId: "user-1", kind: "agent", displayName: "Nova" }, replicationAuthorId: "user-1",
+    });
   });
 
   it.each(["react", "decide"] as const)("syncs a %s without projecting bookmarks or scanning dispatch", async (kind) => {
@@ -357,8 +385,22 @@ describe("chat writes", () => {
     expect(test.store.createThread).toHaveBeenCalledWith({
       workspaceId: "workspace", title: "Notes", linkedFile: { objectId: "object", pathHint: "notes.md" },
     });
-    expect(test.chatRelayIdentityFor).not.toHaveBeenCalled();
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "file-thread" });
     expect(test.effects.queueCloudSync).toHaveBeenCalledWith("workspace");
+  });
+
+  it("refuses a file chat when its workspace becomes a shared view while the file resolves", async () => {
+    const test = fixture();
+    await expect(test.writes.createFileThread(test.place, {
+      title: "Notes",
+      linkedFile: async () => {
+        test.row.shareView = {
+          shareId: "share", granterEmail: null, genericChatWritable: true,
+          grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
+        };
+        return { objectId: "object", pathHint: "notes.md" };
+      },
+    })).rejects.toThrow("Chats are read-only in this shared view.");
+    expectNothingWritten(test);
   });
 });

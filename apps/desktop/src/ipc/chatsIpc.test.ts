@@ -7,6 +7,7 @@ import { ChatMessageRecord } from "./bridgeContract";
 import { createChatWrites } from "../workspaces/chatWrites";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -126,8 +127,12 @@ function fixture(kind: ScopeKind = "local") {
   );
   // The real module: these tests cover what each adapter hands it and how the
   // adapter maps the result. chatWrites.test.ts covers the checks themselves.
+  let chatCredentials: CloudCredentials | null = {
+    serverUrl: "https://cloud.test", userId: "verified-owner", email: "sam@test.invalid", token: "token",
+  };
   const chatWrites = createChatWrites({
-    findWorkspace: () => workspace, chatRelayIdentityFor, currentCredentials: () => null,
+    findWorkspace: () => ({ ...workspace, remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" } }),
+    warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
@@ -157,7 +162,8 @@ function fixture(kind: ScopeKind = "local") {
   return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, activeEngineFileIndex, readOwnedWorkspaceText,
-    warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks };
+    warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
+    signOutChatWrites: () => { chatCredentials = null; } };
 }
 
 const mutations = [
@@ -274,7 +280,7 @@ describe("registered chat writes", () => {
 
   it("names the reaction's author as the viewer, locally when signed out", async () => {
     const test = fixture();
-    test.chatRelayIdentityFor.mockResolvedValue({ joinedChannel: null });
+    test.signOutChatWrites();
     expect(await test.invoke(CHANNELS.setChatReaction, mutations[3].payload)).toMatchObject({ viewerAuthorId: "local-owner" });
     expect(test.storeMethods.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",

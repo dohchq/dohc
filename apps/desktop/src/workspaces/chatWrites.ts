@@ -2,13 +2,13 @@ import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
-import { assertSharedChannelWritable } from "./sharedChannels";
+import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import {
   assertSharedChannelMessageIdentity,
+  chatRelayAuthorId,
   type ChatRelayIdentityStore,
   type ChatRelayIdentityTarget,
-  type ResolvedChatRelayIdentity,
 } from "./chatRelayIdentity";
 
 // The one main-process path for chat writes, whoever makes them. The renderer
@@ -29,6 +29,8 @@ export interface ChatWritePlace {
   store: ChatWriteStore;
 }
 
+type ChatWorkspace = Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
+
 type ChatAttachments = NonNullable<Parameters<LinkedChatStore["sendMessage"]>[0]["attachments"]>;
 
 interface ChatMessageInput {
@@ -36,18 +38,14 @@ interface ChatMessageInput {
   body: string;
   needsDecision?: boolean;
   options?: string[];
-  // Runs after identity resolves and before the final check, so a slow file
-  // lookup cannot carry a stale grant or session into the write.
+  // Runs between admission and the final check, so a slow file lookup cannot
+  // carry a stale grant or session into the write.
   resolveAttachments(): Promise<ChatAttachments>;
 }
 
 export function createChatWrites(dependencies: {
-  findWorkspace(workspaceId: string): Pick<RegistryEntry, "shareView" | "sharedChannels"> | null;
-  // Warms the credential cache and refuses an identity resolved across a
-  // session change.
-  chatRelayIdentityFor(
-    workspaceId: string, target: ChatRelayIdentityTarget, store: ChatRelayIdentityStore,
-  ): Promise<ResolvedChatRelayIdentity>;
+  findWorkspace(workspaceId: string): ChatWorkspace | null;
+  warmCredentials(): Promise<unknown>;
   currentCredentials(): CloudCredentials | null;
   localUserDisplayName(): string;
   agentDisplayName(): Promise<string>;
@@ -61,70 +59,70 @@ export function createChatWrites(dependencies: {
   scanChatDispatch(workspaceId: string): Promise<unknown>;
 }) {
   const {
-    findWorkspace, chatRelayIdentityFor, currentCredentials, localUserDisplayName,
+    findWorkspace, warmCredentials, currentCredentials, localUserDisplayName,
     agentDisplayName, localReactorFallbackId, projectChatBookmarks, queueCloudSync,
     syncSharedChannelsForChatTarget, scanChatDispatch,
   } = dependencies;
 
   // Every received file share is read-only for chat, whatever its cached relay
   // capability: there is no durable per-row relay receipt yet.
-  function assertOwnedWorkspace(workspaceId: string) {
+  function ownedWorkspace(workspaceId: string): ChatWorkspace {
     const workspace = findWorkspace(workspaceId);
-    if (shareViewIsPresent(workspace?.shareView)) {
+    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (shareViewIsPresent(workspace.shareView)) {
       throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
     }
     return workspace;
   }
 
-  // Runs before identity, attachments, or any durable row. The renderer
-  // disabling its composer is honesty, not authorization.
-  async function assertWritable(place: ChatWritePlace, target: ChatRelayIdentityTarget) {
-    const workspace = assertOwnedWorkspace(place.workspaceId);
-    await assertSharedChannelWritable({
-      workspaceId: place.workspaceId,
-      sharedChannels: workspace?.sharedChannels,
-      store: place.store,
-      target,
-    });
+  // The only awaits a check depends on: the target's channel wire id, which
+  // never changes for a thread or channel, and the credential cache. A
+  // workspace with no joined channels needs no store read. undefined means
+  // the wire id was not looked up.
+  async function resolveTarget(place: ChatWritePlace, target: ChatRelayIdentityTarget) {
+    const workspace = ownedWorkspace(place.workspaceId);
+    let channelWireId: string | null | undefined;
+    if ((workspace.sharedChannels?.length ?? 0) > 0) {
+      const channelId = "channelId" in target
+        ? target.channelId
+        : await place.store.findThreadChannelId({ workspaceId: place.workspaceId, threadId: target.threadId });
+      channelWireId = channelId
+        ? await place.store.getChannelWireId({ workspaceId: place.workspaceId, channelId })
+        : null;
+    }
+    await warmCredentials();
+    return { channelWireId };
   }
 
-  // A joined shared channel requires the account that joined it. Elsewhere a
-  // signed-out write stays local and omits the relay author.
-  async function verifiedAuthorUserId(place: ChatWritePlace, target: ChatRelayIdentityTarget) {
-    const identity = await chatRelayIdentityFor(place.workspaceId, target, place.store);
+  // Synchronous, so nothing can change between these checks and the write
+  // that follows them. It reads the registry and the session as they are now.
+  // `admitted` is the author an earlier check accepted; the session must still
+  // resolve to it. The renderer disabling its composer is honesty, not
+  // authorization.
+  function check(
+    place: ChatWritePlace,
+    resolved: { channelWireId: string | null | undefined },
+    admitted?: { authorUserId?: string },
+  ): string | undefined {
+    const workspace = ownedWorkspace(place.workspaceId);
+    if (resolved.channelWireId === undefined && (workspace.sharedChannels?.length ?? 0) > 0) {
+      throw new Error("This shared channel changed. Try again.");
+    }
+    const joinedChannel = resolved.channelWireId === undefined
+      ? null
+      : joinedSharedChannelForWireId(workspace.sharedChannels, resolved.channelWireId);
+    assertJoinedChannelWritable(joinedChannel);
+    const credentials = currentCredentials();
+    const authorUserId = chatRelayAuthorId(workspace, joinedChannel, credentials);
+    // A joined shared channel requires the account that joined it. Elsewhere
+    // a signed-out write stays local and omits the relay author.
     assertSharedChannelMessageIdentity({
-      joinedChannel: identity.joinedChannel,
-      credentials: currentCredentials(),
-      authorUserId: identity.authorUserId,
-      resolvedAuthorUserId: identity.authorUserId,
+      joinedChannel, credentials, authorUserId, resolvedAuthorUserId: authorUserId,
     });
-    return identity.authorUserId;
-  }
-
-  // The grant check is the last await before a durable write, so a channel
-  // downgraded while identity resolves still refuses.
-  async function revalidate(
-    place: ChatWritePlace, target: ChatRelayIdentityTarget, authorUserId: string | undefined,
-  ) {
-    if ((await verifiedAuthorUserId(place, target)) !== authorUserId) {
+    if (admitted && authorUserId !== admitted.authorUserId) {
       throw new Error("Your server session changed. Try again.");
     }
-    await assertWritable(place, target);
-  }
-
-  // Check access, then resolve one identity. A write that awaits more work
-  // after that checks both again, so its row lands under the grant and session
-  // it started with.
-  async function admit<Prepared>(
-    place: ChatWritePlace,
-    target: ChatRelayIdentityTarget,
-    prepare: (authorUserId: string | undefined) => Promise<Prepared>,
-  ) {
-    await assertWritable(place, target);
-    const authorUserId = await verifiedAuthorUserId(place, target);
-    const prepared = await prepare(authorUserId);
-    await revalidate(place, target, authorUserId);
-    return { authorUserId, prepared };
+    return authorUserId;
   }
 
   async function actorFor(writer: ChatWriter) {
@@ -136,15 +134,15 @@ export function createChatWrites(dependencies: {
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }
 
-  async function prepareMessage(input: ChatMessageInput) {
-    return { actor: await actorFor(input.writer), attachments: await input.resolveAttachments() };
-  }
-
-  function messageFields(
-    input: ChatMessageInput,
-    authorUserId: string | undefined,
-    { actor, attachments }: Awaited<ReturnType<typeof prepareMessage>>,
-  ) {
+  // Admit the write, do the caller's async work, then check again with no
+  // await before the row, so it lands under the grant and session it started
+  // with.
+  async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput) {
+    const resolved = await resolveTarget(place, target);
+    const authorUserId = check(place, resolved);
+    const actor = await actorFor(input.writer);
+    const attachments = await input.resolveAttachments();
+    check(place, resolved, { authorUserId });
     return {
       ...actor,
       ...(authorUserId ? { authorUserId } : {}),
@@ -179,9 +177,9 @@ export function createChatWrites(dependencies: {
     title: string;
     linkedFile(): Promise<{ objectId: string; pathHint: string }>;
   }) {
-    assertOwnedWorkspace(place.workspaceId);
+    ownedWorkspace(place.workspaceId);
     const linkedFile = await input.linkedFile();
-    assertOwnedWorkspace(place.workspaceId);
+    ownedWorkspace(place.workspaceId);
     const thread = await place.store.createThread({
       workspaceId: place.workspaceId,
       title: input.title,
@@ -196,12 +194,12 @@ export function createChatWrites(dependencies: {
     parentMessageId?: string;
   }) {
     const target = { threadId: input.threadId };
-    const { authorUserId, prepared } = await admit(place, target, () => prepareMessage(input));
+    const fields = await prepareMessage(place, target, input);
     const message = await place.store.sendMessage({
       workspaceId: place.workspaceId,
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
-      ...messageFields(input, authorUserId, prepared),
+      ...fields,
     });
     afterWrite(place.workspaceId, target, true);
     return message;
@@ -213,13 +211,13 @@ export function createChatWrites(dependencies: {
     title?: string;
   }) {
     const target = { channelId: input.channelId };
-    const { authorUserId, prepared } = await admit(place, target, () => prepareMessage(input));
+    const fields = await prepareMessage(place, target, input);
     const started = await place.store.startChannelThread({
       workspaceId: place.workspaceId,
       channelId: input.channelId,
       ...(input.lane ? { lane: input.lane } : {}),
       ...(input.title ? { title: input.title } : {}),
-      ...messageFields(input, authorUserId, prepared),
+      ...fields,
     });
     afterWrite(place.workspaceId, target, true);
     return started;
@@ -240,13 +238,13 @@ export function createChatWrites(dependencies: {
     const localAuthorId = localReactorFallbackId();
     const aliased = (authorUserId: string | undefined): authorUserId is string =>
       authorUserId !== undefined && authorUserId !== localAuthorId;
-    const { authorUserId, prepared } = await admit(place, target, async (authorUserId) => ({
-      author: (await actorFor(input.writer)).author,
-      existing: input.state === "toggle" || (input.state === "removed" && aliased(authorUserId))
-        ? await store.listReactions({ workspaceId, threadId: input.threadId })
-        : [],
-    }));
-    const reacted = (authorId: string | undefined) => prepared.existing.some((reaction) =>
+    const resolved = await resolveTarget(place, target);
+    const authorUserId = check(place, resolved);
+    const { author } = await actorFor(input.writer);
+    const existing = input.state === "toggle" || (input.state === "removed" && aliased(authorUserId))
+      ? await store.listReactions({ workspaceId, threadId: input.threadId })
+      : [];
+    const reacted = (authorId: string | undefined) => existing.some((reaction) =>
       reaction.messageId === input.messageId && reaction.emoji === input.emoji &&
       reaction.author.authorId === authorId);
     const hasLocalAlias = reacted(localAuthorId);
@@ -254,22 +252,24 @@ export function createChatWrites(dependencies: {
     const state = input.state !== "toggle"
       ? input.state
       : hasLocalAlias || hasCurrent ? "removed" : "added";
-    const write = (authorId: string, replicationAuthorId?: string) => store.setReaction({
-      workspaceId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      emoji: input.emoji,
-      author: { authorId, ...prepared.author },
-      ...(replicationAuthorId ? { replicationAuthorId } : {}),
-      state,
-    });
+    // write() checks again right before each row, including the second row
+    // of an alias removal.
+    const write = (authorId: string, replicationAuthorId?: string) => {
+      check(place, resolved, { authorUserId });
+      return store.setReaction({
+        workspaceId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        emoji: input.emoji,
+        author: { authorId, ...author },
+        ...(replicationAuthorId ? { replicationAuthorId } : {}),
+        state,
+      });
+    };
     let reaction: Awaited<ReturnType<typeof write>>;
     if (state === "removed" && aliased(authorUserId) && hasLocalAlias) {
       reaction = await write(localAuthorId);
-      if (hasCurrent) {
-        await revalidate(place, target, authorUserId);
-        reaction = await write(authorUserId, authorUserId);
-      }
+      if (hasCurrent) reaction = await write(authorUserId, authorUserId);
     } else {
       reaction = await write(authorUserId ?? localAuthorId, authorUserId);
     }
@@ -287,14 +287,7 @@ export function createChatWrites(dependencies: {
     reply?: { authorUserId?: string };
   }) {
     const target = { threadId: input.threadId };
-    // A received share refuses before identity touches the store.
-    assertOwnedWorkspace(place.workspaceId);
-    if (input.reply) {
-      await revalidate(place, target, input.reply.authorUserId);
-    } else {
-      await verifiedAuthorUserId(place, target);
-      await assertWritable(place, target);
-    }
+    check(place, await resolveTarget(place, target), input.reply);
     const decision = await place.store.resolveChatDecision({
       workspaceId: place.workspaceId,
       threadId: input.threadId,

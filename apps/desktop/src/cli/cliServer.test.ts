@@ -188,7 +188,7 @@ describe("CLI socket server", () => {
   let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
   // The registry row the real chatWrites module reads its gates from.
-  let chatRow: Pick<RegistryEntry, "shareView" | "sharedChannels">;
+  let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
 
@@ -363,7 +363,7 @@ describe("CLI socket server", () => {
       writes: 0,
       reads: 0,
     };
-    chatRow = {};
+    chatRow = { remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-user-id" } };
     writeTargets = [];
     readTargets = [];
     onReadEffect = null;
@@ -408,11 +408,13 @@ describe("CLI socket server", () => {
       },
       chatWrites: createChatWrites({
         findWorkspace: () => chatRow,
-        async chatRelayIdentityFor() {
+        async warmCredentials() {
           calls.identity += 1;
-          return { joinedChannel: null, authorUserId: "verified-user-id" };
         },
-        currentCredentials: () => null,
+        currentCredentials: () => ({
+          serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+          userId: "verified-user-id", email: "sam@test.invalid", token: "token",
+        }),
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         localReactorFallbackId: () => "install-local-user-id",
@@ -951,7 +953,7 @@ describe("CLI socket server", () => {
 
   // chatWrites.test.ts covers each gate. This proves post and reply hand
   // their resolved engine target to it, and that a refusal lands nothing.
-  it("refuses post and reply by engine id in a read-only channel before identity", async () => {
+  it("refuses post and reply by engine id in a read-only channel before any row", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
@@ -979,7 +981,6 @@ describe("CLI socket server", () => {
       needsDecision: false,
       body: "Must not land",
     })).rejects.toThrow("This shared channel is read-only for you.");
-    expect(calls.identity).toBe(0);
     expect(calls.writes).toBe(0);
     expect(writeTargets).toEqual([]);
     expect(await store.listMessages({

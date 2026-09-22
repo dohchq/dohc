@@ -186,7 +186,6 @@ import {
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
-  type ChatRelayIdentityStore,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
@@ -2294,7 +2293,7 @@ function localUserId(): string {
 async function chatRelayIdentityFor(
   workspaceId: string,
   target: ChatRelayIdentityTarget,
-  store: ChatRelayIdentityStore,
+  store: DesktopLinkedChatStore,
 ) {
   await warmCredentialCache();
   const workspace = requireWorkspace(workspaceId);
@@ -3005,7 +3004,7 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 
 const chatWrites = createChatWrites({
   findWorkspace,
-  chatRelayIdentityFor,
+  warmCredentials: warmCredentialCache,
   currentCredentials: () => cachedCredentials,
   localUserDisplayName,
   agentDisplayName: async () =>

@@ -168,7 +168,16 @@ export async function joinedSharedChannelForTarget(
     workspaceId: input.workspaceId,
     channelId,
   });
-  const matching = (input.sharedChannels ?? []).filter(
+  return joinedSharedChannelForWireId(input.sharedChannels, wireId);
+}
+
+// The synchronous half of joinedSharedChannelForTarget, for a caller that
+// already resolved the target's wire id.
+export function joinedSharedChannelForWireId(
+  sharedChannels: readonly JoinedSharedChannel[] | undefined,
+  wireId: string | null,
+): JoinedSharedChannel | null {
+  const matching = (sharedChannels ?? []).filter(
     (channel) => channel.channelWireId === wireId,
   );
   return (
@@ -181,7 +190,10 @@ export async function joinedSharedChannelForTarget(
 export async function assertSharedChannelWritable(
   input: SharedChannelTargetInput,
 ): Promise<void> {
-  const channel = await joinedSharedChannelForTarget(input);
+  assertJoinedChannelWritable(await joinedSharedChannelForTarget(input));
+}
+
+export function assertJoinedChannelWritable(channel: JoinedSharedChannel | null): void {
   if (channel?.access === "read-only" || channel?.ended === true) {
     // The engine's read-only refusal, reused verbatim (an ended grant is a
     // read-only local copy) so the IPC error copy matches what the relay-side

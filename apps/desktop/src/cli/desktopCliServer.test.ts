@@ -52,7 +52,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   const handle: CliServerHandle = { socketPath: "socket", tokenPath: "token", close: vi.fn(async () => undefined) };
   const chatWrites = createChatWrites({
     findWorkspace: (id) => rows.get(id) ?? null,
-    chatRelayIdentityFor: async () => ({ joinedChannel: null }),
+    warmCredentials: async () => undefined,
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
