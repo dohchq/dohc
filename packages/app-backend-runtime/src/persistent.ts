@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
@@ -63,7 +64,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     });
   }
   try {
-    child=(options.launch ?? nodeLauncher)({entryPath,cwd:config.directory,env:{},
+    // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
+    child=(options.launch ?? nodeLauncher)({entryPath,cwd:dirname(entryPath),env:{},
       onMessage(message){
         const reply=message as PersistentReply;
         if(!active || !reply || reply.id!==active.id || typeof reply.ok!=="boolean") {fail(new PersistentRuntimeError("worker_protocol","Invalid dataset worker response."));return;}

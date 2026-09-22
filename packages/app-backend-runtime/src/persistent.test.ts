@@ -43,6 +43,29 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
 }
 
 describe("persistent dataset worker",()=>{
+  it("releases its private directory before the closed worker process exits",async()=>{
+    await fixture(async({root,open})=>{
+      const directory=join(root,"removable");await mkdir(directory);
+      let removed=false,removalError:unknown;
+      const launch:AppRuntimeLauncher=options=>{
+        let closeId:number|undefined;
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",message=>{
+          const reply=message as {id:number;ok:boolean};
+          if(reply.id!==closeId||!reply.ok){options.onMessage(message);return;}
+          // The worker has closed SQLite and its lease, but still owns its process cwd until the parent kills it.
+          expect(child.exitCode).toBeNull();
+          void rm(directory,{recursive:true,force:true}).then(()=>{removed=true;options.onMessage(message);},error=>{removalError=error;options.onError(error);});
+        });
+        child.on("error",options.onError);child.on("close",options.onExit);
+        return {postMessage(message){const request=message as {id:number;command:{kind:string}};if(request.command.kind==="close")closeId=request.id;child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({directory},launch);
+      await worker.close();
+      expect(removalError).toBeUndefined();
+      expect(removed).toBe(true);
+    });
+  });
   it("preserves an existing migration report destination when exclusive creation fails",async()=>{
     await fixture(async({root,open})=>{
       const worker=await open(),reportPath=join(root,"existing.jsonl");await writeFile(reportPath,"preserve this");
