@@ -390,3 +390,20 @@ export function datasetRevisionDigestContent(value: DatasetRevision): string {
   return JSON.stringify({ datasetId: parsed.datasetId, revision: parsed.revision, definitionSha256: parsed.definitionSha256,
     schemaSha256: parsed.schemaSha256, operationsSha256: parsed.operationsSha256 });
 }
+
+/** Compare host-approved revisions without widening any executable or access contract. */
+export function datasetRevisionsPreserveAccess(previous: DatasetRevision, current: DatasetRevision): boolean {
+  if (previous.datasetId !== current.datasetId || previous.schemaSha256 !== current.schemaSha256 || previous.operationsSha256 !== current.operationsSha256) return false;
+  const contract = (revision: DatasetRevision) => {
+    const definition = parseDatasetDefinition(revision.definition);
+    definition.name = "Display name";
+    definition.schemaPath = "schema.sql";
+    definition.operationsPath = "operations.js";
+    for (const table of definition.tables) {
+      table.name = table.tableId;
+      for (const field of table.fields) field.name = field.fieldId;
+    }
+    return datasetDefinitionDigestContent(definition);
+  };
+  return contract(previous) === contract(current);
+}
