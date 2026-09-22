@@ -15,6 +15,7 @@ import { createSyncRelayHandler } from "../../../../services/sync-relay/src/serv
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget } from "./remoteDataset";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
+import { stageDatasetRecovery } from "@dohc/app-backend-runtime/recovery";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -138,6 +139,10 @@ describe("local dataset owner adapter", () => {
       await routed.invoke(call(approved,id(6),"remote-write",{name:"Second"}));
       expect((await routed.invoke(call(approved,id(5)))).result).toHaveLength(2);
       await expect(restarted.action(call(approved,id(6),"local-after",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+      const exported=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/export`,{headers:{authorization:"Bearer token"}}));
+      expect(exported.status).toBe(200);expect(exported.headers.get("content-type")).toBe("application/octet-stream");
+      const archive=await stageDatasetRecovery({stream:exported.body!,stagingParent:remoteDirectory,limits:{maxTotalBytes:64*1024*1024},expectedManifestSha256:exported.headers.get("x-dohc-dataset-manifest-sha256")!,authorize(){}});
+      expect(archive.manifest.sourceState).toBe("active");expect(archive.manifest.entries.some(entry=>entry.kind==="attachment")).toBe(true);await archive.dispose();
       const replica=await createDatasetReplica({directory:join(local.workspaceRoot,"replica"),scope:{workspaceId:"w",datasetId:id(1)},ownerKey:"owner",origin:"https://relay",assertOwner(){}});
       const replicaRequest=async(action:string,body?:unknown)=>{
         if(offline)throw Error("offline");

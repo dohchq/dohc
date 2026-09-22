@@ -4,6 +4,7 @@ import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { createDatasetAppRoutes, createDatasetRoutes, type DatasetRoute } from "./datasetRoutes";
 import { createDatasetReplicaRoutes, type DatasetReplicaRoute } from "./datasetReplicaRoutes";
+import { createDatasetRecoveryExport } from "./datasetRecoveryExport";
 import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -227,6 +228,7 @@ export function createSyncRelayHandler({
   ) : undefined;
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
@@ -639,6 +641,10 @@ export function createSyncRelayHandler({
         const actor = await resolveActor(new Request(request.url, {headers: {authorization: authorization!}, signal: request.signal}), route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         const grant = request.headers.get("x-dohc-dataset-grant");
+        if(route.route==="dataset"&&route.action==="export") {
+          if(!respondToDatasetExport||grant!==null||!route.datasetId||new URL(request.url).search)throw notFound();
+          return respondToDatasetExport(request,{workspaceId:route.workspaceId,datasetId:route.datasetId,action:"export"},{kind:"named",workspaceId:route.workspaceId,userId:actor.userId});
+        }
         if (route.route === "dataset-replica") {
           if (!respondToDatasetReplica || grant !== null) throw notFound();
           return await respondToDatasetReplica(request,route,{kind:"named",workspaceId:route.workspaceId,userId:actor.userId});
@@ -936,7 +942,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
     if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
-    if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions","upload","file","history"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions","upload","file","history","export"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();

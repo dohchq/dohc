@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
