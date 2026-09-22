@@ -12,9 +12,9 @@ installer has passed the [release rehearsal](../how-to/desktop-release.md).
 | Browser access through a share link | Reachable share-web and relay services, with the owner's selected access. |
 | Shared live document editing | A configured session host and the relay's required admission settings. |
 | Publish an app from the packaged desktop | Windows x64 and a server configured to accept app publishing. |
-| Create and run a local app backend | Windows x64 compiler and bundled backend runtime. No account or server; the approved app opens in a local browser session. |
+| Create and run a local Collection-backed app | Windows x64 compiler and bundled dataset runtime. No account or server; the approved app opens in a local browser session. |
 | Share an app with private data | App publishing plus backend-enabled relay services. The shared host must be reachable to confirm operations. |
-| Manage app data through tables or an agent | An approved backend with declared operations; table edits use the same rules as the app. |
+| Manage app data through tables or an agent | An approved transactional Collection; table edits and app operations use the same dataset rules. |
 | Run the bundled MCP launcher | Node.js 22.13+, 23.4+, or 24+ on `PATH`. The desktop runtime does not supply Node to MCP. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 

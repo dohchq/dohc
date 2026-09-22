@@ -1,35 +1,37 @@
-# Build and operate an app backend
+# Build an app connected to a Collection
 
-This guide is for app authors and self-host operators. An owner can delegate these steps to an already connected agent. Commands use the dohc CLI connected to the running desktop app. Replace uppercase values with IDs returned by dohc. JSON examples work in PowerShell 7 and POSIX shells.
+App authors and self-host operators use this guide to create, share, and manage a Collection-backed app.
+An already connected agent can use the same commands. Run the CLI from the owning workspace while dohc is open.
+Replace uppercase values with IDs returned by dohc. JSON examples work in PowerShell 7 and POSIX shells.
 
-For a complete source example, copy [examples/fundraiser](../../examples/fundraiser/README.md) into a workspace as `fundraiser`. Its event details are synthetic. Set the event and payment instructions before accepting real registrations.
-
-## Generate a form connected to a Collection
+## Create the Collection first
 
 Create a transactional Collection in the Data section, then choose **Create form**.
-The form uses the existing dataset and approved operations. Submissions appear in the same Collection.
-Choose the public fields before publishing. Private fields remain outside the form's grant.
+Choose which approved create operation and public fields the form can use.
+Submissions appear in the same Collection. Private fields remain outside the form's grant.
 
-Agents use `dohc dataset createForm` with the approved dataset revision, table, operation, and field IDs.
-The command creates frontend source and a pinned dataset binding. It creates no separate response database.
-See [the fundraiser example](../../examples/fundraiser/README.md) for custom rules shared by an app and Collection.
+For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
+Review its synthetic event details and payment instructions before using it.
+The dataset descriptor names stable tables, fields, operations, schema source, and operation source.
+Prepare and approve that source:
 
-## Define the app
+```sh
+dohc dataset prepare '{"workspaceId":"WORKSPACE_ID","descriptorPath":"fundraiser/dataset.json"}'
+dohc dataset approve '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","revisionSha256":"REVISION_SHA256"}'
+dohc dataset describe '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"}'
+```
 
-Put `app.publish.json` in the app folder. Paths in the declaration are relative to the workspace, including entries in `inputs`. The fundraiser's [declaration](../../examples/fundraiser/app.publish.json) includes its browser source, backend source, schema, operations, and tables.
+Review the captured source before approving its exact revision hash.
+Keep app code and Collection views on the same dataset. They do not need separate response stores.
 
-The backend declaration names:
+## Connect the app
 
-- `entryPath`: authored backend JavaScript or TypeScript, compiled without app build hooks.
-- `schemaPath`: SQL that creates the declared tables, indexes, constraints, and triggers. Every table needs an explicit non-null primary key; an `INTEGER PRIMARY KEY` is also supported.
-- `dataPath`: the stable identity of this app's database within the workspace. This does not create a directly editable shared SQLite file at that path.
-- `schemaVersion`: the approved schema version. Changing it or the schema digest currently refuses activation over existing data; there is no migration runner yet.
-- `operations`: names with `access` set to `link`, `helper`, or `owner`, and an explicit `readOnly` value.
-- `tables`: table names, primary keys, and their declared read and optional write operations.
+Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
+The binding names `datasetId`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
+Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
+No private app database path or backend capability is declared.
 
-Publish at most one backend capability per app. Do not put credentials in source or import backend source into the frontend.
-
-Backend source assigns synchronous functions to `globalThis.operations`:
+The dataset's operation source assigns synchronous functions to `globalThis.operations`:
 
 ```js
 globalThis.operations = {
@@ -49,88 +51,81 @@ globalThis.operations = {
 };
 ```
 
-`ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`. Parameters are strings, finite numbers, or null. `ctx.caller` is verified by the host. `ctx.nowMs`, `ctx.requestId`, and `ctx.secret` stay stable during host retries. `ctx.files.attach(fileId)` associates an admitted upload and returns its metadata. Use `ctx.refuse(code, message)` to roll back a business-rule failure. Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
+Declare those tables and operations in the dataset descriptor and schema.
+`ctx.db.query` returns rows; `ctx.db.execute` returns `{ changes }`.
+Parameters are strings, finite numbers, or null. The host verifies `ctx.caller`.
+The request identity and operation context stay stable during host retries.
+`ctx.files.attach(fileId)` associates an admitted upload with the transaction.
+`ctx.refuse(code, message)` rolls back a business-rule failure.
+Returning `{ ok: false }` is an ordinary successful result and keeps preceding writes.
 
-There is no backend network, filesystem, process, import, or secret-store API. Transactions may rerun; they cannot send emails or payments. See [runtime limits and isolation](../../packages/app-backend-runtime/README.md).
+Backend operations have no network, filesystem, process, arbitrary dependency, or secret-store access.
+They cannot send emails or payments. See [runtime limits and isolation](../../packages/app-backend-runtime/README.md).
 
-## Approve local data
-
-Create and manage an unshared backend without a server account:
+## Approve and open the local app
 
 ```sh
 dohc app prepareLocal '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser"}'
 dohc app approve '{"workspaceId":"WORKSPACE_ID","approvalId":"APPROVAL_ID","candidateDigest":"CANDIDATE_DIGEST"}'
-dohc app listLocal '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser"}'
-```
-
-Review the source and requested capability returned by preparation. Use its exact `approvalId` and `candidateDigest` for approval. Approval initializes the database and returns a `publicationId`. Local management uses the same operation commands as shared management. This local backend does not by itself create a URL that friends can visit.
-
-Open the approved app from dohc's local app controls, or request its local launch URL:
-
-```sh
 dohc app launchLocal '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID"}'
 ```
 
-Open the returned `url` in a browser on this computer within 30 seconds. It starts a single-use local session with owner authority and requires dohc to stay open. It is not a share link. Launch again when the session ends.
-
-```sh
-dohc app describe '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID"}'
-dohc app invoke '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID","operation":"listPublicSessions","idempotencyKey":"sessions-1","input":{}}'
-```
-
-For mutations, generate a fresh idempotency key for each intended change. Keep that key and the exact payload when retrying a lost response. Changed input under the same key refuses. A revoked caller cannot use a saved result to regain access.
+Review the source and requested dataset operations before approving.
+App approval grants access to the approved dataset; it does not create a second database.
+The local URL starts a browser session on this computer. Keep dohc open while using it.
+It is not a public share link.
 
 ## Share the app
 
-Set up a [self-hosted server](self-host.md), including the [app-origin and publication configuration](../../services/share-web/README.md). Enable `DOHC_RELAY_APP_PUBLICATIONS=1` and `DOHC_RELAY_APP_BACKENDS=1`. The server image must contain the compiled runtime child and QuickJS Wasm dependencies. Use the release tooling rather than copying a service bundle alone.
+Configure a [self-hosted server](self-host.md) with the [app-origin and publication settings](../../services/share-web/README.md).
+Enable `DOHC_RELAY_APP_PUBLICATIONS=1` and `DOHC_RELAY_APP_BACKENDS=1`.
+Use the release tooling so the server includes its compiled runtime and QuickJS dependencies.
 
-Share the app source folder in dohc. Select the share and link grant that cover its declared source inputs, then prepare and approve:
+Share the app source folder, then prepare and approve the publication:
 
 ```sh
 dohc app prepare '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser","shareId":"SHARE_ID","grantId":"LINK_GRANT_ID"}'
 dohc app approve '{"workspaceId":"WORKSPACE_ID","approvalId":"APPROVAL_ID","candidateDigest":"CANDIDATE_DIGEST"}'
-dohc app list '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser"}'
 ```
 
-The private database and uploaded files need no file-share selector. The publication authorizes operations over that data. An app with ordinary Collection responses has different privacy: those responses remain readable shared files.
+The dataset transfers to one shared authority before shared writes begin. Local writes remain fenced after transfer.
+Keep the shared host online while friends submit. A failed transfer must resume through dohc, not create another writer.
+Dataset records and uploaded files do not require ordinary file-share selectors.
 
-If this app already has local data, approval fences local writes and transfers that data to the shared host. Its local backend source and schema must match the prepared shared version. Once transferred, the shared host confirms all operations. Keep it online while friends submit. A failed transfer remains fenced; retry the publication flow rather than deleting its local store or starting a second writer. A changed schema cannot transfer over an existing database.
+Friends open the share link and launch the app. The browser broker supplies only granted operations and files.
+It does not supply owner credentials. The frontend can use ordinary networking, so review where it sends data.
 
-Friends open the share link and launch the app. The app communicates through dohc's browser broker; it never receives owner credentials. Use the fundraiser client as the example for invocation, upload, and file reads. The browser can use ordinary networking, so the owner must trust the approved source with data it receives.
+## Manage the same records
 
-## Manage data and organizers
-
-The desktop publication view includes App data. Each declared table read receives `{ offset, limit, search }` and must return `{ rows, total? }`. A table write receives `{ rowId, field, value, expectedVersion? }`. Return a numeric `version` in a row to have the table send that version with an edit. The operation decides which fields and transitions are valid; setting `writeOperation` to null makes the table read-only.
-
-The same operations work through `dohc app invoke` and the custom admin app. They do not expose raw SQL writes to the browser or table editor.
-
-Invite an organizer to the source share with named Edit access, then explicitly designate that grant as a helper:
+Use the Collection table for permitted reads and edits, or invoke an approved operation:
 
 ```sh
-dohc app helper '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID","grantId":"NAMED_GRANT_ID","enabled":true}'
+dohc dataset invoke '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revision":1,"revisionSha256":"REVISION_SHA256","operationId":"OPERATION_ID","idempotencyKey":"REQUEST_ID","input":{}}'
+dohc dataset history '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","limit":50}'
+dohc dataset permissions '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"}'
 ```
 
-The organizer signs in through the shared app. Named Edit access alone is insufficient; so is a helper designation after the grant is revoked or narrowed. Use `enabled:false` to remove helper access. Only the owner can manage helpers, export, or restore. Helper designations are not included in app recovery exports.
+Generate a fresh retry key for each intended change. Keep the same key and exact input after a lost response.
+Changed input under the same key refuses. Revoked access cannot be recovered through a saved result.
+History shows saved-operation metadata, not private input or result payloads.
 
-Uploads support JPEG, PNG, and PDF up to 5 MiB, verified from the bytes. Stage a file, then attach its ID in the operation that creates its record. Pending uploads expire after 24 hours and are limited to 32 per caller. A read-only operation can authorize a file read by returning exactly `{ fileId }`. Never treat a supplied file ID as permission.
+Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
+Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
+Run `dohc dataset --help` for the supported command fields.
 
 ## Export and recover
 
-Export from App data or supply an absolute `.json` path through the CLI:
+Use **Import or export CSV** for tabular interchange. CSV import invokes the approved create operation for each row.
+The saved retry report preserves row identities across interruptions. Each row commits separately.
+Spreadsheet-safe CSV export escapes formula-like text and includes only the read operation's declared fields.
+
+Use a private recovery archive to retain data, files, source, history, and retry credentials:
 
 ```sh
-dohc app export '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID","savePath":"C:/Backups/fundraiser.json"}'
+dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","savePath":"C:/Backups/fundraiser.dohc-recovery"}'
 ```
 
-The destination directory must exist. Existing files require explicit `overwrite:true`. Protect the export as private data: it includes the database, backend source, history, retry receipts, and attached file bytes. It omits unattached files and helper designations. The bundle's integrity checksum detects corruption; it is not encryption.
-
-Restore requires an empty target with the same workspace identity, app root, data path, schema, and backend source. Prepare that source and approve with `initialize:false` so approval does not create a new empty database first:
-
-```sh
-dohc app approve '{"workspaceId":"WORKSPACE_ID","approvalId":"APPROVAL_ID","candidateDigest":"CANDIDATE_DIGEST","initialize":false}'
-dohc app restore '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID","sourcePath":"C:/Backups/fundraiser.json"}'
-```
-
-Use `prepareLocal` for a local target or `prepare` for a shared target before that approval. Restore validates the approved schema, history, file associations, and retry receipts. It does not overwrite a populated store or migrate to another workspace identity. App recovery is separate from [whole-server recovery](self-host-recovery.md), including the relay's continuity requirements. Do not use an old app bundle to replace a host that has accepted newer work.
-
-The runtime database limit is 16 MiB. The shared host bounds aggregate app storage to roughly 64 MiB and serialized recovery to 128 MiB. Committed history and retry receipts consume that budget and currently have no compaction workflow. There is no continuous shared-data replica on the desktop, automatic return to local authority, schema migration runner, or backend external-effect service in this version.
+The destination directory must exist. Existing files require explicit `overwrite:true`.
+Protect the archive as private data. Its integrity checks detect corruption; they do not encrypt it.
+Do not replace an authority that has accepted newer writes with an older archive.
+See [server recovery](self-host-recovery.md) for whole-service restoration.

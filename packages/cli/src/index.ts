@@ -62,8 +62,6 @@ function buildCliRequest(
   switch (command.verb) {
     case "dataset":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
-    case "appBackend":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appPublication":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "ownerAppResponses":
@@ -180,9 +178,15 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     if (options.argv.length === 2 && options.argv[0] === "dataset" && ["--help", "-h"].includes(options.argv[1]!)) return {
       exitCode: 0, stderr: "", stdout: [
         "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
-        "Actions: list, describe, create, prepare, approve, discard, invoke, export",
+        "Actions: list, describe, history, permissions, setGrant, removeGrant, create, prepare, approve, discard, invoke, export",
+        "Source actions: prepareMigration, prepareSchemaChange, approveMigration, discardMigration, createForm",
+        "File actions: upload, file",
         "Every request names workspaceId. Run this command from its owning workspace.",
         "list: optional after and limit. describe: datasetId.",
+        "history: datasetId, optional beforeRevision and limit. Shows saved-operation metadata.",
+        "permissions: datasetId, optional after and limit. Shows app bindings and explicit data grants.",
+        "setGrant: datasetId, grantId, grant with revision, revisionSha256, operationIds, and discover.",
+        "removeGrant: datasetId and principalKey from permissions.",
         "create: definition. Writes generated source and prepares it for approval.",
         "prepare: descriptorPath. Captures existing source for review.",
         "approve: preparationId and revisionSha256 from the reviewed preparation.",
@@ -209,7 +213,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       ((value: CliRequestWithoutToken) =>
         sendCliRequest(value, {
           ...options.client,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appBackend" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
           env,
         }));
     const rawResult = await send(request);

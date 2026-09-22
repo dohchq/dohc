@@ -510,18 +510,6 @@ describe("CLI socket server", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("routes app backend commands only through the owning CLI attachment", async () => {
-    const requests: unknown[] = [];
-    context.appBackend = async request => { requests.push(request); return { result: [], revision: 1, replayed: false }; };
-    const request = { action: "invoke" as const, workspaceId: WORKSPACE_ID, publicationId: "a".repeat(64), operation: "list", idempotencyKey: "read-1", input: {} };
-    expect(await invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).toEqual({ result: [], revision: 1, replayed: false });
-    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, publicationId: "a".repeat(64) } })).rejects.toThrow("savePath");
-    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
-    context.readOnly = true;
-    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
-    expect(requests).toHaveLength(1);
-  });
-
   it("routes dataset actions through the same owner workspace attachment for humans and agents", async () => {
     context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
     const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetId:"00000000-0000-4000-8000-000000000001",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};

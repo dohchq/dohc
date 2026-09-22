@@ -1,7 +1,6 @@
 import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
-import { OwnerAppBackendRequest } from "./appBackend";
 import {OwnerAppResponsesRequest} from "./appResponses";
 import { DatasetRequest } from "./dataset";
 
@@ -13,7 +12,6 @@ interface ParsedCliBase {
 export type ParsedCliCommand = ParsedCliBase &
   (
     | { verb: "dataset"; request: DatasetRequest }
-    | { verb: "appBackend"; request: OwnerAppBackendRequest }
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
     | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
     | { verb: "channels" }
@@ -374,11 +372,6 @@ export function parseCliArguments(
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
-      if (["describe", "invoke", "export", "helper", "restore"].includes(verb)) {
-        const request = OwnerAppBackendRequest.parse({ ...value, action: verb });
-        if (request.action === "export" && !request.savePath) fail("app export requires an explicit savePath");
-        return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appBackend", request };
-      }
       if(verb==="responses" || verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"ownerAppResponses",request:OwnerAppResponsesRequest.parse({...value,action:verb==="responses"?"list":"undo"})};
       return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
     } catch { fail(verb === "responses" || verb === "undo-responses" ? "invalid app response arguments" : "invalid app publication arguments"); }

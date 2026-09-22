@@ -25,6 +25,12 @@ const requests: unknown[] = [
   {action:"invoke",workspaceId:"workspace",datasetId:id(1),operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
 ];
 describe("dataset CLI", () => {
+  it.each(["describe", "invoke", "helper", "export", "restore"])("rejects the retired private app %s command before transport", async action => {
+    const send = vi.fn();
+    const result = await executeCli({ argv: ["app", action, JSON.stringify({ workspaceId: "workspace", publicationId: "a".repeat(64) })], request: send });
+    expect(result.exitCode).toBe(1); expect(send).not.toHaveBeenCalled();
+    expect(() => cliRequestSchema.parse({ token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "appBackend", args: { cwd: "/workspace", actor: "agent", request: { action, workspaceId: "workspace", publicationId: "a".repeat(64) } } })).toThrow();
+  });
   it.each(requests)("routes the supported request unchanged: $action", async raw => {
     const request = raw as DatasetRequest;
     const {action,...fields} = request;
