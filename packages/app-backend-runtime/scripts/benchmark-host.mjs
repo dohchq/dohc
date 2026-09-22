@@ -11,6 +11,8 @@ import { createDatasetJournal } from '../dist/journal.mjs';
 import { createDatasetSupervisor } from '../dist/supervisor.mjs';
 import { isExpectedOverload, summarizeBenchmark } from './benchmark-summary.mjs';
 import { startMemorySampler } from './benchmark-memory.mjs';
+import { EventEmitter } from 'node:events';
+import { waitForIdleWorkers } from './benchmark-idle.mjs';
 
 // Run after the package build. Evidence and databases remain in the supplied directory.
 const output = resolve(process.argv[2] ?? 'dataset-host-benchmark');
@@ -53,9 +55,10 @@ if(platform()==='win32') {
 const evidence = { startedAt, processId:process.pid, command:process.argv, commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
   dirty:execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim(), machine:{platform:platform(),release:release(),cpu:cpus()[0].model,logicalCpus:cpus().length,totalMemoryBytes:totalmem(),freeMemoryBytes:freemem(),node:process.version,versions:process.versions,load:loadavg(),antivirus:'Not measured'},
   windowsEnvironment,boundaries:{path:'Built dataset host, permissions SQL, approved binding, supervisor, sandbox worker, FULL/WAL journal, transactional quota callback',network:false,desktopRenderer:false,attachments:false,ordinaryHardware:false,preDispatch:'Host invocation to prepare IPC dispatch: includes authorization, recovery and queue waiting; not isolated queue time',prepareReply:'Prepare dispatch to IPC reply: includes transport and guest execution',commitTime:'Host SQL transaction duration; excludes worker finalization',memory:'Persistent 250ms process sampling plus observed per-process OS peak working set; not simultaneous aggregate peak'},
-  fixtures:[],stages:[],memory:[],transactions:[],errors:[],workerPids:[] };
+  fixtures:[],stages:[],memory:[],idleDrains:[],transactions:[],errors:[],workerPids:[] };
 const alive = new Set();
-let sampler,latestMemory,sampleCount=0,maxSampledWorkerRss=0;
+const idleEvents=new EventEmitter();
+let sampler,latestMemory,sampleCount=0,maxSampledWorkerRss=0,closedAtSample=0,closedAtMs=0;
 const peakByPid=new Map(),traces=new Map();
 let stageTimings;
 function sampledMemory(sample){
@@ -63,13 +66,14 @@ function sampledMemory(sample){
   const workers=sample.processes.filter(item=>item.pid!==process.pid);
   maxSampledWorkerRss=Math.max(maxSampledWorkerRss,workers.reduce((sum,item)=>sum+item.workingSetBytes,0));
   for(const item of workers)peakByPid.set(item.pid,Math.max(peakByPid.get(item.pid)??0,item.peakWorkingSetBytes));
+  idleEvents.emit('change');
 }
 const launch = options => {
   const child = spawn(process.execPath,['--disable-warning=ExperimentalWarning','--max-old-space-size=96',options.entryPath],{cwd:options.cwd,env:options.env,stdio:['ignore','ignore','ignore','ipc'],serialization:'advanced',windowsHide:true});
   evidence.workerPids.push(child.pid);alive.add(child.pid);
   sampler?.update([process.pid,...alive]);const dispatched=new Map();
   child.on('message',message=>{const trace=dispatched.get(message?.id);if(trace){trace.samples?.prepareReply.push(performance.now()-trace.dispatchAt);dispatched.delete(message.id);}options.onMessage(message);});
-  child.on('error',options.onError);child.on('close',code=>{alive.delete(child.pid);sampler?.update([process.pid,...alive]);options.onExit(code);});
+  child.on('error',options.onError);child.on('close',code=>{alive.delete(child.pid);if(!alive.size){closedAtSample=sampleCount;closedAtMs=performance.now();}sampler?.update([process.pid,...alive]);options.onExit(code);idleEvents.emit('change');});
   return {postMessage(message){if(message.command?.kind==='prepare'){const trace=traces.get(JSON.parse(message.command.guest.inputJson)._traceId);if(trace){trace.dispatchAt=performance.now();trace.samples?.preDispatch.push(trace.dispatchAt-trace.start);dispatched.set(message.id,trace);}}child.send(message,error=>{if(error)options.onError(error);});},kill(){child.kill('SIGKILL');}};
 };
 let transactionSamples = [];
@@ -188,9 +192,18 @@ try {
   const soakStart=performance.now();let cycle=0;
   while(performance.now()-soakStart<soakSeconds*1000) {
     await stage(`soak/${cycle}`,100,i=>{const dataset=datasets[(i+cycle)%datasets.length];return invoke(dataset,i%3?'read':'write',{id:1+(i*13)%dataset.rows});});
+    const idleStarted=performance.now();
     await memory(`soak/${cycle++}`);
-    // Idle across the configured worker expiry, then exercise cold churn again.
+    // Preserve the fixed-time observation, then prove actual release through close events.
     await new Promise(resolve=>setTimeout(resolve,31000));
+    await memory(`soak/${cycle}/idle-31s`);
+    const drain={cycle,deadlineMs:60000,fixedObservationMs:performance.now()-idleStarted,passed:false};evidence.idleDrains.push(drain);
+    try{
+      await waitForIdleWorkers({events:idleEvents,timeoutMs:60000-(performance.now()-idleStarted),state:()=>({workers:alive.size,
+        sampleWorkers:latestMemory?.processes.filter(item=>item.pid!==process.pid).length??null,sampleSequence:sampleCount,closedAtSample})});
+      drain.passed=true;
+      drain.workersClosedMs=Math.max(0,closedAtMs-idleStarted);
+    }finally{drain.observedMs=performance.now()-idleStarted;await persist();}
     await memory(`soak/${cycle}/after-idle`);await persist();
   }
   evidence.soak={requestedSeconds:soakSeconds,actualSeconds:(performance.now()-soakStart)/1000,cycles:cycle};

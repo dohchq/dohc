@@ -14,6 +14,7 @@ function fixture() {
   }
   stages.push(stage('ten-dataset-churn',100),stage('soak/0',100));
   return {stages,errors:[],remainingOwnedPids:[],fixtures:Array(10).fill({}),soak:{requestedSeconds:3600,actualSeconds:3601},
+    idleDrains:[{passed:true,observedMs:31000,deadlineMs:60000}],
     memory:[{label:'soak/1/after-idle',at:'now',processes:[{}],workers:[],workerWorkingSetBytes:0,parent:{heapUsed:123,external:456,rss:789}}]};
 }
 
@@ -49,6 +50,7 @@ test('any workload failure, missing duration, duplicate burst count, or survivor
     value=>value.errors.push({message:'shutdown failed'}),
     value=>value.stages.splice(0,1),
     value=>value.memory=[],
+    value=>value.idleDrains[0].passed=false,
     value=>value.stages.find(stage=>stage.label.endsWith('/export')).count=0,
   ]) {const evidence=fixture();mutate(evidence);assert.equal(summarizeBenchmark(evidence).passed,false);}
 });

@@ -36,7 +36,8 @@ export function summarizeBenchmark(evidence) {
     oneHourSoak: evidence.soak?.requestedSeconds >= 3600 && evidence.soak?.actualSeconds >= evidence.soak.requestedSeconds
       && evidence.fixtures?.length >= 10 && stages.some(stage => stage.label.startsWith('soak/')),
     observedWorkerMemory: maxWorkerWorkingSetBytes === null ? null : maxWorkerWorkingSetBytes <= 512 * 1024 * 1024,
-    idleWorkersReleased: idleSamples.length ? idleSamples.every(sample => sample.workerCount === 0 && sample.workerWorkingSetBytes === 0) : null,
+    idleWorkersReleased: idleSamples.length ? idleSamples.every(sample => sample.workerCount === 0 && sample.workerWorkingSetBytes === 0)
+      && evidence.idleDrains?.length===idleSamples.length&&evidence.idleDrains.every(drain=>drain.passed&&drain.observedMs<=drain.deadlineMs) : null,
     diagnosticsCompleted:diagnostics.length===6&&diagnostics.every(stage=>stage.successes===stage.attempts&&!stage.unexpectedFailures.length),
   };
   const failures = stages.reduce((sum, stage) => sum + (stage.failures?.length ?? 0), 0);
@@ -48,6 +49,7 @@ export function summarizeBenchmark(evidence) {
     unexpectedStages: unexpected.map(stage => ({ label: stage.label, failures: stage.unexpectedFailures })),
     errors: evidence.errors ?? [], warmRounds: warm, coldReopen: cold, burst10, burst100,diagnostics,
     memory: { maxObservedWorkerWorkingSetBytes: maxWorkerWorkingSetBytes, idleSamples,
+      idleDrains:evidence.idleDrains??[],fixedIdleObservations:(evidence.memory??[]).filter(sample=>sample.label.endsWith('/idle-31s')),
       sampling:evidence.memorySampling,idleGrowth:{parentHeap: growth('parentHeapUsedBytes'),parentExternal:growth('parentExternalBytes'),parentRss:growth('parentRssBytes')},
       limitation: '250ms samples can miss simultaneous aggregate peaks. Per-process kernel peaks apply only to observed worker lifetimes and cannot be summed into an aggregate peak. Idle deltas are observations, not a leak verdict.' },
     unmeasured: ['Ordinary 4-core/8 GiB hardware', 'HTTP and controlled-LAN transport', 'Renderer responsiveness',
