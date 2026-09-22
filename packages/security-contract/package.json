@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./app-backend": "./src/appBackend.ts",
+    "./dataset": "./src/dataset.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",
