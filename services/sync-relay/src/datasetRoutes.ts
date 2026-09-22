@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,7 +88,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
       } finally {release();}
     }
-    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts", "delete-preview"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts", "delete-preview", "deletion-status"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
     const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"]
@@ -113,6 +113,10 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         const includeArchived = query.get("includeArchived") === "true";
         if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page, includeArchived});
         if (route.action === "describe") return host.describe(auth, {...scope, includeArchived});
+        if (route.action === "deletion-status") {
+          if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
+          return host.deletionStatus(auth, scope);
+        }
         if (route.action === "delete-preview") {
           if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
           if (page.limit !== undefined && page.limit > 100) throw badRequest("Invalid deletion preview page size.");

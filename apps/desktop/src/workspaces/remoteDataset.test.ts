@@ -164,3 +164,25 @@ it.each(["credential","workspace","abort"])("discards a late deletion response a
   f.relay.mockImplementation(async()=>{if(kind==="credential")f.switchCredential();if(kind==="workspace")f.switchWorkspace();if(kind==="abort")f.controller.abort();return {deleted:true,datasetId:id(1)};});
   await expect(f.data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true})).rejects.toThrow();
 });
+
+it("validates the private deletion status response", async () => {
+  const f=fixture(); f.relay.mockResolvedValue({deleted:true});
+  expect(await f.data.deletionStatus!({datasetId:id(1)})).toEqual({deleted:true});
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/deletion-status`);
+  for(const value of [{deleted:"true"},{deleted:true,datasetId:id(1)},{}]) {
+    f.relay.mockResolvedValue(value); await expect(f.data.deletionStatus!({datasetId:id(1)})).rejects.toThrow();
+  }
+});
+it("omits only confirmed remote deletions from the transfer catalog and keeps failures visible", async () => {
+  const local={list:vi.fn(async()=>({datasets:[description],nextCursor:null}))} as unknown as OwnerDatasetData;
+  const remote={deletionStatus:vi.fn(async()=>({deleted:true})),describe:vi.fn(async()=>description)} as unknown as OwnerDatasetData;
+  const data=createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  expect(await data.list({})).toEqual({datasets:[],nextCursor:null}); expect(remote.describe).not.toHaveBeenCalled();
+  expect(await data.deletionStatus!({datasetId:id(1)})).toEqual({deleted:true});
+  vi.mocked(remote.deletionStatus!).mockResolvedValue({deleted:false});
+  expect(await data.list({})).toEqual({datasets:[description],nextCursor:null});
+  vi.mocked(remote.deletionStatus!).mockRejectedValue(Error("offline"));
+  await expect(data.list({})).rejects.toThrow("offline");
+  vi.mocked(remote.deletionStatus!).mockResolvedValue({deleted:false}); vi.mocked(remote.describe).mockRejectedValue(Error("permission changed"));
+  await expect(data.list({})).rejects.toThrow("permission changed");
+});

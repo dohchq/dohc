@@ -18,6 +18,7 @@ export interface OwnerDatasetData {
   list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
   lifecycle?(input: { datasetId: string; after?: string; limit?: number }): Promise<DatasetLifecyclePage>;
+  deletionStatus?(input: { datasetId: string }): Promise<{ deleted: boolean }>;
   deletePreview?(input: { datasetId: string; after?: string; limit?: number }): Promise<DatasetDeletePreview>;
   deleteDataset?(input: { datasetId: string; expected: DatasetCursor; reviewToken: string; acknowledge: true }): Promise<DatasetDeleted>;
   archive?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
@@ -63,6 +64,10 @@ export function createRemoteDatasetData(input: {
     async lifecycle(value) {
       const query = new URLSearchParams(); if(value.after)query.set("after",value.after); if(value.limit)query.set("limit",String(value.limit));
       return DatasetLifecyclePage.parse(await request(`${path(value.datasetId)}/lifecycle${query.size ? `?${query}` : ""}`));
+    },
+    async deletionStatus(value) {
+      if (input.shareId !== undefined) throw new Error("Open the original workspace to manage this Collection.");
+      return z.object({ deleted: z.boolean() }).strict().parse(await request(`${path(value.datasetId)}/deletion-status`));
     },
     async deletePreview(value) {
       if (input.shareId !== undefined) throw new Error("Open the original workspace to delete this Collection.");
@@ -254,7 +259,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "migrate" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "deletePreview" | "deleteDataset" | "pendingAttempts" | "reconcileAttempt" | "cancelAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "migrate" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "deletePreview" | "deleteDataset" | "deletionStatus" | "pendingAttempts" | "reconcileAttempt" | "cancelAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -270,8 +275,9 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
         const localPage = await local.list({ after, limit, includeArchived: true });
         for (let index = 0; index < localPage.datasets.length; index++) {
           const row = localPage.datasets[index]!, authority = await target(row.datasetId);
-          const current = authority === local ? row : await authority.describe(row.datasetId, { includeArchived: true });
           after = row.datasetId;
+          if (authority !== local && authority.deletionStatus && (await authority.deletionStatus({ datasetId: row.datasetId })).deleted) continue;
+          const current = authority === local ? row : await authority.describe(row.datasetId, { includeArchived: true });
           if (!page.includeArchived && current.archived) continue;
           datasets.push(current);
           if (datasets.length === limit) return { datasets, nextCursor: index + 1 < localPage.datasets.length || localPage.nextCursor ? after : null };
@@ -283,6 +289,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
       }
     },
     describe: async (datasetId, options) => (await target(datasetId)).describe(datasetId, options),
+    deletionStatus: async value => { const authority = await target(value.datasetId); if (!authority.deletionStatus) throw new Error("Collection deletion status is unavailable. Update dohc and try again."); return authority.deletionStatus(value); },
     deletePreview: async value => { const authority = await target(value.datasetId); if (!authority.deletePreview) throw new Error("Collection deletion is unavailable. Update dohc and try again."); return authority.deletePreview(value); },
     deleteDataset: async value => { const authority = await target(value.datasetId); if (!authority.deleteDataset) throw new Error("Collection deletion is unavailable. Update dohc and try again."); return authority.deleteDataset(value); },
     lifecycle: async value => { const authority = await target(value.datasetId); if (!authority.lifecycle) throw new Error("Collection archive controls are unavailable."); return authority.lifecycle(value); },
