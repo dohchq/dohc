@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
@@ -119,4 +119,12 @@ it("bounds saved pages and declines oversized pages instead of claiming they wer
   expect((await readFile(join(f.directory, "pages.json"))).byteLength).toBeLessThanOrEqual(1800);
   expect(await cache.read(0)).toBeNull(); expect(await cache.read(19)).not.toBeNull();
   expect(await cache.put("large", "x".repeat(1000), fingerprint)).toBeNull();
+});
+
+it("removes interrupted cache writes when signing out instead of leaving former account bytes behind", async () => {
+  const f = await fixture(); await f.data().describe(id(1));
+  const interrupted = join(f.directory, `pages.json.${id(1)}`);
+  await writeFile(interrupted, "private former account data");
+  await f.registry().credentialsChanged(null);
+  await expect(readFile(interrupted)).rejects.toMatchObject({ code: "ENOENT" });
 });

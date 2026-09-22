@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -30,6 +30,13 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink() || resolve(await realpath(directory)) !== directory) throw Error("Saved Collection pages must remain in this device's profile.");
+    // The queue owns all writes. A matching temporary file is left by an interrupted prior process.
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (/^pages\.json\.[0-9a-f-]{36}$/.test(entry.name)) {
+        if (!entry.isFile() || entry.isSymbolicLink()) throw Error("Saved Collection page storage changed. Reconnect to the sharing server.");
+        await rm(join(directory, entry.name));
+      }
+    }
     return join(directory, "pages.json");
   };
   async function persist() {
