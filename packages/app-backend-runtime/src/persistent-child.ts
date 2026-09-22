@@ -164,7 +164,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     noLinks(command.input.path,true);
     if(command.input.reportPath) noLinks(command.input.reportPath,true);
     const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
-    let copy:DatabaseSync | undefined, outputReserved=false, succeeded=false;
+    let copy:DatabaseSync | undefined, outputReserved=false, reportCreated=false, succeeded=false;
     try {
       closeSync(openSync(copyPath,"wx",0o600));
       db.prepare("VACUUM INTO ?").run(copyPath);
@@ -180,13 +180,14 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       copy.exec("COMMIT");
       const report=command.input.reportPath ? createMigrationPreviewReport({before:db,after:copy,beforeTables:config.tables,
         afterTables:command.input.tables,path:command.input.reportPath,maxBytes:config.limits.databaseBytes}) : undefined;
+      reportCreated=Boolean(report);
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
       copy.prepare("VACUUM INTO ?").run(command.input.path);
       succeeded=true;
       return {path:command.input.path,cursor:{...cursor},...(report ? {report} : {})};
     } finally {
       if (copy) {copy.setAuthorizer(null);copy.close();}
-      for (const path of [copyPath,copyPath+"-journal",...(outputReserved && !succeeded ? [command.input.path] : []),...(!succeeded && command.input.reportPath ? [command.input.reportPath] : [])]) {
+      for (const path of [copyPath,copyPath+"-journal",...(outputReserved && !succeeded ? [command.input.path] : []),...(!succeeded && reportCreated && command.input.reportPath ? [command.input.reportPath] : [])]) {
         try {unlinkSync(path);} catch (error) {if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error;}
       }
     }

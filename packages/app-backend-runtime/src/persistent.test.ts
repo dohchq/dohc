@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -43,6 +43,13 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
 }
 
 describe("persistent dataset worker",()=>{
+  it("preserves an existing migration report destination when exclusive creation fails",async()=>{
+    await fixture(async({root,open})=>{
+      const worker=await open(),reportPath=join(root,"existing.jsonl");await writeFile(reportPath,"preserve this");
+      await expect(worker.migrateCheckpoint({path:join(root,"output.sqlite"),reportPath,schemaSql,tables:["items"],migrationSql:"SELECT 1;"})).rejects.toThrow();
+      expect(await readFile(reportPath,"utf8")).toBe("preserve this");
+    });
+  });
   it("holds its owned-directory lease until worker close and refuses expired ownership",async()=>{
     await fixture(async({root,open})=>{
       const owner=await acquireSupervisorOwnership(root);
