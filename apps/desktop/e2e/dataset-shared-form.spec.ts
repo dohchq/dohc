@@ -6,8 +6,8 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
 
-// Identity is seeded into an isolated profile. Creation, capture, sharing, publication,
-// authority transfer, browser writes, owner reads, and saved-copy reads are production paths.
+// Identity is seeded into an isolated profile. Owners create, preview, share, and publish
+// through visible controls. Only the OS browser dispatcher is replaced for local preview.
 test("@dataset-shared-form desktop publishes its Collection, a guest submits, and the owner reads the saved copy offline", async ({}, info) => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace(), workspaceId = randomUUID(), userId = "dataset-shared-owner";
@@ -29,7 +29,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+    await page.keyboard.press("Control+k");
+    await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
     await create.getByLabel("Require Name").check();
@@ -45,21 +46,74 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await expect(formDialog).toBeHidden();
+    await page.getByRole("button", { name: "Review and open app", exact: true }).click();
+    const publication = page.getByTestId("app-publication-dialog");
+    await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
+    await expect(publication.getByRole("heading", { name: "Review app for this device", exact: true })).toBeVisible();
+    await expect(publication.getByTestId("app-publication-source-paths")).toContainText("registrations-form/frontend.js");
+    await expect(publication.getByTestId("app-publication-capability")).toContainText("Link actions:");
+    await publication.getByRole("button", { name: "Approve for this device", exact: true }).click();
+    await expect(publication.getByRole("button", { name: /^Open in browser / })).toBeVisible();
+    await desktop.app.evaluate(({ shell }) => {
+      const state = globalThis as typeof globalThis & { formPreviewUrl?: string; formPreviewOpenExternal?: typeof shell.openExternal };
+      state.formPreviewOpenExternal = shell.openExternal;
+      shell.openExternal = async url => { state.formPreviewUrl = url; };
+    });
+    try {
+      await publication.getByRole("button", { name: /^Open in browser / }).click();
+      const openedUrl = () => desktop!.app.evaluate(() => (globalThis as typeof globalThis & { formPreviewUrl?: string }).formPreviewUrl);
+      await expect.poll(openedUrl).toBeTruthy();
+      const previewUrl = (await openedUrl())!;
+      expect(new URL(previewUrl).protocol).toBe("http:");
+      expect(new URL(previewUrl).hostname).toBe("127.0.0.1");
+      const preview = await shared.browser.newPage();
+      try {
+        await preview.goto(previewUrl);
+        await expect(preview.frameLocator("iframe").getByLabel("Name", { exact: false })).toBeEnabled();
+        await expect(preview.frameLocator("iframe").getByRole("button", { name: "Submit", exact: true })).toBeEnabled();
+        await preview.screenshot({ path: info.outputPath("owner-form-preview.png") });
+      } finally { await preview.close(); }
+    } finally {
+      await desktop.app.evaluate(({ shell }) => {
+        const state = globalThis as typeof globalThis & { formPreviewUrl?: string; formPreviewOpenExternal?: typeof shell.openExternal };
+        shell.openExternal = state.formPreviewOpenExternal!;
+        delete state.formPreviewOpenExternal;
+        delete state.formPreviewUrl;
+      });
+    }
+    await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
+    const share = page.getByTestId("share-dialog");
+    await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
+    await share.getByRole("radiogroup", { name: "Link access" }).getByRole("radio", { name: "View", exact: true }).click();
+    await share.getByRole("button", { name: "Create link", exact: true }).click();
+    await expect(share.getByTestId("share-link-url")).toBeVisible();
+    const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
+    expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
+    await share.getByRole("button", { name: "Copy", exact: true }).click();
+    await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await share.getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("button", { name: "Review and open app", exact: true }).click();
+    const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
+    await expect(shareLink.locator("option")).toHaveCount(2);
+    await shareLink.selectOption({ index: 1 });
+    await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
+    await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();
+    await expect(publication.getByTestId("app-publication-source-paths")).toContainText("registrations-form/frontend.js");
+    const approval = publication.getByTestId("app-publication-capability");
+    await expect(approval).toContainText("Link actions:");
+    await expect(approval).toContainText("Helper actions: None");
+    await expect(approval).toContainText("Owner actions: None");
+    await page.screenshot({ path: info.outputPath("owner-publication-review.png") });
+    await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
+    await expect(publication.getByRole("status")).toHaveText("App published on the selected link.");
+    await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
+    await publication.getByRole("button", { name: "Close publication", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!, table = dataset.tables[0]!;
-    const link = await page.evaluate(async workspaceId => window.dohcDesktop!.createRelayShareLink({ workspaceId, paths: ["registrations-form"], access: "view" }), workspaceId);
-    const prepared = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ ...input, action: "prepare" }), {
-      workspaceId, appRoot: "registrations-form", shareId: link.shareId, grantId: link.grantId,
-    });
-    if (prepared.kind !== "prepared") throw Error("Expected prepared app.");
-    const published = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ ...input, action: "approve" }), {
-      workspaceId, approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest,
-    });
-    expect(published.kind).toBe("published");
     const guest = await shared.browser.newPage();
     guest.on("pageerror", error => shared!.failures.push(error.message));
-    await guest.goto(link.url);
+    await guest.goto(linkUrl);
     await guest.getByRole("button", { name: "Open app", exact: true }).click();
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
@@ -88,10 +142,11 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     expect(reopened).toMatchObject({ kind: "invoked", result: online.result, copy: { offline: true } });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
-    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetId: dataset.datasetId, publication: published,
+    await info.attach("scope", { body: JSON.stringify({ workspaceId, datasetId: dataset.datasetId,
       identity: "Test identity seeded into isolated profile; account onboarding is outside this proof.",
       transport: "Real relay HTTP, real share-web handler over temporary TLS, browser-local DNS and certificate trust.",
-      flow: "Desktop Collection and generated form → source share → main publication and transfer → guest → owner → offline restart." }, null, 2), contentType: "application/json" });
+      browserDispatch: "Only Electron shell.openExternal is intercepted; the local URL returned by production launch opens in a real browser.",
+      flow: "Desktop Collection and generated form → local approval and browser preview → visible source sharing and publication approval → guest → owner → offline restart." }, null, 2), contentType: "application/json" });
   } finally {
     try { await shared?.close(); } finally {
       try { await relay?.stop(); } finally {
