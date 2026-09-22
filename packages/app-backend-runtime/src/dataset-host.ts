@@ -327,7 +327,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
       } finally { await validated.dispose(); }
     },
-      ...createDatasetReplicaHost({ journal, owner }),
+    ...createDatasetReplicaHost({ journal, owner(context: Context, key: DatasetScope) { const authority=owner(context,key);live(key);return authority; } }),
     async exportRecovery(context: Context, raw: DatasetScope & { signal?: AbortSignal }) {
       const key=scope(raw),recovery=options.recovery;
       if(!recovery)throw new DatasetHostError("invalid","Dataset recovery storage is not configured.");

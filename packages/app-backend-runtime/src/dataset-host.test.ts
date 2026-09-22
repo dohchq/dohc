@@ -86,9 +86,13 @@ it("archives and restores the same records without releasing storage or reactiva
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "retained" });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
   const bytes = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  const capture = f.host.replicaCapture("owner",scope);
   expect(f.host.lifecycle("owner", scope).apps).toMatchObject([{ appId: "form" }]);
   expect(() => f.host.archiveDataset("helper", scope)).toThrow();
   f.host.archiveDataset("owner", scope);
+  expect(()=>f.host.replicaCapture("owner",scope)).toThrow("archived");
+  expect(()=>f.host.replicaPage("owner",{...scope,through:capture.head,after:capture.checkpoint.cursor})).toThrow("archived");
+  expect(()=>f.host.replicaBlob("owner",{...scope,record:capture.checkpoint,offset:0,length:100})).toThrow("archived");
   expect(f.host.list("owner", { workspaceId: scope.workspaceId }).datasets).toEqual([]);
   expect(f.host.list("owner", { workspaceId: scope.workspaceId, includeArchived: true }).datasets).toMatchObject([{ datasetId: scope.datasetId, archived: true }]);
   expect(() => f.host.list("helper", { workspaceId: scope.workspaceId, includeArchived: true })).toThrow();
@@ -96,6 +100,7 @@ it("archives and restores the same records without releasing storage or reactiva
   await expect(f.invoke("friend", id(6), { value: "denied" }, "form")).rejects.toThrow("archived");
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(bytes);
   f.host.restoreDataset("owner", scope);
+  expect(f.host.replicaCapture("owner",scope).head).toEqual(capture.head);
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "retained" }]);
   f.host.archiveDataset("owner", scope);
   f.journal.fence({ expected: f.host.approvedArtifacts("owner", scope).cursor, authorize() {} });
