@@ -1,0 +1,144 @@
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, expect, it, vi } from "vitest";
+import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
+import { createDatasetSupervisor, type DatasetInvocation } from "./supervisor.ts";
+import type { AppRuntimeLauncher } from "./protocol.ts";
+
+vi.setConfig({ testTimeout: 30_000 });
+const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
+const source = `globalThis.operations = { run(ctx,input) {
+  if(input.refuse) ctx.refuse('full','No spaces remain.');
+  if(input.id) ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,input.value]);
+  if(input.file) ctx.files.attach(input.file);
+  return ctx.db.query('SELECT * FROM items ORDER BY id');
+}}`;
+
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
+  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(schemaSql); seed.close();
+  const checkpoint = await readFile(join(directory, "seed.sqlite"));
+  const db = new DatabaseSync(join(directory, "authority.sqlite"));
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0);");
+  function transaction<T>(work: () => T): T {
+    db.exec("BEGIN IMMEDIATE");
+    try { const result = work(); db.exec("COMMIT"); return result; }
+    catch (error) { db.exec("ROLLBACK"); throw error; }
+  }
+  const journal = createDatasetJournal({ db, transaction });
+  const scope = { workspaceId: "workspace", datasetId: "dataset" };
+  const authorize = () => { if (db.prepare("SELECT allowed FROM grants").get()!.allowed !== 1) throw Error("denied"); };
+  function initialize(datasetId = scope.datasetId) {
+    journal.initialize({ scope: { ...scope, datasetId }, hostEpoch: "host", approvedRevisionHash: hash("approved"), source,
+      schemaSql, definitionJson: "{}", checkpoint, authorize });
+  }
+  initialize();
+  const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
+    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers });
+  cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
+  function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
+    return supervisor.invoke({ scope, tables: ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
+      idempotencyKey: "retry", payloadSha256: hash(JSON.stringify(input)), readOnly: false, authorize, ...overrides });
+  }
+  return { db, journal, supervisor, invoke, scope, authorize, initialize };
+}
+
+function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void): AppRuntimeLauncher {
+  return options => {
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", options.entryPath], {
+      cwd: options.cwd, env: options.env, stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true,
+    });
+    child.on("error", options.onError); child.on("close", options.onExit); child.on("message", options.onMessage);
+    return { postMessage(message) { hook(message, { stop: () => child.kill("SIGKILL"), deliver: () => child.send(message as object) }); }, kill() { child.kill("SIGKILL"); } };
+  };
+}
+
+it("serializes concurrent writes and reuses a worker without copying the database", async () => {
+  let launches = 0;
+  const f = await fixture({ launch: launcher((command, controls) => { if (command.command.kind === "open") launches++; controls.deliver(); }) });
+  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => f.invoke({ id: String(i), value: "saved" }, { idempotencyKey: String(i) })));
+  expect(results.map(result => result.revision)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
+  expect(launches).toBe(1);
+  expect((await f.invoke({}, { readOnly: true })).result).toHaveLength(12);
+});
+
+it("recovers a host commit whose acknowledgment was lost and returns its receipt exactly once", async () => {
+  let fail = true;
+  const f = await fixture({ transform: journal => ({ ...journal, commitOperation(input) {
+    const result = journal.commitOperation(input);
+    if (fail) { fail = false; throw Error("lost host acknowledgment"); }
+    return result;
+  } }) });
+  await expect(f.invoke({ id: "once", value: "saved" })).rejects.toThrow("lost host acknowledgment");
+  expect(await f.invoke({ id: "once", value: "saved" })).toMatchObject({ revision: 1, replayed: true, result: [{ id: "once", value: "saved" }] });
+  await expect(f.invoke({ id: "once", value: "changed" })).rejects.toThrow("another payload");
+  expect((await f.invoke({}, { readOnly: true })).result).toHaveLength(1);
+});
+
+it("recovers committed data after the worker dies before finalization", async () => {
+  let killed = false;
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "finalize" && !killed) { killed = true; controls.stop(); } else controls.deliver();
+  }) });
+  await expect(f.invoke({ id: "once", value: "saved" })).rejects.toThrow("stopped");
+  expect(await f.invoke({ id: "once", value: "saved" })).toMatchObject({ replayed: true, revision: 1 });
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "once", value: "saved" }]);
+});
+
+it("does not commit a prepared write after revocation", async () => {
+  let revoke = () => {};
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "prepare") revoke();
+    controls.deliver();
+  }) });
+  revoke = () => f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.invoke({ id: "blocked", value: "private" })).rejects.toThrow("denied");
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
+});
+
+it("withholds committed results and receipts when authority is revoked before disclosure", async () => {
+  let revoke = () => {};
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "finalize") revoke();
+    controls.deliver();
+  }) });
+  revoke = () => f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.invoke({ id: "saved", value: "private" })).rejects.toThrow("denied");
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
+  await expect(f.invoke({ id: "saved", value: "private" })).rejects.toThrow("denied");
+});
+
+it("rolls back file associations and data together when accounting refuses", async () => {
+  const f = await fixture();
+  const fileId = "receipt_file_0001";
+  await expect(f.invoke({ id: "blocked", value: "private", file: fileId }, {
+    files: [{ fileId, name: "receipt.png", contentType: "image/png", byteLength: 10, sha256: hash("file") }],
+    accountAndAttach(allocation) { expect(allocation.attachedFileIds).toEqual([fileId]); f.db.exec("UPDATE files SET attached=1"); throw Error("quota full"); },
+  })).rejects.toThrow("quota full");
+  expect(f.db.prepare("SELECT attached FROM files").get()!.attached).toBe(0);
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([]);
+});
+
+it("keeps independent datasets isolated while evicting idle workers", async () => {
+  const f = await fixture({ maxWorkers: 1 }); f.initialize("other");
+  await f.invoke({ id: "first", value: "private" });
+  expect((await f.invoke({}, { scope: { ...f.scope, datasetId: "other" }, readOnly: true })).result).toEqual([]);
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "first", value: "private" }]);
+});
+
+it("rechecks authority before returning a structured refusal", async () => {
+  let revoke = () => {};
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "prepare") revoke();
+    controls.deliver();
+  }) });
+  revoke = () => f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.invoke({ refuse: true })).rejects.toThrow("denied");
+});
