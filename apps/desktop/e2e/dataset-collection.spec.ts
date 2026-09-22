@@ -3,7 +3,7 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { launchDesktopApp } from "./helpers/desktopApp";
+import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
 test("@dataset-collection owner creates a Collection and form, submits, edits, and reopens the same records", async ({ browser }) => {
@@ -69,6 +69,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     const restored = await desktop.page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
     expect(restored).toEqual(read);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
+    assertDesktopEngineHealthy(desktop.logs);
   } finally {
     await context.close();
     await cleanupDesktopWorkspace(desktop, workspace);
@@ -152,6 +153,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     const remaining = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list", includeArchived: true }), workspaceId);
     expect(remaining).toMatchObject({ kind: "list", datasets: [] });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
+    assertDesktopEngineHealthy(desktop.logs);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });

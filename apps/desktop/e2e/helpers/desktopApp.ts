@@ -20,6 +20,12 @@ export interface DesktopLogEntry {
   text: string;
 }
 
+/** Fail the flow while the app is still open when its engine has already failed. */
+export function assertDesktopEngineHealthy(logs: readonly DesktopLogEntry[]): void {
+  const failures = logs.filter(entry => entry.source === "main" && /Rust engine daemon:|EngineDaemonUnavailableError|engine stopped answering|engine client is closed/i.test(entry.text));
+  if (failures.length) throw new Error(`Rust engine failed during the flow:\n${failures.map(entry => entry.text.trim()).join("\n")}`);
+}
+
 export interface LaunchedDesktopApp {
   app: ElectronApplication;
   page: Page;
