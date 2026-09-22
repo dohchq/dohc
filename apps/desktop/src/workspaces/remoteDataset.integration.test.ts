@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
-import { fixture, limits } from "../../../../services/sync-relay/src/appBackendTestFixture";
+import { fixture, limits } from "../../../../services/sync-relay/src/datasetTestFixture";
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";

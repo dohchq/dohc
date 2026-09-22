@@ -883,6 +883,27 @@ type RelayShareJsonOptions =
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
+async function relayShareResponseWithCredentials(
+  credentials: CloudSessionCredentials, path: string, init: RequestInit,
+): Promise<Response> {
+  if (!credentials.relayUrl) throw new Error("Reconnect your sharing server, then try again.");
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${credentials.token}`);
+  const response = await relayShareFetch(`${normalizeServerUrl(credentials.relayUrl)}${path}`, {
+    ...init, headers, redirect: "error", cache: "no-store",
+  });
+  if (response.status === 401) {
+    await handleRelayUnauthorized({
+      requestCredentials: credentials, currentCredentials: cachedCredentials,
+      clearCachedCredentials: () => clearCachedCredentials(),
+      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      invalidatePersistedSessionIf: expected => cloudLogin().invalidateSessionIf(expected),
+    });
+  }
+  return response;
+}
+
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -4204,6 +4225,12 @@ function registerIpcHandlers(): void {
   };
   const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
     ...datasetDependencies,
+    chooseRecoveryFile: async (_workspace, signal) => {
+      const chosen = await dialog.showOpenDialog({ title: "Restore Collection recovery", properties: ["openFile"],
+        filters: [{ name: "Collection recovery", extensions: ["dohc-recovery"] }] });
+      signal.throwIfAborted();
+      return chosen.canceled ? null : chosen.filePaths[0] ?? null;
+    },
     exportArchive: async (workspace, input, signal, authorize) => {
       if (input.savePath !== undefined || input.overwrite !== undefined) throw new Error("Choose the recovery export location in the save dialog.");
       const chosen = await dialog.showSaveDialog({ title: "Export Collection recovery", defaultPath: `collection-${input.datasetId.slice(0, 8)}.dohc-recovery`,

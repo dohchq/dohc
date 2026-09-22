@@ -11,12 +11,11 @@ import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOpt
 import { compileClosedApp } from "./closedAppCompiler";
 import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
 import { writeDatasetRecoveryExport } from "./datasetRecoveryExport";
-import { fixture as relayFixture, limits as relayLimits } from "../../../../services/sync-relay/src/appBackendTestFixture";
+import { fixture as relayFixture, limits as relayLimits } from "../../../../services/sync-relay/src/datasetTestFixture";
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget } from "./remoteDataset";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
-import { stageDatasetRecovery } from "@dohc/app-backend-runtime/recovery";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -179,8 +178,8 @@ describe("local dataset owner adapter", () => {
       oldStore.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("w",id(1),"old-helper",JSON.stringify({revision:1,revisionSha256:approved.revision.revisionSha256,operationIds:[id(5)],discover:true}),"old-grant-token");
       oldStore.close();
       const oldHost=(await open({workspaceRoot:local.workspaceRoot})).host;
-      const archive=await oldHost.prepareExport(id(1)),sourcePath=join(local.workspaceRoot,"before-recovery.dohc-recovery");
-      await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),maxBytes:archive.maxBytes,signal:controller.signal,authorize(){}});await archive.dispose();await oldHost.close();
+      const originalArchive=await oldHost.prepareExport(id(1)),sourcePath=join(local.workspaceRoot,"before-recovery.dohc-recovery");
+      await writeDatasetRecoveryExport({path:sourcePath,stream:originalArchive.stream(),maxBytes:originalArchive.maxBytes,signal:controller.signal,authorize(){}});await originalArchive.dispose();await oldHost.close();
       local=await open();
       const recovery=await local.host.prepareRecovery({sourcePath});
       expect(local.host.list().datasets).toEqual([]);

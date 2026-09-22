@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
 import { createSyncRelayHandler } from "./server";
-import { fixture } from "./appBackendTestFixture";
+import { fixture } from "./datasetTestFixture";
 import type { RelayDatasetHost } from "./datasetHost";
 
 const datasetId = "00000000-0000-4000-8000-000000000001", reference = "a".repeat(64);
