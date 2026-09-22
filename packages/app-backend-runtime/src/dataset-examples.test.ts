@@ -101,6 +101,10 @@ it("shares fundraiser records and rules across the public app, admin app, and Co
   const checklist = await f.result("tableAttendees", {}, "owner");
   expect(checklist.rows.find((row: Result) => row.id === player.id).values[f.field("attendees", "reclub_synced")]).toBe(true);
   const statusField = f.field("registrations", "status");
+  const boardGroup = {fieldId:statusField,value:"pending_verification"};
+  expect(await f.result("tableRegistrations", {group:boardGroup}, "owner")).toMatchObject({group:boardGroup,rows:[{id:saved.id}]});
+  expect(await f.result("tableRegistrations", {groupBy:statusField,limit:8}, "owner")).toEqual({groupBy:statusField,groups:["pending_verification"],nextGroupCursor:null});
+  expect((await f.result("tableRegistrations", {group:{fieldId:statusField,value:"verified"}}, "owner")).rows).toEqual([]);
   const edited = await f.result("editRegistrationStatus", { id: saved.id, expectedVersion: 1, values: { [statusField]: "rejected" } }, "owner");
   expect(edited).toEqual({ id: saved.id, version: 2, priorValues: { [statusField]: "pending_verification" } });
   expect(f.host.history("owner", f.scope).entries[0]!.undo).toMatchObject({ operationId: f.operation("editRegistrationStatus").operationId,
@@ -161,4 +165,7 @@ it("uses the same dataset host for stock reservations, Collection status edits, 
   expect(next.rows).toHaveLength(1); expect(next.rows[0].id).not.toBe(page.rows[0].id); expect(next.nextCursor).toBeNull();
   const filtered = await f.result("tableOrders", { filters: [{ fieldId: status, value: "confirmed" }] }, "owner");
   expect(filtered.rows).toHaveLength(1); expect(filtered.rows[0].id).toBe(first.id);
+  expect(await f.result("tableOrders",{groupBy:status,limit:1},"owner")).toEqual({groupBy:status,groups:["cancelled"],nextGroupCursor:{value:"cancelled"}});
+  expect(await f.result("tableOrders",{groupBy:status,limit:1,groupAfter:{value:"cancelled"}},"owner")).toEqual({groupBy:status,groups:["confirmed"],nextGroupCursor:null});
+  expect(await f.result("tableOrders",{group:{fieldId:status,value:"confirmed"}},"owner")).toMatchObject({rows:[{id:first.id}],group:{fieldId:status,value:"confirmed"}});
 });
