@@ -66,11 +66,17 @@ afterEach(async () => {
 describe("local dataset owner adapter", () => {
   it("persists a local fence before sharing and resumes the same archive after a lost remote response", async () => {
     const {host,workspaceRoot} = await open(), approved = await activate(host);
-    await host.action(call(approved,id(6),"before-transfer",{name:"Camera"}));
+    const attachment = Buffer.from("%PDF-synthetic-transfer-receipt");
+    const uploaded = await host.upload({datasetId:id(1),revision:approved.revision.revision,revisionSha256:approved.revision.revisionSha256,
+      idempotencyKey:"transfer-attachment",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:attachment.toString("base64")});
+    await host.action(call(approved,id(6),"before-transfer",{name:"Camera",fileId:uploaded.file.fileId}));
     let saved: import("./localDatasetTransfer").DatasetTransferReceipt | undefined, calls = 0;
     const target: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
       calls++;
       expect(host.approvedArtifacts(id(1)).active).toBe(false);
+      expect(input.manifest.entries.filter(entry => entry.kind === "attachment")).toEqual([
+        expect.objectContaining({byteLength:attachment.byteLength,sha256:digest(attachment)}),
+      ]);
       let chunks = 0; for await (const chunk of input.stream) chunks += chunk.byteLength;
       expect(chunks).toBeGreaterThan(4096);
       const receipt = {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
