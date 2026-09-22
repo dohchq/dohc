@@ -123,6 +123,7 @@ export interface ExplorerProps {
   onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetId: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
+  onRestoreCollection?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
   // A rejected begin (a flush failure, an unresolved collection write)
@@ -1578,7 +1579,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink"
@@ -1587,6 +1588,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
+          {props.onRestoreCollection && !props.shareView && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
         </section>}
         <section
           data-testid="open-editors-section"

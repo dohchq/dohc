@@ -58,6 +58,14 @@ function treeRow(path: string): HTMLElement {
 }
 
 describe("Explorer collection folders", () => {
+  it("offers recovery before the workspace has any data Collections", () => {
+    const onRestoreCollection = vi.fn();
+    const view = render(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection })} />);
+    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Restore from recovery file" }));
+    expect(onRestoreCollection).toHaveBeenCalledOnce();
+    view.rerender(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
+    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+  });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);

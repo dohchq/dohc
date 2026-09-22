@@ -105,6 +105,7 @@ import {
 } from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
   advanceCollectionWriteLineage,
@@ -584,6 +585,7 @@ export function DesktopWorkspaceShell(props: {
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(
     null,
   );
+  const [recoveryWorkspaceId, setRecoveryWorkspaceId] = useState<string | null>(null);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   // The address a failed attempt used. Only set when a notice's Try again has
@@ -4211,6 +4213,7 @@ export function DesktopWorkspaceShell(props: {
         onIncludeArchivedCollections={isShareView ? undefined : setIncludeArchived}
         onOpenDataCollection={(datasetId, tableId) => openVirtualTab(transactionalCollectionTabPath(datasetId, tableId))}
         onMoreDataCollections={nextDataset ? () => { void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error)); } : undefined}
+        onRestoreCollection={!isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? () => setRecoveryWorkspaceId(workspaceId) : undefined}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -4405,6 +4408,7 @@ export function DesktopWorkspaceShell(props: {
     if (!storeUpdateRequired) return;
     setNewFileOpen(false);
     setNewCollectionFolder(null);
+    setRecoveryWorkspaceId(null);
     setQuickOpenOpen(false);
     setPaletteOpen(false);
     setShareTarget(null);
@@ -5257,6 +5261,7 @@ export function DesktopWorkspaceShell(props: {
                   owner={!isShareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={reportShellError}
+                  onNotice={showShellNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));
@@ -5829,6 +5834,21 @@ export function DesktopWorkspaceShell(props: {
             );
           }}
         />
+      ) : null}
+      {recoveryWorkspaceId === workspaceId && !isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
+        <ConnectedCollectionRecoveryRestore workspaceId={workspaceId} onError={reportShellError}
+          onClose={() => setRecoveryWorkspaceId(null)}
+          onRestored={(datasetId, tableId) => {
+            if (workspaceIdRef.current !== workspaceId) return;
+            openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+            showShellNotice("Restored the Collection. Sharing stays off.");
+            void refreshDatasets().catch(error => {
+              if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh Collections.", error);
+            });
+            void refreshFiles().catch(error => {
+              if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh workspace files.", error);
+            });
+          }} />
       ) : null}
       {newCollectionFolder !== null && !isShareView ? (
         <NewCollectionDialog

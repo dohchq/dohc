@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
@@ -7,7 +7,11 @@ import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollec
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { onTransferCsv(): void }) => <button onClick={props.onTransferCsv}>Import or export CSV</button> }));
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+  {props.onTransferCsv && <button onClick={props.onTransferCsv}>Import or export CSV</button>}
+  {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
+  {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
+</> }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -53,4 +57,40 @@ it("opens archived metadata without running records and offers owner restore", a
   await waitFor(() => expect(onLifecycleChanged).toHaveBeenCalledOnce());
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "invoke")).toBe(false);
   expect(backend.dataset).toHaveBeenCalledWith({ action: "describe", workspaceId: "workspace-a", datasetId: id(1), includeArchived: true });
+});
+
+it("loads owner pending responses and requires confirmation before clearing a saved retry", async () => {
+  let cleared = false;
+  backend.dataset.mockImplementation(async input => {
+    if (input.action === "describe") return { kind: "description", dataset };
+    if (input.action === "pendingAttempts") return { kind: "pending-attempts", datasetId: dataset.datasetId, entries: cleared ? [] : [{ reference: "b".repeat(64), operation: "Submit", recordedAtMs: 1000, revision: 2, outcome: "committed", attachmentCount: 0 }], nextAfter: null };
+    cleared = true; return { kind: "attempt-reconciled", cleared: true };
+  });
+  const onNotice = vi.fn(), onError = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pending responses" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Clear retry" }));
+  expect(backend.dataset.mock.calls.some(([input]) => input.action === "reconcileAttempt")).toBe(false);
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear retry" }));
+  await screen.findByText("No pending responses. Refresh to check for changes.");
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "pendingAttempts", workspaceId: "workspace-a", datasetId: id(1), limit: 50 });
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "reconcileAttempt", workspaceId: "workspace-a", datasetId: id(1), reference: "b".repeat(64), acknowledge: true });
+  expect(onNotice).toHaveBeenCalledWith("Cleared the saved response's retry"); expect(onError).not.toHaveBeenCalled();
+});
+
+it.each([{ owner: false, offline: false }, { owner: true, offline: true }])("hides pending review and recovery export for $owner owner and $offline offline", async ({ owner, offline }) => {
+  backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline } });
+  render(<ConnectedTransactionalCollection owner={owner} workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByText("Opening collection…")).toBeNull());
+  expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
+});
+
+it("reports the saved recovery file through the shell notice callback", async () => {
+  backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset } : { kind: "exported", savedPath: "C:/private/fundraiser.dohc-recovery" });
+  const onNotice = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Export recovery" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save recovery file" }));
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Saved recovery file: C:/private/fundraiser.dohc-recovery"));
 });

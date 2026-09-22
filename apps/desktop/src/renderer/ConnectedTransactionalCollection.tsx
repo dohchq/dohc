@@ -6,6 +6,7 @@ import { TransactionalCollectionPage, type TransactionalInvoke } from "./Transac
 import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
+import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -24,11 +25,12 @@ export interface ConnectedTransactionalCollectionProps {
   onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
   onFormCreated(appRoot: string): void;
   onLifecycleChanged?(): void;
+  onNotice?(message: string): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
@@ -36,6 +38,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [transferringCsv, setTransferringCsv] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
+  const [viewingPending, setViewingPending] = useState(false);
   const [editingFields, setEditingFields] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -89,13 +92,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
   }
   if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{owner && <SecondaryButton disabled={restoring} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}</div>;
-  return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+  return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
     copy={copy}
     onRefresh={() => { void refresh(); }}
     onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}
     onCreateForm={owner && !copy?.offline ? () => setCreatingForm(true) : undefined}
     onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
     onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
+    onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
     onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
     onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
     onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
@@ -139,6 +143,22 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       }), hasMore: page.nextCursor !== null };
     }}
     invoke={invoke} />
+    {viewingPending && owner && !copy?.offline && <CollectionPendingResponsesDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+      onClose={() => setViewingPending(false)} onLoad={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "pendingAttempts" });
+        signal.throwIfAborted();
+        if (result.kind !== "pending-attempts") throw Error("dohc could not read pending responses. Try again.");
+        const { kind: _, ...page } = result;
+        return page;
+      }} onReconcile={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "reconcileAttempt" });
+        signal.throwIfAborted();
+        if (result.kind !== "attempt-reconciled") throw Error("dohc could not confirm the cleared retry. Refresh pending responses.");
+        onNotice?.("Cleared the saved response's retry");
+        return result;
+      }} />}
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
@@ -165,8 +185,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         return result;
       }} />}
     {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
-    {exportingRecovery && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
-      onSaved={() => { /* The dialog closes after the writer confirms the durable file. */ }}
+    {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
+      onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
       onExport={async signal => { signal.throwIfAborted(); const result = await bridge().dataset({ action: "export", workspaceId, datasetId }); signal.throwIfAborted();
         if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again."); return result.savedPath; }} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}

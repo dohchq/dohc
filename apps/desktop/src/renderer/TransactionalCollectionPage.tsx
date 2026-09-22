@@ -36,6 +36,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onCreateForm?(): void;
   onTransferCsv?(): void;
   onHistory?(): void;
+  onPendingResponses?(): void;
   onReviewSchema?(): void;
   onManageAccess?(): void;
   onExportRecovery?(): void;
@@ -194,6 +195,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       {props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly) ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
       {props.onTransferCsv ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
       {props.onHistory ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onHistory}>History</SecondaryButton> : null}
+      {props.onPendingResponses ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onPendingResponses}>Pending responses</SecondaryButton> : null}
       {props.onArchive ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onArchive}>Archive</SecondaryButton> : null}
       {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
       {canCreate ? <PrimaryButton disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
