@@ -1,0 +1,200 @@
+import { APP_BACKEND_INPUT_BYTES, APP_BACKEND_UPLOAD_BYTES, type AppBackendJson } from "@dohc/security-contract/app-backend";
+import { FORM_CSS } from "./appFormFrontend";
+
+export interface DatasetFormField {
+  fieldId: string;
+  name: string;
+  type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment";
+  options?: string[];
+  required: boolean;
+  omitWhenEmpty: boolean;
+  default?: AppBackendJson;
+}
+export interface DatasetFormFrontendInput { title: string; operation: string; fields: DatasetFormField[] }
+
+export function generateDatasetFormFrontend(input: DatasetFormFrontendInput): { "frontend.js": string; "frontend.css": string } {
+  const data = JSON.stringify({ ...input, inputBytes: APP_BACKEND_INPUT_BYTES, uploadBytes: APP_BACKEND_UPLOAD_BYTES })
+    .replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return { "frontend.js": `import './frontend.css';\n(() => {\nconst definition = ${data};\n${SCRIPT}\n})();\n`, "frontend.css": FORM_CSS };
+}
+
+const SCRIPT = String.raw`
+const element = (tag, text) => {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+const main = element("main"), title = element("h1", definition.title);
+title.id = "form-title";
+main.setAttribute("aria-labelledby", title.id);
+const intro = element("p", "Required fields are marked with *.");
+intro.className = "intro";
+const form = element("form"), fields = element("fieldset"), legend = element("legend", "Your response");
+legend.className = "sr-only";
+fields.append(legend);
+const controls = definition.fields.map((field, index) => {
+  const wrapper = element("div");
+  wrapper.className = field.type === "checkbox" ? "field check-field" : "field";
+  const id = "field-" + index;
+  const label = element("label", field.name + (field.required ? " *" : ""));
+  label.htmlFor = id;
+  const choice = field.type === "select" || field.type === "multi-select";
+  const control = element(choice ? "select" : "input");
+  control.id = id; control.name = id;
+  // A required boolean must have a value; false is a valid value.
+  control.required = field.required && field.type !== "checkbox";
+  if (choice) {
+    control.multiple = field.type === "multi-select";
+    if (!control.multiple) { const empty = element("option", "Choose an option"); empty.value = ""; control.append(empty); }
+    for (const value of field.options || []) { const option = element("option", value); option.value = value; control.append(option); }
+  } else {
+    control.type = field.type === "attachment" ? "file" : field.type;
+    if (field.type === "number") { control.step = "any"; control.min = String(-Number.MAX_SAFE_INTEGER); control.max = String(Number.MAX_SAFE_INTEGER); }
+    if (field.type === "text" || field.type === "url") control.maxLength = 2000;
+    if (field.type === "url") control.placeholder = "https://";
+  }
+  if (field.type === "checkbox") control.defaultChecked = field.default === true;
+  else if (choice) {
+    for (const option of control.options) option.defaultSelected = Array.isArray(field.default) ? field.default.includes(option.value) : option.value === field.default;
+  } else if (field.type !== "attachment" && field.default !== undefined && field.default !== null) control.defaultValue = String(field.default);
+  const error = element("p"); error.className = "field-error"; error.id = id + "-error"; error.hidden = true;
+  control.setAttribute("aria-describedby", error.id);
+  control.addEventListener("input", () => { control.setCustomValidity(""); control.removeAttribute("aria-invalid"); error.hidden = true; });
+  if (field.type === "checkbox") wrapper.append(control, label, error);
+  else wrapper.append(label, control, error);
+  fields.append(wrapper);
+  return { field, control, error };
+});
+const submit = element("button", "Submit"); submit.type = "submit";
+const status = element("p"); status.className = "status"; status.setAttribute("role", "status");
+status.setAttribute("aria-live", "polite"); status.setAttribute("aria-atomic", "true"); status.tabIndex = -1;
+const another = element("button", "Submit another response"); another.type = "button"; another.hidden = true;
+form.append(fields, submit); main.append(title, intro, form, status, another);
+(document.getElementById("root") || document.body).append(main);
+
+let port, pending, attempt, busy = false, received = false;
+const finish = result => {
+  if (!pending) return;
+  const item = pending; pending = undefined; clearTimeout(item.timer); item.resolve(result);
+};
+const send = () => {
+  if (!port || !pending || pending.sent) return;
+  pending.sent = true;
+  try { port.postMessage(pending.message); } catch { finish({ uncertain: true }); }
+};
+const receiveChannel = event => {
+  if (port || event.source !== window.parent || event.source === window) return;
+  if (!record(event.data) || event.data.kind !== "dohc-app-channel" || event.data.version !== 1 || event.ports.length !== 1) return;
+  window.removeEventListener("message", receiveChannel);
+  port = event.ports[0];
+  port.onmessage = ({ data }) => {
+    if (!pending || !record(data) || data.id !== pending.message.id) return;
+    const value = data.value;
+    if (data.ok === true && record(value)) {
+      if (pending.message.op === "backend.upload" && record(value.file) && typeof value.file.fileId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value.file.fileId)) {
+        finish({ fileId: value.file.fileId }); return;
+      }
+      if (pending.message.op === "backend.invoke" && record(value.result) &&
+          ((typeof value.result.id === "string" && value.result.id.length > 0) || Number.isSafeInteger(value.result.id)) &&
+          Number.isSafeInteger(value.revision) && value.revision >= 0 && typeof value.replayed === "boolean") {
+        finish({ saved: true }); return;
+      }
+    }
+    if (data.ok === false && [400, 404, 409, 413].includes(data.status)) {
+      const message = data.status === 409 && record(data.error) && typeof data.error.message === "string" &&
+        data.error.message.length > 0 && data.error.message.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(data.error.message)
+        ? data.error.message : "Check your answers and try again.";
+      finish({ refused: true, message });
+    } else finish({ uncertain: true });
+  };
+  port.start(); send();
+};
+window.addEventListener("message", receiveChannel);
+const request = message => new Promise(resolve => {
+  pending = { message: { id: crypto.randomUUID(), ...message }, resolve, sent: false,
+    timer: setTimeout(() => finish({ uncertain: true }), 30000) };
+  send();
+});
+const readDraft = () => {
+  const values = {}; let upload, invalid;
+  for (const { field, control, error } of controls) {
+    let value = field.type === "checkbox" ? control.checked : field.type === "multi-select" ? [...control.selectedOptions].map(option => option.value)
+      : field.type === "attachment" ? control.files[0] || null : control.value || null;
+    let message = "";
+    if (field.required && (value === null || (Array.isArray(value) && !value.length))) message = "Complete this required field.";
+    if (field.type === "number" && value !== null) {
+      value = Number(value);
+      if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) message = "Enter a number within the allowed range.";
+    }
+    if (field.type === "number" && control.validity.badInput) message = "Enter a valid number.";
+    if (field.type === "url" && value !== null) {
+      try { const url = new URL(value); if (!["https:", "http:"].includes(url.protocol) || /\s/.test(value)) throw new Error(); }
+      catch { message = "Enter a web address starting with https:// or http://."; }
+    }
+    if (typeof value === "string" && value.length > 2000) message = "Use 2000 characters or fewer.";
+    if (field.type === "attachment" && value !== null) {
+      if (value.size < 1 || value.size > definition.uploadBytes) message = "Choose a nonempty file up to 5 MB.";
+      else upload = { fieldId: field.fieldId, file: value };
+    } else if (!(value === null && field.omitWhenEmpty)) values[field.fieldId] = value;
+    if (message) {
+      error.textContent = message; error.hidden = false; control.setCustomValidity(message);
+      control.setAttribute("aria-invalid", "true"); invalid ||= control;
+    }
+  }
+  if (invalid) { invalid.focus(); invalid.reportValidity(); return; }
+  if (new TextEncoder().encode(JSON.stringify({ values })).byteLength > definition.inputBytes - 256) {
+    status.textContent = "Your response is too long. Shorten the answers and try again."; status.focus(); return;
+  }
+  return { values, upload };
+};
+const readFile = file => new Promise(resolve => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(typeof reader.result === "string" ? reader.result.slice(reader.result.indexOf(",") + 1) : null);
+  reader.onerror = reader.onabort = () => resolve(null);
+  try { reader.readAsDataURL(file); } catch { resolve(null); }
+});
+form.addEventListener("submit", async event => {
+  event.preventDefault(); if (busy || received) return;
+  if (!attempt) {
+    const draft = readDraft(); if (!draft) return;
+    attempt = { ...draft, key: "submit:" + crypto.randomUUID(), uncertain: false };
+  }
+  busy = true; fields.disabled = true; submit.disabled = true; submit.textContent = "Submitting…";
+  status.textContent = "Sending your response. Keep this page open until it is confirmed.";
+  if (attempt.upload) {
+    const upload = attempt.upload;
+    if (!upload.bytesBase64) upload.bytesBase64 = await readFile(upload.file);
+    const result = upload.bytesBase64 ? await request({ op: "backend.upload", idempotencyKey: attempt.key + ":file",
+      name: upload.file.name, contentType: upload.file.type || "application/octet-stream", bytesBase64: upload.bytesBase64 }) : { refused: true };
+    if (!result.fileId) {
+      busy = false; submit.disabled = false; submit.textContent = "Try again";
+      if (result.refused) {
+        // No create request has run, so changing a refused file cannot duplicate a response.
+        attempt = undefined; fields.disabled = false; submit.textContent = "Submit";
+        status.textContent = "The file was not accepted. Choose another file and try again.";
+      } else status.textContent = "The file upload is unconfirmed. Try again with the same file. Keep this page open.";
+      status.focus(); return;
+    }
+    attempt.values[upload.fieldId] = result.fileId; attempt.upload = undefined;
+  }
+  const result = await request({ op: "backend.invoke", operation: definition.operation, idempotencyKey: attempt.key, input: { values: attempt.values } });
+  busy = false; submit.disabled = false;
+  if (result.saved) {
+    attempt = undefined; received = true; form.hidden = true; intro.hidden = true; another.hidden = false;
+    status.textContent = "Response received."; status.focus();
+  } else if (result.refused && !attempt.uncertain) {
+    attempt = undefined; fields.disabled = false; submit.textContent = "Submit";
+    status.textContent = "Response not saved. " + result.message; status.focus();
+  } else {
+    attempt.uncertain = true; submit.textContent = "Try again";
+    status.textContent = "Your response may have been saved. Try again to confirm the same response. Keep this page open; reloading loses this retry.";
+    status.focus();
+  }
+});
+another.addEventListener("click", () => {
+  form.reset(); fields.disabled = false; form.hidden = false; intro.hidden = false; another.hidden = true; received = false;
+  status.textContent = ""; submit.textContent = "Submit"; (controls[0]?.control || submit).focus();
+});
+window.addEventListener("beforeunload", event => { if (attempt) { event.preventDefault(); event.returnValue = ""; } });
+`;

@@ -214,7 +214,7 @@ window.addEventListener("beforeunload", event => {
 });
 `;
 
-const FORM_CSS = `
+export const FORM_CSS = `
 :root { color-scheme: light dark; --bg: #faf9f5; --panel: #f3f1ea; --ink: #1c1b18; --muted: #55524a; --line: #e4e1d8; --accent: #2d342e; --danger: #a6402c; }
 @media (prefers-color-scheme: dark) { :root { --bg: #131211; --panel: #1b1d1a; --ink: #f6f4ee; --muted: #a9a599; --line: #2a2925; --accent: #d7d0c0; --danger: #e08065; } }
 * { box-sizing: border-box; }
