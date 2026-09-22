@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { MoreHorizontal } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
@@ -228,21 +229,32 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const readDisabled = busy || resourceBusy;
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
+  const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
+  const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || canCreateForm || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
-    <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold text-ink">{table.name}</h2><div className="flex flex-wrap gap-2">
+    <header className="flex items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
+      {canCreate ? <PrimaryButton className="shrink-0" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
+    </header>
+    <div className="flex flex-wrap items-center gap-2">
       {props.viewControls?.(disabled || editor !== null)}
-      {props.onReviewSchema ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onReviewSchema}>Fields and names</SecondaryButton> : null}
-      {props.onManageAccess ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onManageAccess}>Manage access</SecondaryButton> : null}
-      {props.onExportRecovery ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onExportRecovery}>Export recovery</SecondaryButton> : null}
-      {props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly) ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
-      {props.onTransferCsv ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
-      {props.onHistory ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onHistory}>History</SecondaryButton> : null}
-      {props.onPendingResponses ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onPendingResponses}>Pending responses</SecondaryButton> : null}
-      {props.onArchive ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onArchive}>Archive</SecondaryButton> : null}
-      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
-      {canCreate ? <PrimaryButton disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
-    </div></header>
+      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
+      {hasManagement ? <details className="group relative" onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
+        <summary aria-label="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden">
+          <MoreHorizontal size={14} aria-hidden /> <span>Manage</span>
+        </summary>
+        <div className="dohc-popover absolute left-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
+          {props.onReviewSchema ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onReviewSchema}>Fields and names</SecondaryButton> : null}
+          {props.onManageAccess ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onManageAccess}>Manage access</SecondaryButton> : null}
+          {props.onExportRecovery ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onExportRecovery}>Export recovery</SecondaryButton> : null}
+          {canCreateForm ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
+          {props.onTransferCsv ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
+          {props.onHistory ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onHistory}>History</SecondaryButton> : null}
+          {props.onPendingResponses ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}>Pending responses</SecondaryButton> : null}
+          {props.onArchive ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onArchive}>Archive</SecondaryButton> : null}
+        </div>
+      </details> : null}
+    </div>
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
       <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
       <SecondaryButton type="submit" disabled={readDisabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>

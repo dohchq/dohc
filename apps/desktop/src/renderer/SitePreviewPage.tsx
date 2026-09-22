@@ -527,6 +527,8 @@ export function SitePreviewPage(props: {
     !props.sharedView &&
     site?.authority.kind === "workspace" &&
     !!props.onShareSite;
+  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0
+    && site.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
 
   return (
     <div data-testid="site-preview-page" className="flex min-h-0 flex-1 flex-col bg-bg">
@@ -726,8 +728,11 @@ export function SitePreviewPage(props: {
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This app did not start automatically. Choose another mode in Preview options."
+                  : needsPublication ? "Review this app to open it on this device or publish it to a shared link."
                   : "This app has no previewable entry, dev script, or build output yet."}
               </div>
+              {needsPublication ? <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} triggerLabel="Review and open app" reportError={props.reportError}
+                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : null}
               {idleReason === "exited" && previewLogs.length > 0 ? (
                 <LogsDetails
                   logs={previewLogs}

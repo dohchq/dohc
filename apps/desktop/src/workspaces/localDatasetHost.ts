@@ -132,7 +132,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   function charge(datasetId: string, bytes: number) {
     if (!Number.isSafeInteger(bytes)) throw new Error("Invalid Collection storage allocation.");
     const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?>=0 AND bytes+?<=?").run(bytes, bytes, bytes, maxStoredBytes);
-    if (changed.changes !== 1) throw new Error("Collection storage is full. Export your data before continuing.");
+    if (changed.changes !== 1) throw new Error("Collection storage is full. Delete an unused Collection permanently to release storage. Exporting alone does not release storage.");
     db.prepare("INSERT OR IGNORE INTO local_dataset_usage VALUES(?,0)").run(datasetId);
     db.prepare("UPDATE local_dataset_usage SET bytes=bytes+? WHERE dataset_id=?").run(bytes,datasetId);
   }

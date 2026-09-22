@@ -455,7 +455,7 @@ describe("local dataset owner adapter", () => {
 
   it("rolls back creation when quota refuses, and ends all work when the session closes", async () => {
     const {host} = await open({maxStoredBytes:4096});
-    await expect(activate(host)).rejects.toThrow(/storage is full/);
+    await expect(activate(host)).rejects.toThrow("Collection storage is full. Delete an unused Collection permanently to release storage. Exporting alone does not release storage.");
     expect(host.list().datasets).toEqual([]);
     await host.close();
     expect(() => host.list()).toThrow(/session ended/);

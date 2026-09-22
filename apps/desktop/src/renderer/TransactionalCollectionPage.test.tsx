@@ -92,6 +92,17 @@ describe("transactional Collection page", () => {
     expect(writes[1]![0]).toEqual(writes[0]![0]);
   });
 
+  it("keeps creation outside management and returns focus when its disclosure closes", async () => {
+    const onReviewSchema = vi.fn(); setup({onReviewSchema}); await screen.findByText("Alice");
+    const manage = screen.getByLabelText("Manage Collection");
+    const details = manage.closest("details")!;
+    expect(screen.getByRole("button",{name:"New record"}).closest("details")).toBeNull();
+    fireEvent.click(manage); expect(details.open).toBe(true);
+    const fields = screen.getByRole("button",{name:"Fields and names"});
+    fireEvent.click(fields); expect(onReviewSchema).toHaveBeenCalledOnce();
+    fields.focus(); fireEvent.keyDown(fields,{key:"Escape"});
+    expect(details.open).toBe(false); expect(document.activeElement).toBe(manage);
+  });
   it("keeps saved filters when sorting and resets paging when switching views",async()=>{
     const activeView={viewId:id(30),name:"Pending",kind:"table" as const,search:"Alice",filters:[{fieldId:status,value:"New"}],sort:{fieldId:name,direction:"asc" as const}};
     const result=setup({activeView});await screen.findByText("Alice");

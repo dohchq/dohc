@@ -40,6 +40,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before sharing");
+    await collection.getByLabel("Manage Collection", { exact: true }).click();
     await collection.getByRole("button", { name: "Create form", exact: true }).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();

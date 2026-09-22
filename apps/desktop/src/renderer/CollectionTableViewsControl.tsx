@@ -55,7 +55,7 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
   }
   const views=snapshot?.document.views??[];
   return <>
-    <select aria-label="Saved Collection view" className={selectClass} disabled={busy||props.disabled} value={selected} onChange={event=>select(views.find(view=>view.viewId===event.target.value)??null)}>
+    <select aria-label="Saved Collection view" className={`${selectClass.replace("w-full", "w-auto")} max-w-60`} disabled={busy||props.disabled} value={selected} onChange={event=>select(views.find(view=>view.viewId===event.target.value)??null)}>
       <option value="">All records</option>{views.map(view=><option key={view.viewId} value={view.viewId}>{view.name}</option>)}
     </select>
     <SecondaryButton disabled={busy||props.disabled} onClick={()=>setOpen(true)}>Views</SecondaryButton>

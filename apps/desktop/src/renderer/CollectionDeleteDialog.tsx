@@ -62,7 +62,8 @@ function Delete(props: CollectionDeleteDialogProps) {
     <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink">
       <h2 id="delete-collection-title" className="m-0 text-sm font-semibold">Delete {props.name} permanently?</h2>
       <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection.</p>
-      <p className="m-0 text-[13px] text-danger">This cannot be undone. Keep a recovery file before deletion to preserve a separate copy.</p>
+      <p className="m-0 text-[13px] text-danger">This cannot be undone on this host, even with a recovery file.</p>
+      <p className="m-0 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
       <p className="m-0 text-[13px] text-muted">App source files and recovery files you saved stay in place.</p>
       <div className="min-h-0 overflow-auto"><h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
         {!page ? <p className="m-0 text-[12px] text-muted">{busy ? "Loading affected apps…" : "Refresh to see affected apps."}</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No affected apps on this page.</p>}

@@ -56,6 +56,15 @@ describe("owner app publication", () => {
     api.publishOwnerApp.mockImplementation(answer);
   });
 
+  it("opens approval from the form empty state and restores focus after closing", async () => {
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" triggerLabel="Review and open app" />);
+    const trigger = screen.getByRole("button", { name: "Review and open app" });
+    await userEvent.setup().click(trigger);
+    await screen.findByRole("button", { name: "Prepare for this device" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("reviews a bound Collection app without presenting another response database", async () => {
     const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };

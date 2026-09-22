@@ -50,7 +50,7 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   return checked.data;
 }
 
-type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError };
+type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError; triggerLabel?: string };
 
 export function OwnerAppPublication(props: PublicationProps) {
   return <PublicationControl key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
@@ -64,9 +64,9 @@ function PublicationControl(props: PublicationProps) {
     trigger.current?.focus();
   };
   return <>
-    <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
+    {props.triggerLabel ? <button ref={trigger} type="button" className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90" onClick={() => setOpen(true)}>{props.triggerLabel}</button> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
-    </IconButton>
+    </IconButton>}
     {open ? <PublicationDialog {...props} onClose={close} /> : null}
   </>;
 }

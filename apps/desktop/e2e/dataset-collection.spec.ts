@@ -1,10 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+
+async function openManagement(collection: Locator): Promise<void> {
+  const trigger = collection.getByLabel("Manage Collection", { exact: true });
+  if (!await trigger.evaluate(element => element.closest("details")?.open)) await trigger.click();
+}
 
 test("@dataset-collection owner creates a Collection and form, submits, edits, and reopens the same records", async ({ browser }) => {
   test.setTimeout(180_000);
@@ -23,11 +28,12 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await expect(dialog).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
     await expect(collection.getByRole("button", { name: "New record", exact: true })).toBeVisible();
+    await openManagement(collection);
     await collection.getByRole("button", { name: "Create form", exact: true }).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await expect(formDialog).toBeHidden();
-    await page.getByTestId("site-preview-publish").click();
+    await page.getByRole("button", { name: "Review and open app", exact: true }).click();
     const publication = page.getByTestId("app-publication-dialog");
     await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
     await publication.getByTestId("app-publication-approve").click();
@@ -110,6 +116,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await views.getByRole("button", { name: "Done", exact: true }).click();
     await expect(collection.getByLabel("Saved Collection view")).toHaveValue(/.+/);
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Camera");
+    await openManagement(collection);
     await collection.getByRole("button", { name: "Fields and names" }).click();
     const fields = page.getByRole("dialog", { name: "Fields and names" });
     await fields.getByLabel("Name", { exact: true }).fill("Location");
@@ -121,10 +128,22 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await expect(review).toBeHidden();
     await expect(collection.getByRole("button", { name: /^Edit Location for record / })).toBeVisible();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Camera");
-    for (const theme of ["light", "dark"]) {
-      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+    await collection.getByLabel("Manage Collection", { exact: true }).focus();
+    await page.keyboard.press("Escape");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    for (const theme of ["light", "dark"] as const) {
+      await page.getByTestId("activity-settings").click();
+      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark" }).click();
+      await page.getByRole("button", { name: "Close settings", exact: true }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.evaluate(async () => {
+        await Promise.allSettled(document.getAnimations().map(animation => animation.finished));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
       await page.screenshot({ path: test.info().outputPath(`collection-management-${theme}.png`) });
     }
+    await openManagement(collection);
     await collection.getByRole("button", { name: "Fields and names" }).focus();
     await page.keyboard.press("Enter");
     await expect(fields.getByLabel("Name", { exact: true })).toBeFocused();
@@ -142,11 +161,13 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       request: { action: "export", workspaceId, datasetId: listed.datasets[0].datasetId, savePath } } }, { stateDir: workspace.homeDir });
     expect(result).toMatchObject({ kind: "exported", savedPath: savePath });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
+    await openManagement(collection);
     await collection.getByRole("button", { name: "Archive", exact: true }).click();
     await page.getByRole("dialog", { name: "Archive Equipment?" }).getByRole("button", { name: "Archive Collection" }).click();
     await page.getByRole("button", { name: "Delete permanently…", exact: true }).click();
     const deletion = page.getByRole("dialog", { name: "Delete Equipment permanently?" });
-    await expect(deletion).toContainText("This cannot be undone.");
+    await expect(deletion).toContainText("This cannot be undone on this host, even with a recovery file.");
+    await expect(deletion).toContainText("Recovery requires another clean host with this workspace's identity.");
     await deletion.getByRole("checkbox", { name: "I understand that dohc cannot undo this deletion." }).check();
     await deletion.getByRole("button", { name: "Delete Collection permanently", exact: true }).click();
     await expect(deletion).toBeHidden();
