@@ -254,8 +254,12 @@ it("migrates through the owner route and removes retained history with dataset a
   const artifacts = await (await f.http(`${f.path}/artifacts`)).json();
   const nextSchema = `${schemaSql} CREATE INDEX requests_name ON requests(name);`;
   const next = describeDatasetRevision({definition, revision: 2, schemaSql: nextSchema, operationSource});
-  const migrated = await f.http(`${f.path}/migrate`, {revision: next, schemaSql: nextSchema, operationSource,
+  const prepared = await f.http(`${f.path}/prepare-migration`, {revision: next, schemaSql: nextSchema, operationSource,
     expected: artifacts.cursor, migrationSql: "CREATE INDEX requests_name ON requests(name);"});
+  expect(prepared.status).toBe(200);
+  const candidate = await prepared.json();
+  expect(candidate.preview.firstPage.changes).toEqual([]);
+  const migrated = await f.http(`${f.path}/approve-migration`, { candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256 });
   expect(migrated.status).toBe(200);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog_history").get()?.n).toBe(1);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_checkpoint_history").get()?.n).toBe(1);

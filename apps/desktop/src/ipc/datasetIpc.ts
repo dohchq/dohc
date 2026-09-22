@@ -1,4 +1,4 @@
-import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -72,7 +72,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
@@ -83,20 +83,37 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           if (dependencies.currentCredentialGeneration?.() !== credentialGeneration) throw new Error("Your server session changed. Try again.");
         },
         approvedArtifacts: (datasetId: string) => data.approvedArtifacts(datasetId),
-        migrate: (value: Parameters<NonNullable<OwnerDatasetData["migrate"]>>[0]) => {
+        prepareMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["prepareMigrationCandidate"]>>[0]) => {
           migrationAuthority.assertCurrent();
-          if (!data.migrate) throw new Error("Collection rule changes are unavailable on this host.");
-          return data.migrate(value);
+          if (!data.prepareMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
+          return data.prepareMigrationCandidate(value);
+        },
+        approveMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["approveMigrationCandidate"]>>[0]) => {
+          migrationAuthority.assertCurrent();
+          if (!data.approveMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
+          return data.approveMigrationCandidate(value);
+        },
+        discardMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["discardMigrationCandidate"]>>[0]) => {
+          migrationAuthority.assertCurrent();
+          if (!data.discardMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
+          return data.discardMigrationCandidate(value);
         },
       };
-      if (input.action === "approveMigration" || input.action === "discardMigration") {
+      if (input.action === "approveMigration" || input.action === "discardMigration" || input.action === "migrationPreviewPage") {
         const pending = migrations.get(input.preparationId);
         if (!pending || pending.caller !== caller || pending.workspaceId !== input.workspaceId || pending.signal !== operation.signal || pending.scope !== operation.scope || pending.credentialGeneration !== credentialGeneration) {
           throw new Error("This Collection review expired. Prepare the change again.");
         }
+        const candidate = { workspaceId: input.workspaceId, datasetId: pending.review.revision.datasetId, candidateId: pending.review.candidate.candidateId, signal: operation.signal };
+        if (input.action === "migrationPreviewPage") {
+          if (pending.review.expiresAtMs <= Date.now() || !data.migrationPreviewPage) throw new Error("This Collection review expired. Prepare the change again.");
+          const page = await data.migrationPreviewPage({ ...candidate, after: input.after, limit: input.limit });
+          migrationAuthority.assertCurrent();
+          return { kind: "migration-preview-page" as const, ...DatasetMigrationPreviewPage.parse(page) };
+        }
         // Consume before any authority read or SQL, including an uncertain remote reply.
         pending.clear();
-        if (input.action === "discardMigration") return { kind: "migration-discarded" as const };
+        if (input.action === "discardMigration") { await migrationAuthority.discardMigrationCandidate(candidate); migrationAuthority.assertCurrent(); return { kind: "migration-discarded" as const }; }
         const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, { ...input, signal: operation.signal }); migrationAuthority.assertCurrent();
         return { kind: "migrated" as const, ...result };
       }
@@ -198,6 +215,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         current();
         if (prepared.previousRevision.revisionSha256 !== input.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
           migrations.get(prepared.preparationId)?.clear();
+          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
           throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
         }
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };

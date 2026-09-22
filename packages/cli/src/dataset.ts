@@ -44,7 +44,7 @@ export const DatasetSchemaChange = z.discriminatedUnion("kind", [
     default: json.optional(), options: z.array(z.string().min(1).max(128)).min(1).max(100).optional() }).strict() }).strict(),
 ]);
 export type DatasetSchemaChange = z.infer<typeof DatasetSchemaChange>;
-const migrationValue = z.union([z.null(), z.boolean(), z.number(), z.string(), z.object({ type: z.literal("integer"), value: z.string().min(1).max(128) }).strict(), z.object({ type: z.literal("blob"), base64: z.string().max(1024 * 1024) }).strict()]);
+const migrationValue = z.union([z.null(), z.number(), z.string(), z.object({ type: z.literal("integer"), value: z.string().min(1).max(128) }).strict(), z.object({ type: z.literal("blob"), base64: z.string().max(1024 * 1024) }).strict()]);
 const migrationValues = z.record(z.string().max(256), migrationValue);
 const migrationRowChange = z.object({ table: z.string().min(1).max(128), kind: z.enum(["insert", "update", "delete"]), key: migrationValues,
   before: migrationValues.nullable(), after: migrationValues.nullable() }).strict();

@@ -6,6 +6,7 @@ import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-con
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { MigrateDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
+import { DatasetMigrationCandidate } from "@dohc/cli/dataset";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 export interface LocalDatasetMigrationPreparation {
@@ -19,6 +20,7 @@ export interface LocalDatasetMigrationPreparation {
   operationSource: string;
   migrationSql: string;
   expiresAtMs: number;
+  candidate: DatasetMigrationCandidate;
 }
 export interface PrepareLocalDatasetMigration {
   datasetId: string;
@@ -38,7 +40,9 @@ interface MigrationAuthority {
   workspaceId: string;
   assertCurrent(): void;
   approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
-  migrate(input: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+  prepareMigrationCandidate(input: MigrateDatasetInput): Promise<DatasetMigrationCandidate>;
+  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+  discardMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; signal?: AbortSignal }): Promise<unknown>;
 }
 type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal };
 
@@ -56,8 +60,15 @@ export async function approveLocalDatasetMigration(dependencies: MigrationAuthor
     throw new Error("This Collection approval expired or changed. Prepare the change again.");
   }
   await assertMigrationCursor(dependencies, review.expected);
-  return dependencies.migrate({ workspaceId: dependencies.workspaceId, revision: review.revision, expected: review.expected,
-    schemaSql: review.schemaSql, operationSource: review.operationSource, migrationSql: review.migrationSql, signal: input.signal });
+  const result = await dependencies.approveMigrationCandidate({ workspaceId: dependencies.workspaceId, datasetId: review.revision.datasetId,
+    candidateId: review.candidate.candidateId, checkpointSha256: review.candidate.checkpointSha256, signal: input.signal });
+  dependencies.assertCurrent();
+  if (result.revision.revisionSha256 !== review.revision.revisionSha256 || result.revision.datasetId !== review.revision.datasetId ||
+      result.cursor.workspaceId !== dependencies.workspaceId || result.cursor.datasetId !== review.revision.datasetId ||
+      result.cursor.hostEpoch !== review.expected.hostEpoch || result.cursor.approvedRevisionHash !== review.revision.revisionSha256 || result.cursor.revision !== review.expected.revision + 1) {
+    throw new Error("The server did not confirm this Collection change. Refresh the Collection before reviewing it again.");
+  }
+  return result;
 }
 
 /** Reviews retain captured bytes and the complete data cursor, never paths to reread at approval. */
@@ -98,8 +109,14 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
         const schemaSql = read(definition.schemaPath), operationSource = read(definition.operationsPath), migrationSql = read(input.migrationPath);
         if (!migrationSql.trim() || migrationSql.includes("\0")) throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
         const revision = describeDatasetRevision({ definition, revision: previous.revision.revision + 1, schemaSql, operationSource });
+        const candidate = DatasetMigrationCandidate.parse(await dependencies.prepareMigrationCandidate({ workspaceId: dependencies.workspaceId,
+          revision, expected: previous.cursor, schemaSql, operationSource, migrationSql, signal: input.signal }));
+        dependencies.assertCurrent(); input.signal?.throwIfAborted();
+        if (!sameCursor(candidate.expected, previous.cursor) || candidate.approvedRevisionHash !== revision.revisionSha256 || candidate.expiresAtMs <= Date.now()) {
+          throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
+        }
         const review = { preparationId: randomUUID(), previousRevision: previous.revision, revision, expected: previous.cursor,
-          sourceDigest: captured.metadata.sourceDigest, schemaSql, operationSource, migrationSql, expiresAtMs: Date.now() + 10 * 60_000 };
+          sourceDigest: captured.metadata.sourceDigest, schemaSql, operationSource, migrationSql, candidate, expiresAtMs: candidate.expiresAtMs };
         const preparation = { ...review, approvalDigest: digest(JSON.stringify(["dohc-dataset-migration-review-v1", review])) };
         pending.set(preparation.preparationId, structuredClone(preparation));
         return preparation;
@@ -115,7 +132,10 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
       pending.delete(input.preparationId);
       return approveLocalDatasetMigration(dependencies, review, input);
     },
-    discardMigration(preparationId: string) { dependencies.assertCurrent(); pending.delete(preparationId); },
+    async discardMigration(preparationId: string) {
+      dependencies.assertCurrent(); const review = pending.get(preparationId); pending.delete(preparationId);
+      if (review) await dependencies.discardMigrationCandidate({ workspaceId: dependencies.workspaceId, datasetId: review.revision.datasetId, candidateId: review.candidate.candidateId });
+    },
     clear() { pending.clear(); },
   };
 }

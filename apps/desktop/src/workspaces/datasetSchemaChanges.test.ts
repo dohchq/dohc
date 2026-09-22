@@ -47,13 +47,15 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   const workspace = { workspaceId: "w" };
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
   let alterSources: ((paths: string[]) => void) | undefined;
-  const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, migrate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
+  const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, prepareMigrationCandidate() { throw new Error("Local store is fenced"); }, approveMigrationCandidate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
   const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => {
     let active = true;
     try { return await work({ workspace, signal, scope, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
     finally { active = false; }
   }, currentCredentialGeneration: () => credentialGeneration,
-    hostForWorkspace: async () => local, ...(remote ? { dataForWorkspace: async () => ({ approvedArtifacts: async (datasetId: string) => host.approvedArtifacts(datasetId), migrate: host.migrate }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
+    hostForWorkspace: async () => local, ...(remote ? { dataForWorkspace: async () => ({ approvedArtifacts: async (datasetId: string) => host.approvedArtifacts(datasetId),
+      prepareMigrationCandidate: host.prepareMigrationCandidate, approveMigrationCandidate: host.approveMigrationCandidate, discardMigrationCandidate: host.discardMigrationCandidate,
+      migrationPreviewPage: host.migrationPreviewPage }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
       for (const [path, source] of Object.entries(sources)) { if (files.has(path)) throw new Error("Existing source"); files.set(path, source); }
       alterSources?.(Object.keys(sources));
     } });
@@ -165,7 +167,7 @@ it("retains captured review bytes after the preparation operation releases its l
 it("consumes approval before an uncertain remote migration reply", async () => {
   const f = await fixture(definition, true);
   const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
-  const migrate = vi.spyOn(f.host, "migrate").mockRejectedValue(new Error("Remote reply lost"));
+  const migrate = vi.spyOn(f.host, "approveMigrationCandidate").mockRejectedValue(new Error("Remote reply lost"));
   await expect(approve(f, review)).rejects.toThrow("Remote reply lost");
   await expect(approve(f, review)).rejects.toThrow(/review expired/);
   expect(migrate).toHaveBeenCalledTimes(1);
@@ -179,7 +181,7 @@ it("refuses a credential change during approval before sending migration SQL", a
     f.changeCredentials();
     return approvedArtifacts(datasetId);
   });
-  const migrate = vi.spyOn(f.host, "migrate");
+  const migrate = vi.spyOn(f.host, "approveMigrationCandidate");
   await expect(approve(f, review)).rejects.toThrow(/server session changed/);
   expect(migrate).not.toHaveBeenCalled();
 });

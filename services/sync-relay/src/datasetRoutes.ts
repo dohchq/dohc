@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "prepare-migration" | "approve-migration" | "discard-migration" | "migration-preview-page" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -126,7 +126,14 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
-        const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "prepare-migration" ? 1024 * 1024 : 128 * 1024);
+        if (route.action === "approve-migration" || route.action === "discard-migration" || route.action === "migration-preview-page") {
+          const body = record(raw, ["candidateId", ...(route.action === "approve-migration" ? ["checkpointSha256"] : [])], route.action === "migration-preview-page" ? ["after", "limit"] : []);
+          const candidate = { ...scope, candidateId: datasetId(text(body.candidateId)), signal };
+          if (route.action === "approve-migration") return host.approveMigration(auth, { ...candidate, checkpointSha256: digest(body.checkpointSha256) });
+          if (route.action === "discard-migration") { await host.discardMigration(auth, candidate); return { discarded: true }; }
+          return host.migrationPreviewPage(auth, { ...candidate, after: body.after === undefined ? undefined : text(body.after, 1024), limit: body.limit === undefined ? undefined : positive(body.limit) });
+        }
         if (route.action === "reconcile-attempt" || route.action === "cancel-attempt") {
           const body = record(raw, ["reference", "acknowledge"]);
           if (body.acknowledge !== true) throw badRequest("Attempt reconciliation requires acknowledgment.");
@@ -162,8 +169,8 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           }
           return host.ownerReadFile(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), fileId: text(body.fileId, 128)}, signal);
         }
-        if (route.action === "activate" || route.action === "migrate") {
-          const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "migrate" ? ["expected", "migrationSql"] : [])], ["capacityBytes"]);
+        if (route.action === "activate" || route.action === "prepare-migration") {
+          const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "prepare-migration" ? ["expected", "migrationSql"] : [])], ["capacityBytes"]);
           let revision; try {revision = parseDatasetRevision(body.revision);} catch {throw badRequest("Invalid dataset revision.");}
           if (revision.datasetId !== scope.datasetId) throw badRequest("Dataset identity does not match this route.");
           const input = {...scope, revision, schemaSql: text(body.schemaSql, 256 * 1024), operationSource: text(body.operationSource, 256 * 1024), signal};
@@ -171,7 +178,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           if (body.capacityBytes !== undefined) throw badRequest("Dataset migrations cannot change capacity through this route.");
           const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
           if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
-          return host.migrate(auth, {...input, migrationSql: text(body.migrationSql, 256 * 1024), expected: {...scope,
+          return host.prepareMigration(auth, {...input, migrationSql: text(body.migrationSql, 256 * 1024), expected: {...scope,
             hostEpoch: text(expected.hostEpoch), approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
         }
         if (route.action === "invoke") {

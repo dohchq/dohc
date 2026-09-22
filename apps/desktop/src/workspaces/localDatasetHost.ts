@@ -282,7 +282,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     }
     const migrations = createLocalDatasetMigrations({ workspaceId, assertCurrent,
       approvedArtifacts: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
-      migrate: input => host.migrate(owner, input) });
+      prepareMigrationCandidate: input => host.prepareMigration(owner, input),
+      approveMigrationCandidate: input => host.approveMigration(owner, input),
+      discardMigrationCandidate: input => host.discardMigration(owner, input) });
     const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
       transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
@@ -339,6 +341,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
       approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })); },
       discardMigration: migrations.discardMigration,
+
       discard(preparationId: string) { assertCurrent(); pending.delete(preparationId); },
       approve(input: {preparationId: string; revisionSha256: string; signal?: AbortSignal}) {
         return tracked(async () => {
@@ -367,7 +370,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)); },
       discardRecovery(transferId: string) { return tracked(() => recovery.discard(transferId)); },
-      migrate(input: import("@dohc/app-backend-runtime/dataset-host").MigrateDatasetInput) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.migrate(owner, { ...input, signal: signal(input.signal) })); },
+      prepareMigrationCandidate(input: Parameters<typeof host.prepareMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.prepareMigration(owner, { ...input, signal: signal(input.signal) })); },
+      approveMigrationCandidate(input: Parameters<typeof host.approveMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.approveMigration(owner, { ...input, signal: signal(input.signal) })); },
+      migrationPreviewPage(input: Parameters<typeof host.migrationPreviewPage>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(async () => host.migrationPreviewPage(owner, { ...input, signal: signal(input.signal) })); },
+      discardMigrationCandidate(input: Parameters<typeof host.discardMigration>[1]) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(async () => host.discardMigration(owner, { ...input, signal: signal(input.signal) })); },
       prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {
         return tracked(async () => {
           const archive = await host.exportRecovery(owner, { workspaceId, datasetId, signal: signal(input.signal) });

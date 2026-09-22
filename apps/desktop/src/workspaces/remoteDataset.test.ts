@@ -40,18 +40,27 @@ describe("remote Collection authority", () => {
     expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ reference: value.reference, acknowledge: true });
     f.relay.mockResolvedValue({ cleared: true }); await expect(f.data.cancelAttempt!(value)).rejects.toThrow();
   });
-  it("sends captured migration bytes and validates the confirmed cursor", async () => {
+  it("sends captured migration bytes and approves the resulting candidate", async () => {
     const f = fixture();
     const next = describeDatasetRevision({ definition: { ...definition, name: "Renamed" }, revision: 2, schemaSql: "SQL", operationSource: "RULES" });
     const value = { workspaceId: "workspace", revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor };
     const committed = { revision: next, cursor: { ...approved.cursor, approvedRevisionHash: next.revisionSha256, revision: 1, digest: "a".repeat(64) } };
-    f.relay.mockResolvedValue(committed);
-    expect(await f.data.migrate!(value)).toEqual(committed);
-    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/migrate`);
+    const candidate = { candidateId: id(9), expected: approved.cursor, approvedRevisionHash: next.revisionSha256, checkpointSha256: "f".repeat(64), expiresAtMs: Date.now() + 10000, preview: { tables: [], firstPage: { changes: [], nextCursor: null } } };
+    f.relay.mockResolvedValue(candidate);
+    expect(await f.data.prepareMigrationCandidate!(value)).toEqual(candidate);
+    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/prepare-migration`);
     expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor });
-    for (const patch of [{ hostEpoch: "other" }, { datasetId: id(9) }, { revision: 7 }, { approvedRevisionHash: revision.revisionSha256 }]) {
+    for (const patch of [{ hostEpoch: "other" }, { datasetId: id(9) }, { revision: 7 }, { approvedRevisionHash: next.revisionSha256 }]) {
+      f.relay.mockResolvedValue({ ...candidate, expected: { ...candidate.expected, ...patch } });
+      await expect(f.data.prepareMigrationCandidate!(value)).rejects.toThrow(/different Collection review/);
+    }
+    const approval = { workspaceId: "workspace", datasetId: id(1), candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256 };
+    f.relay.mockResolvedValue(committed);
+    expect(await f.data.approveMigrationCandidate!(approval)).toEqual(committed);
+    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/approve-migration`);
+    for (const patch of [{ datasetId: id(9) }, { approvedRevisionHash: revision.revisionSha256 }]) {
       f.relay.mockResolvedValue({ ...committed, cursor: { ...committed.cursor, ...patch } });
-      await expect(f.data.migrate!(value)).rejects.toThrow(/did not confirm/);
+      await expect(f.data.approveMigrationCandidate!(approval)).rejects.toThrow(/did not confirm/);
     }
   });
 

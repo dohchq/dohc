@@ -78,6 +78,9 @@ describe("owner Collection migration", () => {
     f.next();
     const review = await prepare(host, f), exact = approval(review);
     expect(DatasetMigrationPreparation.parse(review).expected.revision).toBe(1);
+    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 1, afterRows: 1, changedRows: 1 }]);
+    expect(review.candidate.preview.firstPage.changes).toMatchObject([{ table: "items", kind: "update", before: { name: "Camera" }, after: { name: "Camera migrated", note: null } }]);
+    expect((await host.query(call(first, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
     f.files.set("items/migration.sql", "DROP TABLE items;");
     review.migrationSql = "DROP TABLE items;";
     review.revision.definition.name = "Tampered";
@@ -107,6 +110,36 @@ describe("owner Collection migration", () => {
     await expect(host.approveMigration(approval(review))).rejects.toThrow(/expired or changed/);
   });
 
+  it("previews every deleted record across bounded pages before approval", async () => {
+    const { host } = await open(), f = fixture(), first = await activate(host, f);
+    for (let index = 0; index < 3; index++) await host.action(call(first, id(6), { name: `Record ${index}` }, `record-${index}`));
+    f.next();
+    f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; DELETE FROM items;");
+    const review = await prepare(host, f);
+    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 3, afterRows: 0, changedRows: 3 }]);
+    const changes = [];
+    let after: string | undefined;
+    do {
+      const page = await host.migrationPreviewPage({ workspaceId: "w", datasetId: id(1), candidateId: review.candidate.candidateId, after, limit: 1 });
+      expect(page.changes).toHaveLength(1); changes.push(...page.changes); after = page.nextCursor ?? undefined;
+    } while (after);
+    expect(changes.map(change => change.before!.name).sort()).toEqual(["Record 0", "Record 1", "Record 2"]);
+    expect(changes.every(change => change.kind === "delete" && change.after === null)).toBe(true);
+    expect((await host.query(call(first, id(5)))).result).toHaveLength(3);
+    const migrated = await host.approveMigration(approval(review));
+    expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([]);
+  });
+
+  it("commits the previewed random values without rerunning migration SQL", async () => {
+    const { host } = await open(), f = fixture(), first = await activate(host, f);
+    await host.action(call(first, id(6), { name: "Before" }, "random"));
+    f.next(); f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; UPDATE items SET name=lower(hex(randomblob(16)));");
+    const review = await prepare(host, f);
+    const expectedName = review.candidate.preview.firstPage.changes[0]!.after!.name;
+    const migrated = await host.approveMigration(approval(review));
+    expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: expectedName, note: null }]);
+  });
+
   it("rolls back a rejected migration allocation with data and schema intact", async () => {
     let reject = true;
     const { host } = await open({ resources: () => ({ accountMigration() { if (reject) throw new Error("quota refused"); } }) });
@@ -125,7 +158,7 @@ describe("owner Collection migration", () => {
     const { host } = await open(), f = fixture(); await activate(host, f); f.next();
     const review = await prepare(host, f);
     await expect(host.approveMigration({ ...approval(review), approvalDigest: "0".repeat(64) })).rejects.toThrow(/expired or changed/);
-    host.discardMigration(review.preparationId);
+    await host.discardMigration(review.preparationId);
     await expect(host.approveMigration(approval(review))).rejects.toThrow(/expired or changed/);
     const expired = await prepare(host, f);
     vi.spyOn(Date, "now").mockReturnValue(expired.expiresAtMs);
@@ -137,8 +170,7 @@ describe("owner Collection migration", () => {
   it("rejects mismatched target schema and never publishes partial changes", async () => {
     const { host } = await open(), f = fixture(), first = await activate(host, f); f.next();
     f.files.set("items/migration.sql", "SELECT 1;");
-    const review = await prepare(host, f);
-    await expect(host.approveMigration(approval(review))).rejects.toThrow(/schema/i);
+    await expect(prepare(host, f)).rejects.toThrow(/schema/i);
     expect(host.approvedArtifacts(id(1)).revision).toEqual(first);
     expect((await host.query(call(first, id(5)))).result).toEqual([]);
   });

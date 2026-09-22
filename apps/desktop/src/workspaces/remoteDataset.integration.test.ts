@@ -64,9 +64,13 @@ it("manages the authoritative relay Collection through the desktop owner adapter
     await expect(data.invoke({ ...submit, input: {}, idempotencyKey: "missing" })).rejects.toMatchObject({ refusal: { code: "name_required", message: "Enter your name." } });
     const previous = await data.approvedArtifacts(id(1));
     const renamed = describeDatasetRevision({ definition: { ...definition, name: "Guests" }, revision: 2, schemaSql, operationSource });
-    const migrated = await data.migrate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor });
+    const candidate = await data.prepareMigrationCandidate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor });
+    expect(candidate.preview.firstPage.changes).toEqual([]);
+    expect((await data.describe(id(1))).revision).toBe(1);
+    expect(await data.migrationPreviewPage!({ workspaceId: "w", datasetId: id(1), candidateId: candidate.candidateId })).toEqual(candidate.preview.firstPage);
+    const migrated = await data.approveMigrationCandidate!({ workspaceId: "w", datasetId: id(1), candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256 });
     expect(migrated.revision).toEqual(renamed);
     expect((await data.describe(id(1))).name).toBe("Guests");
-    await expect(data.migrate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor })).rejects.toThrow();
+    await expect(data.prepareMigrationCandidate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor })).rejects.toThrow();
   } finally { controller.abort(); await host.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); }
 });

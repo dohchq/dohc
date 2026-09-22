@@ -259,8 +259,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       activate(auth: AppBackendAuth, input: Parameters<typeof host.activate>[1]) {
         return host.activate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
-      migrate(auth: AppBackendAuth, input: Parameters<typeof host.migrate>[1]) {
-        return host.migrate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      prepareMigration(auth: AppBackendAuth, input: Parameters<typeof host.prepareMigration>[1]) {
+        return host.prepareMigration(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      approveMigration(auth: AppBackendAuth, input: Parameters<typeof host.approveMigration>[1]) {
+        return host.approveMigration(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      migrationPreviewPage(auth: AppBackendAuth, input: Parameters<typeof host.migrationPreviewPage>[1]) {
+        return host.migrationPreviewPage(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      discardMigration(auth: AppBackendAuth, input: Parameters<typeof host.discardMigration>[1]) {
+        return host.discardMigration(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
       lifecycle: host.lifecycle, archiveDataset: host.archiveDataset, restoreDataset: host.restoreDataset,
