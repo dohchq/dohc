@@ -4,6 +4,7 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { OwnerAppBackendRequest, OwnerAppBackendResult } from "./appBackend";
+import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppFormRequest, OwnerAppFormResult } from "./appForm";
 export { OwnerAppFormRequest, OwnerAppFormResult } from "./appForm";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
@@ -238,6 +239,7 @@ const collectionCreateRecordArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appBackend"), args: z.object({ ...argsBase, request: OwnerAppBackendRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appForm"), args: z.object({ ...argsBase, request: OwnerAppFormRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
@@ -727,6 +729,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
 
 const cliResultSchemas = {
   appBackend: OwnerAppBackendResult,
+  dataset: DatasetResult,
   appForm: OwnerAppFormResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,

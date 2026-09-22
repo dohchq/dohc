@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -17,6 +18,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   createRecord,
+  dataset,
   createWorkspaceDirectory,
   listChannels,
   queryCollection,
@@ -108,6 +110,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
+
+  registerWrite("dohc_dataset", {
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Create prepares source; approve uses the reviewed preparation ID and hash. Invoke an approved operation with the described revision and a stable retry key. The same rules apply in dohc and apps.",
+    inputSchema: {request: DatasetRequest},
+  }, async ({request}) => text(await dataset(ctx, request)));
 
   server.registerTool(
     "dohc_list_workspaces",

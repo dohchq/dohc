@@ -13,6 +13,7 @@ import { isRecord } from "@dohc/workspace-core/records";
 import { databaseSyncStrategy, DOHC_METADATA_GUARD, DOHC_TRASH_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, nameUnitFor, sameFsEntry, entryCharBudget, trashEntryPlan, WINDOWS_MAX_PATH_CHARS, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type FsEntryIdentity, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
+import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
   collectionCreateFieldsSchema,
@@ -2342,11 +2343,19 @@ async function requestCli<Verb extends CliVerb>(
   try {
     const rawResult = ctx.request
       ? await ctx.request(request)
-      : await sendCliRequest(request, { stateDir: ctx.home });
+      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" ? {timeoutMs:90_000} : {}) });
     return parseCliResult(verb, rawResult);
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error) };
   }
+}
+
+/** Dataset authority comes from the owning desktop attachment, never a folder share. */
+export async function dataset(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"Collections require the owning workspace."};
+  const parsed = DatasetRequest.safeParse(input);
+  if (!parsed.success) return {ok:false as const,reason:"Invalid Collection request. Use a supported action and its required fields."};
+  return requestCli(ctx, "dataset", {request:parsed.data});
 }
 
 export async function listFileChats(ctx: ToolContext, args: { path: string }) {

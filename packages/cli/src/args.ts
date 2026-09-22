@@ -4,6 +4,7 @@ import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppBackendRequest } from "./appBackend";
 import { OwnerAppFormRequest } from "./appForm";
 import {OwnerAppResponsesRequest} from "./appResponses";
+import { DatasetRequest } from "./dataset";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -13,6 +14,7 @@ interface ParsedCliBase {
 export type ParsedCliCommand = ParsedCliBase &
   (
     | { verb: "appForm"; request: OwnerAppFormRequest }
+    | { verb: "dataset"; request: DatasetRequest }
     | { verb: "appBackend"; request: OwnerAppBackendRequest }
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
     | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
@@ -357,6 +359,15 @@ export function parseCliArguments(
 ): ParsedCliCommand {
   const global = stripGlobalFlags(argv);
   const [family, verb, ...tokens] = global.tokens;
+  if (family === "dataset") {
+    const [json, ...rest] = tokens;
+    if (!verb || !json || rest.length) fail("usage: dohc dataset <list|describe|create|prepare|approve|discard|invoke> '<JSON>'");
+    try {
+      const value: unknown = JSON.parse(json);
+      if (!value || typeof value !== "object" || Array.isArray(value) || ("action" in value && value.action !== verb)) fail("dataset arguments must match the requested action");
+      return {actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "dataset", request: DatasetRequest.parse({...value, action:verb})};
+    } catch { fail("invalid dataset arguments; run dohc dataset --help"); }
+  }
   if (family === "app") {
     const [json, ...rest] = tokens;
     if (!verb || !json || rest.length) fail("usage: dohc app <createForm|list|prepare|approve|cancel|withdraw|revokeCollection|reviewReactivation|responses> '<JSON>'");

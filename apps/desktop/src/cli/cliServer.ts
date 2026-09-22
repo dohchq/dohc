@@ -176,6 +176,7 @@ export interface CliCollectionsPort {
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   appForm?(request: import("@dohc/cli/protocol").OwnerAppFormRequest): Promise<import("@dohc/cli/protocol").OwnerAppFormResult>;
   appBackend?(request: import("@dohc/cli/app-backend").OwnerAppBackendRequest): Promise<import("@dohc/cli/app-backend").OwnerAppBackendResult>;
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -1615,6 +1616,10 @@ async function dispatch(
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appBackend) throw new CliCommandError("App data requires the owning workspace.");
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("App export requires an explicit savePath.");
       return context.appBackend(request.args.request);
+    }
+    case "dataset": {
+      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
+      return context.dataset(request.args.request);
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");

@@ -60,6 +60,8 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "dataset":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appForm":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appBackend":
@@ -177,6 +179,22 @@ function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
 
 export async function executeCli(options: CliExecutionOptions): Promise<CliExecutionResult> {
   try {
+    if (options.argv.length === 2 && options.argv[0] === "dataset" && ["--help", "-h"].includes(options.argv[1]!)) return {
+      exitCode: 0, stderr: "", stdout: [
+        "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
+        "Actions: list, describe, create, prepare, approve, discard, invoke",
+        "Every request names workspaceId. Run this command from its owning workspace.",
+        "list: optional after and limit. describe: datasetId.",
+        "create: definition. Writes generated source and prepares it for approval.",
+        "prepare: descriptorPath. Captures existing source for review.",
+        "approve: preparationId and revisionSha256 from the reviewed preparation.",
+        "discard: preparationId. Leaves the source files in place.",
+        "invoke: datasetId, revision, revisionSha256, operationId, input, idempotencyKey.",
+        "Use describe to find approved operation IDs. Retry uncertain writes with the same input and idempotencyKey.",
+        "Commands use the same Collection rules as dohc. They do not accept SQL or caller identity.",
+        "",
+      ].join("\n"),
+    };
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
@@ -191,7 +209,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       ((value: CliRequestWithoutToken) =>
         sendCliRequest(value, {
           ...options.client,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "appBackend" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appBackend" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
           env,
         }));
     const rawResult = await send(request);

@@ -8,6 +8,7 @@ import type { ToolContext } from "./tools";
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
+  "dohc_dataset",
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_move_path",

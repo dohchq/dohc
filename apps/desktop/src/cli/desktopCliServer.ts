@@ -43,6 +43,7 @@ import {
 
 interface DesktopCliServerDependencies<State> {
   appBackend?(request: import("@dohc/cli/app-backend").OwnerAppBackendRequest): Promise<import("@dohc/cli/app-backend").OwnerAppBackendResult>;
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -195,6 +196,11 @@ export function createDesktopCliServer<State>(
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app workspace attachment changed.");
           return dependencies.appBackend!(request);
+        }) } : {}),
+      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
+          return dependencies.dataset!(request);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
