@@ -53,7 +53,8 @@ function lock(path:string,create:boolean):WorkerLease {
   }catch(error){db.close();throw new Error(`Dataset worker ownership is busy or unavailable: ${path}`,{cause:error});}
 }
 function manifest(root:string,directory:string):Record<string,unknown> {
-  const value=readJson(join(directory,MANIFEST));
+  let value:Record<string,unknown>;
+  try{value=readJson(join(directory,MANIFEST));}catch(error){throw new Error(`Dataset worker ownership is missing or damaged; inspect it before cleanup: ${directory}`,{cause:error});}
   if(value.format!==format||value.root!==root||value.directory!==basename(directory)||typeof value.session!=="string"||!/^[a-f0-9-]{36}$/.test(value.session))
     throw new Error(`Unknown dataset worker directory; inspect it before cleanup: ${directory}`);
   return value;
