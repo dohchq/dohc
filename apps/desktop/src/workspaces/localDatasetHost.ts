@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -6,13 +6,14 @@ import type { DatabaseSync } from "node:sqlite";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
-import { compileClosedApp } from "./closedAppCompiler";
+import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
@@ -24,6 +25,8 @@ export interface LocalDatasetHostOptions {
   assertCurrent?(): void;
   runtime?: AppBackendRuntimeOptions;
   persistentRuntime?: DatasetSupervisorOptions["runtime"];
+  /** Electron supplies its installed, supervised compiler. Node tests may use the direct compiler. */
+  compile?(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   maxWorkers?: number;
   /** Retained journal and checkpoint bytes plus reserved materialization capacity. */
   maxStoredBytes?: number;
@@ -45,6 +48,23 @@ export interface LocalDatasetInvocation {
   idempotencyKey: string;
   signal?: AbortSignal;
 }
+export interface LocalDatasetUpload {
+  datasetId: string;
+  revision: number;
+  revisionSha256: string;
+  idempotencyKey: string;
+  name: string;
+  contentType: string;
+  bytesBase64: string;
+  signal?: AbortSignal;
+}
+export interface LocalDatasetFileRequest {
+  datasetId: string;
+  revision: number;
+  revisionSha256: string;
+  fileId: string;
+  signal?: AbortSignal;
+}
 
 const artifactBytes = 256 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -56,6 +76,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   if (typeof options.workspaceId !== "string" || !options.workspaceId || options.workspaceId.includes("\0") || Buffer.byteLength(options.workspaceId) > 256) throw new Error("Invalid workspace identity.");
   const maxStoredBytes = options.maxStoredBytes ?? 1024 * 1024 * 1024;
   if (!Number.isSafeInteger(maxStoredBytes) || maxStoredBytes < 4096) throw new Error("Invalid Collection storage limit.");
+  if (process.versions.electron && !options.compile) throw new Error("Electron must configure the installed Collection compiler.");
+  const compile = options.compile ?? ((request: ClosedAppBuildRequest) => compileClosedApp(request));
   const root = await realpath(options.workspaceRoot);
   let directory = root;
   for (const part of [".dohc", "datasets"]) {
@@ -71,7 +93,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
   const { DatabaseSync: Sqlite } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
   const db: DatabaseSync = new Sqlite(path, { allowExtension: false });
-  let closed = false, closePromise: Promise<void> | undefined;
+  let closed = false, closePromise: Promise<void> | undefined, transactionSequence = 0;
   const lifetime = new AbortController(), active = new Set<Promise<unknown>>();
   const owner: OwnerContext = { owner: true };
   const workspaceId = options.workspaceId;
@@ -82,24 +104,31 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
   function signal(input?: AbortSignal) { assertCurrent(); return input ? AbortSignal.any([input, lifetime.signal]) : lifetime.signal; }
   function transaction<T>(work: () => T): T {
-    assertCurrent(); db.exec("BEGIN IMMEDIATE");
-    try { const result = work(); db.exec("COMMIT"); return result; }
-    catch (error) { db.exec("ROLLBACK"); throw error; }
+    assertCurrent();
+    const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
+    db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
+    try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
+    catch (error) { db.exec(nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK"); throw error; }
   }
   async function tracked<T>(work: () => Promise<T>): Promise<T> {
     assertCurrent(); const result = work(); active.add(result);
     try { return await result; } finally { active.delete(result); }
   }
   function charge(bytes: number) {
-    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("Invalid Collection storage allocation.");
-    const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?<=?").run(bytes, bytes, maxStoredBytes);
+    if (!Number.isSafeInteger(bytes)) throw new Error("Invalid Collection storage allocation.");
+    const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?>=0 AND bytes+?<=?").run(bytes, bytes, bytes, maxStoredBytes);
     if (changed.changes !== 1) throw new Error("Collection storage is full. Export your data before continuing.");
   }
   let supervisor: Awaited<ReturnType<typeof createDatasetSupervisor>> | undefined;
   try {
     db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;
       CREATE TABLE IF NOT EXISTS local_dataset_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL) STRICT;
-      CREATE TABLE IF NOT EXISTS local_dataset_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;`);
+      CREATE TABLE IF NOT EXISTS local_dataset_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
+      CREATE TABLE IF NOT EXISTS local_dataset_files(
+        workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,
+        metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,
+        attached_revision INTEGER,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
+        PRIMARY KEY(workspace_id,dataset_id,file_id),UNIQUE(workspace_id,dataset_id,key)) STRICT;`);
     transaction(() => {
       db.prepare("INSERT OR IGNORE INTO local_dataset_identity VALUES(1,?)").run(workspaceId);
       if (db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get()!.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
@@ -120,18 +149,38 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       async compileOperations(source, sourcePath) {
         const bytes = Buffer.from(source);
-        const built = await compileClosedApp({ entryPath: sourcePath, inputs: [{path: sourcePath, bytes, sha256: digest(bytes)}],
-          packageMap: {}, bounds: {maxInputFiles: 1, maxInputBytes: artifactBytes, maxOutputBytes: artifactBytes} });
+        const built = await compile({ entryPath: sourcePath, inputs: [{path: sourcePath, bytes, sha256: digest(bytes)}],
+          packageMap: {}, bounds: {maxInputFiles: 1, maxInputBytes: artifactBytes, maxOutputBytes: artifactBytes} }, lifetime.signal);
         assertCurrent(); lifetime.signal.throwIfAborted();
         if (built.files.length !== 1 || built.files[0]?.path !== "bundle.js") throw new Error("Collection actions must compile to one script.");
         return decode(built.files[0].bytes);
       },
-      accountCreation(context, allocation) { charge(allocation.bytes); resources?.accountCreation?.(context, allocation); },
+      accountCreation(context, allocation) { charge(allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       operationResources(context, request) {
         const extra = resources?.operationResources?.(context, request);
-        return { files: extra?.files, accountAndAttach(allocation) {
-          if (allocation.attachedFileIds.length && !extra?.accountAndAttach) throw new Error("Collection attachments are unavailable.");
-          charge(allocation.bytes); extra?.accountAndAttach?.(allocation);
+        const ids = new Set<string>();
+        const collect = (value: unknown) => {
+          if (typeof value === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value)) ids.add(value);
+          else if (Array.isArray(value)) value.forEach(collect);
+          else if (value && typeof value === "object") Object.values(value).forEach(collect);
+        };
+        collect(request.input);
+        const files: AppBackendFile[] = [];
+        for (const fileId of ids) {
+          const row = db.prepare("SELECT metadata FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)").get(workspaceId, request.datasetId, fileId, Date.now());
+          if (row) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
+        }
+        if (files.length > 32) throw new Error("A Collection action can attach at most 32 files.");
+        const capturedFiles = new Set(files.map(file => file.fileId));
+        return { files: [...(extra?.files ?? []), ...files], accountAndAttach(allocation) {
+          // The journal already owns the transaction containing this callback.
+          for (const fileId of allocation.attachedFileIds) {
+            if (!capturedFiles.has(fileId)) throw new Error("This Collection file is unavailable.");
+            const changed = db.prepare("UPDATE local_dataset_files SET attached_revision=coalesce(attached_revision,?) WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)")
+              .run(allocation.revision, workspaceId, request.datasetId, fileId, Date.now());
+            if (changed.changes !== 1) throw new Error("This Collection file expired. Upload it again.");
+          }
+          charge(allocation.bytes); return extra?.accountAndAttach?.(allocation);
         } };
       },
     });
@@ -165,10 +214,14 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         return preparation;
       });
     }
-    function checkInvocation(input: LocalDatasetInvocation, readOnly?: boolean) {
+    function checkRevision(input: Pick<LocalDatasetInvocation, "datasetId" | "revision" | "revisionSha256">) {
       assertCurrent();
       const description = host.describe(owner, {workspaceId, datasetId: input.datasetId});
       if (input.revision !== description.revision || input.revisionSha256 !== description.revisionSha256) throw new Error("Collection rules changed. Reload the Collection.");
+      return description;
+    }
+    function checkInvocation(input: LocalDatasetInvocation, readOnly?: boolean) {
+      const description = checkRevision(input);
       if (readOnly !== undefined && !description.operations.some(operation => operation.operationId === input.operationId && operation.readOnly === readOnly)) throw new Error("Choose an approved Collection action.");
     }
     function invoke(input: LocalDatasetInvocation, readOnly?: boolean): Promise<DatasetInvocationResult> {
@@ -193,6 +246,48 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       list(input: {after?: string; limit?: number} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
       describe(datasetId: string) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId}); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
+      upload(input: LocalDatasetUpload) {
+        return tracked(async () => {
+          signal(input.signal).throwIfAborted(); checkRevision(input);
+          const parsed = parseAppBackendUploadRequest({authorityRevision: input.revision, idempotencyKey: input.idempotencyKey, name: input.name, contentType: input.contentType, bytesBase64: input.bytesBase64});
+          const bytes = Buffer.from(parsed.bytesBase64, "base64"), sha256 = digest(bytes);
+          if (!appBackendFileSignatureMatches(parsed.contentType, bytes)) throw new Error("File content does not match its type.");
+          const now = Date.now();
+          return transaction(() => {
+            const head = journal.head({workspaceId, datasetId:input.datasetId}, assertCurrent);
+            if (!head.active || head.cursor.approvedRevisionHash !== input.revisionSha256) throw new Error("Collection authority changed. Reload the Collection.");
+            const stale = db.prepare("SELECT file_id, storage_bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL AND expires_at_ms<=?").all(workspaceId, input.datasetId, now);
+            for (const row of stale) { db.prepare("DELETE FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NULL").run(workspaceId, input.datasetId, String(row.file_id)); charge(-Number(row.storage_bytes)); }
+            const key = JSON.stringify([workspaceId, input.datasetId, parsed.idempotencyKey]);
+            const existing = db.prepare("SELECT metadata FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND key=?").get(workspaceId, input.datasetId, key) as {metadata:string}|undefined;
+            if (existing) {
+              const file = parseAppBackendFile(JSON.parse(existing.metadata));
+              if (file.sha256 !== sha256 || file.name !== parsed.name || file.contentType !== parsed.contentType) throw new Error("This retry key was already used for another upload.");
+              return {file, replayed:true};
+            }
+            const staged = Number(db.prepare("SELECT count(*) AS count FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL").get(workspaceId, input.datasetId)!.count);
+            if (staged >= 32) throw new Error("Attach or wait for existing uploads before uploading more files.");
+            const file: AppBackendFile = {fileId: randomBytes(24).toString("base64url"), name: parsed.name, contentType: parsed.contentType, byteLength: bytes.byteLength, sha256};
+            const metadata = JSON.stringify(file), storageBytes = bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(key) + 384;
+            db.prepare("INSERT INTO local_dataset_files VALUES(?,?,?,?,?,?,?,?,NULL,?)").run(workspaceId, input.datasetId, file.fileId, key, metadata, bytes, now, now + 86_400_000, storageBytes);
+            charge(storageBytes);
+            return {file, replayed:false};
+          });
+        });
+      },
+      file(input: LocalDatasetFileRequest) {
+        return tracked(async () => {
+          signal(input.signal).throwIfAborted(); checkRevision(input);
+          if (typeof input.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(input.fileId)) throw new Error("Invalid Collection file.");
+          return transaction(() => {
+            const row = db.prepare("SELECT metadata,content,expires_at_ms,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId, input.datasetId, input.fileId) as {metadata:string;content:Uint8Array;expires_at_ms:number;attached_revision:number|null}|undefined;
+            if (!row || (row.attached_revision === null && row.expires_at_ms <= Date.now())) throw new Error("This Collection file is unavailable.");
+            const file = parseAppBackendFile(JSON.parse(row.metadata));
+            if (row.content.byteLength !== file.byteLength || digest(row.content) !== file.sha256) throw new Error("Collection file integrity check failed.");
+            return {file, bytesBase64: Buffer.from(row.content).toString("base64")};
+          });
+        });
+      },
       invoke: (input: LocalDatasetInvocation) => invoke(input),
       query: (input: LocalDatasetInvocation) => invoke(input, true),
       action: (input: LocalDatasetInvocation) => invoke(input, false),

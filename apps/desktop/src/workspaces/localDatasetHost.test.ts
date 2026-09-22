@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
+import { compileClosedApp } from "./closedAppCompiler";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -22,7 +23,7 @@ const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT
 // Type annotations prove activation executes the compiled capture, not raw TypeScript.
 const source = `globalThis.operations={
   list(ctx: any) {return ctx.db.query('SELECT id,name FROM items ORDER BY id');},
-  add(ctx: any,input: any) {ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.name]);return {name:input.name};}
+  add(ctx: any,input: any) {if(input.fileId)ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.name]);return {name:input.name};}
 };`;
 function sources() {
   const files = new Map([["items/dataset.json", JSON.stringify(definition)], [definition.schemaPath, schemaSql], [definition.operationsPath, source]]);
@@ -57,6 +58,7 @@ async function activate(host: LocalDatasetHost, fixture = sources()) {
 const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: string, idempotencyKey = "read", input = {}) =>
   ({datasetId: id(1), revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationId, idempotencyKey, input});
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const host of hosts.splice(0)) await host.close();
   for (const root of roots.splice(0)) await rm(root, {recursive: true, force: true});
 });
@@ -101,6 +103,61 @@ describe("local dataset owner adapter", () => {
     expect((await host.query(call(approved,id(5)))).result).toEqual([]);
   });
 
+  it("stores private uploads, replays the same upload key, and attaches bytes in the data journal", async () => {
+    const {host,workspaceRoot} = await open(), approved = await activate(host);
+    const bytes = Buffer.from("%PDF-synthetic").toString("base64");
+    const upload = {datasetId:id(1),revision:approved.revision.revision,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"upload-1",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:bytes};
+    const first = await host.upload(upload);
+    expect(first.file.byteLength).toBe(Buffer.from(bytes,"base64").byteLength);
+    expect(await host.upload(upload)).toEqual({...first,replayed:true});
+    await expect(host.upload({...upload,bytesBase64:Buffer.from("%PDF-other").toString("base64")})).rejects.toThrow(/retry key/);
+    const read = await host.file({...upload,fileId:first.file.fileId});
+    expect(read.bytesBase64).toBe(bytes);
+    const added = await host.action(call(approved,id(6),"add-file",{name:"With receipt",fileId:first.file.fileId}));
+    expect(added.result).toEqual({name:"With receipt"});
+    const staged = await host.upload({...upload,idempotencyKey:"unattached"});
+    await host.close();
+    const restarted = (await open({workspaceRoot})).host;
+    vi.spyOn(Date,"now").mockReturnValue(Date.now() + 86_400_001);
+    expect(await restarted.upload(upload)).toEqual({...first,replayed:true});
+    expect((await restarted.file({...upload,fileId:first.file.fileId})).bytesBase64).toBe(bytes);
+    await expect(restarted.file({...upload,fileId:staged.file.fileId})).rejects.toThrow(/unavailable/);
+    const fresh = await restarted.upload({...upload,idempotencyKey:"unattached"});
+    expect(fresh.file.fileId).not.toBe(staged.file.fileId);
+    expect(await restarted.action(call(approved,id(6),"add-file",{name:"With receipt",fileId:first.file.fileId}))).toEqual({...added,replayed:true});
+  });
+
+  it("does not attach a file when the authoritative data commit rolls back", async () => {
+    let fail = true;
+    const {host} = await open({resources:() => ({operationResources:() => ({accountAndAttach:() => {if(fail)throw new Error("quota refused");}})})});
+    const approved = await activate(host);
+    const upload = {datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"upload",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-synthetic").toString("base64")};
+    const staged = await host.upload(upload);
+    await expect(host.action(call(approved,id(6),"add-file",{name:"No commit",fileId:staged.file.fileId}))).rejects.toThrow("quota refused");
+    expect((await host.query(call(approved,id(5)))).result).toEqual([]);
+    vi.spyOn(Date,"now").mockReturnValue(Date.now() + 86_400_001);
+    await expect(host.file({...upload,fileId:staged.file.fileId})).rejects.toThrow(/unavailable/);
+    fail = false;
+    const fresh = await host.upload(upload);
+    expect(fresh.file.fileId).not.toBe(staged.file.fileId);
+    expect((await host.action(call(approved,id(6),"add-file",{name:"Accepted",fileId:fresh.file.fileId}))).result).toEqual({name:"Accepted"});
+  });
+
+  it("validates upload bytes, scope, abort and quota before retaining an upload key", async () => {
+    const {host} = await open({maxStoredBytes: 2 * 1024 * 1024}), approved = await activate(host);
+    const input = {datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"upload",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-synthetic").toString("base64")};
+    for (const bytesBase64 of ["broken",Buffer.from("wrong signature").toString("base64"),Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64")]) {
+      await expect(host.upload({...input,bytesBase64})).rejects.toThrow();
+    }
+    const huge = Buffer.alloc(1024 * 1024,32);huge.write("%PDF-");
+    await expect(host.upload({...input,bytesBase64:huge.toString("base64")})).rejects.toThrow(/storage is full/);
+    await expect(host.upload({...input,datasetId:id(10)})).rejects.toThrow(/access/);
+    await expect(host.upload({...input,revisionSha256:"0".repeat(64)})).rejects.toThrow(/rules changed/);
+    const abort = new AbortController(); abort.abort();
+    await expect(host.upload({...input,signal:abort.signal})).rejects.toThrow();
+    expect((await host.upload(input)).replayed).toBe(false);
+  });
+
   it("rejects source paths before capture and refuses a different workspace identity", async () => {
     const {host,workspaceRoot} = await open(), fixture = sources();
     const capture = vi.spyOn(fixture.adapter,"captureSourceMetadata");
@@ -122,6 +179,19 @@ describe("local dataset owner adapter", () => {
     await host.close();
     expect(() => host.list()).toThrow(/session ended/);
     await expect(host.prepare({descriptorPath:"items/dataset.json",adapter:sources().adapter})).rejects.toThrow(/session ended/);
+  });
+
+  it("routes the captured operations through the host compiler without filesystem rereads", async () => {
+    const compile = vi.fn<NonNullable<LocalDatasetHostOptions["compile"]>>((request) => compileClosedApp(request));
+    const {host} = await open({compile});
+    await activate(host);
+    expect(compile).toHaveBeenCalledTimes(1);
+    const [request,abort] = compile.mock.calls[0]!;
+    expect(request.entryPath).toBe(definition.operationsPath);
+    expect(request.inputs).toHaveLength(1);
+    expect(Buffer.from(request.inputs[0]!.bytes).toString()).toBe(source);
+    expect(abort).toBeInstanceOf(AbortSignal);
+    await host.close(); expect(abort.aborted).toBe(true);
   });
 
   it("rejects a linked private directory before opening storage", async () => {
