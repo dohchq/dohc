@@ -44,6 +44,16 @@ export const DatasetSchemaChange = z.discriminatedUnion("kind", [
     default: json.optional(), options: z.array(z.string().min(1).max(128)).min(1).max(100).optional() }).strict() }).strict(),
 ]);
 export type DatasetSchemaChange = z.infer<typeof DatasetSchemaChange>;
+const migrationValue = z.union([z.null(), z.boolean(), z.number(), z.string(), z.object({ type: z.literal("integer"), value: z.string().min(1).max(128) }).strict(), z.object({ type: z.literal("blob"), base64: z.string().max(1024 * 1024) }).strict()]);
+const migrationValues = z.record(z.string().max(256), migrationValue);
+const migrationRowChange = z.object({ table: z.string().min(1).max(128), kind: z.enum(["insert", "update", "delete"]), key: migrationValues,
+  before: migrationValues.nullable(), after: migrationValues.nullable() }).strict();
+export const DatasetMigrationPreviewPage = z.object({ changes: z.array(migrationRowChange).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
+const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative() }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
+export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256,
+  expiresAtMs: z.number().int().positive(), preview: migrationPreview }).strict();
+export type DatasetMigrationPreviewPage = z.infer<typeof DatasetMigrationPreviewPage>;
+export type DatasetMigrationCandidate = z.infer<typeof DatasetMigrationCandidate>;
 export const DatasetLifecycleState = z.object({ archived: z.boolean(), generation: z.number().int().nonnegative(), reason: z.string().max(1024).optional() }).strict();
 export const DatasetLifecyclePage = z.object({ archived: z.boolean(), generation: z.number().int().nonnegative(), reason: z.string().max(1024),
   apps: z.array(z.object({ appId: z.string().min(1).max(256), binding: z.unknown().transform(value => parseDatasetBindingReference(value)) }).strict()).max(100),
@@ -87,6 +97,7 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), descriptorPath: z.string().min(1).max(1024), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
   z.object({ ...workspace, action: z.literal("approveMigration"), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
@@ -96,7 +107,7 @@ export const DatasetRequest = z.discriminatedUnion("action", [
 export type DatasetRequest = z.infer<typeof DatasetRequest>;
 export const DatasetPreparation = z.object({ preparationId: identity, revision, sourceDigest: sha256 }).strict();
 export type DatasetPreparation = z.infer<typeof DatasetPreparation>;
-export const DatasetMigrationPreparation = z.object({ preparationId: identity, previousRevision: revision, revision, expected: DatasetCursor,
+export const DatasetMigrationPreparation = z.object({ preparationId: identity, previousRevision: revision, revision, expected: DatasetCursor, candidate: DatasetMigrationCandidate,
   sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
   migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
@@ -144,6 +155,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("file"), file, bytesBase64: fileBytes }).strict(),
   z.object({ kind: z.literal("discarded") }).strict(),
   DatasetMigrationPreparation.extend({ kind: z.literal("migration-prepared") }).strict(),
+  DatasetMigrationPreviewPage.extend({ kind: z.literal("migration-preview-page") }).strict(),
   z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),
   z.object({ kind: z.literal("migration-discarded") }).strict(),
 ]);
