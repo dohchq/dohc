@@ -9,7 +9,7 @@ import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
 import { requireLinkAppPublication } from "./storage/publications";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
-import { authorizeShareGrantAction } from "./shareAuthorization";
+import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
 import { notFound } from "./errors";
 
@@ -92,14 +92,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         candidate.inputs.some(file => visibleSharePath(selector, file.path) !== file.path)) throw notFound();
     const publicationOwner = {workspaceId: auth.workspaceId, shareId: share.shareId, grantId: grant.grantId, generation: grant.generation, ownerUserId: String(row.owner_user_id)};
     if (hash(JSON.stringify(["dohc-app-publication-v1", publicationOwner, hash(JSON.stringify(candidate))])) !== publicationId) throw notFound();
-    if (auth.userId === row.owner_user_id) return {candidate, authority: {...owner(auth, auth.workspaceId), authorityToken: String(row.authority_revision)}};
-    if (!auth.grantId) throw notFound();
-    const authority = named(auth.workspaceId, auth.grantId, auth.userId);
-    const namedGrant = storage.getShareGrant(auth.grantId);
+    if (auth.userId === row.owner_user_id) return {candidate, authorityRevision: Number(row.authority_revision), authority: {...owner(auth, auth.workspaceId), authorityToken: String(row.authority_revision)}};
+    const authorized = authorizeShareAction({storage, actorUserId: auth.userId, shareId: share.shareId, action: "read"});
+    const grantId = auth.grantId ?? (authorized.ok ? authorized.grant.grantId : undefined);
+    if (!grantId) throw notFound();
+    const authority = named(auth.workspaceId, grantId, auth.userId);
+    const namedGrant = storage.getShareGrant(grantId);
     const namedSelector = parsed && namedGrant && effectiveShareSelector(parsed, namedGrant.access);
     if (!namedGrant || namedGrant.shareId !== share.shareId || !namedSelector || "kind" in namedSelector ||
         targetVersionId(namedSelector) !== candidate.versionId || visibleSharePath(namedSelector, candidate.appRoot) !== candidate.appRoot) throw notFound();
-    return {candidate, authority: {...authority, authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision]))}};
+    return {candidate, authorityRevision: Number(row.authority_revision), authority: {...authority, authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision]))}};
   }
   function capability(candidate: AppPublicationCandidate, workspaceId: string, datasetId: string): AppDatasetCapability {
     const row = storage.db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
@@ -138,9 +140,25 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     if (!auth.grantId) throw notFound();
     return named(auth.workspaceId, auth.grantId, auth.userId);
   }
+  function publication(auth: AppBackendAuth, publicationId: string) {
+    current();
+    let candidate: AppPublicationCandidate, workspaceId: string, authorityRevision: number;
+    if (auth.kind === "link") {
+      const published = requireLinkAppPublication(storage, {...auth, publicationId, limits, nowMs: nowMs()});
+      candidate = published.candidate; workspaceId = published.workspaceId; authorityRevision = published.result.descriptor.authorityRevision;
+    } else {
+      const published = namedPublication(auth, publicationId);
+      candidate = published.candidate; workspaceId = auth.workspaceId; authorityRevision = published.authorityRevision;
+    }
+    const requested = candidate.capabilities.find(value => value.kind === "dataset");
+    if (!requested) return null;
+    const verified = app(auth, workspaceId, requested.datasetId, publicationId);
+    return {workspaceId, datasetId: requested.datasetId, authorityRevision, capability: verified.capability, authority: verified.authority, candidate};
+  }
   try {
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
       accountCreation(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes, true); },
+      accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       operationResources(_auth, request) {
         return {accountAndAttach(allocation) {
@@ -149,13 +167,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         }};
       },
     });
-    storage.tx(() => storage.db.exec(`CREATE TRIGGER IF NOT EXISTS sync_relay_dataset_delete
+    storage.tx(() => storage.db.exec(`DROP TRIGGER IF EXISTS sync_relay_dataset_delete;
+      CREATE TRIGGER sync_relay_dataset_delete
       AFTER DELETE ON sync_relay_dataset_usage BEGIN
         DELETE FROM dohc_dataset_bindings WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_data_grants WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_catalog WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_catalog_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_receipts WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_events WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_checkpoint_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_journals WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
@@ -163,7 +184,10 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       activate(auth: AppBackendAuth, input: Parameters<typeof host.activate>[1]) {
         return host.activate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
-      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts,
+      migrate(auth: AppBackendAuth, input: Parameters<typeof host.migrate>[1]) {
+        return host.migrate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, publication,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
@@ -180,8 +204,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         owner(auth, input.workspaceId);
         const target = storage.getShareGrant(input.grantId);
         if (!target || target.principalKind !== "user" || !target.principalUserId) throw notFound();
-        const authority = named(input.workspaceId, input.grantId, target.principalUserId);
-        host.setDataGrant(auth, {...input, principalKey: authority.principalKey});
+        const key = input.grant === null ? principalKey(input.workspaceId, input.grantId, target.principalUserId)
+          : named(input.workspaceId, input.grantId, target.principalUserId).principalKey;
+        host.setDataGrant(auth, {...input, principalKey: key});
+      },
+      removeDataGrant(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; principalKey: string}): void {
+        host.setDataGrant(auth, {...input, grant: null});
       },
       close,
     };

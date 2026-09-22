@@ -2,6 +2,8 @@ import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-con
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
+import { createDatasetAppRoutes, createDatasetRoutes, type DatasetRoute } from "./datasetRoutes";
+import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
@@ -79,6 +81,7 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendsEnabled?: boolean;
   appBackendMaxParticipantsPerGrant?: number;
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
+  datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -131,6 +134,7 @@ export interface CreateSyncRelayHandlerOptions {
 
 type SyncRelayRoute =
   | AppBackendRoute
+  | DatasetRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -167,6 +171,7 @@ export function createSyncRelayHandler({
   appBackendsEnabled = false,
   appBackendMaxParticipantsPerGrant,
   appBackendAdmissionLimits,
+  datasetHost,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -217,6 +222,8 @@ export function createSyncRelayHandler({
     storage.createAppBackendHost({limits: appPublicationLimits!, nowMs, maxParticipantsPerGrant:appBackendMaxParticipantsPerGrant}), storage.unavailable,
     {limits: appBackendAdmissionLimits, nowMs},
   ) : undefined;
+  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -611,6 +618,16 @@ export function createSyncRelayHandler({
       ) {
         return await respondToLinkRead(request, route);
       }
+      if (route.route === "dataset") {
+        if (!respondToDataset) throw notFound();
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {headers: {authorization: authorization!}, signal: request.signal}), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        const grant = request.headers.get("x-dohc-dataset-grant");
+        return await respondToDataset(request, route, {kind:"named", workspaceId:route.workspaceId, userId:actor.userId,
+          ...(grant === null ? {} : {grantId: parseShareId(grant)})});
+      }
       if (route.route === "owner-app-publication" || route.route === "owner-app-responses") {
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
@@ -629,8 +646,10 @@ export function createSyncRelayHandler({
           const {capability} = requireLinkCapability(request);
           const secret = request.headers.get("x-dohc-link-profile-secret");
           if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
-          return await respondToAppBackend(request, route, {kind:"link", capabilityHash:capability.session.capabilityHash,
-            profileTokenHash:hashLinkProfileSecret(secret, linkKey)});
+          const auth = {kind:"link" as const, capabilityHash:capability.session.capabilityHash,
+            profileTokenHash:hashLinkProfileSecret(secret, linkKey)};
+          if (respondToDatasetApp) { const datasetResponse = await respondToDatasetApp(request, route, auth); if (datasetResponse) return datasetResponse; }
+          return await respondToAppBackend(request, route, auth);
         }
         const authorization = request.headers.get("authorization");
         let actorRequest: Request;
@@ -645,7 +664,9 @@ export function createSyncRelayHandler({
         }
         const actor = await resolveNamedActor(actorRequest, route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
-        return await respondToAppBackend(request, route, {kind:"named", workspaceId:route.workspaceId,userId:actor.userId});
+        const auth = {kind:"named" as const, workspaceId:route.workspaceId,userId:actor.userId};
+        if (respondToDatasetApp) { const datasetResponse = await respondToDatasetApp(request, route, auth); if (datasetResponse) return datasetResponse; }
+        return await respondToAppBackend(request, route, auth);
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
@@ -882,6 +903,16 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts[2] === "datasets") {
+    if (parts.length === 3) return {route:"dataset", workspaceId, action:"list"};
+    const datasetId = parts[3];
+    if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
+    if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
+    if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
+    if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
+    throw notFound();
+  }
   if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "owner-app-publication", workspaceId, action: "publish"};

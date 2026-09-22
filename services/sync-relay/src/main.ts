@@ -1,7 +1,9 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
+import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { tmpdir } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   fatal,
@@ -228,6 +230,11 @@ if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FAT
 const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+// Worker files are disposable materializations. The relay database retains authority and recovery history.
+const datasetDirectory = await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
+  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+}, onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -329,6 +336,7 @@ const relayApplication = createSyncRelayHandler({
   appPublicationLimits,
   appBackendsEnabled,
   appBackendMaxParticipantsPerGrant,
+  datasetHost,
   appCollectionPolicy,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -566,6 +574,8 @@ installShutdown(server, {
     await selfHost?.close();
     await configuredServiceHost?.close();
     await liveValidation.close();
+    await datasetHost?.close();
+    if (datasetDirectory) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
     storage.close();
     try {
       await pool?.end();

@@ -1,0 +1,165 @@
+import { readBoundedJson } from "@dohc/service-http";
+import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { JournalError } from "@dohc/app-backend-runtime/journal";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { parseAppBackendJson, parseAppBackendInvokeRequest } from "@dohc/security-contract/app-backend";
+import type { RelayDatasetHost } from "./datasetHost";
+import type { AppBackendAuth } from "./appBackendAuthority";
+import type { AppBackendRoute } from "./appBackendRoutes";
+import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
+import { badRequest, notFound, relayError } from "./errors";
+import type { SyncRelayStorage } from "./storage";
+
+export interface DatasetRoute {
+  route: "dataset";
+  workspaceId: string;
+  datasetId?: string;
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding";
+}
+const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export function datasetId(value: string | undefined): string { if (!value || !uuid.test(value)) throw notFound(); return value; }
+function record(raw: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || required.some(key => !Object.hasOwn(raw, key)) ||
+      Object.keys(raw).some(key => !required.includes(key) && !optional.includes(key))) throw badRequest("Invalid dataset request.");
+  return raw as Record<string, unknown>;
+}
+function text(value: unknown, max = 256): string {
+  if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > max) throw badRequest("Invalid dataset value.");
+  return value;
+}
+function positive(value: unknown): number { if (!Number.isSafeInteger(value) || Number(value) < 1) throw badRequest("Invalid dataset revision."); return Number(value); }
+function digest(value: unknown): string { if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw badRequest("Invalid dataset digest."); return value; }
+function input(value: unknown) { try { return parseAppBackendJson(value, 64 * 1024); } catch { throw badRequest("Invalid operation input."); } }
+async function json(request: Request, signal: AbortSignal, maximum: number): Promise<unknown> {
+  if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Dataset requests require JSON.");
+  try { return await readBoundedJson(request, maximum, signal); }
+  catch (error) { signal.throwIfAborted(); if (error instanceof RangeError) throw relayError("payload_too_large"); throw badRequest("Invalid dataset JSON."); }
+}
+async function response(run: () => unknown): Promise<Response> {
+  try { return Response.json(await run(), {headers}); }
+  catch (error) {
+    if (isAppBackendRuntimeError(error)) return Response.json({code: error.refusal.code, message: error.refusal.message}, {status: 409, headers});
+    if (error instanceof JournalError) throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
+    if (error instanceof DatasetHostError) throw relayError(error.code === "not_authorized" ? "not_found" : error.code === "invalid" ? "bad_request" : "conflict");
+    throw error;
+  }
+}
+
+export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
+  const admit = createAppBackendAdmission(options.limits);
+  return async (request: Request, route: DatasetRoute, auth: Extract<AppBackendAuth, {kind: "named"}>): Promise<Response> => {
+    const read = ["list", "describe", "artifacts", "permissions"].includes(route.action);
+    if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
+    const query = new URL(request.url).searchParams;
+    if ([...query.keys()].some(key => !["after", "limit"].includes(key)) || query.getAll("after").length > 1 || query.getAll("limit").length > 1 ||
+      (query.size && route.action !== "list" && route.action !== "permissions")) throw badRequest("Invalid dataset query.");
+    const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
+    const scope = {workspaceId: route.workspaceId, datasetId: route.datasetId!};
+    const release = admit({dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]), participant: auth.userId,
+      organizer: storage.workspaceIsOwnedBy(route.workspaceId, auth.userId)}, route.action, options.nowMs());
+    try {
+      return await response(async () => {
+        signal.throwIfAborted();
+        const page = {after: query.get("after") ?? undefined, limit: query.has("limit") ? positive(Number(query.get("limit"))) : undefined};
+        if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page});
+        if (route.action === "describe") return host.describe(auth, scope);
+        if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
+        if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
+        const raw = await json(request, signal, route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        if (route.action === "activate" || route.action === "migrate") {
+          const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "migrate" ? ["expected", "migrationSql"] : [])], ["capacityBytes"]);
+          let revision; try {revision = parseDatasetRevision(body.revision);} catch {throw badRequest("Invalid dataset revision.");}
+          if (revision.datasetId !== scope.datasetId) throw badRequest("Dataset identity does not match this route.");
+          const input = {...scope, revision, schemaSql: text(body.schemaSql, 256 * 1024), operationSource: text(body.operationSource, 256 * 1024), signal};
+          if (route.action === "activate") return host.activate(auth, {...input, ...(body.capacityBytes === undefined ? {} : {capacityBytes: positive(body.capacityBytes)})});
+          if (body.capacityBytes !== undefined) throw badRequest("Dataset migrations cannot change capacity through this route.");
+          const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
+          if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
+          return host.migrate(auth, {...input, migrationSql: text(body.migrationSql, 256 * 1024), expected: {...scope,
+            hostEpoch: text(expected.hostEpoch), approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
+        }
+        if (route.action === "invoke") {
+          const body = record(raw, ["revision", "revisionSha256", "operationId", "input", "idempotencyKey"]);
+          return host.invoke(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), operationId: datasetId(text(body.operationId)),
+            input: input(body.input), idempotencyKey: text(body.idempotencyKey, 128), signal});
+        }
+        if (route.action === "binding") {
+          const body = record(raw, ["publicationId", "enabled"]);
+          if (typeof body.enabled !== "boolean") throw badRequest("Invalid app binding.");
+          const input = {...scope, publicationId: digest(body.publicationId)};
+          if (body.enabled) host.bindPublication(auth, input); else host.unbindPublication(auth, input);
+          return {ok: true};
+        }
+        const body = record(raw, ["grant"], ["grantId", "principalKey"]);
+        if (Object.hasOwn(body, "principalKey")) {
+          if (body.grant !== null || Object.hasOwn(body, "grantId")) throw badRequest("Invalid dataset grant removal.");
+          host.removeDataGrant(auth, {...scope, principalKey: text(body.principalKey)});
+          return {ok: true};
+        }
+        let grant = null;
+        if (body.grant !== null) {
+          const value = record(body.grant, ["operationIds", "discover", "revision", "revisionSha256"]);
+          if (!Array.isArray(value.operationIds) || value.operationIds.length > 128 || typeof value.discover !== "boolean") throw badRequest("Invalid dataset grant.");
+          grant = {operationIds: value.operationIds.map(value => datasetId(text(value))), discover: value.discover,
+            revision: positive(value.revision), revisionSha256: digest(value.revisionSha256)};
+        }
+        host.setDataGrant(auth, {...scope, grantId: text(body.grantId), grant});
+        return {ok: true};
+      });
+    } finally {release();}
+  };
+}
+
+/** Returns null only for publications using the separate app-backend capability. */
+export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
+  const admit = createAppBackendAdmission(options.limits);
+  return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response | null> => {
+    const published = host.publication(auth, route.publicationId);
+    if (!published) return null;
+    const {authority, workspaceId, datasetId, authorityRevision, capability} = published;
+    const release = admit({dataset: JSON.stringify([workspaceId, datasetId]), participant: authority.principalKey,
+      ...(authority.caller.kind === "link" ? {link: JSON.stringify([workspaceId, authority.caller.grantId])} : {}),
+      organizer: authority.caller.kind === "owner"}, route.action, options.nowMs());
+    const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
+    try {
+      const get = route.action === "descriptor" || route.action === "blob";
+      if (request.method !== (get ? "GET" : "POST")) throw relayError("method_not_allowed");
+      const query = new URL(request.url).searchParams;
+      if (route.action === "blob") {
+        if (auth.kind !== "named" || query.size !== 1 || query.get("authorityRevision") !== String(authorityRevision)) throw notFound();
+        const file = published.candidate.files.find(file => file.sha256 === route.sha256);
+        if (!file) throw notFound();
+        const bytes = storage.getBlob(workspaceId, file.sha256);
+        if (!bytes || bytes.byteLength !== file.byteLength) throw notFound();
+        signal.throwIfAborted();
+        return new Response(Uint8Array.from(bytes), {headers: {...headers, "content-type": file.contentType}});
+      }
+      if (query.size) throw badRequest("App operations do not accept a query.");
+      return await response(async () => {
+        signal.throwIfAborted();
+        if (route.action === "descriptor") {
+          if (auth.kind !== "named") throw notFound();
+          return {publicationId: route.publicationId, authorityRevision, files: published.candidate.files};
+        }
+        const raw = await json(request, signal, 128 * 1024);
+        if (route.action === "activate") {
+          const body = record(raw, ["authorityRevision"]);
+          if (body.authorityRevision !== authorityRevision) throw notFound();
+          host.bindPublication(auth, {workspaceId, datasetId, publicationId: route.publicationId});
+          return {publicationId: route.publicationId, authorityRevision, datasetId};
+        }
+        if (route.action !== "invoke") throw notFound();
+        let body; try {body = parseAppBackendInvokeRequest(raw);} catch {throw badRequest("Invalid app operation.");}
+        if (body.authorityRevision !== authorityRevision) throw notFound();
+        const operation = capability.operations.find(operation => operation.name === body.operation);
+        if (!operation) throw notFound();
+        return host.invoke(auth, {workspaceId, datasetId, revision: capability.revision, revisionSha256: capability.revisionSha256,
+          operationId: operation.operationId, input: body.input, idempotencyKey: body.idempotencyKey, access: {kind: "app", appId: route.publicationId}, signal});
+      });
+    } finally {release();}
+  };
+}
