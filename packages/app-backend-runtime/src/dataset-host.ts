@@ -14,7 +14,7 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt } from "./dataset-attempts.js";
+import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -382,7 +382,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId || expected.approvedRevisionHash !== previous.revisionSha256 || approved.revision !== previous.revision + 1) {
         throw new DatasetHostError("conflict", "Dataset revision transition does not match the current approval.");
       }
-      const authorize = () => { signal?.throwIfAborted(); live(key); if (lifecycle(key).generation !== generation || JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const authorize = () => { signal?.throwIfAborted(); live(key); if (lifecycle(key).generation !== generation || JSON.stringify(owner(context, key)) !== ownerToken) denied(); assertDatasetAttemptsCommitted(db, key); };
+      authorize();
       const compiledSource = await compile(source, approved.definition.operationsPath);
       authorize();
       const cursor = await options.supervisor.migrate({ scope: key, expected, tables: previous.definition.tables.map(table => table.sqlName),
@@ -529,6 +530,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         owner(context, key); return {cleared: true as const};
       });
     },
+    cancelAttempt(context: Context, raw: DatasetScope & {reference: string; acknowledge: true}) {
+      const key = scope(raw);
+      if (raw.acknowledge !== true) throw new DatasetHostError("invalid", "Review this response before cancelling it.");
+      return transaction(() => {
+        owner(context, key); revision(key);
+        const bytes = cancelDatasetAttempt(db, key, raw.reference);
+        if (bytes && options.accountMetadata) synchronous(() => options.accountMetadata!(context, {...key, bytes}));
+        owner(context, key); return {cancelled: true as const};
+      });
+    },
     permissions(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
       const key = scope(raw), after = raw.after === undefined ? "" : text(raw.after, 1024), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");
@@ -561,7 +572,10 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const authorize = () => {
         const current = permissions(context, key, through);
         if (current.token !== permitted.token || !current.operations.some(candidate => candidate.operationId === operationId)) denied();
+        try { assertDatasetAttemptNotCancelled(db, key, hash(JSON.stringify([permitted.authority.principalKey, through])), idempotencyKey); }
+        catch (error) { throw new DatasetHostError("conflict", error instanceof Error ? error.message : "This submission was cancelled."); }
       };
+      authorize();
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
       return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
         operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),

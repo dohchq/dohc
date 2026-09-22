@@ -12,7 +12,7 @@ import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecover
 import { validateDatasetRecovery, readValidatedBlob } from "./recovery-import";
 import { parseRecoveryJournalRecord } from "./recovery-record";
 import { createRecoveryInstaller } from "./recovery-install";
-import { createDatasetAttempts } from "./dataset-attempts";
+import { createDatasetAttempts, cancelDatasetAttempt, reviewDatasetAttempts, assertDatasetAttemptNotCancelled } from "./dataset-attempts";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
 vi.setConfig({ testTimeout: 30_000 });
@@ -238,5 +238,25 @@ it("requires trusted local recovery and explicit stopped-host acknowledgement fo
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_data_grants").get()!.n).toBe(0);
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_recovered_permissions").get()!.n).toBe(1);
     expect(t.installer.claim({},{...claim,oldHostStopped:true}).targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
+  } finally { await valid.dispose(); }
+});
+
+it("preserves cancelled retry tombstones through recovery and rejects their reuse", async () => {
+  const f = await fixture(false, true), selected = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  attempts.request(selected, {action: "save", idempotencyKey: "abandoned", input: {value: "private"}}, f.authorize);
+  const reference = reviewDatasetAttempts(f.db, f.scope).entries[0]!.reference;
+  f.transaction(() => cancelDatasetAttempt(f.db, f.scope, reference));
+  const valid = await validateDatasetRecovery({staged: await f.stage(), authorize: f.authorize}), t = target(f, {allowOwnerRecoveryClaim: true});
+  try {
+    const input = {transferId: "cancelled-transfer", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize};
+    await t.installer.install({}, input);
+    t.installer.claim({}, {...f.scope, transferId: input.transferId, manifestSha256: input.manifestSha256, sourceCursor: f.head(), oldHostStopped: true, authorize: f.authorize});
+    const callerKey = hash(JSON.stringify([selected.principalKey, {kind: "app", appId: selected.appId}]));
+    expect(() => assertDatasetAttemptNotCancelled(t.db, f.scope, callerKey, "abandoned")).toThrow("cancelled");
+    const restored = createDatasetAttempts({db: t.db, transaction: t.transaction, account() {}});
+    expect(() => restored.request(selected, {action: "save", idempotencyKey: "abandoned", input: {}}, f.authorize)).toThrow("cancelled");
+    expect(restored.request(selected, {action: "save", idempotencyKey: "new", input: {}}, f.authorize).attempt).not.toBeNull();
+    expect(t.transaction(() => cancelDatasetAttempt(t.db, f.scope, reference))).toBe(0);
   } finally { await valid.dispose(); }
 });

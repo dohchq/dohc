@@ -8,7 +8,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
-import { createDatasetAttempts } from "./dataset-attempts.ts";
+import { createDatasetAttempts, assertDatasetAttemptsCommitted } from "./dataset-attempts.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => Promise<void>> = [];
@@ -369,4 +369,112 @@ it("lets only owners acknowledge an exact committed response without exposing pa
   f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
   expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
   expect(next.attempt!.token).not.toBe(pending.attempt!.token);
+});
+
+it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {
+  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "cancelled"}}, () => {});
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  expect(() => assertDatasetAttemptsCommitted(f.db, scope)).toThrow("unconfirmed");
+  for (const caller of ["helper", "friend"] as const) expect(() => f.host.cancelAttempt(caller, {...scope, reference, acknowledge: true})).toThrow("not permitted");
+  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: false as true})).toThrow("Review");
+  const queued = f.invoke("friend", id(6), {value: "cancelled"}, "form");
+  expect(f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cancelled: true});
+  await expect(queued).rejects.toThrow("cancelled");
+  expect(() => assertDatasetAttemptsCommitted(f.db, scope)).not.toThrow();
+  expect(f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cancelled: true});
+  expect(attempts.request(selected, {action: "clear", token: saved.attempt!.token}, () => {})).toEqual({attempt: null});
+  expect(() => attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "changed"}}, () => {})).toThrow("cancelled");
+  await expect(f.invoke("friend", id(6), {value: "changed"}, "form")).rejects.toThrow("cancelled");
+  expect((await f.invoke("owner", id(7))).result).toEqual([]);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts WHERE idempotency_key='request'").get()!.n).toBe(0);
+  attempts.request(selected, {action: "save", idempotencyKey: "new-key", input: {value: "new"}}, () => {});
+  await expect(f.host.invoke("friend", {...scope, access: {kind: "app", appId: "form"}, revision: 1, revisionSha256: selected.revisionSha256, operationId: id(6), input: {value: "new"}, idempotencyKey: "new-key"})).resolves.toMatchObject({replayed: false});
+});
+
+it("preserves a committed response when commit wins the owner cancellation race", async () => {
+  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  await f.invoke("friend", id(6), {value: "saved"}, "form");
+  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toThrow("saved before cancellation");
+  expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
+  expect((await f.invoke("friend", id(6), {value: "saved"}, "form")).replayed).toBe(true);
+});
+
+it("rejects a worker proposal when the owner cancels immediately before journal commit", async () => {
+  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "prepared"}}, () => {});
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  const commit = f.journal.commitOperation.bind(f.journal);
+  const interception = vi.spyOn(f.journal, "commitOperation").mockImplementation(input => {
+    f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true});
+    return commit(input);
+  });
+  await expect(f.invoke("friend", id(6), {value: "prepared"}, "form")).rejects.toThrow("cancelled");
+  expect(interception).toHaveBeenCalledOnce(); interception.mockRestore();
+  expect((await f.invoke("owner", id(7))).result).toEqual([]);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts").get()!.n).toBe(0);
+});
+
+it("refuses migration before staging until pending submissions are resolved", async () => {
+  const stages = vi.fn();
+  const f = await fixture({accountCheckpointStage: stages}); await f.activate();
+  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "pending"}}, () => {});
+  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
+  const change = {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"};
+  stages.mockClear();
+  await expect(f.host.migrate("owner", change)).rejects.toThrow("unconfirmed"); expect(stages).not.toHaveBeenCalled();
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true});
+  await expect(f.host.migrate("owner", change)).resolves.toMatchObject({revision});
+});
+
+it("retains committed pending responses across schema migration for owner review", async () => {
+  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
+  await f.invoke("friend", id(6), {value: "saved"}, "form");
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
+  await f.host.migrate("owner", {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"});
+  expect(f.host.pendingAttempts("owner", scope).entries[0]).toMatchObject({reference, outcome: "committed"});
+  expect(f.host.reconcileAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cleared: true});
+});
+
+it("rolls back a prepared migration if a submission appears before its final transaction", async () => {
+  const f = await fixture(); await f.activate();
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
+  const transition = f.journal.transitionCheckpoint.bind(f.journal);
+  const interception = vi.spyOn(f.journal, "transitionCheckpoint").mockImplementation(input => {
+    attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "arrived"}}, () => {});
+    return transition(input);
+  });
+  await expect(f.host.migrate("owner", {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"})).rejects.toThrow("unconfirmed");
+  expect(interception).toHaveBeenCalledOnce(); interception.mockRestore();
+  expect(f.host.approvedArtifacts("owner", scope).revision.revision).toBe(1);
+  expect(f.host.pendingAttempts("owner", scope).entries[0]!.outcome).toBe("unconfirmed");
+});
+
+it("rolls cancellation and its storage delta back together when accounting fails", async () => {
+  let failAccounting = false;
+  const f = await fixture({accountMetadata() { if (failAccounting) throw Error("accounting refused"); }}); await f.activate();
+  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "retained"}}, () => {});
+  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
+  failAccounting = true;
+  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toThrow("accounting refused");
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
+  expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
 });

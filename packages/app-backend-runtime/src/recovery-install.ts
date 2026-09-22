@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb, JournalExportRecord, CheckpointStage } from "./journal.js";
 import { readValidatedBlob, type ValidatedDatasetRecovery, type RecoveryBlob } from "./recovery-import.js";
 import type { RecoveryAttachment } from "./recovery-export.js";
-import { initializeDatasetAttempts } from "./dataset-attempts.js";
+import { initializeDatasetAttempts, cancelledDatasetAttemptBytes } from "./dataset-attempts.js";
 
 export interface RecoveryImportReceipt {
   transferId: string;
@@ -215,6 +215,18 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
             // Metadata staging already reserved its body; charge only the final storage difference.
             account(context, scope, bytes - Buffer.byteLength(String(row.body)) - 512);
             db.prepare("INSERT INTO dohc_dataset_attempts VALUES(?,?,?,?,?,?,?,?)").run(scope.workspaceId, scope.datasetId, m.appId, m.principalKey, m.operationId, m.revisionSha256, json, bytes);
+          }
+          let cancelledAfter = 0;
+          for (;;) {
+            const rows = db.prepare("SELECT rowid,body FROM dohc_dataset_import_metadata WHERE import_id=? AND rowid>? AND json_extract(body,'$.kind')='cancelled-attempt' ORDER BY rowid LIMIT 64").all(importId, cancelledAfter);
+            if (!rows.length) break;
+            for (const row of rows) {
+              const m = JSON.parse(String(row.body)) as Extract<import("./recovery-import.js").RecoveryMetadata, {kind: "cancelled-attempt"}>;
+              const bytes = cancelledDatasetAttemptBytes(scope);
+              account(context, scope, bytes - Buffer.byteLength(String(row.body)) - 512);
+              db.prepare("INSERT INTO dohc_dataset_cancelled_attempts VALUES(?,?,?,?,?)").run(scope.workspaceId, scope.datasetId, m.retrySha256, m.reference, bytes);
+              cancelledAfter = Number(row.rowid);
+            }
           }
           if (options.commitAttachments) sync(() => options.commitAttachments!(context, { ...scope, importId }));
           db.prepare("UPDATE dohc_dataset_imports SET phase='installed' WHERE import_id=?").run(importId);

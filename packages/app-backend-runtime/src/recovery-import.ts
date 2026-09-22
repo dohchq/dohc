@@ -41,6 +41,7 @@ export type RecoveryMetadata =
   | { kind: "binding"; appId: string; bindingJson: string; token: string }
   | { kind: "grant"; principalKey: string; grantJson: string; token: string }
   | { kind: "attempt"; appId: string; principalKey: string; operationId: string; revisionSha256: string; attempt: DatasetPendingAttempt }
+  | { kind: "cancelled-attempt"; retrySha256: string; reference: string }
   | { kind: "attachment"; file: { fileId: string; name: string; contentType: string; byteLength: number; sha256: string; revision: number } };
 export interface ValidatedDatasetRecovery {
   manifest: StagedDatasetRecovery["manifest"];
@@ -111,6 +112,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
     CREATE TABLE used_catalogs(hash TEXT PRIMARY KEY);
     CREATE TABLE receipts(caller TEXT,key TEXT,payload TEXT,PRIMARY KEY(caller,key));
     CREATE TABLE attempts(app TEXT,principal TEXT,operation TEXT,PRIMARY KEY(app,principal,operation));
+    CREATE TABLE cancelled_attempts(retry TEXT PRIMARY KEY,reference TEXT UNIQUE);
     CREATE TABLE references_(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE permissions(kind TEXT,id TEXT,PRIMARY KEY(kind,id));`);
@@ -193,6 +195,11 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           const generation = recoveryInteger(raw.generation), archivedAtMs = raw.archivedAtMs === null ? null : recoveryInteger(raw.archivedAtMs);
           index.prepare("INSERT INTO permissions VALUES('lifecycle','lifecycle')").run();
           rawMetadata({ kind: "lifecycle", archived: raw.archived, generation, reason: raw.reason, archivedAtMs });
+        } else if (raw.kind === "cancelled-attempt") {
+          recoveryObject(raw, ["kind", "retrySha256", "reference"]);
+          const retrySha256 = recoveryDigest(raw.retrySha256), reference = recoveryDigest(raw.reference);
+          index.prepare("INSERT INTO cancelled_attempts VALUES(?,?)").run(retrySha256, reference);
+          rawMetadata({kind: "cancelled-attempt", retrySha256, reference});
         } else if (raw.kind === "attempt") {
           recoveryObject(raw, ["kind", "appId", "principalKey", "operationId", "revisionSha256", "attempt"]);
           const appId = recoveryText(raw.appId, 256), principalKey = recoveryText(raw.principalKey, 1024), operationId = recoveryText(raw.operationId, 256), revisionSha256 = recoveryDigest(raw.revisionSha256);
@@ -233,6 +240,10 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
         index.prepare("SELECT id FROM attachments EXCEPT SELECT id FROM references_").get() ||
         index.prepare("SELECT a.id FROM attachments a JOIN references_ r ON a.id=r.id WHERE a.revision!=r.revision").get() ||
         Number(index.prepare("SELECT count(*) n FROM attachments").get()!.n) !== staged.files.filter(f => f.entry.kind === "attachment").length) fail("attachment association history differs.");
+    for (const row of index.prepare("SELECT caller,key FROM receipts").iterate()) {
+      authorize();
+      if (index.prepare("SELECT 1 FROM cancelled_attempts WHERE retry=?").get(hash(JSON.stringify([row.caller, row.key])))) fail("cancelled submission has a committed result.");
+    }
     for (const row of index.prepare("SELECT body FROM metadata").iterate()) {
       authorize(); const m = JSON.parse(String(row.body)) as RecoveryMetadata;
       if (m.kind === "binding") { const b = JSON.parse(m.bindingJson); parseDatasetBinding(b, getCatalog(b.revisionSha256).revision); }

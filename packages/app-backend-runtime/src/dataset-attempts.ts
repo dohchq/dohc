@@ -7,6 +7,14 @@ export interface DatasetAttemptScope {
   revisionSha256: string;
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export function assertDatasetAttemptNotCancelled(db: JournalDb, scope: DatasetScope, callerKey: string, idempotencyKey: string): void {
+  if (db.prepare("SELECT 1 FROM dohc_dataset_cancelled_attempts WHERE workspace_id=? AND dataset_id=? AND retry_sha256=?").get(scope.workspaceId, scope.datasetId, digest([callerKey, idempotencyKey]))) {
+    throw new Error("The owner cancelled this submission. Start a new response before submitting again.");
+  }
+}
+export function cancelledDatasetAttemptBytes(scope: DatasetScope): number {
+  return Buffer.byteLength(scope.workspaceId) + Buffer.byteLength(scope.datasetId) + 128 + 256;
+}
 function committedAttempt(db: JournalDb, scope: DatasetScope, row: Record<string, unknown>) {
   const attempt = parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!;
   const callerKey = digest([row.principal_key, {kind: "app", appId: row.app_id}]);
@@ -55,11 +63,38 @@ export function reconcileDatasetAttempt(db: JournalDb, scope: DatasetScope, refe
     }
   }
 }
+/** Must share the host journal transaction so cancellation and commit cannot both win. */
+export function cancelDatasetAttempt(db: JournalDb, scope: DatasetScope, reference: string): number {
+  if (typeof reference !== "string" || !/^[a-f0-9]{64}$/.test(reference) || reference.length !== 64) throw new Error("Invalid pending response reference.");
+  if (db.prepare("SELECT 1 FROM dohc_dataset_cancelled_attempts WHERE workspace_id=? AND dataset_id=? AND reference_sha256=?").get(scope.workspaceId, scope.datasetId, reference)) return 0;
+  let after = 0;
+  for (;;) {
+    const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
+    if (!rows.length) throw new Error("This pending response changed. Refresh pending responses before cancelling it.");
+    for (const row of rows) {
+      after = Number(row.rowid);
+      if (reviewReference(scope, row) !== reference) continue;
+      if (committedAttempt(db, scope, row)) throw new Error("This response was saved before cancellation. Refresh pending responses to review its result.");
+      const attempt = parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!;
+      const callerKey = digest([row.principal_key, {kind: "app", appId: row.app_id}]);
+      // A receipt with a different payload is still committed lineage and cannot be cancelled.
+      if (db.prepare("SELECT 1 FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=? AND caller_key=? AND idempotency_key=?").get(scope.workspaceId, scope.datasetId, callerKey, attempt.idempotencyKey)) throw new Error("This retry key already has a saved result. Review its original submission.");
+      const bytes = cancelledDatasetAttemptBytes(scope), retrySha256 = digest([callerKey, attempt.idempotencyKey]);
+      const present = db.prepare("SELECT 1 FROM dohc_dataset_cancelled_attempts WHERE workspace_id=? AND dataset_id=? AND retry_sha256=?").get(scope.workspaceId, scope.datasetId, retrySha256);
+      if (!present) db.prepare("INSERT INTO dohc_dataset_cancelled_attempts VALUES(?,?,?,?,?)").run(scope.workspaceId, scope.datasetId, retrySha256, reference, bytes);
+      db.prepare("DELETE FROM dohc_dataset_attempts WHERE rowid=?").run(row.rowid);
+      return (present ? 0 : bytes) - Number(row.storage_bytes);
+    }
+  }
+}
 export function initializeDatasetAttempts(db: JournalDb): void {
   db.exec(`CREATE TABLE IF NOT EXISTS dohc_dataset_attempts(
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,app_id TEXT NOT NULL,principal_key TEXT NOT NULL,operation_id TEXT NOT NULL,
     revision_sha256 TEXT NOT NULL,attempt_json TEXT NOT NULL,storage_bytes INTEGER NOT NULL,
-    PRIMARY KEY(workspace_id,dataset_id,app_id,principal_key,operation_id)) STRICT;`);
+    PRIMARY KEY(workspace_id,dataset_id,app_id,principal_key,operation_id)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_cancelled_attempts(
+    workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,retry_sha256 TEXT NOT NULL,reference_sha256 TEXT NOT NULL,storage_bytes INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id,dataset_id,retry_sha256),UNIQUE(workspace_id,dataset_id,reference_sha256)) STRICT;`);
 }
 /** Runs within the same transaction as the source fence. Uncommitted uploads still belong to that source. */
 export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScope): void {
@@ -68,7 +103,7 @@ export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScop
     const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
     if (!rows.length) return;
     for (const row of rows) {
-      if (!committedAttempt(db, scope, row)) throw new Error("A submission is unconfirmed. Retry it in the current app before moving this Collection.");
+      if (!committedAttempt(db, scope, row)) throw new Error("A submission is unconfirmed. Retry it in the current app or cancel it in Pending responses.");
       after = Number(row.rowid);
     }
   }
@@ -99,6 +134,7 @@ export function createDatasetAttempts(options: {
       const parameters = [scope.workspaceId, scope.datasetId, scope.appId, scope.principalKey, scope.operationId];
       return tx(() => {
         sync(authorize);
+        if (request.action === "save") assertDatasetAttemptNotCancelled(options.db, scope, digest([scope.principalKey, {kind: "app", appId: scope.appId}]), request.idempotencyKey);
         const row = options.db.prepare("SELECT revision_sha256,attempt_json,storage_bytes FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND app_id=? AND principal_key=? AND operation_id=?").get(...parameters);
         if (row && row.revision_sha256 !== scope.revisionSha256) throw new Error("The submission uses earlier Collection rules. Its outcome must be checked before starting another.");
         const existing = row ? parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))) : { attempt: null };

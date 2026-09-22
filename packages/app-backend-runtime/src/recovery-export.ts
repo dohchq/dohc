@@ -39,6 +39,7 @@ export type DatasetRecoveryRecord =
   | { kind: "grant"; principalKey: string; grantJson: string; token: string }
   | { kind: "attachment"; file: RecoveryAttachment }
   | { kind: "attempt"; appId: string; principalKey: string; operationId: string; revisionSha256: string; attempt: DatasetPendingAttempt }
+  | { kind: "cancelled-attempt"; retrySha256: string; reference: string }
   | JournalExportRecord;
 
 function sync<T>(run: () => T): T {
@@ -62,7 +63,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
   const authorize = () => { options.signal?.throwIfAborted(); sync(options.authorize); };
   const mutableMetadataDigest = () => {
     const digest = createHash("sha256");
-    for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle", "dohc_dataset_attempts"]) {
+    for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle", "dohc_dataset_attempts", "dohc_dataset_cancelled_attempts"]) {
       digest.update(table); let after = 0;
       for (;;) {
         const rows = db.prepare(`SELECT rowid,* FROM ${table} WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64`).all(scope.workspaceId, scope.datasetId, after);
@@ -80,6 +81,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     const attempts = db.prepare("SELECT * FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? ORDER BY app_id,principal_key,operation_id").all(scope.workspaceId, scope.datasetId)
       .map(row => ({kind: "attempt" as const, appId: String(row.app_id), principalKey: String(row.principal_key), operationId: String(row.operation_id),
         revisionSha256: String(row.revision_sha256), attempt: parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!}));
+    const cancelledThrough = Number(db.prepare("SELECT COALESCE(MAX(rowid),0) AS last FROM dohc_dataset_cancelled_attempts WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)!.last);
     const catalog = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
     if (!catalog) throw new Error("Dataset catalog is missing.");
     const revisionJson = String(catalog.revision_json), artifactsJson = String(catalog.artifacts_json);
@@ -100,7 +102,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     const attachments=files.map(file=>({...file}));
     const sourceState = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)?.active === 1 ? "active" as const : "fenced" as const;
     const lifecycle = db.prepare("SELECT archived,generation,reason,archived_at_ms FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
-    return { mutableMetadataDigest: mutableMetadataDigest(), revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, attempts, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
+    return { mutableMetadataDigest: mutableMetadataDigest(), revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, attempts, cancelledThrough, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
   } });
   if (pinned.captured.revision.revisionSha256 !== pinned.cursor.approvedRevisionHash) throw new Error("Dataset catalog and journal approval differ.");
   const attachments = pinned.captured.attachments;
@@ -144,6 +146,13 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
       for(const row of [...pinned.captured.bindings,...pinned.captured.grants])yield encodeDatasetRecoveryRecord(row);
       if(pinned.captured.lifecycle)yield encodeDatasetRecoveryRecord(pinned.captured.lifecycle);
       for(const row of pinned.captured.attempts)yield encodeDatasetRecoveryRecord(row);
+      let cancelledAfter = 0;
+      for (;;) {
+        authorize();
+        const rows = db.prepare("SELECT rowid,retry_sha256,reference_sha256 FROM dohc_dataset_cancelled_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, cancelledAfter, pinned.captured.cancelledThrough);
+        if (!rows.length) break;
+        for (const row of rows) { yield encodeDatasetRecoveryRecord({kind: "cancelled-attempt", retrySha256: String(row.retry_sha256), reference: String(row.reference_sha256)}); cancelledAfter = Number(row.rowid); }
+      }
       let after=0;
       for(;;){authorize();const row=db.prepare("SELECT revision,revision_json,artifacts_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>? AND revision<? ORDER BY revision LIMIT 1")
           .get(scope.workspaceId,scope.datasetId,after,pinned.captured.revision.revision);
