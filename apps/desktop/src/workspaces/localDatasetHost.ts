@@ -179,7 +179,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     } while (stageCursor);
     let apps: ReturnType<typeof createLocalDatasetApps>;
     const exportDirectory = join(directory, "exports");
-    const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime,
+    const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
       recovery: {
         directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
         install: { allowOwnerRecoveryClaim: true, account(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },

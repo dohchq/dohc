@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -18,6 +19,7 @@ import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteData
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
+import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -183,8 +185,18 @@ describe("local dataset owner adapter", () => {
     const sourcePath = join(sourceHost.workspaceRoot,"backup.dohc-recovery");
     await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}});
     await archive.dispose();
-    const target = await open();
+    const oneShotLaunch = vi.fn(() => { throw Error("Recovery cannot use the one-shot worker."); });
+    const persistentLaunch = vi.fn<AppRuntimeLauncher>(options => {
+      const child = spawn(process.execPath, [options.entryPath], { cwd: options.cwd, env: options.env,
+        stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true });
+      child.on("message", options.onMessage); child.on("error", options.onError); child.on("close", options.onExit);
+      return { postMessage(message) { child.send(message as object, error => { if (error) options.onError(error); }); }, kill() { child.kill("SIGKILL"); } };
+    });
+    const target = await open({ runtime: { launch: oneShotLaunch }, persistentRuntime: { launch: persistentLaunch } });
     const prepared = await target.host.prepareRecovery({sourcePath});
+    expect(oneShotLaunch).not.toHaveBeenCalled();
+    expect(persistentLaunch).toHaveBeenCalled();
+    expect(persistentLaunch.mock.calls.every(([options]) => /persistent-child\.(?:ts|js|mjs)$/.test(options.entryPath))).toBe(true);
     expect(target.host.list().datasets).toEqual([]);
     await expect(target.host.claimRecovery(prepared)).rejects.toThrow(/old host stopped/);
     expect(target.host.list().datasets).toEqual([]);

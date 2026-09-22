@@ -204,7 +204,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         if (stageCursor) await new Promise<void>(resolve => setImmediate(resolve));
       } while (stageCursor);
     }
-    const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
+    const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations, persistentRuntime: options.runtime,
       recovery: {
         directory: recoveryDirectory, limits: {maxTotalBytes: storage.options.workspaceQuotaBytes},
         captureAttachments(auth, key, cursor) {owner(auth, key.workspaceId); return recoveryFiles.capture(key, cursor);},

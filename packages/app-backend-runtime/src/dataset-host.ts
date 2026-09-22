@@ -4,6 +4,7 @@ import { effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, 
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
+import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration, createDatasetSupervisor, DatasetMigrationCandidate } from "./supervisor.js";
 import type { JsonValue } from "./protocol.js";
@@ -42,6 +43,7 @@ export interface DatasetHostOptions<Context> {
   /** datasetId is absent only for workspace catalog discovery. */
   resolveAuthority(context: Context, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority;
   runtime?: AppBackendRuntimeOptions;
+  persistentRuntime?: PersistentRuntimeOptions;
   /** Compile the captured operations artifact to the runtime's supported JavaScript. */
   compileOperations?(source: string, path: string): string | Promise<string>;
   /** Runs in the journal transaction and includes retained catalog artifact bytes. */
@@ -392,7 +394,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const ownerToken = JSON.stringify(owner(context, { workspaceId: raw.workspaceId }));
       const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, { workspaceId: raw.workspaceId })) !== ownerToken) denied(); };
       const staged = await stageDatasetRecovery({ ...raw, stagingParent: recovery.directory, expectedManifestSha256: raw.manifestSha256, limits: recovery.limits, authorize });
-      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.runtime, compileOperations: options.compileOperations });
+      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.persistentRuntime, compileOperations: options.compileOperations });
       try {
         const key = scope(validated.manifest.cursor);
         if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
@@ -420,7 +422,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : prior;
       }
       const staged = await stageDatasetRecovery({ stream: raw.stream, stagingParent: recovery.directory, expectedManifestSha256: manifestSha256, limits: recovery.limits, signal: raw.signal, authorize });
-      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.runtime, compileOperations: options.compileOperations });
+      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.persistentRuntime, compileOperations: options.compileOperations });
       try {
         if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "Recovery source cursor differs.");
         if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "Transfer requires a fenced source dataset.");
