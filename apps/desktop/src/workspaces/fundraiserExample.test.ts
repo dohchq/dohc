@@ -194,6 +194,54 @@ it("does not send a new registration until the original retry state is checked",
   expect(client.uploadReceipt).not.toHaveBeenCalled(); expect(client.register).not.toHaveBeenCalled();
 });
 
+it("clears a host-saved retry after its save response is lost before accepting a new draft", async () => {
+  let retained: RetainedRegistrationAttempt | null = null, loseSaveReply = true;
+  const registrationAttempt = vi.fn<FundraiserClient["registrationAttempt"]>(async request => {
+    if (request.action === "get") return { attempt: retained };
+    if (request.action === "clear") { if (retained?.token !== request.token) throw new BackendError(409); retained = null; return { attempt: null }; }
+    if (!retained) retained = { token: "C".repeat(43), idempotencyKey: request.idempotencyKey, input: request.input };
+    if (loseSaveReply) { loseSaveReply = false; throw new BackendError(503); }
+    return { attempt: retained };
+  });
+  const client = fakeClient({registrationAttempt, register: vi.fn<FundraiserClient["register"]>(async () => ({result:saved,revision:1,replayed:false}))});
+  mount(client); await fillRegistration(); send(); await screen.findByRole("button", {name:"Retry same registration"});
+  const originalKey = (registrationAttempt.mock.calls.find(([request]) => request.action === "save")![0] as {idempotencyKey:string}).idempotencyKey;
+  fireEvent.click(screen.getByRole("button", {name:"Discard pending registration"}));
+  fireEvent.click(await screen.findByRole("button", {name:/^Discard$/}));
+  await waitFor(() => expect(registrationAttempt).toHaveBeenCalledWith({action:"clear",token:"C".repeat(43)}));
+  await waitFor(() => expect(fieldsetDisabled("Mobile number")).toBe(false));
+  fireEvent.input(screen.getByLabelText("Your first and last name"), {target:{value:"New Contact"}});
+  send(); await screen.findByText("Registration received");
+  expect(client.register).toHaveBeenCalledOnce(); expect(retained).not.toBeNull();
+  expect(vi.mocked(client.register).mock.calls[0]![0].fullName).toBe("New Contact");
+  expect(vi.mocked(client.register).mock.calls[0]![1]).not.toBe(originalKey);
+});
+
+it.each(["unavailable", "changed"])("keeps the local pending response if discard finds %s host state", async kind => {
+  const client = fakeClient({register:vi.fn<FundraiserClient["register"]>().mockRejectedValue(new BackendError(503))});
+  mount(client);await fillRegistration();send();await screen.findByRole("button",{name:"Retry same registration"});
+  if (kind === "unavailable") vi.mocked(client.registrationAttempt).mockRejectedValueOnce(new BackendError(503));
+  else {
+    const prior = await client.registrationAttempt({action:"get"});
+    vi.mocked(client.registrationAttempt).mockResolvedValueOnce({attempt:{...prior.attempt!, idempotencyKey:"different-key"}});
+  }
+  fireEvent.click(screen.getByRole("button",{name:"Discard pending registration"}));fireEvent.click(screen.getByRole("button",{name:/^Discard$/}));
+  await screen.findByRole("button",{name:"Retry same registration"});
+  expect(fieldsetDisabled("Mobile number")).toBe(true);
+  expect(vi.mocked(client.registrationAttempt).mock.calls.some(([request])=>request.action==="clear")).toBe(false);
+});
+
+it("requires explicit retry when another tab's saved response wins", async () => {
+  const prior = await createRegistrationAttempt({fullName:"Previous Contact",mobile:"+639171234567",paymentMethod:"gcash",sessions:[{sessionId:"s1",players:["Previous Player"],spectators:[]}]},{name:"receipt.png",contentType:"image/png",bytesBase64:"YWJjZA=="});
+  const retained = {token:"D".repeat(43),idempotencyKey:prior.registerKey,input:{...prior.input,receiptFileId:uploaded.file.fileId}};
+  const client = fakeClient({registrationAttempt:vi.fn<FundraiserClient["registrationAttempt"]>().mockResolvedValueOnce({attempt:null}).mockResolvedValue({attempt:retained})});
+  mount(client);await fillRegistration();send();await screen.findByRole("button",{name:"Retry same registration"});
+  expect(client.register).not.toHaveBeenCalled();
+  expect((screen.getByLabelText("Your first and last name") as HTMLInputElement).value).toBe("Previous Contact");
+  fireEvent.click(screen.getByRole("button",{name:"Retry same registration"}));await screen.findByText("Registration received");
+  expect(client.register).toHaveBeenCalledWith(retained.input,retained.idempotencyKey);
+});
+
 it("keeps a reloaded uncertain request after a later refusal", async () => {
   const client = fakeClient({register:vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(503)).mockRejectedValue(new BackendError(409))});
   mount(client);await fillRegistration();send();await screen.findByRole("button",{name:"Retry same registration"});

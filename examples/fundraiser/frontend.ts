@@ -4,7 +4,7 @@ import {
   BackendError, backendStatus, createFundraiserClient, createRegistrationAttempt, decodeBase64, defaultAppContext, mutationKey,
   RECEIPT_MAX_BYTES, RECEIPT_TYPES, receiptUploadFromFile, submitRegistration,
   restoreRegistrationAttempt, type RegistrationRetry,
-  type AppContext, type BackendStatus, type FundraiserClient, type RegistrationAttempt, type RegistrationDraft,
+  type AppContext, type BackendStatus, type FundraiserClient, type RegistrationAttempt, type RegistrationDraft, type RetainedRegistrationAttempt,
 } from "./client.ts";
 import type {
   AttendeeRow, FileReply, ManualEntryInput, OnlinePaymentMethod, PaymentMethod, PaymentTotal, PublicSession, RegisterInput, RegisterResult,
@@ -76,6 +76,12 @@ function describe(error: unknown, overrides: Partial<Record<BackendStatus, strin
   return status === null ? "The app hit an unexpected error. Reload the page, then try again." : overrides[status] ?? GENERIC_MESSAGE[status];
 }
 const uncertain = (error: unknown) => error instanceof BackendError && error.uncertain;
+function sameRetainedRegistration(current: RegistrationRetry, saved: RetainedRegistrationAttempt): boolean {
+  const values = (input: Omit<RegisterInput, "receiptFileId">) => [input.fullName, input.mobile, input.paymentMethod,
+    input.submissionId, input.retrySecret, input.receiptSha256, input.sessions.map(session => [session.sessionId, session.players, session.spectators])];
+  return current.registerKey === saved.idempotencyKey && current.fileId === saved.input.receiptFileId &&
+    JSON.stringify(values(current.input)) === JSON.stringify(values(saved.input));
+}
 
 // ---------- DOM helpers ----------
 type Child = Node | string | null | undefined | false;
@@ -358,9 +364,11 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
         const retained = (await client.registrationAttempt({ action: "save", idempotencyKey: current.registerKey, input: { ...current.input, receiptFileId: current.fileId } })).attempt;
         if (!retained) throw new BackendError(503);
         attemptToken = retained.token;
-        if (retained.idempotencyKey !== current.registerKey) {
+        if (!sameRetainedRegistration(current, retained)) {
           current = restoreRegistrationAttempt(retained); attempt = current; outcomeUnknown = true;
-          restoreDraft(current); setBusy(true, "Sending…");
+          restoreDraft(current);
+          showPending("Another response was already saved in this browser. Review these details before retrying.");
+          return;
         }
       }
       const reply = await submitRegistration(client, current);
@@ -436,8 +444,15 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
     } catch (error) { setBusy(false); submitButton.disabled = true; messages.replaceChildren(notice("dohc could not check your saved response. Try again before registering.", "error", button("Check saved response", {class: "primary", click: () => void loadRetained()}))); }
   }
   async function clearRetained(): Promise<boolean> {
-    if (!attemptToken) return true;
-    try { const result = await client.registrationAttempt({action: "clear", token: attemptToken}); if (result.attempt !== null) return false; attemptToken = null; outcomeUnknown = false; return true; }
+    try {
+      const saved = (await client.registrationAttempt({action: "get"})).attempt;
+      if (saved) {
+        if (!attempt || !sameRetainedRegistration(attempt, saved) || attemptToken && saved.token !== attemptToken) return false;
+        const result = await client.registrationAttempt({action: "clear", token: saved.token});
+        if (result.attempt !== null) return false;
+      }
+      attemptToken = null; outcomeUnknown = false; return true;
+    }
     catch { return false; }
   }
   void loadRetained();
