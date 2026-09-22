@@ -121,7 +121,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       setPage(parsePage(response.result, read.fieldIds)); setQuery(next); setPrevious(history);
     } catch (cause) {
-      if (alive.current && sequence.current === mine && !abort.signal.aborted) onError(`dohc could not load ${table?.name ?? "this collection"}.`, cause, () => { if (alive.current) void load(next, history); });
+      if (alive.current && sequence.current === mine && !abort.signal.aborted) {
+        setPage(null);
+        onError(`dohc could not load ${table?.name ?? "this collection"}.`, cause, () => { if (alive.current) void load(next, history); });
+      }
     } finally {
       if (alive.current && sequence.current === mine) { locked.current = false; setBusy(false); }
     }

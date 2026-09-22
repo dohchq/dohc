@@ -31,6 +31,13 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("clears previously displayed records when a read loses access", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    result.invoke.mockRejectedValueOnce(Error("Access revoked"));
+    fireEvent.click(screen.getByRole("button", {name:"Refresh"}));
+    await waitFor(() => expect(result.onError).toHaveBeenCalled());
+    expect(screen.queryByText("Alice")).toBeNull();
+  });
   it("shows saved offline records without mutation controls and refreshes the copy", async () => {
     const onRefresh = vi.fn();
     setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000 }, onRefresh, confirmDelete: async () => true });

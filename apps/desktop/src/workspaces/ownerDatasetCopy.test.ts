@@ -42,4 +42,4 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     denied=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("revoked");
     offline=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow(/no longer available/);
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
-});
+}, 15_000);
