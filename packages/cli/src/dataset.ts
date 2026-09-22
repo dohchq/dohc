@@ -18,6 +18,8 @@ const revision = z.unknown().transform((value, context) => {
   try { return parseDatasetRevision(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection revision." }); return z.NEVER; }
 });
+export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
+  revision: z.number().int().nonnegative(), digest: sha256 }).strict();
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe") }).strict(),
@@ -28,12 +30,19 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("prepare"), descriptorPath: z.string().min(1).max(1024) }).strict(),
   z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
+  z.object({ ...selection, action: z.literal("prepareMigration"), descriptorPath: z.string().min(1).max(1024), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...workspace, action: z.literal("approveMigration"), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
+  z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
     input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
 ]);
 export type DatasetRequest = z.infer<typeof DatasetRequest>;
 export const DatasetPreparation = z.object({ preparationId: identity, revision, sourceDigest: sha256 }).strict();
 export type DatasetPreparation = z.infer<typeof DatasetPreparation>;
+export const DatasetMigrationPreparation = z.object({ preparationId: identity, previousRevision: revision, revision, expected: DatasetCursor,
+  sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
+  migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
+export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
 export const DatasetInvocationResult = z.object({
   result: z.unknown().transform((value, context) => {
     try { return parseAppBackendJson(value, 256 * 1024); }
@@ -53,5 +62,8 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("approved"), revision }).strict(),
   DatasetInvocationResult.extend({ kind: z.literal("invoked") }).strict(),
   z.object({ kind: z.literal("discarded") }).strict(),
+  DatasetMigrationPreparation.extend({ kind: z.literal("migration-prepared") }).strict(),
+  z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),
+  z.object({ kind: z.literal("migration-discarded") }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;

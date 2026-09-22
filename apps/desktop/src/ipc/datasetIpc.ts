@@ -1,4 +1,4 @@
-import { DatasetRequest, DatasetInvocationResult, DatasetPreparation } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -44,6 +44,17 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
+      if (input.action === "discardMigration") { host.discardMigration(input.preparationId); return { kind: "migration-discarded" as const }; }
+      if (input.action === "prepareMigration") {
+        const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepareMigration({ ...input, adapter, signal: operation.signal }));
+        current();
+        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
+      }
+      if (input.action === "approveMigration") {
+        const result = await host.approveMigration({ ...input, signal: operation.signal });
+        current();
+        return { kind: "migrated" as const, ...result };
+      }
       if (input.action === "invoke") {
         const result = await host.invoke({ ...input, signal: operation.signal });
         current();

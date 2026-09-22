@@ -1,0 +1,106 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { isSharedWithMePath } from "@dohc/workspace-core";
+import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
+import type { MigrateDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
+
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
+export interface LocalDatasetMigrationPreparation {
+  preparationId: string;
+  previousRevision: DatasetRevision;
+  revision: DatasetRevision;
+  expected: DatasetCursor;
+  sourceDigest: string;
+  approvalDigest: string;
+  schemaSql: string;
+  operationSource: string;
+  migrationSql: string;
+  expiresAtMs: number;
+}
+export interface PrepareLocalDatasetMigration {
+  datasetId: string;
+  descriptorPath: string;
+  migrationPath: string;
+  adapter: SourceAdapter;
+  signal?: AbortSignal;
+}
+const maximumBytes = 256 * 1024;
+const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const decode = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
+const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path) && !path.toLowerCase().split("/").includes(".dohc");
+const sameCursor = (a: DatasetCursor, b: DatasetCursor) => a.workspaceId === b.workspaceId && a.datasetId === b.datasetId
+  && a.hostEpoch === b.hostEpoch && a.approvedRevisionHash === b.approvedRevisionHash && a.revision === b.revision && a.digest === b.digest;
+
+/** Reviews retain captured bytes and the complete data cursor, never paths to reread at approval. */
+export function createLocalDatasetMigrations(dependencies: {
+  workspaceId: string;
+  assertCurrent(): void;
+  approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean };
+  migrate(input: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+}) {
+  const pending = new Map<string, LocalDatasetMigrationPreparation>();
+  let preparing = 0;
+  function current(expected: DatasetCursor) {
+    dependencies.assertCurrent();
+    const head = dependencies.approvedArtifacts(expected.datasetId);
+    if (!head.active || !sameCursor(expected, head.cursor)) throw new Error("This Collection changed after review started. Prepare the change again.");
+  }
+  return {
+    async prepareMigration(input: PrepareLocalDatasetMigration): Promise<LocalDatasetMigrationPreparation> {
+      dependencies.assertCurrent(); input.signal?.throwIfAborted();
+      const abort = input.signal ?? new AbortController().signal;
+      for (const [key, value] of pending) if (value.expiresAtMs <= Date.now()) pending.delete(key);
+      if (pending.size + preparing >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
+      if (!allowed(input.descriptorPath) || !allowed(input.migrationPath)
+        || (input.descriptorPath !== "dataset.json" && !input.descriptorPath.endsWith("/dataset.json"))) throw new Error("Choose Collection sources in this workspace.");
+      const previous = dependencies.approvedArtifacts(input.datasetId);
+      current(previous.cursor);
+      preparing++;
+      try {
+        const capture = async (paths: string[]) => {
+          current(previous.cursor); input.signal?.throwIfAborted();
+          const metadata = await input.adapter.captureSourceMetadata({ workspaceId: dependencies.workspaceId, versionId: "main", paths,
+            bounds: { maxInputFiles: 4, maxInputBytes: maximumBytes * 4 }, signal: abort });
+          const files = await input.adapter.hydrateCapturedSources(metadata, abort);
+          current(previous.cursor); input.signal?.throwIfAborted();
+          if (metadata.workspaceId !== dependencies.workspaceId || files.length !== paths.length || new Set(files.map(file => file.path)).size !== paths.length
+            || files.some(file => !paths.includes(file.path) || file.bytes.byteLength > maximumBytes || digest(file.bytes) !== file.sha256)) throw new Error("Collection source capture failed. Prepare the change again.");
+          return { metadata, files };
+        };
+        const first = await capture([input.descriptorPath]);
+        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)));
+        if (definition.datasetId !== input.datasetId) throw new Error("These sources belong to another Collection. Choose the matching sources.");
+        const paths = [input.descriptorPath, definition.schemaPath, definition.operationsPath, input.migrationPath];
+        if (new Set(paths).size !== 4 || paths.some(path => !allowed(path))) throw new Error("Choose separate Collection source files in this workspace.");
+        const captured = await capture(paths);
+        if (captured.files.find(file => file.path === input.descriptorPath)!.sha256 !== first.files[0]!.sha256) throw new Error("The Collection definition changed. Prepare the change again.");
+        const read = (path: string) => decode(captured.files.find(file => file.path === path)!.bytes);
+        const schemaSql = read(definition.schemaPath), operationSource = read(definition.operationsPath), migrationSql = read(input.migrationPath);
+        if (!migrationSql.trim() || migrationSql.includes("\0")) throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
+        const revision = describeDatasetRevision({ definition, revision: previous.revision.revision + 1, schemaSql, operationSource });
+        const review = { preparationId: randomUUID(), previousRevision: previous.revision, revision, expected: previous.cursor,
+          sourceDigest: captured.metadata.sourceDigest, schemaSql, operationSource, migrationSql, expiresAtMs: Date.now() + 10 * 60_000 };
+        const preparation = { ...review, approvalDigest: digest(JSON.stringify(["dohc-dataset-migration-review-v1", review])) };
+        pending.set(preparation.preparationId, structuredClone(preparation));
+        return preparation;
+      } finally { preparing--; }
+    },
+    async approveMigration(input: { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal }) {
+      dependencies.assertCurrent(); input.signal?.throwIfAborted();
+      const review = pending.get(input.preparationId);
+      if (!review || review.expiresAtMs <= Date.now() || review.revision.revisionSha256 !== input.revisionSha256 || review.approvalDigest !== input.approvalDigest) {
+        throw new Error("This Collection approval expired or changed. Prepare the change again.");
+      }
+      // Consume before the first await: a failed or uncertain outcome requires fresh capture, never repeated SQL.
+      pending.delete(input.preparationId);
+      current(review.expected);
+      return dependencies.migrate({ workspaceId: dependencies.workspaceId, revision: review.revision, expected: review.expected,
+        schemaSql: review.schemaSql, operationSource: review.operationSource, migrationSql: review.migrationSql, signal: input.signal });
+    },
+    discardMigration(preparationId: string) { dependencies.assertCurrent(); pending.delete(preparationId); },
+    clear() { pending.clear(); },
+  };
+}

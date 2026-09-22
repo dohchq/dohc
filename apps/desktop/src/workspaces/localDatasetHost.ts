@@ -15,11 +15,12 @@ import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupe
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
+import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
 type LocalContext = OwnerContext | LocalDatasetAppContext;
-type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation">;
+type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration">;
 export interface LocalDatasetHostOptions {
   workspaceId: string;
   workspaceRoot: string;
@@ -162,6 +163,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       accountCreation(context, allocation) { charge(allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       accountMetadata(_context, allocation) { charge(allocation.bytes); },
+      accountMigration(context, allocation) { charge(allocation.bytes); return resources?.accountMigration?.(context, allocation); },
       operationResources(context, request) {
         const extra = resources?.operationResources?.(context, request);
         const ids = new Set<string>();
@@ -190,6 +192,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         } };
       },
     });
+    const migrations = createLocalDatasetMigrations({ workspaceId, assertCurrent,
+      approvedArtifacts: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
+      migrate: input => host.migrate(owner, input) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
       return tracked(async () => {
         const abort = signal(input.signal);
@@ -239,6 +244,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     }
     const local = {
       prepare,
+      prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
+      approveMigration(input: Parameters<typeof migrations.approveMigration>[0]) { return tracked(() => migrations.approveMigration({ ...input, signal: signal(input.signal) })); },
+      discardMigration: migrations.discardMigration,
       discard(preparationId: string) { assertCurrent(); pending.delete(preparationId); },
       approve(input: {preparationId: string; revisionSha256: string; signal?: AbortSignal}) {
         return tracked(async () => {
@@ -304,7 +312,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       action: (input: LocalDatasetInvocation) => invoke(input, false),
       close(): Promise<void> {
         return closePromise ??= (async () => {
-          closed = true; pending.clear(); lifetime.abort();
+          closed = true; pending.clear(); migrations.clear(); lifetime.abort();
           await Promise.allSettled([...active]);
           try { await supervisor!.close(); } finally { db.close(); }
         })();
