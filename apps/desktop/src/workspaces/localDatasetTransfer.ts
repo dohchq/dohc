@@ -18,7 +18,7 @@ export interface DatasetTransferStatus {
   workspaceId: string;
   datasetId: string;
   targetOrigin: string;
-  state: "fenced" | "ready" | "imported";
+  state: "ready" | "imported";
   sourceCursor: DatasetCursor;
   manifestSha256: string | null;
   receipt: DatasetTransferReceipt | null;
@@ -29,7 +29,7 @@ export interface DatasetTransferTarget {
     stream: AsyncIterable<Uint8Array>; signal?: AbortSignal }): Promise<DatasetTransferReceipt>;
 }
 interface StoredTransfer extends DatasetTransferStatus { archive: { directory: string; manifest: DatasetRecoveryManifest } | null }
-type PreparedExport = { directory: string; manifest: DatasetRecoveryManifest; dispose(): Promise<void> };
+type PreparedExport = { directory: string; manifest: DatasetRecoveryManifest; assertUnchanged(): void; dispose(): Promise<void> };
 const sameCursor = (a: DatasetCursor, b: DatasetCursor) => a.workspaceId === b.workspaceId && a.datasetId === b.datasetId && a.hostEpoch === b.hostEpoch && a.approvedRevisionHash === b.approvedRevisionHash && a.revision === b.revision && a.digest === b.digest;
 function canonicalOrigin(value: string): string {
   const url = new URL(value);
@@ -44,7 +44,7 @@ function checkReceipt(value: DatasetTransferReceipt, marker: StoredTransfer): Da
   return structuredClone(value);
 }
 
-/** Durable intent and journal fencing share one transaction. No failure path restores local write authority. */
+/** A complete archive and its journal fence become durable together. Target failures never restore local write authority. */
 export function createLocalDatasetTransfers(options: {
   db: DatabaseSync; journal: DatasetJournal; workspaceId: string; exportDirectory: string; limits: RecoveryLimits;
   transaction<T>(run: () => T): T;
@@ -55,7 +55,7 @@ export function createLocalDatasetTransfers(options: {
   transaction(() => initializeDatasetAttempts(db));
   db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_transfers(
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,transfer_id TEXT NOT NULL UNIQUE,target_origin TEXT NOT NULL,
-    source_cursor TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('fenced','ready','imported')),
+    source_cursor TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ready','imported')),
     manifest_sha256 TEXT,archive TEXT,receipt TEXT,PRIMARY KEY(workspace_id,dataset_id)) STRICT;`);
   const inFlight = new Map<string, Promise<DatasetTransferStatus>>();
   function authorize(signal?: AbortSignal) { options.assertCurrent(); signal?.throwIfAborted(); }
@@ -92,39 +92,38 @@ export function createLocalDatasetTransfers(options: {
   }
   async function execute(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }): Promise<DatasetTransferStatus> {
     const targetOrigin = canonicalOrigin(input.targetOrigin); authorize(input.signal);
-    let marker = transaction(() => {
-      const existing = read(input.datasetId);
-      if (existing) {
-        if (existing.targetOrigin !== targetOrigin) throw Error("This Collection is transferring to another server. Finish that transfer first.");
-        assertFence(existing); return existing;
-      }
-      const head = journal.head({ workspaceId, datasetId: input.datasetId }, options.assertCurrent);
-      if (!head.active) throw Error("This Collection has no local write authority. Restore its transfer record before continuing.");
-      assertDatasetAttemptsCommitted(db, {workspaceId, datasetId: input.datasetId});
-      const value: StoredTransfer = { workspaceId, datasetId: input.datasetId, transferId: randomUUID(), targetOrigin, sourceCursor: head.cursor,
-        state: "fenced", manifestSha256: null, archive: null, receipt: null };
-      journal.fence({ expected: head.cursor, authorize: options.assertCurrent });
-      db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'fenced',NULL,NULL,NULL)").run(workspaceId, input.datasetId, value.transferId, targetOrigin, JSON.stringify(head.cursor));
-      return value;
-    });
-    if (marker.state === "imported") return finishImported(marker);
-    if (marker.state === "fenced") {
+    let marker: StoredTransfer;
+    const existing = read(input.datasetId);
+    if (existing) {
+      if (existing.targetOrigin !== targetOrigin) throw Error("This Collection is transferring to another server. Finish that transfer first.");
+      assertFence(existing); marker = existing;
+    } else {
+      // Build and validate the complete archive while local writes remain active. A malformed,
+      // oversized, unreadable, or otherwise unexportable dataset must remain writable.
       const prepared = await options.exportRecovery(input.datasetId, input.signal);
       let retained = false;
       try {
-        authorize(input.signal); assertFence(marker);
-        if (!sameCursor(prepared.manifest.cursor, marker.sourceCursor)) throw Error("The Collection export changed. Retry this transfer.");
+        authorize(input.signal);
+        prepared.manifest.sourceState = "fenced";
         const archive = { directory: prepared.directory, manifest: prepared.manifest };
         await checkedArchive(archive);
         const manifestSha256 = recoveryManifestSha256(prepared.manifest, options.limits);
+        encodeRecoveryManifest(prepared.manifest, options.limits);
         marker = transaction(() => {
-          authorize(input.signal); const current = read(input.datasetId)!; assertFence(current);
-          if (current.transferId !== marker.transferId) throw Error("The transfer changed. Reopen the workspace.");
-          if (current.state !== "fenced") return current;
-          db.prepare("UPDATE local_dataset_transfers SET state='ready',manifest_sha256=?,archive=? WHERE workspace_id=? AND dataset_id=? AND transfer_id=?")
-            .run(manifestSha256, JSON.stringify(archive), workspaceId, input.datasetId, marker.transferId);
-          retained = true; return { ...current, state: "ready" as const, manifestSha256, archive };
+          authorize(input.signal);
+          const head = journal.head({ workspaceId, datasetId: input.datasetId }, options.assertCurrent);
+          if (!head.active) throw Error("This Collection has no local write authority. Restore its transfer record before continuing.");
+          if (!sameCursor(head.cursor, prepared.manifest.cursor)) throw Error("The Collection changed while it was being exported. Retry this transfer.");
+          prepared.assertUnchanged();
+          assertDatasetAttemptsCommitted(db, { workspaceId, datasetId: input.datasetId });
+          journal.fence({ expected: head.cursor, authorize: options.assertCurrent });
+          const value: StoredTransfer = { workspaceId, datasetId: input.datasetId, transferId: randomUUID(), targetOrigin,
+            sourceCursor: head.cursor, state: "ready", manifestSha256, archive, receipt: null };
+          db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,'ready',?,?,NULL)").run(workspaceId, input.datasetId, value.transferId, targetOrigin,
+            JSON.stringify(head.cursor), manifestSha256, JSON.stringify(archive));
+          return value;
         });
+        retained = true;
       } finally { if (!retained) await prepared.dispose(); }
     }
     if (marker.state === "imported") return finishImported(marker);

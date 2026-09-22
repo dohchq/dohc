@@ -60,6 +60,18 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
   const { db, journal } = options, scope={...options.scope};
   if(!Number.isSafeInteger(options.limits.maxTotalBytes)||options.limits.maxTotalBytes<1)throw new Error("Invalid dataset export storage reservation.");
   const authorize = () => { options.signal?.throwIfAborted(); sync(options.authorize); };
+  const mutableMetadataDigest = () => {
+    const digest = createHash("sha256");
+    for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle", "dohc_dataset_attempts"]) {
+      digest.update(table); let after = 0;
+      for (;;) {
+        const rows = db.prepare(`SELECT rowid,* FROM ${table} WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64`).all(scope.workspaceId, scope.datasetId, after);
+        if (!rows.length) break;
+        for (const row of rows) { digest.update(JSON.stringify(row)); after = Number(row.rowid); }
+      }
+    }
+    return digest.digest("hex");
+  };
   const pinned = journal.captureExport({ scope, authorize, capture(cursor) {
     initializeDatasetAttempts(db);
     assertDatasetAttemptsCommitted(db, scope);
@@ -88,7 +100,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     const attachments=files.map(file=>({...file}));
     const sourceState = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)?.active === 1 ? "active" as const : "fenced" as const;
     const lifecycle = db.prepare("SELECT archived,generation,reason,archived_at_ms FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
-    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, attempts, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
+    return { mutableMetadataDigest: mutableMetadataDigest(), revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, attempts, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
   } });
   if (pinned.captured.revision.revisionSha256 !== pinned.cursor.approvedRevisionHash) throw new Error("Dataset catalog and journal approval differ.");
   const attachments = pinned.captured.attachments;
@@ -107,7 +119,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     try {for await(const chunk of chunks){authorize();if(!(chunk instanceof Uint8Array)||chunk.byteLength>RECOVERY_CHUNK_BYTES+4)throw new Error("Dataset export chunk exceeds its bound.");
       total+=chunk.byteLength;size+=chunk.byteLength;if(total>options.limits.maxTotalBytes)throw new Error("Dataset export exceeds its storage reservation.");
       hash.update(chunk);let offset=0;while(offset<chunk.byteLength){const wrote=await file.write(chunk,offset,chunk.byteLength-offset);if(!wrote.bytesWritten)throw new Error("Dataset export write stopped.");offset+=wrote.bytesWritten;}
-    }}finally{await file.close();}
+    } await file.sync();}finally{await file.close();}
     const completed={...entry,byteLength:size,sha256:hash.digest("hex")};entries.push(completed);paths.set(entry.id,path);return completed;
   }
   async function* bytes(value:Uint8Array){for(let offset=0;offset<value.byteLength;offset+=RECOVERY_CHUNK_BYTES)yield value.subarray(offset,offset+RECOVERY_CHUNK_BYTES);}
@@ -144,7 +156,12 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     if([...attachedReferences].some(fileId=>!seen.has(fileId))||attachments.some(file=>!attachedReferences.has(file.fileId)))throw new Error("Dataset export attachment inventory does not match its committed history.");
     for(const file of attachments){const saved=await save({id:`attachment:${file.fileId}`,kind:"attachment"},options.attachments!.open(file));if(saved.byteLength!==file.byteLength||saved.sha256!==file.sha256)throw new Error("Dataset export attachment hash differs.");}
     const manifest:DatasetRecoveryManifest={format:"dohc-dataset-recovery-v1",sourceState:pinned.captured.sourceState,cursor:pinned.cursor,checkpoint:pinned.checkpoint.cursor,entries};encodeRecoveryManifest(manifest,options.limits);authorize();
-    return {manifest,directory,dispose,stream(){if(disposed)throw new Error("Dataset export was disposed.");return writeDatasetRecovery({manifest,limits:options.limits,signal:options.signal,authorize,
+    return {manifest,directory,dispose,assertUnchanged() {
+      authorize();
+      const head = journal.head(scope, authorize);
+      if (JSON.stringify(head.cursor) !== JSON.stringify(pinned.cursor) || head.active !== (pinned.captured.sourceState === "active") ||
+          mutableMetadataDigest() !== pinned.captured.mutableMetadataDigest) throw new Error("The Collection changed while it was being exported. Retry this transfer.");
+    },stream(){if(disposed)throw new Error("Dataset export was disposed.");return writeDatasetRecovery({manifest,limits:options.limits,signal:options.signal,authorize,
       open(entry){return createReadStream(paths.get(entry.id)!,{highWaterMark:RECOVERY_CHUNK_BYTES});}});}};
   }catch(error){await dispose();throw error;}
 }

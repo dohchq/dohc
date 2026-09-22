@@ -42,8 +42,8 @@ it("uses remote archive state and routes lifecycle changes without touching the 
   expect(f.remote.archive).toHaveBeenCalledWith({ datasetId: remoteId }); expect(f.remote.restore).toHaveBeenCalledWith({ datasetId: remoteId });
 });
 
-it.each(["fenced", "ready"] as const)("refuses %s transfers without contacting either writable authority", async state => {
-  const f = fixture(); f.status.mockResolvedValue({ ...marker, state, receipt: null });
+it("refuses unconfirmed transfers without contacting either writable authority", async () => {
+  const f = fixture(); f.status.mockResolvedValue({ ...marker, state: "ready", receipt: null });
   await expect(f.data.invoke({ datasetId: remoteId, revision: 1, revisionSha256: "a".repeat(64), operationId: localId, input: {}, idempotencyKey: "retry" })).rejects.toThrow(/transferring/);
   expect(f.local.invoke).not.toHaveBeenCalled(); expect(f.remote.invoke).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled();
 });
