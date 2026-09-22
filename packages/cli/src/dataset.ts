@@ -1,11 +1,17 @@
 import { z } from "zod";
-import { parseAppBackendJson } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription } from "@dohc/security-contract/dataset";
 
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const workspace = { workspaceId: z.string().min(1).max(128) };
 const selection = { ...workspace, datasetId: identity };
+const pinned = { ...selection, revision: z.number().int().positive(), revisionSha256: sha256 };
+const file = z.unknown().transform((value, context) => {
+  try { return parseAppBackendFile(value); }
+  catch { context.addIssue({ code: "custom", message: "Invalid Collection file." }); return z.NEVER; }
+});
+const fileBytes = z.string().max(Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3) * 4);
 const json = z.unknown().transform((value, context) => {
   try { return parseAppBackendJson(value, 64 * 1024); }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection input." }); return z.NEVER; }
@@ -23,6 +29,9 @@ export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe") }).strict(),
+  z.object({ ...pinned, action: z.literal("upload"), fieldId: identity, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    name: z.string().min(1).max(255), contentType: z.string().min(1).max(128), bytesBase64: fileBytes }).strict(),
+  z.object({ ...pinned, action: z.literal("file"), fileId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/) }).strict(),
   z.object({ ...selection, action: z.literal("createForm"), revision: z.number().int().positive(), revisionSha256: sha256,
     tableId: identity, createOperationId: identity, appRoot: z.string().min(1).max(900), title: z.string().min(1).max(200).optional(),
     fieldIds: z.array(identity).min(1).max(24) }).strict(),
@@ -61,6 +70,9 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetPreparation.extend({ kind: z.literal("prepared") }).strict(),
   z.object({ kind: z.literal("approved"), revision }).strict(),
   DatasetInvocationResult.extend({ kind: z.literal("invoked") }).strict(),
+  z.object({ kind: z.literal("refused"), code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), message: z.string().max(1024) }).strict(),
+  z.object({ kind: z.literal("uploaded"), file, replayed: z.boolean() }).strict(),
+  z.object({ kind: z.literal("file"), file, bytesBase64: fileBytes }).strict(),
   z.object({ kind: z.literal("discarded") }).strict(),
   DatasetMigrationPreparation.extend({ kind: z.literal("migration-prepared") }).strict(),
   z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),

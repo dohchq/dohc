@@ -5,6 +5,7 @@ import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
@@ -28,6 +29,19 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       current();
       if (input.action === "list") return { kind: "list" as const, ...host.list({ after: input.after, limit: input.limit }) };
       if (input.action === "describe") return { kind: "description" as const, dataset: host.describe(input.datasetId) };
+      if (input.action === "upload") {
+        const description = host.describe(input.datasetId);
+        if (!description.tables.some(table => table.fields.some(field => field.fieldId === input.fieldId && field.type === "attachment")) ||
+            !description.operations.some(action => !action.readOnly && action.fieldIds.includes(input.fieldId))) throw new Error("Choose an editable Collection file field.");
+        const result = await host.upload({ ...input, signal: operation.signal });
+        current();
+        return { kind: "uploaded" as const, ...result };
+      }
+      if (input.action === "file") {
+        const result = await host.file({ ...input, signal: operation.signal });
+        current();
+        return { kind: "file" as const, ...result };
+      }
       if (input.action === "createForm") {
         const approved = host.approvedArtifacts(input.datasetId);
         if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) {
@@ -56,9 +70,15 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "migrated" as const, ...result };
       }
       if (input.action === "invoke") {
-        const result = await host.invoke({ ...input, signal: operation.signal });
-        current();
-        return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
+        try {
+          const result = await host.invoke({ ...input, signal: operation.signal });
+          current();
+          return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
+        } catch (error) {
+          current();
+          if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal };
+          throw error;
+        }
       }
       if (input.action === "approve") {
         const revision = await host.approve({ ...input, signal: operation.signal });
