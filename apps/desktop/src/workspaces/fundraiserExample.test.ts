@@ -177,11 +177,10 @@ it("restores the exact saved request after reload, without another upload or rec
   await screen.findByRole("button", {name:"Retry same registration"});
   const first = vi.mocked(client.register).mock.calls[0];
   mount(client);
-  fireEvent.click(await screen.findByRole("button", {name:"Retry same registration"}));
   await screen.findByText("Registration received");
   expect(vi.mocked(client.register).mock.calls[1]).toEqual(first);
   expect(client.uploadReceipt).toHaveBeenCalledOnce(); expect(URL.createObjectURL).not.toHaveBeenCalled();
-  mount(client); fireEvent.click(await screen.findByRole("button", {name:"Retry same registration"}));
+  mount(client);
   await screen.findByText(token); expect(vi.mocked(client.register).mock.calls[2]).toEqual(first);
   fireEvent.click(screen.getByRole("button", {name:"Register another group"}));
   await waitFor(()=>expect(fieldsetDisabled("Mobile number")).toBe(false));
@@ -245,7 +244,7 @@ it("requires explicit retry when another tab's saved response wins", async () =>
 it("keeps a reloaded uncertain request after a later refusal", async () => {
   const client = fakeClient({register:vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(503)).mockRejectedValue(new BackendError(409))});
   mount(client);await fillRegistration();send();await screen.findByRole("button",{name:"Retry same registration"});
-  mount(client);fireEvent.click(await screen.findByRole("button",{name:"Retry same registration"}));
+  mount(client);
   await waitFor(()=>expect(client.register).toHaveBeenCalledTimes(2));
   await screen.findByRole("button",{name:"Retry same registration"});
   expect(vi.mocked(client.registrationAttempt).mock.calls.some(([request])=>request.action==="clear")).toBe(false);

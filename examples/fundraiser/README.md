@@ -20,7 +20,7 @@ Submitting the form reserves the slots. Payment alone does not reserve them.
 If the slots fill before submission, the organizer must arrange another session or refund outside the app.
 
 Successful submission returns a private status token. Copy it or download its text file to check status in another browser.
-The original browser can reopen the app and retry its saved response to recover the same confirmation and token.
+The original browser replays its saved response when reopening the app to recover the same confirmation and token.
 Paste the token into **My registration**. This example does not create a portable status URL.
 Anyone holding that token can inspect that registration's status and attendee names.
 The lookup omits contact information and receipts. There is no mobile-number lookup or automatic lost-link recovery.

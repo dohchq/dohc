@@ -438,7 +438,11 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
     try {
       const saved = (await client.registrationAttempt({ action: "get" })).attempt;
       ready = true;
-      if (saved) { attemptToken = saved.token; outcomeUnknown = true; restoreDraft(restoreRegistrationAttempt(saved)); }
+      if (saved) {
+        attemptToken = saved.token; outcomeUnknown = true; restoreDraft(restoreRegistrationAttempt(saved));
+        messages.replaceChildren(notice("Checking your saved registration…", "info"));
+        await send();
+      }
       else if (context.pendingAttempt) restoreDraft(context.pendingAttempt);
       else { messages.replaceChildren(); setBusy(false); }
     } catch (error) { setBusy(false); submitButton.disabled = true; messages.replaceChildren(notice("dohc could not check your saved response. Try again before registering.", "error", button("Check saved response", {class: "primary", click: () => void loadRetained()}))); }
