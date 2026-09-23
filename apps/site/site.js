@@ -220,6 +220,7 @@ if (principlesGraph) {
   const principleTitle = principlesGraph.querySelector('[data-principle-title]');
   const principleCopy = principlesGraph.querySelector('[data-principle-copy]');
   const principleAgent = principlesGraph.querySelector('[data-principle-agent]');
+  const principleDetail = principlesGraph.querySelector('.principle-detail');
   const principleCanvas = principlesGraph.querySelector('.principles-graph-canvas');
   const principleSvg = principlesGraph.querySelector('.principles-edges');
   const principleCore = principlesGraph.querySelector('.principle-core');
@@ -261,9 +262,13 @@ if (principlesGraph) {
       edge.classList.toggle('is-active', connected);
       edge.classList.toggle('is-muted', !connected);
     });
+    const changed = principleTitle && principleTitle.textContent !== node.dataset.title;
     if (principleTitle) principleTitle.textContent = node.dataset.title;
     if (principleCopy) principleCopy.textContent = node.dataset.copy;
     if (principleAgent) principleAgent.textContent = node.dataset.agent;
+    if (changed && !reducedGraphMotion.matches) {
+      principleDetail?.animate?.([{ opacity: 0.2, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }], { duration: 220, easing: 'ease-out' });
+    }
     restartPhysics(0.16);
   };
 
@@ -658,16 +663,16 @@ const agentDemo = document.querySelector('[data-agent-demo]');
 if (agentDemo) {
   const AGENTS = {
     claude: {
-      name: 'Claude',
+      name: 'Claude Code',
       color: '#D97757',
     },
     codex: {
       name: 'Codex',
       color: 'var(--ink)',
     },
-    gemini: {
-      name: 'Gemini',
-      color: '#4285F4',
+    opencode: {
+      name: 'OpenCode',
+      color: 'var(--ink)',
     },
   };
   const chips = Array.from(agentDemo.querySelectorAll('[data-agent]'));
@@ -866,6 +871,51 @@ if (agentDemo) {
 
 }
 
+// Drive waitlist: posts to the Loops form endpoint in the form's action.
+const waitlist = document.querySelector('[data-waitlist]');
+
+if (waitlist) {
+  const status = waitlist.querySelector('[data-waitlist-status]');
+  const submit = waitlist.querySelector('button[type="submit"]');
+  const submitLabel = submit.textContent;
+  let pending = false;
+
+  const failure = async (response) => {
+    if (response.status === 429) return 'Too many signups from this network. Try again in a few minutes.';
+    const result = await response.json().catch(() => null);
+    if (response.status === 200 && result?.success === true) return null;
+    return 'Couldn\'t join the waitlist. Check the email address and try again.';
+  };
+
+  waitlist.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (pending) return;
+    pending = true;
+    waitlist.dataset.state = 'pending';
+    submit.disabled = true;
+    submit.textContent = 'Joining…';
+    status.textContent = 'Joining the waitlist…';
+    try {
+      const response = await fetch(waitlist.action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(new FormData(waitlist)).toString(),
+        signal: AbortSignal.timeout(10000),
+      });
+      const message = await failure(response);
+      waitlist.dataset.state = message ? 'error' : 'joined';
+      status.textContent = message ?? 'You\'re on the list. We\'ll email you when Drive opens.';
+    } catch {
+      waitlist.dataset.state = 'error';
+      status.textContent = 'Couldn\'t reach the waitlist. Check your connection and try again.';
+    } finally {
+      pending = false;
+      submit.disabled = false;
+      submit.textContent = submitLabel;
+    }
+  });
+}
+
 const syncDemo = document.querySelector('[data-sync-demo]');
 if (syncDemo) createSyncDemo(syncDemo);
 
@@ -880,27 +930,27 @@ if (readers) {
     plan: {
       name: 'Plan',
       view: '<h3>Launch plan</h3><p>Beta on the 24th. Three things gate it: the pricing page, the payment sandbox, and the invite flow. Maya owns pricing, Sam owns the sandbox.</p>',
-      foot: 'Markdown on disk. A live document while it\'s open, so edits from both of you merge.',
+      foot: 'Saved as a Markdown file. When you both edit it, the changes merge live.',
     },
     tasks: {
       name: 'Tasks',
       view: '<div class="reader-board"><div class="reader-col"><h4>todo <span>2</span></h4><div class="reader-task">Invite flow</div><div class="reader-task">Launch email</div></div><div class="reader-col"><h4>doing <span>3</span></h4><div class="reader-task">Pricing page</div><div class="reader-task">Payment sandbox</div><div class="reader-task">Copy review</div></div><div class="reader-col"><h4>done <span>1</span></h4><div class="reader-task">Beta day</div></div></div>',
-      foot: 'A folder with a schema. One markdown file per task; the board, table, and calendar are views of the same files.',
+      foot: 'One Markdown file per task. The board, table, and calendar all show the same files.',
     },
     drawing: {
       name: 'Flow sketch',
       view: '<div class="reader-drawing"><svg viewBox="0 0 400 170" aria-hidden="true"><rect x="20" y="60" width="110" height="44" rx="6"/><text x="75" y="86" text-anchor="middle">Sign up</text><rect x="250" y="20" width="130" height="44" rx="6"/><text x="315" y="46" text-anchor="middle">Has account</text><rect x="250" y="106" width="130" height="44" rx="6"/><text x="315" y="132" text-anchor="middle">New user</text><path d="M130 82 C 190 82, 190 42, 250 42"/><path d="M130 82 C 190 82, 190 128, 250 128"/></svg></div>',
-      foot: 'JSON with an id on every shape, so your agent can add a branch or move one without redrawing.',
+      foot: 'Every shape has an id, so your agent can change one part without redrawing the rest.',
     },
     chat: {
       name: '#launch',
       view: `<div class="reader-msg">${WHO('S')}<span><b>Sam</b> sandbox is on track for the 19th, so the 24th is fine by me.</span></div><div class="reader-msg">${WHO('M')}<span><b>Maya</b> <span class="chat-mention">@My Agent</span> can you add the three gates as tasks?</span></div><div class="reader-msg">${AGENT_WHO}<span><b>My Agent</b> done. three tasks in tasks/, due the 21st.</span></div>`,
-      foot: 'Chat is available as a read-only Markdown projection. Your agent replies through dohc\'s chat tools.',
+      foot: 'Your agent can read the chat as a file, and it replies with dohc\'s chat tools.',
     },
     app: {
       name: 'Split',
       view: '<div class="reader-app"><div class="reader-app-row"><span>Maya</span><span>owes ¥2,140</span></div><div class="reader-app-row"><span>Sam</span><span class="is-clear">settled</span></div><div class="reader-app-row"><span>you</span><span class="is-clear">paid</span></div></div>',
-      foot: 'Source in the folder. The app reads only the data it lists, and your agent can change the source like any other file.',
+      foot: 'The app\'s code lives in the folder. It reads only the data you allow.',
     },
     history: {
       name: 'History',

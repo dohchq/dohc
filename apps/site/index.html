@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dohc | local-first workspace for you and your agents</title>
-<meta name="description" content="Build documents, data, dashboards, and workflows with your agents. Your workspace stays on your computer, in files you control." />
-<meta property="og:title" content="dohc | local-first workspace for you and your agents" />
-<meta property="og:description" content="Build documents, data, dashboards, and workflows with your agents. Your workspace stays on your computer, in files you control." />
+<title>dohc | a workspace for you and your AI agents</title>
+<meta name="description" content="A free desktop app where you and your AI agents work side by side. Docs, tables, chats, and apps, all stored on your computer." />
+<meta property="og:title" content="dohc | a workspace for you and your AI agents" />
+<meta property="og:description" content="A free desktop app where you and your AI agents work side by side. Docs, tables, chats, and apps, all stored on your computer." />
 <meta property="og:type" content="website" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="preload" href="/node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
@@ -37,7 +37,9 @@
   <!-- Agent marks are hand-drawn placeholders; swap for official assets before launch. -->
   <symbol id="logo-claude" viewBox="0 0 24 24"><g stroke="#D97757" stroke-width="2.4" stroke-linecap="round" fill="none"><line x1="16" y1="12" x2="21.5" y2="12"/><line x1="15.24" y1="14.35" x2="18.07" y2="16.41"/><line x1="13.24" y1="15.8" x2="14.94" y2="21.03"/><line x1="10.76" y1="15.8" x2="9.68" y2="19.13"/><line x1="8.76" y1="14.35" x2="4.31" y2="17.59"/><line x1="8" y1="12" x2="4.5" y2="12"/><line x1="8.76" y1="9.65" x2="4.31" y2="6.41"/><line x1="10.76" y1="8.2" x2="9.68" y2="4.87"/><line x1="13.24" y1="8.2" x2="14.94" y2="2.97"/><line x1="15.24" y1="9.65" x2="18.07" y2="7.59"/></g></symbol>
   <symbol id="logo-codex" viewBox="0 0 24 24"><g transform="translate(12 12)" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M 0 -10 L 8.66 -5 L 8.66 5"/><path d="M 0 -10 L 8.66 -5 L 8.66 5" transform="rotate(60)"/><path d="M 0 -10 L 8.66 -5 L 8.66 5" transform="rotate(120)"/><path d="M 0 -10 L 8.66 -5 L 8.66 5" transform="rotate(180)"/><path d="M 0 -10 L 8.66 -5 L 8.66 5" transform="rotate(240)"/><path d="M 0 -10 L 8.66 -5 L 8.66 5" transform="rotate(300)"/></g></symbol>
-  <symbol id="logo-gemini" viewBox="0 0 24 24"><defs><linearGradient id="logo-gemini-grad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#4285F4"/><stop offset="1" stop-color="#9B72CB"/></linearGradient></defs><path fill="url(#logo-gemini-grad)" d="M12 1.5 C12.6 7.5 16.5 11.4 22.5 12 C16.5 12.6 12.6 16.5 12 22.5 C11.4 16.5 7.5 12.6 1.5 12 C7.5 11.4 11.4 7.5 12 1.5 Z"/></symbol>
+  <symbol id="logo-opencode" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1.5"/><rect x="8.5" y="11" width="7" height="6" fill="currentColor" stroke="none"/></g></symbol>
+  <symbol id="glyph-person" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></g></symbol>
+  <symbol id="glyph-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="7.5" width="15" height="11" rx="3"/><path d="M12 7.5V4.5"/><circle cx="12" cy="3.8" r=".9" fill="currentColor"/><path d="M9.3 12.4v1.4M14.7 12.4v1.4"/></g></symbol>
 </svg>
 
 <header class="nav">
@@ -51,8 +53,8 @@
   </a>
   <nav class="nav-links" aria-label="Site">
     <a href="#demo">demo</a>
-    <a href="#downloads">downloads</a>
     <a href="#drive">drive</a>
+    <a href="#downloads">downloads</a>
   </nav>
   <div class="nav-end">
     <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
@@ -75,7 +77,7 @@
     <div class="hero-copy">
       <h1 class="reveal d1">Put work in <em class="underlined">plain sight.<svg class="hand-underline" viewBox="0 0 220 22" preserveAspectRatio="none" aria-hidden="true"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
       <p class="hero-sub reveal d2">
-        A workspace for you and your agents. Files, docs, chats, and apps, stored on your computer. No account needed.
+        A free desktop app where you and your AI agents work side by side. Docs, tables, chats, and apps, all stored on your computer.
       </p>
       <div class="hero-cta reveal d3">
         <div class="download-control" data-download-control>
@@ -86,17 +88,24 @@
           <a class="download-other" href="#downloads">Other platforms</a>
         </div>
       </div>
+      <ul class="hero-facts reveal d4" aria-label="At a glance">
+        <li>Open source</li>
+        <li>Self-hostable</li>
+        <li>No account</li>
+        <li>Works offline</li>
+      </ul>
     </div>
     <figure class="hero-engine">
       <div class="hero-engine-view" data-engine-host role="group" aria-label="Interactive DOHC inline-six engine model">
         <img class="hero-engine-poster" src="/inline-six-engine.webp" srcset="/inline-six-engine-480.webp 480w, /inline-six-engine.webp 852w" sizes="(max-width: 780px) 90vw, (min-width: 1240px) 550px, 42vw" width="852" height="852" fetchpriority="high" alt="Jaguar XK-inspired inline-six engine with sealed polished aluminum cam covers, triple carburetors and curved exhaust headers." />
       </div>
+      <figcaption class="fig-caption"><span class="fig-number">Fig. 1</span> DOHC means double overhead cam. Drag to turn it.</figcaption>
     </figure>
   </section>
 
   <!-- ============ interactive desktop demo ============ -->
   <section class="section demo-section" id="demo" aria-label="Interactive dohc workspace demo">
-    <div class="demo-stage reveal">
+    <div class="demo-stage">
       <div id="desktop-demo" role="group" aria-label="Interactive demo of the dohc desktop app">
         <div class="demo-loading" role="status">
           <span class="demo-loading-mark" aria-hidden="true">dohc</span>
@@ -112,8 +121,8 @@
     <div class="section-head reveal">
       <h2><span>One folder.</span> <span>Everything connected.</span></h2>
       <p class="section-lede">
-        Files, documents, data, chat, and apps as the foundation for your agents
-        to build on. History is built in. Sync and sharing need a server.
+        Docs, tables, drawings, chats, and apps, all in one folder on your computer.
+        Pick one to see how it works.
       </p>
     </div>
     <div class="principles-graph reveal" data-principles-graph>
@@ -149,61 +158,59 @@
           <span class="principle-core-label">dohc</span>
         </div>
 
-        <button class="principle-node" type="button" data-principle="documents" data-title="Write together, without conflicts." data-copy="Markdown you and your collaborators edit at the same time. dohc merges the edits and writes the file back to disk." data-agent="Edits the same document you have open, and the change shows up under its name." aria-pressed="true" style="--node-x: 18%; --node-y: 16%; --node-delay: 40ms;">
+        <button class="principle-node" type="button" data-principle="documents" data-title="Write together, live." data-copy="You and others can type in the same doc at once. It saves as a plain Markdown file." data-agent="Types in the same doc as you, and its edits carry its name." aria-pressed="true" style="--node-x: 18%; --node-y: 16%; --node-delay: 40ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
-          <span class="principle-node-label">Live documents</span>
-          <span class="visually-hidden">Markdown you and your collaborators edit at the same time. dohc merges the edits and writes the file back to disk.</span>
+          <span class="principle-node-label">Documents</span>
+          <span class="visually-hidden">You and others can type in the same doc at once. It saves as a plain Markdown file.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="files" data-title="It starts as a folder on your disk." data-copy="Open any folder. Everything dohc adds stays inside it as files you can read, copy, or put in git." data-agent="Reads and writes the same files, under the same rules." aria-pressed="false" style="--node-x: 48%; --node-y: 12%; --node-delay: 70ms;">
+        <button class="principle-node" type="button" data-principle="files" data-title="It's just a folder." data-copy="Everything lives in a normal folder on your computer. Open it in other apps, copy it, or back it up." data-agent="Reads and writes the same files you do." aria-pressed="false" style="--node-x: 48%; --node-y: 12%; --node-delay: 70ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Your folder</span>
-          <span class="visually-hidden">Open any folder. Everything dohc adds stays inside it as files you can read, copy, or put in git.</span>
+          <span class="visually-hidden">Everything lives in a normal folder on your computer. Open it in other apps, copy it, or back it up.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="drawings" data-title="Sketch next to the text." data-copy="Whiteboards and diagrams live as files in the same folder, edited live alongside the documents they explain." data-agent="Can read a diagram's source and update it like any other file." aria-pressed="false" style="--node-x: 81%; --node-y: 20%; --node-delay: 100ms;">
+        <button class="principle-node" type="button" data-principle="drawings" data-title="Sketch next to your notes." data-copy="Whiteboards and diagrams sit in the same folder as the docs they explain." data-agent="Can read a diagram and redraw part of it." aria-pressed="false" style="--node-x: 81%; --node-y: 20%; --node-delay: 100ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Drawings</span>
-          <span class="visually-hidden">Whiteboards and diagrams live as files in the same folder, edited live alongside the documents they explain.</span>
+          <span class="visually-hidden">Whiteboards and diagrams sit in the same folder as the docs they explain.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="collections" data-title="Structured data, still in files." data-copy="A folder with a schema becomes a collection. Each record is a markdown file with typed properties, shown as a table, board, or calendar." data-agent="Fills in properties and adds records without breaking the schema." aria-pressed="false" style="--node-x: 87%; --node-y: 48%; --node-delay: 130ms;">
+        <button class="principle-node" type="button" data-principle="collections" data-title="Tables, boards, and calendars." data-copy="Turn a folder into a collection. Each record is its own file, shown as a table, a board, or a calendar." data-agent="Adds records and fills in the details." aria-pressed="false" style="--node-x: 87%; --node-y: 48%; --node-delay: 130ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Collections</span>
-          <span class="visually-hidden">A folder with a schema becomes a collection. Each record is a markdown file with typed properties, shown as a table, board, or calendar.</span>
+          <span class="visually-hidden">Turn a folder into a collection. Each record is its own file, shown as a table, a board, or a calendar.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="history" data-title="Every change is signed." data-copy="Each save records who made it, human or agent. Open the diff and restore an earlier version in one click." data-agent="Works fast and on the record, so you can review what it did after the fact." aria-pressed="false" style="--node-x: 80%; --node-y: 77%; --node-delay: 160ms;">
+        <button class="principle-node" type="button" data-principle="history" data-title="Every change is saved." data-copy="See who changed what, you or your agent, and bring back any earlier version." data-agent="Everything it does is on the record, so you can check it or undo it." aria-pressed="false" style="--node-x: 80%; --node-y: 77%; --node-delay: 160ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">History</span>
-          <span class="visually-hidden">Each save records who made it, human or agent. Open the diff and restore an earlier version in one click.</span>
+          <span class="visually-hidden">See who changed what, you or your agent, and bring back any earlier version.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="chat" data-title="Conversations live with the work." data-copy="Chat with people and your own agent inside the workspace. Threads stay attached to the files they are about." data-agent="Answers when anyone in the chat @ mentions it, on your account." aria-pressed="false" style="--node-x: 51%; --node-y: 84%; --node-delay: 190ms;">
+        <button class="principle-node" type="button" data-principle="chat" data-title="Chat where the work is." data-copy="Talk with people and agents right next to your files." data-agent="Joins in when someone @ mentions it." aria-pressed="false" style="--node-x: 51%; --node-y: 84%; --node-delay: 190ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Chat</span>
-          <span class="visually-hidden">Chat with people and your own agent inside the workspace. Threads stay attached to the files they are about.</span>
+          <span class="visually-hidden">Talk with people and agents right next to your files.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="sharing" data-title="One link, scoped to what you chose." data-copy="Share a folder, a document, or an app through your server. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed." data-agent="Opens a share link like a person would: read, comment, or edit, nothing more." aria-pressed="false" style="--node-x: 22%; --node-y: 78%; --node-delay: 220ms;">
+        <button class="principle-node" type="button" data-principle="sharing" data-title="Share only what you pick." data-copy="Send a link to a folder, a doc, or an app, and choose view, comment, or edit. Sharing runs through a sync server you connect." data-agent="A link gives it the same access as a person, and nothing more." aria-pressed="false" style="--node-x: 22%; --node-y: 78%; --node-delay: 220ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Sharing</span>
-          <span class="visually-hidden">Share a folder, a document, or an app through your server. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed.</span>
+          <span class="visually-hidden">Send a link to a folder, a doc, or an app, and choose view, comment, or edit. Sharing runs through a sync server you connect.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="apps" data-title="Real web apps, sandboxed." data-copy="An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Publish it by URL from a configured server." data-agent="Builds and revises apps from chat, and the source stays inspectable." aria-pressed="false" style="--node-x: 13%; --node-y: 48%; --node-delay: 250ms;">
+        <button class="principle-node" type="button" data-principle="apps" data-title="Apps built for you." data-copy="Ask for an app and it's saved in your folder as code you can read and change. It only sees the data you give it." data-agent="Builds and updates apps from chat." aria-pressed="false" style="--node-x: 13%; --node-y: 48%; --node-delay: 250ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Apps</span>
-          <span class="visually-hidden">An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Publish it by URL from a configured server.</span>
+          <span class="visually-hidden">Ask for an app and it's saved in your folder as code you can read and change. It only sees the data you give it.</span>
         </button>
       </div>
 
       <div class="principle-detail">
-        <h3 data-principle-title>Write together, without conflicts.</h3>
-        <div class="principle-detail-copy">
-          <p data-principle-copy>Markdown you and your collaborators edit at the same time. dohc merges the edits and writes the file back to disk.</p>
-          <p class="principle-detail-agent"><strong>Your agent:</strong> <span data-principle-agent>Edits the same document you have open, and the change shows up under its name.</span></p>
-        </div>
+        <h3 data-principle-title>Write together, live.</h3>
+        <p data-principle-copy>You and others can type in the same doc at once. It saves as a plain Markdown file.</p>
+        <p class="principle-detail-agent"><svg aria-hidden="true"><use href="#glyph-agent"/></svg><span><strong>Your agent</strong> <span data-principle-agent>Types in the same doc as you, and its edits carry its name.</span></span></p>
       </div>
     </div>
   </section>
@@ -211,18 +218,18 @@
   <!-- ============ humans and agents ============ -->
   <section class="section feature-section" id="two-readers" aria-labelledby="two-readers-title">
     <div class="section-head reveal">
-      <h2 id="two-readers-title">Built for humans and agents.</h2>
+      <h2 id="two-readers-title"><span>You see a workspace.</span> <span>Your agent sees files.</span></h2>
       <div class="section-lede">
-        <p>Your agents don't need an integration to work in dohc. Anything that
-          can read and write files can do the job.</p>
-        <p>dohc also provides SDKs and CLIs for extended capabilities.</p>
+        <p>Any AI tool that can read and write files already works with dohc.
+          No plugin needed.</p>
+        <p>Want more? dohc comes with a command-line tool and an SDK.</p>
       </div>
     </div>
     <div class="reader-showcase reveal d1" data-reader-showcase>
     <div class="reader-stage">
     <div class="readers" data-readers aria-label="Two sides of the same workspace">
       <div class="reader-card reader-agent" data-reader-face="agent" inert aria-hidden="true">
-        <div class="device-bar"><span class="reader-who is-agent" aria-hidden="true">🤖</span><span class="reader-face-label">What your agent sees</span></div>
+        <div class="device-bar"><svg class="reader-face-glyph" aria-hidden="true"><use href="#glyph-agent"/></svg><span class="reader-face-label">What your agent sees</span><span class="mono">plain files</span></div>
         <div class="reader-tree" role="group" aria-label="Files in the launch folder">
           <span class="reader-dir">launch/</span>
           <button class="reader-file in1" type="button" aria-pressed="true" data-reader-pick="plan">plan.md</button>
@@ -242,7 +249,7 @@
       </div>
 
       <div class="reader-card reader-window" data-reader-face="human">
-        <div class="device-bar"><span class="reader-who" aria-hidden="true">👤</span><span class="reader-face-label">What you see</span><span class="mono" data-reader-name>Plan</span></div>
+        <div class="device-bar"><svg class="reader-face-glyph" aria-hidden="true"><use href="#glyph-person"/></svg><span class="reader-face-label">What you see</span><span class="mono" data-reader-name>Plan</span></div>
         <div class="reader-view" data-reader-view></div>
         <div class="device-foot" data-reader-foot></div>
       </div>
@@ -250,7 +257,6 @@
     </div>
     <div class="reader-rotation-controls" role="group" aria-label="Workspace panel view">
       <button type="button" data-reader-side="human" aria-pressed="true">Your view</button>
-      <span class="reader-rotation-divider" aria-hidden="true">/</span>
       <button type="button" data-reader-side="agent" aria-pressed="false">Your agent’s view</button>
     </div>
     </div>
@@ -262,19 +268,18 @@
       <div class="section-head reveal">
         <h2 id="agent-chat-title">Chat as a primitive.</h2>
         <p class="section-lede">
-          Chat sits next to your files, and you can give your agents access
-          to it. @ them on anything to read, write, or build in your
-          workspace.
+          Mention your agent in any chat. It can read your files, write new
+          ones, or even build a small app for the whole group.
         </p>
       </div>
       <div class="agent-card reveal">
         <div class="agent-card-tab">
           <span>kyoto trip · chat</span>
-          <span class="agent-picker" role="group" aria-label="Bring your own AI: choose which model your agent runs on">
+          <span class="agent-picker" role="group" aria-label="Bring your own AI: choose which tool your agent runs on">
             <span>bring your own AI</span>
-            <button class="agent-chip" type="button" aria-pressed="true" data-agent="claude" aria-label="Claude"><svg class="agent-logo" aria-hidden="true"><use href="#logo-claude"/></svg></button>
-            <button class="agent-chip" type="button" aria-pressed="false" data-agent="codex" aria-label="Codex"><svg class="agent-logo" aria-hidden="true"><use href="#logo-codex"/></svg></button>
-            <button class="agent-chip" type="button" aria-pressed="false" data-agent="gemini" aria-label="Gemini"><svg class="agent-logo" aria-hidden="true"><use href="#logo-gemini"/></svg></button>
+            <button class="agent-chip" type="button" aria-pressed="true" data-agent="claude" aria-label="Claude Code" title="Claude Code"><svg class="agent-logo" aria-hidden="true"><use href="#logo-claude"/></svg></button>
+            <button class="agent-chip" type="button" aria-pressed="false" data-agent="codex" aria-label="Codex" title="Codex"><svg class="agent-logo" aria-hidden="true"><use href="#logo-codex"/></svg></button>
+            <button class="agent-chip" type="button" aria-pressed="false" data-agent="opencode" aria-label="OpenCode" title="OpenCode"><svg class="agent-logo" aria-hidden="true"><use href="#logo-opencode"/></svg></button>
           </span>
         </div>
         <div class="agent-thread">
@@ -287,7 +292,7 @@
             </span>
           </div>
           <div class="chat-msg is-agent">
-            <span class="agent-line"><span class="agent-avatar" aria-hidden="true">M</span><b>My Agent</b><span class="agent-line-runs">your agent · on <svg class="agent-logo" aria-hidden="true"><use data-agent-logo href="#logo-claude"/></svg><span data-agent-name>Claude</span></span></span>
+            <span class="agent-line"><span class="agent-avatar" aria-hidden="true">M</span><b>My Agent</b><span class="agent-line-runs">your agent · on <svg class="agent-logo" aria-hidden="true"><use data-agent-logo href="#logo-claude"/></svg><span data-agent-name>Claude Code</span></span></span>
             <span class="agent-message">Read the receipts and made you an app. Tick what you had and it works out the rest.</span>
             <span class="chat-appchip"><span class="app-icon" aria-hidden="true"></span>Split<span class="chat-appchip-meta">app · shared with Maya, Sam</span></span>
           </div>
@@ -322,8 +327,8 @@
     <div class="section-head reveal">
       <h2 id="sync-title"><span>Files on your computer.</span> <span>Sync when you need it.</span></h2>
       <p class="section-lede">
-        Local and offline first. Connect a sync server to work across devices.
-        Offline changes sync when your connection returns.
+        Your files live on your computer, so they work offline. Connect a sync
+        server to see them on every device. Offline changes sync when you reconnect.
       </p>
     </div>
     <div class="sync-stage reveal d1">
@@ -372,7 +377,6 @@
         </div>
       </div>
       <div class="sync-controls">
-        <span>Sync demo</span>
         <label class="sync-switch">
           <input type="checkbox" checked data-sync-toggle />
           <span class="sync-switch-track theme-track" aria-hidden="true">
@@ -381,9 +385,53 @@
               <svg class="sync-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>
             </span>
           </span>
-          <span>connection</span>
+          <span>online</span>
         </label>
         <span class="sync-hint" data-sync-hint>watching. click or type to take over.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ open source and drive ============ -->
+  <section class="section feature-section" id="drive" aria-labelledby="ownership-title">
+    <div class="drive-summary">
+      <div class="ownership-summary reveal d1">
+        <h2 id="ownership-title">Free, open source, and self-hostable.</h2>
+        <div class="ownership-details">
+          <p>The app and its code are free. Want sync and sharing? Run the server yourself.</p>
+          <a class="ownership-source" href="https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md">Read the self-hosting guide <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+        </div>
+      </div>
+
+      <div class="drive-offer reveal d2" aria-labelledby="drive-title">
+        <div class="drive-offer-header">
+          <div class="drive-offer-heading">
+            <span class="drive-status">Coming soon</span>
+            <h3 id="drive-title">dohc Drive.</h3>
+          </div>
+          <p>Let us run the server for you. Sync and share without setting anything up.</p>
+          <ul class="drive-includes">
+            <li>Sync across your devices</li>
+            <li>Share links for people and agents</li>
+            <li>Your files stay on your computer</li>
+          </ul>
+          <form class="waitlist" data-waitlist method="post" action="https://app.loops.so/api/newsletter-form/cmuegff8m01nl0j182sc6dixh">
+            <div class="waitlist-field">
+              <label class="visually-hidden" for="waitlist-email">Email address</label>
+              <input id="waitlist-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+              <input type="hidden" name="userGroup" value="Drive waitlist" />
+              <button class="btn btn-primary" type="submit">Join the waitlist</button>
+            </div>
+            <p class="waitlist-status" data-waitlist-status role="status">We'll email you when Drive opens.</p>
+          </form>
+        </div>
+
+        <figure class="drive-visual">
+          <div class="drive-model-stage" data-drive-model-host>
+            <p class="drive-model-loading" role="status">Loading the model…</p>
+          </div>
+          <figcaption class="fig-caption"><span class="fig-number">Fig. 2</span> The drive: a differential and driveshaft.</figcaption>
+        </figure>
       </div>
     </div>
   </section>
@@ -393,9 +441,7 @@
     <div class="downloads-inner">
       <div class="downloads-heading reveal">
         <h2 id="downloads-title">Runs on your machine.</h2>
-        <p class="downloads-lede">No account, no backend, no setup. Download, open a folder, start.</p>
       </div>
-
 
       <div class="download-grid reveal d1">
         <a class="download-card" data-download-card="windows-x64" href="https://github.com/dohc-ai/dohc/releases">
@@ -421,41 +467,6 @@
     </div>
   </section>
 
-  <!-- ============ drive ============ -->
-  <section class="section feature-section" id="drive" aria-labelledby="ownership-title">
-    <div class="drive-summary">
-      <div class="ownership-summary reveal d1">
-        <h2 id="ownership-title">Free, open source, and self-hostable.</h2>
-        <div class="ownership-details">
-          <p>Work locally without an account. Run sync and sharing on your own server.</p>
-          <a class="ownership-source" href="https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md">Read the self-hosting guide <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
-        </div>
-      </div>
-
-      <div class="drive-offer reveal d2" aria-labelledby="drive-title">
-        <div class="drive-offer-header">
-          <div class="drive-offer-heading">
-            <span class="drive-status">Coming soon</span>
-            <h3 id="drive-title">dohc Drive.</h3>
-          </div>
-          <p>Managed sync and sharing for your workspace, with a free tier planned. Run the same capabilities on your own server.</p>
-          <ul class="drive-includes">
-            <li>Sync across your devices</li>
-            <li>Share links for people and agents</li>
-            <li>Same files, same permissions, same exit</li>
-          </ul>
-        </div>
-
-        <div class="drive-visual">
-          <div class="drive-model-stage" data-drive-model-host>
-            <p class="drive-model-loading" role="status">Loading the studio…</p>
-          </div>
-        </div>
-
-      </div>
-    </div>
-  </section>
-
 </main>
 
 <footer class="footer">
@@ -470,8 +481,8 @@
   <p class="footer-tagline">A workspace for you and your agents.</p>
   <nav class="footer-links" aria-label="Footer">
     <a href="#demo">Demo</a>
-    <a href="#downloads">Downloads</a>
     <a href="#drive">Drive</a>
+    <a href="#downloads">Downloads</a>
     <a href="https://github.com/dohc-ai/dohc">GitHub</a>
   </nav>
   <p class="footer-line">© 2026</p>
