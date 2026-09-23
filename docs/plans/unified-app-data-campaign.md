@@ -2,7 +2,7 @@
 
 Reader: Ice, the implementation lead, and reviewers approving and delivering this campaign.
 
-Status: approved feature work and local acceptance are complete on `campaign/unified-app-data`, within the stated platform and testing limits. Required source reviews, all seven desktop flows, both shared-app examples, and the fresh canonical JavaScript gate pass. Fable and Opus 5.5 accept the sixty-sample cold-reopen result with the startup-tail limits below. No PR, merge, or deployment.
+Status: approved feature work and local acceptance are complete on `campaign/unified-app-data`, within the stated platform and testing limits. [PR #1201](https://github.com/dohc-ai/dohc/pull/1201) contains the campaign and current-main integration. The canonical JavaScript gate passes on the integrated source; all seven desktop flows and both shared-app examples pass after the review fixes. Fable and Opus 5.5 accept the sixty-sample cold-reopen result with the startup-tail limits below. The [maintained review note](https://github.com/dohc-ai/dohc/pull/1201#issuecomment-5791682776) records final review coverage and verification. No merge or deployment.
 
 ## Approved completion work, September 23
 
