@@ -30,25 +30,25 @@ async function tempStateDir(): Promise<string> {
   return dir;
 }
 
-const channel = {
+const group = {
   id: "ch_general",
   name: "General",
   slug: "general",
-  kind: "channel" as const,
+  kind: "group" as const,
 };
 
 describe("executeCli", () => {
   it("prints stable JSON with a schemaVersion field", async () => {
     const result = await executeCli({
-      argv: ["chat", "channels", "--json"],
+      argv: ["chat", "groups", "--json"],
       cwd: "/workspace",
       env: {},
-      request: async () => ({ channels: [channel] }),
+      request: async () => ({ groups: [group] }),
     });
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 1, channels: [channel] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 1, groups: [group] }, null, 2)}\n`,
     });
   });
 
@@ -128,10 +128,10 @@ describe("executeCli", () => {
     const transport = vi.fn(async () => ({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
-      result: { channels: [] },
+      result: { groups: [] },
     }));
     const result = await executeCli({
-      argv: ["chat", "channels"],
+      argv: ["chat", "groups"],
       cwd: "/workspace",
       env: {},
       client: {
@@ -157,7 +157,7 @@ describe("executeCli", () => {
     const request = async (value: CliRequestWithoutToken): Promise<unknown> => {
       requests.push(value);
       if (value.verb === "post") {
-        return { channel, threadId: "th_new", messageId: "msg_post", title: "Run report" };
+        return { group, threadId: "th_new", messageId: "msg_post", title: "Run report" };
       }
       if (value.verb === "react") {
         return {
@@ -167,7 +167,7 @@ describe("executeCli", () => {
           state: "added" as const,
         };
       }
-      return { channels: [channel] };
+      return { groups: [group] };
     };
     const common = {
       cwd: "/workspace",
@@ -185,7 +185,7 @@ describe("executeCli", () => {
     });
     await executeCli({
       ...common,
-      argv: ["chat", "channels"],
+      argv: ["chat", "groups"],
     });
 
     expect(requests.map((value) => ({ verb: value.verb, args: value.args }))).toEqual([
@@ -195,7 +195,7 @@ describe("executeCli", () => {
           cwd: WORKSPACE,
           actor: "human",
           runId: "run_env",
-          channel: "general",
+          group: "general",
           title: "Run report",
           attachments: [],
           needsDecision: false,
@@ -213,7 +213,7 @@ describe("executeCli", () => {
         },
       },
       {
-        verb: "channels",
+        verb: "groups",
         args: { cwd: WORKSPACE, actor: "human" },
       },
     ]);
@@ -224,7 +224,7 @@ describe("executeCli", () => {
       thread: {
         id: "th_one",
         title: "One",
-        channel,
+        group,
         commentCount: 0,
         openDecisionCount: 0,
       },
@@ -254,7 +254,7 @@ describe("executeCli", () => {
 
   it("returns exactly one stderr line and exit 1", async () => {
     const result = await executeCli({
-      argv: ["chat", "channels"],
+      argv: ["chat", "groups"],
       env: {},
       request: async () => {
         throw new Error("dohc: not inside a dohc workspace\nextra detail");
@@ -270,9 +270,9 @@ describe("executeCli", () => {
 
   it("hides response validation details", async () => {
     const result = await executeCli({
-      argv: ["chat", "channels"],
+      argv: ["chat", "groups"],
       env: {},
-      request: async () => ({ channels: [{ id: 7 }] }),
+      request: async () => ({ groups: [{ id: 7 }] }),
     });
     expect(result.stderr).toBe("dohc: desktop app returned an invalid response\n");
   });

@@ -170,7 +170,7 @@ export function decodeRelayWorkspaceBootstrap(
 }
 
 export class SharedChannelReadOnlyError extends Error {
-  constructor(message = "This shared channel is read-only for you.") {
+  constructor(message = "This shared group is read-only for you.") {
     super(message);
     this.name = "SharedChannelReadOnlyError";
   }

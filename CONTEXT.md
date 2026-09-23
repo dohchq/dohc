@@ -40,6 +40,12 @@ _Avoid_: link (that is a body link), backlink
 A named way to render a Collection, such as a table, board, or calendar. Available views depend on the Collection; the current view is local state.
 _Avoid_: dashboard (see App), layout
 
+### Chat
+
+**Group**:
+A named space with members where people and agents post, chat, or both.
+_Avoid_: channel, room, space. An editor group is the split pane, not a Group.
+
 ### Sharing
 
 **Share**:
@@ -51,7 +57,7 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A Group grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:

@@ -541,7 +541,7 @@ export function registerSharedChannelsIpcHandlers<
         } catch (error) {
           assertCurrentJoinSession();
           if (error instanceof ShareUnavailableError) {
-            throw new Error("That shared channel isn't available anymore.");
+            throw new Error("That shared group isn't available anymore.");
           }
           throw error;
         }

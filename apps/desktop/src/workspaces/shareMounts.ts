@@ -496,7 +496,7 @@ export function assertMountableSelector(
 ): asserts selector is ShareViewSelector {
   if (selector === null) {
     throw new Error(
-      "This code is for a shared chat channel — join it from Chats instead of mounting it.",
+      "This code is for a shared group. Join it from Chats instead of mounting it.",
     );
   }
 }

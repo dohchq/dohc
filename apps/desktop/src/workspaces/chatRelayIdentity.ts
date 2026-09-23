@@ -152,18 +152,18 @@ export function assertSharedChannelMessageIdentity(input: {
     return;
   }
   if (!input.credentials) {
-    throw new Error("Sign in to your server to send a message in this shared channel.");
+    throw new Error("Sign in to your server to send a message in this shared group.");
   }
   if (
     !input.credentials.relayUrl ||
     !relayUrlsMatch(input.credentials.relayUrl, input.joinedChannel.relayUrl)
   ) {
-    throw new Error("Sign in to the cloud server this shared channel uses.");
+    throw new Error("Sign in to the cloud server this shared group uses.");
   }
   if (
     input.credentials.userId !== input.joinedChannel.recipientUserId ||
     input.authorUserId !== input.joinedChannel.recipientUserId
   ) {
-    throw new Error("Sign in to the account that joined this shared channel.");
+    throw new Error("Sign in to the account that joined this shared group.");
   }
 }

@@ -228,7 +228,7 @@ describe("CLI socket server", () => {
 
   async function post(input: {
     actor: "human" | "agent";
-    channel?: string;
+    group?: string;
     title: string;
     body: string;
     attachments?: string[];
@@ -239,7 +239,7 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot,
       actor: input.actor,
       ...(input.runId ? { runId: input.runId } : {}),
-      channel: input.channel ?? "general",
+      group: input.group ?? "general",
       title: input.title,
       attachments: input.attachments ?? [],
       needsDecision: input.needsDecision ?? false,
@@ -559,7 +559,7 @@ describe("CLI socket server", () => {
       const response = await rawRequest({
         token,
         protocolVersion,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: workspaceRoot, actor: "human" },
       });
 
@@ -576,7 +576,7 @@ describe("CLI socket server", () => {
     const response = await rawRequest({
       token,
       protocolVersion: CLI_PROTOCOL_VERSION,
-      verb: "channels",
+      verb: "groups",
       args: { cwd: stateDir, actor: "human" },
     });
 
@@ -674,40 +674,40 @@ describe("CLI socket server", () => {
       },
     });
 
-    const emptyChannels = await invoke("channelsFull", {
+    const emptyChannels = await invoke("groupsFull", {
       cwd: workspaceRoot,
       actor: "agent",
     });
     expect(emptyChannels).toMatchObject({
       ok: true,
-      channels: [{
+      groups: [{
         id: general.id,
         threadCount: 0,
         threads: [],
       }],
     });
-    // The engine channel id from channelsFull opens a thread through the
+    // The engine channel id from groupsFull opens a thread through the
     // canonical post verb: no MCP-only write path exists.
     const started = await invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
-      channel: general.id,
+      group: general.id,
       title: "Raw id contract",
       attachments: [],
       needsDecision: false,
       body: "Opening through the engine channel id",
     });
     expect(started).toMatchObject({
-      channel: { name: "general", slug: "general", kind: "channel" },
+      group: { name: "general", slug: "general", kind: "group" },
       title: "Raw id contract",
     });
 
-    const listedChannels = await invoke("channelsFull", {
+    const listedChannels = await invoke("groupsFull", {
       cwd: workspaceRoot,
       actor: "agent",
     });
     if (!listedChannels.ok) throw new Error(listedChannels.reason);
-    const startedThread = listedChannels.channels[0]?.threads[0];
+    const startedThread = listedChannels.groups[0]?.threads[0];
     if (!startedThread) throw new Error("Posted thread is not listed");
     expect(startedThread).toMatchObject({ title: "Raw id contract", messageCount: 1 });
     expect(cliThreadId(startedThread.id)).toBe(started.threadId);
@@ -759,12 +759,12 @@ describe("CLI socket server", () => {
     });
     // post provisions the default channels like the terminal CLI does, so
     // general is looked up by id rather than assumed to be the only channel.
-    const relisted = await invoke("channelsFull", {
+    const relisted = await invoke("groupsFull", {
       cwd: workspaceRoot,
       actor: "agent",
     });
     if (!relisted.ok) throw new Error(relisted.reason);
-    expect(relisted.channels.find((channel) => channel.id === general.id)).toMatchObject({
+    expect(relisted.groups.find((channel) => channel.id === general.id)).toMatchObject({
       threadCount: 1,
       threads: [{
         id: startedThread.id,
@@ -912,20 +912,20 @@ describe("CLI socket server", () => {
       thread: { id: scopedFileThread.id },
       projection: { text: expect.stringContaining("scoped.md") },
     });
-    const channels = await invoke("channelsFull", {
+    const channels = await invoke("groupsFull", {
       cwd: scopedRoot,
       actor: "agent",
     });
     expect(channels).toMatchObject({
       ok: true,
-      channels: [{
+      groups: [{
         id: scopedGeneral.id,
         threads: [{ id: scopedChannelChat.thread.id }],
       }],
     });
     expect(
       channels.ok
-        ? channels.channels.flatMap((channel) =>
+        ? channels.groups.flatMap((channel) =>
             channel.threads.map((thread) => thread.title)
           )
         : [],
@@ -934,7 +934,7 @@ describe("CLI socket server", () => {
     const started = await invoke("post", {
       cwd: scopedRoot,
       actor: "agent",
-      channel: scopedGeneral.id,
+      group: scopedGeneral.id,
       attachments: [],
       needsDecision: false,
       body: "Scoped opening",
@@ -980,11 +980,11 @@ describe("CLI socket server", () => {
     await expect(invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
-      channel: general.id,
+      group: general.id,
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared channel is read-only for you.");
+    })).rejects.toThrow("This shared group is read-only for you.");
     await expect(invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -992,7 +992,7 @@ describe("CLI socket server", () => {
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared channel is read-only for you.");
+    })).rejects.toThrow("This shared group is read-only for you.");
     expect(calls.writes).toBe(0);
     expect(writeTargets).toEqual([]);
     expect(await store.listMessages({
@@ -1044,12 +1044,12 @@ describe("CLI socket server", () => {
       ok: true,
       messages: [{ threadId: fileThread.id }],
     });
-    await expect(invoke("channelsFull", {
+    await expect(invoke("groupsFull", {
       cwd: workspaceRoot,
       actor: "agent",
     })).resolves.toMatchObject({
       ok: true,
-      channels: [{
+      groups: [{
         id: general.id,
         threads: [{ id: channelChat.thread.id }],
       }],
@@ -1059,7 +1059,7 @@ describe("CLI socket server", () => {
     await expect(invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
-      channel: general.id,
+      group: general.id,
       attachments: [],
       needsDecision: false,
       body: "Forbidden",
@@ -1087,11 +1087,11 @@ describe("CLI socket server", () => {
       grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
     };
 
-    const channels = await invoke("channels", {
+    const channels = await invoke("groups", {
       cwd: workspaceRoot,
       actor: "human",
     });
-    expect(channels.channels.map((channel) => channel.slug)).toEqual(["general"]);
+    expect(channels.groups.map((channel) => channel.slug)).toEqual(["general"]);
     await expect(post({
       actor: "human",
       title: "Forbidden",
@@ -1485,11 +1485,11 @@ describe("CLI socket server", () => {
     };
     const openCallsBefore = calls.openWorkspace;
 
-    const response = await invoke("channels", {
+    const response = await invoke("groups", {
       cwd: sharedRoot,
       actor: "human",
     });
-    expect(response.channels.map((channel) => channel.slug)).toEqual(["general"]);
+    expect(response.groups.map((channel) => channel.slug)).toEqual(["general"]);
     expect(calls.openWorkspace).toBe(openCallsBefore + 1);
     expect(openedWorkspaceIds).toEqual([sharedWorkspace.workspaceId]);
     expect(await store.listThreads({ workspaceId: WORKSPACE_ID })).toEqual([]);
@@ -1582,9 +1582,9 @@ describe("CLI socket server", () => {
       body: "Read-coverage message",
     });
     const chatReads: Array<[CliVerb, unknown]> = [
-      ["channels", { cwd: workspaceRoot, actor: "agent" }],
-      ["channelsFull", { cwd: workspaceRoot, actor: "agent" }],
-      ["threads", { cwd: workspaceRoot, actor: "agent", channel: general.id }],
+      ["groups", { cwd: workspaceRoot, actor: "agent" }],
+      ["groupsFull", { cwd: workspaceRoot, actor: "agent" }],
+      ["threads", { cwd: workspaceRoot, actor: "agent", group: general.id }],
       ["inbox", { cwd: workspaceRoot, actor: "agent" }],
       ["chat", { cwd: workspaceRoot, actor: "agent", threadId: thread.id }],
       ["fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }],
@@ -1791,14 +1791,14 @@ describe("CLI socket server", () => {
     await invoke("threads", {
       cwd: workspaceRoot,
       actor: "agent",
-      channel: general.id,
+      group: general.id,
     });
     expect(readTargets.at(-1)).toEqual({ channelId: general.id });
 
     // A verb whose args carry no single channel or thread runs the plain
     // rotation instead of guessing one.
     readTargets.length = 0;
-    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     expect(readTargets.at(-1)).toBeUndefined();
   });
 
@@ -1812,7 +1812,7 @@ describe("CLI socket server", () => {
     });
     expect(opened.threadId).toMatch(/^th_/u);
     expect(opened.messageId).toMatch(/^msg_/u);
-    expect(opened.channel.id).toMatch(/^ch_/u);
+    expect(opened.group.id).toMatch(/^ch_/u);
     const replied = await invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1904,58 +1904,58 @@ describe("CLI socket server", () => {
   it("lists chat-only and mixed groups and posts into a chat-only lane", async () => {
     if (!store) throw new Error("Store is not available");
     const chat = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Chat group", kind: "channel", type: "chat", purpose: "Plan the launch" });
-    await post({ actor: "human", channel: chat.slug, title: "Hello", body: "In chat" });
+    await post({ actor: "human", group: chat.slug, title: "Hello", body: "In chat" });
     const chatThreads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" });
     expect(chatThreads).toHaveLength(1);
     expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(0);
-    const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", channel: chat.slug });
-    expect(listed.channel.purpose).toBe("Plan the launch");
+    const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: chat.slug });
+    expect(listed.group.purpose).toBe("Plan the launch");
     expect(listed.threads).toHaveLength(1);
     const both = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Mixed group", kind: "channel", type: "both" });
     for (const lane of ["posts", "chat"] as const) {
       await store.startChannelThread({ workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Sam" }, body: lane });
     }
-    const mixed = await invoke("threads", { cwd: workspaceRoot, actor: "human", channel: both.slug });
+    const mixed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: both.slug });
     expect(mixed.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
-    const full = await invoke("channelsFull", { cwd: workspaceRoot, actor: "human" });
+    const full = await invoke("groupsFull", { cwd: workspaceRoot, actor: "human" });
     expect(full.ok).toBe(true);
     if (!full.ok) throw new Error(full.reason);
-    expect(full.channels.find(channel => channel.id === chat.id)?.threads).toHaveLength(1);
-    expect(full.channels.find(channel => channel.id === both.id)?.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
+    expect(full.groups.find(channel => channel.id === chat.id)?.threads).toHaveLength(1);
+    expect(full.groups.find(channel => channel.id === both.id)?.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
   });
 
   it("posts to the agent channel using the name returned by MCP discovery", async () => {
     if (!store) throw new Error("Store is not available");
     const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    const listed = await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    const listed = await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     if (!listed.ok) throw new Error(listed.reason);
-    const discovered = listed.channels.find((channel) => channel.id === agent.id);
+    const discovered = listed.groups.find((channel) => channel.id === agent.id);
     expect(discovered?.name).toBe("My agent");
     const started = await post({
       actor: "agent",
-      channel: discovered!.name,
+      group: discovered!.name,
       title: "Continue",
       body: "Continue this task.",
     });
-    expect(started.channel.kind).toBe("agent");
+    expect(started.group.kind).toBe("agent");
     const threads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agent.id });
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
   });
 
   // Provisioning General writes outside chatWrites, so only onWrite tells
   // the desktop to notify the renderer and queue cloud sync for it.
-  it("reports the write when listing channels provisions General, and only then", async () => {
-    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
+  it("reports the write when listing groups provisions General, and only then", async () => {
+    await invoke("groups", { cwd: workspaceRoot, actor: "human" });
     expect(calls.writes).toBe(1);
-    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
-    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    await invoke("groups", { cwd: workspaceRoot, actor: "human" });
+    await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     expect(calls.writes).toBe(1);
   });
 
-  it("does not provision an agent when listing channels", async () => {
+  it("does not provision an agent when listing groups", async () => {
     if (!store) throw new Error("Store is not available");
-    const result = await invoke("channels", { cwd: workspaceRoot, actor: "agent" });
-    expect(result.channels.map((channel) => channel.kind)).not.toContain("agent");
+    const result = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    expect(result.groups.map((channel) => channel.kind)).not.toContain("agent");
     expect((await store.listChannels({ workspaceId: WORKSPACE_ID })).map(
       (channel) => channel.kind,
     )).not.toContain("agent");
@@ -1973,7 +1973,7 @@ describe("CLI socket server", () => {
 
     await expect(post({
       actor: "human",
-      channel: dm.slug,
+      group: dm.slug,
       title: "Must not become a DM thread",
       body: "DMs need replies.",
     })).rejects.toThrow(
@@ -1987,11 +1987,11 @@ describe("CLI socket server", () => {
 
     const agentPost = await post({
       actor: "human",
-      channel: "my-agent",
+      group: "my-agent",
       title: "Agent task",
       body: "Agent channels still create task threads.",
     });
-    expect(agentPost.channel.kind).toBe("agent");
+    expect(agentPost.group.kind).toBe("agent");
     expect(agentPost.title).toBe("Agent task");
   });
 
@@ -2804,7 +2804,7 @@ describe("CLI socket server", () => {
   it("reads attachment, parent, and decision metadata needed to continue a chat", async () => {
     await writeFile(join(workspaceRoot, "tracked.md"), "Agenda");
     const opened = await invoke("post", {
-      cwd: workspaceRoot, actor: "human", channel: "general", attachments: ["tracked.md"],
+      cwd: workspaceRoot, actor: "human", group: "general", attachments: ["tracked.md"],
       needsDecision: true, options: ["Ship", "Hold"], body: "Choose a release date",
     });
     const threadId = opened.threadId.replace(/^th_/u, "thread-");
@@ -2830,7 +2830,7 @@ describe("CLI socket server", () => {
 
   it("rejects invalid decision choices before posting a reply", async () => {
     const opened = await invoke("post", {
-      cwd: workspaceRoot, actor: "human", channel: "general", attachments: [],
+      cwd: workspaceRoot, actor: "human", group: "general", attachments: [],
       needsDecision: true, options: ["Ship", "Hold"], body: "Choose",
     });
     for (const choice of [
@@ -2855,7 +2855,7 @@ describe("CLI socket server", () => {
     }
   });
 
-  it("replies by exact engine id without enumerating channels or threads", async () => {
+  it("replies by exact engine id without enumerating groups or threads", async () => {
     const opened = await post({ actor: "human", title: "Exact target", body: "Reply here" });
     const threadId = opened.threadId.replace(/^th_/u, "thread-");
     const spies = [
@@ -3020,7 +3020,7 @@ describe("CLI socket server", () => {
         resolve: opened.messageId,
         body: "Reply before access changed",
       });
-      expect(reply.warning).toContain("could not be resolved: This shared channel is read-only for you.");
+      expect(reply.warning).toContain("could not be resolved: This shared group is read-only for you.");
       expect(reply.resolvedMessageId).toBeUndefined();
       const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
       expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
@@ -3044,7 +3044,7 @@ describe("CLI socket server", () => {
     await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const agentDm = await post({
       actor: "human",
-      channel: "my-agent",
+      group: "my-agent",
       title: "Work for my agent",
       body: "Please investigate this",
     });
@@ -3077,7 +3077,7 @@ describe("CLI socket server", () => {
       actor: "agent",
     });
     expect(agentInbox.threads.map((thread) => thread.id)).toContain(agentDm.threadId);
-    expect(agentInbox.threads.every((thread) => thread.channel.kind === "agent")).toBe(true);
+    expect(agentInbox.threads.every((thread) => thread.group.kind === "agent")).toBe(true);
     expect(agentInbox.mentions).toEqual([
       expect.objectContaining({
         threadId: mention.threadId,
@@ -3092,7 +3092,7 @@ describe("CLI socket server", () => {
     });
     expect(humanInbox.threads.map((thread) => thread.id)).toContain(humanUnread.threadId);
     expect(humanInbox.threads).toContainEqual(
-      expect.objectContaining({ id: fileThreadId, channel: expect.objectContaining({ slug: "files" }) }),
+      expect.objectContaining({ id: fileThreadId, group: expect.objectContaining({ slug: "files" }) }),
     );
     expect(humanInbox.mentions).toEqual([]);
 
@@ -3528,10 +3528,10 @@ describe("CLI socket server", () => {
       limit: 20,
       regex: true,
     })).rejects.toThrow("regular expression scan timed out");
-    await expect(invoke("channels", {
+    await expect(invoke("groups", {
       cwd: workspaceRoot,
       actor: "human",
-    })).resolves.toMatchObject({ channels: expect.any(Array) });
+    })).resolves.toMatchObject({ groups: expect.any(Array) });
   });
 
   it("advances human and agent read cursors while show --peek leaves both untouched", async () => {

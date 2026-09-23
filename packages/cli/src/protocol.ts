@@ -7,7 +7,7 @@ import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
-export const CLI_PROTOCOL_VERSION = 3;
+export const CLI_PROTOCOL_VERSION = 4;
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
 const cliActorSchema = z.enum(["human", "agent"]);
@@ -23,9 +23,9 @@ const argsBase = {
   actor: cliActorSchema,
 };
 
-const channelsArgsSchema = z.object(argsBase).strict();
+const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
-  .object({ ...argsBase, channel: z.string().min(1) })
+  .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
 const showArgsSchema = z
@@ -35,7 +35,7 @@ const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
-    channel: z.string().min(1),
+    group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
@@ -69,7 +69,7 @@ const grepArgsSchema = z
   .object({
     ...argsBase,
     pattern: z.string().min(1),
-    channel: z.string().min(1).optional(),
+    group: z.string().min(1).optional(),
     thread: z.string().min(1).optional(),
     from: z.string().min(1).optional(),
     since: z.string().min(1).optional(),
@@ -82,7 +82,7 @@ const grepArgsSchema = z
   .strict();
 const exportScopeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
-  z.object({ kind: z.literal("channel"), channel: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("group"), group: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("thread"), thread: z.string().min(1) }).strict(),
 ]);
 const exportArgsSchema = z
@@ -109,7 +109,7 @@ const fileChatsArgsSchema = z
 const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
-const channelsFullArgsSchema = z.object(argsBase).strict();
+const groupsFullArgsSchema = z.object(argsBase).strict();
 
 // Collection field values cross the CLI socket in the engine wire's JSON
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
@@ -239,7 +239,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
@@ -254,8 +254,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("chat"), args: chatArgsSchema }).strict(),
   z.object({
     ...requestBase,
-    verb: z.literal("channelsFull"),
-    args: channelsFullArgsSchema,
+    verb: z.literal("groupsFull"),
+    args: groupsFullArgsSchema,
   }).strict(),
   z.object({
     ...requestBase,
@@ -287,16 +287,16 @@ export type CliRequestWithoutToken = CliRequest extends infer Request
     : never
   : never;
 
-const cliChannelSchema = z
+const cliGroupSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1),
     slug: z.string().min(1),
-    kind: z.enum(["channel", "dm", "agent"]),
+    kind: z.enum(["group", "dm", "agent"]),
     purpose: z.string().min(1).optional(),
   })
   .strict();
-export type CliChannel = z.infer<typeof cliChannelSchema>;
+export type CliGroup = z.infer<typeof cliGroupSchema>;
 
 const cliAuthorSchema = z
   .object({
@@ -319,14 +319,14 @@ const cliThreadSummarySchema = z
   .strict();
 
 const cliInboxThreadSchema = cliThreadSummarySchema
-  .extend({ channel: cliChannelSchema })
+  .extend({ group: cliGroupSchema })
   .strict();
 
 const cliInboxMentionSchema = z
   .object({
     threadId: z.string().min(1),
     messageId: z.string().min(1),
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     author: cliAuthorSchema,
     createdAtMs: z.number().int().nonnegative(),
     text: z.string(),
@@ -360,7 +360,7 @@ const cliShowThreadSchema = z
   .object({
     id: z.string().min(1),
     title: z.string(),
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     commentCount: z.number().int().nonnegative(),
     openDecisionCount: z.number().int().nonnegative(),
   })
@@ -378,7 +378,7 @@ export type CliGrepContextMessage = z.infer<typeof cliGrepContextMessageSchema>;
 
 const cliGrepMatchSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     author: cliAuthorSchema,
@@ -390,12 +390,12 @@ const cliGrepMatchSchema = z
   .strict();
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
-const channelsResultSchema = z
-  .object({ channels: z.array(cliChannelSchema) })
+const groupsResultSchema = z
+  .object({ groups: z.array(cliGroupSchema) })
   .strict();
 const threadsResultSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threads: z.array(cliThreadSummarySchema),
   })
   .strict();
@@ -413,7 +413,7 @@ const showResultSchema = z
   .strict();
 const postResultSchema = z
   .object({
-    channel: cliChannelSchema,
+    group: cliGroupSchema,
     threadId: z.string().min(1),
     messageId: z.string().min(1),
     title: z.string(),
@@ -586,17 +586,17 @@ const chatResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const channelsFullResultSchema = z.discriminatedUnion("ok", [
+const groupsFullResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      channels: z.array(
+      groups: z.array(
         z
           .object({
             id: rawChannelIdSchema,
             name: z.string().min(1),
             slug: z.string().min(1),
-            kind: z.enum(["channel", "dm", "agent"]),
+            kind: z.enum(["group", "dm", "agent"]),
             purpose: z.string().min(1).optional(),
             threadCount: z.number().int().nonnegative(),
             threads: z.array(
@@ -726,7 +726,7 @@ const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
-  channels: channelsResultSchema,
+  groups: groupsResultSchema,
   threads: threadsResultSchema,
   inbox: inboxResultSchema,
   show: showResultSchema,
@@ -739,7 +739,7 @@ const cliResultSchemas = {
   moment: momentResultSchema,
   fileChats: fileChatsResultSchema,
   chat: chatResultSchema,
-  channelsFull: channelsFullResultSchema,
+  groupsFull: groupsFullResultSchema,
   collectionQuery: collectionQueryResultSchema,
   collectionRecord: collectionRecordResultSchema,
   collectionSetFields: collectionSetFieldsResultSchema,
