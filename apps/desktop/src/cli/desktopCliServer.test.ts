@@ -4,9 +4,9 @@ import * as Y from "yjs";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createDesktopCliServer } from "./desktopCliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
-import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
+import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import { createChatWrites } from "../workspaces/chatWrites";
 import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
@@ -48,9 +48,21 @@ function fixture(rootPath = resolve("cli-workspace")) {
       : [{ threadId: "thread", messageCount: 2, lastReadSequence: 1 }]);
   let currentCapture: ReturnType<Dependencies["activity"]["engineCaptureFor"]> = capture;
   let daemon: ReturnType<Dependencies["currentDaemon"]> = { requestWorkspace };
-  let credentials: CloudCredentials | null = null;
   let options!: CliServerOptions;
   const handle: CliServerHandle = { socketPath: "socket", tokenPath: "token", close: vi.fn(async () => undefined) };
+  const chatWrites = createChatWrites({
+    findWorkspace: (id) => rows.get(id) ?? null,
+    warmCredentials: async () => undefined,
+    currentCredentialGeneration: () => 0,
+    currentCredentials: () => null,
+    localUserDisplayName: () => "Local name",
+    agentDisplayName: async () => "Agent",
+    localReactorFallbackId: () => "local:device",
+    projectChatBookmarks: vi.fn(),
+    queueCloudSync: vi.fn(),
+    syncSharedChannelsForChatTarget: async () => undefined,
+    scanChatDispatch: async () => undefined,
+  });
   const dependencies: Dependencies = {
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
@@ -63,38 +75,24 @@ function fixture(rootPath = resolve("cli-workspace")) {
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     withEngineAdapter: async () => null,
-    assertWritableWorkspace: vi.fn(),
-    chatRelayIdentityFor: vi.fn(async () => ({ joinedChannel: null })),
-    currentCredentials: () => credentials,
+    chatWrites,
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
-    warmCredentialCache: vi.fn(async () => undefined),
     localUserDisplayName: () => "Local name",
-    localReactorFallbackId: () => "local:device",
-    notifyRenderer: vi.fn(), queueChatBookmarkProjection: vi.fn(),
+    notifyRenderer: vi.fn(),
     syncSharedChannelsForChatTarget: vi.fn(async () => undefined),
     chatDispatchService: { scanWorkspace: vi.fn(async () => undefined) },
     rememberPendingCliRunMessageLink: vi.fn(),
   };
   return {
     workspace, rows, authorities, capture, store, dispatchStore,
-    requestWorkspace, handle, dependencies,
+    requestWorkspace, handle, dependencies, chatWrites,
     create: () => createDesktopCliServer(dependencies),
     options: () => options,
     setCapture: (value: typeof currentCapture) => { currentCapture = value; },
     setDaemon: (value: typeof daemon) => { daemon = value; },
-    setCredentials: (value: typeof credentials) => { credentials = value; },
   };
 }
-
-const credentials: CloudCredentials = {
-  serverUrl: "https://cloud.test", relayUrl: "https://relay.test", userId: "owner",
-  email: "owner@test.invalid", token: "test-token",
-};
-const joined: JoinedSharedChannel = {
-  shareId: "share", channelWireId: "wire", access: "read-write", granterEmail: null,
-  relayUrl: "https://relay.test", recipientUserId: "owner",
-};
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -159,36 +157,6 @@ describe("desktop CLI workspace context", () => {
     const context = await f.create().openCliWorkspace(f.workspace);
     await expect(context.daemonReads.queryChatMessagesGranular({ query: "q", limit: 1 })).rejects.toThrow();
     await expect(context.daemonReads.listUnreadFileThreads({ pageLimit: 1 })).rejects.toThrow();
-  });
-
-  it("reads grant changes at write time and checks workspace writability first", async () => {
-    const f = fixture();
-    const context = await f.create().openCliWorkspace(f.workspace);
-    await expect(context.assertWritable({ channelId: "channel" })).resolves.toBeUndefined();
-    f.rows.set("workspace", { ...f.workspace, sharedChannels: [{ ...joined, ended: true }] });
-    await expect(context.assertWritable({ threadId: "thread" })).rejects.toThrow();
-    expect(f.store.findThreadChannelId).toHaveBeenCalledWith({ workspaceId: "workspace", threadId: "thread" });
-    f.dependencies.assertWritableWorkspace = vi.fn(() => { throw new Error("workspace read-only"); });
-    const blocked = await f.create().openCliWorkspace(f.workspace);
-    await expect(blocked.assertWritable({ channelId: "channel" })).rejects.toThrow("workspace read-only");
-  });
-
-  it("reads credentials after the awaited target identity resolves", async () => {
-    const f = fixture();
-    const held = deferred();
-    f.setCredentials(credentials);
-    f.dependencies.chatRelayIdentityFor = vi.fn(async () => {
-      await held.promise;
-      return { joinedChannel: joined, authorUserId: "owner" };
-    });
-    const context = await f.create().openCliWorkspace(f.workspace);
-    const result = context.assertMessageWritable({ channelId: "channel" }, "owner");
-    const observed = result.catch((error: unknown) => error);
-    try { f.setCredentials(null); } finally { held.release(); await observed; }
-    expect(await observed).toMatchObject({ message: expect.stringContaining("Sign in to your server") });
-    f.setCredentials(credentials);
-    await expect(context.assertMessageWritable({ channelId: "channel" }, "owner")).resolves.toBeUndefined();
-    await expect(context.assertMessageWritable({ channelId: "channel" }, "other")).rejects.toThrow("account that joined");
   });
 
   it("filters protected and objectless moments and preserves optional metadata", async () => {
@@ -323,61 +291,44 @@ describe("desktop CLI server callbacks", () => {
     expect(context.readOnly).toBe(true);
   });
 
-  it("warms credentials before resolving untargeted identity and uses the target identity owner", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred();
-    f.dependencies.warmCredentialCache = async () => { entered.release(); await held.promise; };
-    f.dependencies.chatRelayIdentityFor = vi.fn(async () => ({ joinedChannel: joined, authorUserId: "recipient" }));
+  it("hands chat writes to the shared module and notifies and cloud-syncs every write", async () => {
+    const f = fixture();
     await f.create().startDesktopCliServer();
-    const pending = f.options().identity("workspace");
-    try { await entered.promise; f.setCredentials(credentials); }
-    finally { held.release(); await pending; }
-    expect(await pending).toEqual({ displayName: "Local name", agentName: "Agent", authorUserId: "owner", reactionAuthorId: "local:device" });
-    expect(await f.options().identity("workspace", { threadId: "thread" })).toEqual({
-      displayName: "Local name", agentName: "Agent", authorUserId: "recipient", reactionAuthorId: "local:device" });
-    expect(f.dependencies.chatRelayIdentityFor).toHaveBeenCalledWith("workspace", { threadId: "thread" }, f.store);
-    f.setCredentials({ ...credentials, userId: "other" });
-    expect(await f.options().identity("workspace")).not.toHaveProperty("authorUserId");
-    expect(await f.options().identity("absent")).not.toHaveProperty("authorUserId");
+    const options = f.options(); const context = await options.openWorkspace(f.workspace);
+    expect(options.chatWrites).toBe(f.chatWrites);
+    expect(options.localUserDisplayName()).toBe("Local name");
+    // Covers writes outside chatWrites, such as provisioning General.
+    await options.onWrite!(context);
+    expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    expect(f.dependencies.activity.queueCloudSync).toHaveBeenCalledWith("workspace");
+    expect(f.dependencies.syncSharedChannelsForChatTarget).not.toHaveBeenCalled();
+    expect(f.dependencies.chatDispatchService.scanWorkspace).not.toHaveBeenCalled();
   });
 
-  it("notifies writes, awaits target read sync, and updates pending message links", async () => {
+  it("awaits target read sync and updates pending message links", async () => {
     const f = fixture(); const held = deferred();
     const readEntered = deferred();
-    const order: string[] = [];
-    let syncCalls = 0;
     f.dependencies.syncSharedChannelsForChatTarget = vi.fn(async () => {
-      const isRead = ++syncCalls === 2;
-      if (isRead) readEntered.release();
+      readEntered.release();
       await held.promise;
-      if (isRead) order.push("sync finished");
     });
     await f.create().startDesktopCliServer();
     const options = f.options(); const context = await options.openWorkspace(f.workspace);
     const target = { channelId: "channel" };
-    let read: Promise<void> | undefined;
     let finished = false;
+    const read = Promise.resolve(options.onRead!(context, target)).then(() => { finished = true; });
     try {
-      await options.onWrite!(context, target);
-      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
-      expect(f.dependencies.queueChatBookmarkProjection).toHaveBeenCalledWith("workspace");
-      expect(f.dependencies.activity.queueCloudSync).toHaveBeenCalledWith("workspace");
-      expect(f.dependencies.chatDispatchService.scanWorkspace).toHaveBeenCalledWith("workspace");
-      read = Promise.resolve(options.onRead!(context, target)).then(() => {
-        finished = true;
-        order.push("read finished");
-      });
       await readEntered.promise;
       expect(finished).toBe(false);
-    } finally { held.release(); await read; await held.promise; }
+    } finally { held.release(); await read; }
     expect(finished).toBe(true);
-    expect(order).toEqual(["sync finished", "read finished"]);
-    expect(f.dependencies.syncSharedChannelsForChatTarget).toHaveBeenNthCalledWith(2, "workspace", target);
+    expect(f.dependencies.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", target);
     const link = { workspaceId: "workspace", runId: "run", messageId: "message" };
     options.onRunMessageLinkPending!(link); options.onRunMessageLinkSettled!(link); options.onRunMessageLinkAbandoned!(link);
     expect(f.dependencies.rememberPendingCliRunMessageLink).toHaveBeenNthCalledWith(1, link, true);
     expect(f.dependencies.rememberPendingCliRunMessageLink).toHaveBeenNthCalledWith(2, link, false);
     expect(f.dependencies.rememberPendingCliRunMessageLink).toHaveBeenNthCalledWith(3, link, false);
-    expect(f.dependencies.chatDispatchService.scanWorkspace).toHaveBeenCalledTimes(2);
+    expect(f.dependencies.chatDispatchService.scanWorkspace).toHaveBeenCalledOnce();
   });
 
   it("reports rejected background work and exposes server error and debug callbacks", async () => {
@@ -387,16 +338,13 @@ describe("desktop CLI server callbacks", () => {
       if (message === "[desktop] CLI provenance recovery scan:") recoveryLogged.release();
     });
     const debugLog = vi.spyOn(console, "debug").mockImplementation(() => undefined);
-    f.dependencies.syncSharedChannelsForChatTarget = async () => { throw error; };
     f.dependencies.chatDispatchService.scanWorkspace = async () => { throw error; };
     await f.create().startDesktopCliServer();
-    const options = f.options(); const context = await options.openWorkspace(f.workspace);
-    await options.onWrite!(context);
+    const options = f.options();
     options.onRunMessageLinkSettled!({ workspaceId: "workspace", runId: "run", messageId: "message" });
     await recoveryLogged.promise;
     options.onError!(error); options.onDebug!("listening");
     expect(errorLog.mock.calls).toEqual([
-      ["[desktop] shared channel sync:", error], ["[desktop] CLI dispatch scan:", error],
       ["[desktop] CLI provenance recovery scan:", error], ["[desktop] CLI server:", error],
     ]);
     expect(debugLog).toHaveBeenCalledWith("[desktop] CLI server: listening");

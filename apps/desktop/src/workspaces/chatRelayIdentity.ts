@@ -115,17 +115,28 @@ export async function resolveChatRelayIdentity(input: {
       store: input.store,
       target: input.target,
     })) ?? null;
-  const authorUserId = joinedChannel
-    ? joinedChannelMatchesCredentials(joinedChannel, input.credentials)
-      ? joinedChannel.recipientUserId
-      : undefined
-    : input.workspace.shareView
-      ? resolveShareViewRelayAuthorId(input.workspace.shareView, input.credentials)
-      : resolveWorkspaceRelayAuthorId(input.workspace, input.credentials);
+  const authorUserId = chatRelayAuthorId(input.workspace, joinedChannel, input.credentials);
   return {
     joinedChannel,
     ...(authorUserId ? { authorUserId } : {}),
   };
+}
+
+// The synchronous half of resolveChatRelayIdentity, for a caller that already
+// resolved the target's joined channel.
+export function chatRelayAuthorId(
+  workspace: Pick<RegistryEntry, "remote" | "shareView">,
+  joinedChannel: JoinedSharedChannel | null,
+  credentials: CloudCredentials | null,
+): string | undefined {
+  if (joinedChannel) {
+    return joinedChannelMatchesCredentials(joinedChannel, credentials)
+      ? joinedChannel.recipientUserId
+      : undefined;
+  }
+  return workspace.shareView
+    ? resolveShareViewRelayAuthorId(workspace.shareView, credentials)
+    : resolveWorkspaceRelayAuthorId(workspace, credentials);
 }
 
 export function assertSharedChannelMessageIdentity(input: {

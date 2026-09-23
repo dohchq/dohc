@@ -50,21 +50,17 @@ import {
 import { CHANNELS } from "./channels";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import { assertSharedChannelWritable } from "../workspaces/sharedChannels";
 import {
   resolveWorkspaceRelayAuthorId,
   type ChatRelayIdentityTarget,
   type ResolvedChatRelayIdentity,
 } from "../workspaces/chatRelayIdentity";
+import type { ChatWrites, ChatWriter } from "../workspaces/chatWrites";
 import {
   chatViewerAuthorId,
   createChatChannelIpcHandler,
   createMarkChatThreadReadIpcHandler,
-  assertChatWritable,
-  createSetChatReactionIpcHandler,
   reactionsForViewer,
-  setChatReactionFromMain,
-  writeChatMessageFromMain,
 } from "../mainChatIpcHandlers";
 import type {
   ChannelThreadSummary,
@@ -80,7 +76,14 @@ import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { resolveChatFileMentionPath } from "../workspaces/chatFileReferenceResolution";
 import { chatBookmarkDestination } from "../workspaces/desktopChatBookmarks";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
-import type { createChatScopeCapability } from "./chatScope";
+import type { ChatScope, createChatScopeCapability } from "./chatScope";
+
+// The renderer always writes as the local person, never as an agent.
+const RENDERER: ChatWriter = { via: "renderer" };
+
+function chatWritePlace(scope: ChatScope) {
+  return { workspaceId: scope.workspace.workspaceId, store: scope.store };
+}
 
 function chatAttachmentForIpc(
   attachment: ChatMessage["attachments"][number],
@@ -131,20 +134,12 @@ export function registerChatsIpcHandlers<
     workspace: string | RegistryEntry, feature: "Chats",
   ): Promise<{ workspace: RegistryEntry; capture: WorkspaceEngineCapture }>;
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
-  findWorkspace(workspaceId: string): RegistryEntry | null;
+  chatWrites: ChatWrites;
   assertWritableWorkspace(workspace: RegistryEntry): void;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
-  localUserDisplayName(): string;
   localReactorFallbackId(): string;
   currentCredentials(): CloudCredentials | null;
-  verifiedChatAuthorUserIdFor(
-    workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
-  ): Promise<string | undefined>;
-  revalidateChatWrite(
-    workspace: RegistryEntry, target: ChatRelayIdentityTarget,
-    authorUserId: string | undefined, store: DesktopLinkedChatStore,
-  ): Promise<void>;
   chatRelayIdentityFor(
     workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
   ): Promise<ResolvedChatRelayIdentity>;
@@ -161,14 +156,10 @@ export function registerChatsIpcHandlers<
     objectIdByPath: Map<string, string>; pathByObjectId: Map<string, string>;
   }>;
   activity: { queueCloudSync(workspaceId: string): void };
-  chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
   desktopChatBookmarks: {
     materializeChatBookmark(
       workspace: RegistryEntry, capture: WorkspaceEngineCapture, bookmark: ChatBookmark,
     ): Promise<ChatBookmark>;
-    materializePendingChatBookmarks(
-      workspace: RegistryEntry, capture: WorkspaceEngineCapture,
-    ): Promise<void>;
     archiveChatBookmark(
       workspace: RegistryEntry, capture: WorkspaceEngineCapture,
       ownerUserId: string, bookmarkId: string,
@@ -179,15 +170,15 @@ export function registerChatsIpcHandlers<
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
 }) {
   const {
-    registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor,
-    findWorkspace, assertWritableWorkspace, warmCredentialCache, localUserId, localUserDisplayName,
-    localReactorFallbackId, currentCredentials, verifiedChatAuthorUserIdFor, revalidateChatWrite,
-    chatRelayIdentityFor, syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
-    syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
-    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer, ensureGroupFolder,
+    registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
+    assertWritableWorkspace, warmCredentialCache, localUserId, localReactorFallbackId,
+    currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
+    syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
+    withRendererWorkspaceOperation, activeEngineFileIndex, activity, desktopChatBookmarks,
+    notifyRenderer, ensureGroupFolder,
   } = dependencies;
-  const { requireChatScope, syncChatWriteFor, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
-  const { materializeChatBookmark, materializePendingChatBookmarks } = desktopChatBookmarks;
+  const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
+  const { materializeChatBookmark } = desktopChatBookmarks;
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
     return {
       id: thread.id,
@@ -404,24 +395,20 @@ export function registerChatsIpcHandlers<
     assertTrustedSender(event);
     const input = CreateFileChatPayload.parse(payload);
     // Reads are reachable from every received share. This mutation resolves
-    // the same scope, then the gate refuses it before persistence.
+    // the same scope, then chatWrites refuses it before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    assertChatWritable(scope);
-    const { workspace, store } = scope;
-    // The chat links to the file's stable engine object id (never the path),
-    // so the link survives renames; the path rides along as a display hint.
-    const fileObjectId = await chatFileObjectId(scope, input.path);
-    if (!fileObjectId) {
-      throw new Error(
-        "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
-      );
-    }
-    const thread = await store.createThread({
-      workspaceId: workspace.workspaceId,
+    const thread = await chatWrites.createFileThread(chatWritePlace(scope), {
       title: input.title,
-      linkedFile: { objectId: fileObjectId, pathHint: input.path },
+      linkedFile: async () => {
+        const objectId = await chatFileObjectId(scope, input.path);
+        if (!objectId) {
+          throw new Error(
+            "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
+          );
+        }
+        return { objectId, pathHint: input.path };
+      },
     });
-    syncChatWriteFor(scope, { threadId: thread.id });
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
   });
 
@@ -455,62 +442,20 @@ export function registerChatsIpcHandlers<
     assertTrustedSender(event);
     const input = SendChatMessagePayload.parse(payload);
     // A share view resolves a scope instead of a capture so reads still work.
-    // The write gate refuses every received share before persistence.
+    // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    assertChatWritable(scope);
-    const { workspace, store } = scope;
-    // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
-    // writes at the main boundary, before any durable local row — the
-    // renderer disabling its composer is honesty, not authorization.
-    await assertSharedChannelWritable({
-      workspaceId: workspace.workspaceId,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-      store,
-      target: { threadId: input.threadId },
-    });
-    // Resolve one relay-scoped identity before attachments or any durable
-    // write. Shared channels require it; local history may omit it.
-    const target = { threadId: input.threadId };
-    const message = await writeChatMessageFromMain({
-      resolveAuthorUserId: () =>
-        verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
+    const message = await chatWrites.sendMessage(chatWritePlace(scope), {
+      writer: RENDERER,
+      threadId: input.threadId,
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
+      body: input.body,
       resolveAttachments: () =>
         resolveChatFileReferences(
-          workspace,
+          scope.workspace,
           (path) => chatFileObjectId(scope, path),
           input.fileReferences,
         ),
-      revalidateAuthorUserId: (authorUserId) =>
-        revalidateChatWrite(workspace, target, authorUserId, store),
-      // Author is derived here: renderer-sent messages are always the local
-      // human user. Agent authorship arrives through agent tooling, never
-      // through this channel.
-      write: ({ authorUserId, attachments }) =>
-        store.sendMessage({
-          workspaceId: workspace.workspaceId,
-          threadId: input.threadId,
-          author: { kind: "human", displayName: localUserDisplayName() },
-          ...(authorUserId ? { authorUserId } : {}),
-          ...(input.parentMessageId
-            ? { parentMessageId: input.parentMessageId }
-            : {}),
-          body: input.body,
-          ...(attachments.length > 0 ? { attachments } : {}),
-        }),
     });
-    // Bookmarks and agent dispatch are LOCAL projections of a workspace this
-    // machine owns. A share view owns neither: it has no capture to project
-    // into, and an agent dispatched from someone else's shared file would be
-    // this machine acting on a workspace it only reads.
-    if (scope.kind === "workspace") {
-      void materializePendingChatBookmarks(workspace, scope.capture);
-      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-        console.error("[desktop] local chat dispatch scan:", error);
-      });
-    }
-    // If this thread lives in a joined shared channel, push it promptly. A
-    // received share never reaches this point.
-    syncChatWriteFor(scope, { threadId: input.threadId });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
   });
 
@@ -545,22 +490,12 @@ export function registerChatsIpcHandlers<
     const input = ResolveChatDecisionPayload.parse(payload);
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
-    assertChatWritable(scope);
-    const { workspace, store } = scope;
-    await assertSharedChannelWritable({
-      workspaceId: workspace.workspaceId,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-      store,
-      target: { threadId: input.threadId },
-    });
-    const decision = await store.resolveChatDecision({
-      workspaceId: workspace.workspaceId,
+    const decision = await chatWrites.resolveDecision(chatWritePlace(scope), {
       threadId: input.threadId,
       messageId: input.messageId,
       resolvedByMessageId: input.resolvedByMessageId,
       ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
     });
-    syncChatWriteFor(scope, { threadId: input.threadId });
     return ResolveChatDecisionResult.parse({
       decision: {
         threadId: decision.threadId,
@@ -1019,48 +954,18 @@ export function registerChatsIpcHandlers<
       input.workspaceId,
       "Chats",
     );
-    assertWritableWorkspace(workspace);
-    // MU-C4 (CodeRabbit security): read-only shared channels reject the
-    // composer at the main boundary, before any durable row.
-    await assertSharedChannelWritable({
+    // No title, ever, on this path: the thread displays its first-message
+    // snippet.
+    const started = await chatWrites.startThread({
       workspaceId: workspace.workspaceId,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
       store: linkedChatStoreFor(workspace),
-      target: { channelId: input.channelId },
-    });
-    // Resolve one relay-scoped identity before attachments or any durable
-    // write. Shared channels require it; local history may omit it.
-    const store = linkedChatStoreFor(workspace);
-    const target = { channelId: input.channelId };
-    const started = await writeChatMessageFromMain({
-      resolveAuthorUserId: () =>
-        verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
+    }, {
+      writer: RENDERER,
+      channelId: input.channelId,
+      ...(input.lane ? { lane: input.lane } : {}),
+      body: input.body,
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
-      revalidateAuthorUserId: (authorUserId) =>
-        revalidateChatWrite(workspace, target, authorUserId, store),
-      // No title, ever, on this path: the thread displays its first-message
-      // snippet. Author is main-derived like every renderer send.
-      write: ({ authorUserId, attachments }) =>
-        store.startChannelThread({
-          workspaceId: workspace.workspaceId,
-          channelId: input.channelId,
-          ...(input.lane ? { lane: input.lane } : {}),
-          author: { kind: "human", displayName: localUserDisplayName() },
-          ...(authorUserId ? { authorUserId } : {}),
-          body: input.body,
-          ...(attachments.length > 0 ? { attachments } : {}),
-        }),
-    });
-    void materializePendingChatBookmarks(workspace, capture);
-    void syncSharedChannelsForChatTarget(workspace.workspaceId, {
-      channelId: input.channelId,
-    }).catch((error) => {
-      console.error("[desktop] shared channel sync:", error);
-    });
-    activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
     });
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
@@ -1142,63 +1047,22 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(
-    CHANNELS.setChatReaction,
-    createSetChatReactionIpcHandler({
-      assertTrustedSender,
-      parsePayload: (payload) => SetChatReactionPayload.parse(payload),
-      // Reads are reachable from a share view; this mutation is not.
-      requireContext: requireChatScope,
-      assertWritable: assertChatWritable,
-      run: async (scope, input) => {
-        const { workspace, store } = scope;
-        await warmCredentialCache();
-        const target = { threadId: input.threadId };
-        // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
-        // shared channel rejects them before any durable row.
-        await assertSharedChannelWritable({
-          workspaceId: workspace.workspaceId,
-          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-          store,
-          target,
-        });
-        const reaction = await setChatReactionFromMain({
-          workspaceId: workspace.workspaceId,
-          threadId: input.threadId,
-          messageId: input.messageId,
-          emoji: input.emoji,
-          localFallbackAuthorId: localReactorFallbackId(),
-          localAuthorDisplayName: localUserDisplayName(),
-          resolveReplicationAuthorId: () =>
-            verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
-          revalidateReplicationAuthorId: (authorUserId) =>
-            revalidateChatWrite(workspace, target, authorUserId, store),
-          listReactions: () =>
-            store.listReactions({
-              workspaceId: workspace.workspaceId,
-              threadId: input.threadId,
-            }),
-          setReaction: (mutation) => store.setReaction(mutation),
-          state: input.state,
-        });
-        // A received share is refused before this callback. Owned workspaces
-        // still push joined channels and queue cloud sync below.
-        syncChatWriteFor(scope, { threadId: input.threadId });
-        return SetChatReactionResult.parse({
-          reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
-          viewerAuthorId: reaction.author.authorId,
-        });
-      },
-      // MU-C4: reactions in a joined shared channel push out promptly too.
-      syncJoinedChannels: (workspaceId) => {
-        void syncWorkspaceSharedChannels(workspaceId).catch((error) => {
-          console.error("[desktop] shared channel sync:", error);
-        });
-      },
-      // Signed-in reactions are journaled workspace mutations, so the owner's
-      // cloud workspace is nudged too. Signed-out sync attempts are no-ops.
-      queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
-    }),
-  );
+  registerHandler(CHANNELS.setChatReaction, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetChatReactionPayload.parse(payload);
+    // Reads are reachable from a share view; this mutation is not.
+    const scope = await requireChatScope(input.workspaceId);
+    const reaction = await chatWrites.setReaction(chatWritePlace(scope), {
+      writer: RENDERER,
+      threadId: input.threadId,
+      messageId: input.messageId,
+      emoji: input.emoji,
+      state: input.state,
+    });
+    return SetChatReactionResult.parse({
+      reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
+      viewerAuthorId: reaction.author.authorId,
+    });
+  });
 
 }

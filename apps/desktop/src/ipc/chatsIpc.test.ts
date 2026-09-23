@@ -4,8 +4,10 @@ import { CHANNELS } from "./channels";
 import { createChatScopeCapability } from "./chatScope";
 import { chatMessageForIpc, registerChatsIpcHandlers } from "./chatsIpc";
 import { ChatMessageRecord } from "./bridgeContract";
+import { createChatWrites } from "../workspaces/chatWrites";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -106,16 +108,14 @@ function fixture(kind: ScopeKind = "local") {
     workspaceAuthorities: authorities, canonicalWorkspaceFor, requireEngineCapture,
     linkedChatStoreFor, openWorkspaceActivity,
     receivedShareEngine: { workspaceFor: input => ({ workspaceId: input.engineWorkspaceId, rootPath: input.rootPath, attachmentId: input.attachmentId }) },
-    syncSharedChannelsForChatTarget, activity, activeEngineFileIndex, readOwnedWorkspaceText,
+    activeEngineFileIndex, readOwnedWorkspaceText,
   });
   const warmCredentialCache = vi.fn(async (): Promise<void> => undefined);
-  const verifiedChatAuthorUserIdFor = vi.fn(async (): Promise<string | undefined> => "verified-owner");
-  const revalidateChatWrite = vi.fn(async () => undefined);
-  const chatDispatchService = { scanWorkspace: vi.fn(async () => undefined) };
+  const scanChatDispatch = vi.fn(async () => undefined);
+  const projectChatBookmarks = vi.fn();
   const ensureGroupFolder = vi.fn(async (_workspace: RegistryEntry, _folderPath: string): Promise<void> => undefined);
   const desktopChatBookmarks = {
     materializeChatBookmark: vi.fn(async (_workspace: RegistryEntry, _capture: WorkspaceEngineCapture, saved: ChatBookmark) => ({ ...saved, projectionState: "ready" as const })),
-    materializePendingChatBookmarks: vi.fn(async () => undefined),
     archiveChatBookmark: vi.fn(async () => ({ ...bookmark, state: "archived" as const, generation: 2, projectionState: "ready" as const })),
   };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
@@ -125,23 +125,34 @@ function fixture(kind: ScopeKind = "local") {
         ? { joinedChannel: null, authorUserId: "recipient" }
         : { joinedChannel: null, authorUserId: "verified-owner" },
   );
+  // The real module: these tests cover what each adapter hands it and how the
+  // adapter maps the result. chatWrites.test.ts covers the checks themselves.
+  let chatCredentials: CloudCredentials | null = {
+    serverUrl: "https://cloud.test", userId: "verified-owner", email: "sam@test.invalid", token: "token",
+  };
+  const chatWrites = createChatWrites({
+    findWorkspace: () => ({ ...workspace, remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" } }),
+    warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
+    currentCredentialGeneration: () => 0,
+    localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
+    localReactorFallbackId: () => "local-owner", projectChatBookmarks,
+    queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
+  });
   const sender = { trusted: true };
   const assertTrustedSender = vi.fn((event: Event) => {
     if (!event.sender.trusted) throw new Error("Untrusted sender");
   });
   registerChatsIpcHandlers<Event["sender"], Event, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
-    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor,
-    findWorkspace: () => workspace,
+    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
-    warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Sam",
+    warmCredentialCache, localUserId: () => "owner",
     localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
-    verifiedChatAuthorUserIdFor, revalidateChatWrite,
     chatRelayIdentityFor,
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
-    activeEngineFileIndex, activity, chatDispatchService, desktopChatBookmarks, notifyRenderer: () => undefined,
+    activeEngineFileIndex, activity, desktopChatBookmarks, notifyRenderer: () => undefined,
     ensureGroupFolder,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
@@ -152,7 +163,8 @@ function fixture(kind: ScopeKind = "local") {
   return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, activeEngineFileIndex, readOwnedWorkspaceText,
-    warmCredentialCache, verifiedChatAuthorUserIdFor, chatRelayIdentityFor, revalidateChatWrite, chatDispatchService, desktopChatBookmarks };
+    warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
+    signOutChatWrites: () => { chatCredentials = null; } };
 }
 
 const mutations = [
@@ -213,16 +225,17 @@ describe("chat message IPC identity", () => {
   });
 });
 
-describe("registered chat write gates", () => {
+describe("registered chat writes", () => {
+  // Each handler must hand its write to chatWrites rather than the store: a
+  // share scope reaching a store method would mean one bypassed it.
   for (const kind of ["view", "comment", "edit", "ended", "damaged"] as const) {
     it.each(mutations)(`${kind} scope refuses $name before any chat store operation`, async mutation => {
       const test = fixture(kind);
       await expect(test.invoke(mutation.channel, mutation.payload)).rejects.toThrow("Chats are read-only in this shared view.");
       for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
       expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
-      expect(test.verifiedChatAuthorUserIdFor).not.toHaveBeenCalled();
-      expect(test.desktopChatBookmarks.materializePendingChatBookmarks).not.toHaveBeenCalled();
-      expect(test.chatDispatchService.scanWorkspace).not.toHaveBeenCalled();
+      expect(test.activeEngineFileIndex).not.toHaveBeenCalled();
+      expect(test.chatRelayIdentityFor).not.toHaveBeenCalled();
       expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
       expect(test.requireEngineCapture).not.toHaveBeenCalled();
     });
@@ -251,66 +264,24 @@ describe("registered chat write gates", () => {
     expect(test.linkedChatStoreFor).not.toHaveBeenCalled();
   });
 
-  for (const grant of ["read-only", "ended"] as const) {
-    it.each([
-      ...mutations.slice(1),
-      { name: "channel composer", channel: CHANNELS.startChannelThread, payload: { workspaceId: "workspace", channelId: "channel", body: "First" }, method: "startChannelThread" as const },
-    ])(`${grant} joined channel refuses $name before a durable write`, async mutation => {
-      const test = fixture();
-      test.workspace.sharedChannels = [{
-        shareId: "share", channelWireId: "wire", granterEmail: "owner@example.test",
-        relayUrl: "https://relay.example.test", recipientUserId: "owner",
-        access: grant === "read-only" ? "read-only" : "read-write",
-        ...(grant === "ended" ? { ended: true } : {}),
-      }];
-      await expect(test.invoke(mutation.channel, mutation.payload)).rejects.toThrow("This shared channel is read-only for you.");
-      expect(test.storeMethods.getChannelWireId).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel" });
-      for (const method of ["createThread", "sendMessage", "resolveChatDecision", "setReaction", "startChannelThread"] as const) {
-        expect(test.storeMethods[method]).not.toHaveBeenCalled();
-      }
-      expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
-      expect(test.verifiedChatAuthorUserIdFor).not.toHaveBeenCalled();
-      expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
-    });
-  }
-
-  it("retains main-derived message identity and resolves attachments before revalidating", async () => {
+  it("sends as the local person whatever identity the payload claims", async () => {
     const test = fixture();
-    const entered = deferred();
-    const file = deferred<string | null>();
-    test.captureMethods.fileObjectIdForPath.mockImplementationOnce(() => { entered.resolve(); return file.promise; });
-    const sent = test.invoke(CHANNELS.sendChatMessage, {
+    await test.invoke(CHANNELS.sendChatMessage, {
       workspaceId: "workspace", threadId: "thread", body: "Hello", authorUserId: "forged",
       author: { kind: "agent", displayName: "Forged" }, fileReferences: [{ path: "notes/a.md" }],
     });
-    await entered.promise;
-    expect(test.verifiedChatAuthorUserIdFor).toHaveBeenCalledOnce();
-    expect(test.revalidateChatWrite).not.toHaveBeenCalled();
-    expect(test.storeMethods.sendMessage).not.toHaveBeenCalled();
-    file.resolve("object");
-    await sent;
-    expect(test.revalidateChatWrite).toHaveBeenCalledWith(test.workspace, { threadId: "thread" }, "verified-owner", expect.anything());
     expect(test.storeMethods.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", body: "Hello",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
       attachments: [{ objectId: "object", pathHint: "notes/a.md" }],
     });
-    expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);
-    expect(test.chatDispatchService.scanWorkspace).toHaveBeenCalledWith("workspace");
+    expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
+    expect(test.scanChatDispatch).toHaveBeenCalledWith("workspace");
   });
 
-  it("does not persist a message when identity revalidation rejects", async () => {
+  it("names the reaction's author as the viewer, locally when signed out", async () => {
     const test = fixture();
-    test.revalidateChatWrite.mockRejectedValueOnce(new Error("Changed identity"));
-    await expect(test.invoke(CHANNELS.sendChatMessage, mutations[1].payload)).rejects.toThrow("Changed identity");
-    expect(test.storeMethods.sendMessage).not.toHaveBeenCalled();
-    expect(test.desktopChatBookmarks.materializePendingChatBookmarks).not.toHaveBeenCalled();
-    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
-  });
-
-  it("keeps the fallback reaction author local when signed out", async () => {
-    const test = fixture();
-    test.verifiedChatAuthorUserIdFor.mockResolvedValueOnce(undefined);
+    test.signOutChatWrites();
     expect(await test.invoke(CHANNELS.setChatReaction, mutations[3].payload)).toMatchObject({ viewerAuthorId: "local-owner" });
     expect(test.storeMethods.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
@@ -374,7 +345,7 @@ describe("registered channels and personal chat projections", () => {
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
     expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner" });
-    expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);
+    expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
   });
 
   it("requires a usable default folder and creates no channel if the folder fails", async () => {
