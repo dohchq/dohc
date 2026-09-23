@@ -118,7 +118,7 @@ Understand the constraint before building. Choose the smallest model that makes 
 
 Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
 - Choose layouts for their content. Give comparisons enough room, with consistent spacing and varied composition.
-- Prefer interfaces that are clear without subtext or subheadings. Use them only as a last resort or when they are the most obvious, simplest solution for users. If a cleaner design works without them, choose it.
+- Show, don't tell. A person should see what a surface is, what state it is in, and what to do next at a glance, without reading. Let icons, placement, shape, and color that means something carry the meaning; keep words for the user's own content and for facts only words can state.
 - For broad redesigns, develop one representative section before extending the treatment.
 - Inspect affected layouts, both themes, keyboard access, reduced motion, loading transitions, and failure states in the browser.
 - Match preview and live visuals. Keep content useful while visuals load, and suspend animation offscreen.

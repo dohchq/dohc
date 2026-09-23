@@ -16,6 +16,35 @@ The discipline behind the words is the `dohc-writing` skill: Orwell plus ASD-STE
 
 - **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`, `DohcBrandBlock`).
 
+## Show, don't tell
+
+The eye reads shape, position, and color before it reads a word. A picture sticks where a sentence does not. So a person should know what a surface is, what state it is in, and what to do next at a glance. Decide this before you write any words: most surfaces need fewer than you expect.
+
+Words are for two things: the user's own content (file names, titles, messages), and facts only words can state (an error's cause, a recovery path, a count someone acts on).
+
+**The glance test.** Hide every word that is not the user's own content. A person should still tell what the surface is for, what state it is in, and where to click next. Where they cannot, move that meaning into an icon, a position, a shape, or a color.
+
+| Instead of | Show |
+| --- | --- |
+| A type label (`DOCUMENT`, `DATA`) | The file's icon |
+| A panel title that repeats the active rail icon (`EXPLORER`) | The rail's active mark |
+| The same status twice (`Local · saved`, then `Saved`) | One mark in one place. Words appear only when something needs the person |
+| A helper sentence under a control | A live preview of its effect: theme thumbnails, the resolved path |
+| A scope tag on every row (`User`, `Workspace`) | One group heading per scope |
+| A paragraph about who can access something | Three icon facts, one line each |
+| `Unknown source` on every row | An actor glyph, or nothing |
+| An empty state sentence | The actions it offers, with their shortcuts |
+| Prose about what changed | A number, a bar, or the changed words highlighted |
+| A label saying who is an agent | The olive agent voice: its badge or a 6px dot beside the name |
+
+**Keep what a picture cannot carry.**
+
+- Every icon-only control keeps an accessible name and a tooltip. A new visible label keeps the control's current accessible name (see Hard invariants).
+- Distinct facts keep distinct marks. Saved on this machine, accepted by the host, and waiting to share are three states, not one check.
+- An error keeps its words: what happened, why if known, and what to do next. The icon marks the error; the sentence explains it.
+- Color always travels with a second cue (a shape, an icon, or a position), so meaning survives grayscale and color blindness.
+- Use the lucide icon people already know for the action. A clever metaphor costs more reading than the word it replaced.
+
 ## The words
 
 The Controls section below covers the parts. This section covers the words inside them.
@@ -262,8 +291,9 @@ Agent attribution: olive voice. `text-agent` name/icon or a 6px `bg-agent` dot. 
 3. Hierarchy readable squinting? Title → sections → rows → metadata.
 4. All interactive states present? (hover, active, focus-visible, disabled, empty, loading, error)
 5. Metadata in the mono voice, decorative text `text-subtle`, semantics the only color?
-6. Every string checked against the Words section above: right noun, active voice, and a next action where one is owed?
-7. Would Notion/Linear ship it? If not, it isn't done.
+6. Passes the glance test in Show, don't tell? Every remaining word earns its place.
+7. Every string checked against the Words section above: right noun, active voice, and a next action where one is owed?
+8. Would Notion/Linear ship it? If not, it isn't done.
 
 ### Hard invariants (breaking these breaks the product)
 
