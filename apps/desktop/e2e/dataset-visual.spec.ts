@@ -42,6 +42,8 @@ for (const theme of ["light", "dark"] as const) {
       const preview = create.getByRole("region", { name: "Collection preview" });
       await expect(preview.getByRole("columnheader", { name: "Status", exact: true })).toBeVisible();
       await expect(preview.getByText("0 records", { exact: true })).toBeVisible();
+      const previewScroller = preview.getByRole("table").locator("..");
+      expect(await previewScroller.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       await page.screenshot({ path: test.info().outputPath(`create-collection-${theme}.png`) });
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(760, 640));
       await expectInsideViewport(create.getByTestId("new-collection-create"));
@@ -70,6 +72,10 @@ for (const theme of ["light", "dark"] as const) {
       await form.getByRole("button", { name: "Cancel", exact: true }).click();
       await expect(form).toBeHidden();
       await expect(collection.getByRole("button", { name: "Create form", exact: true })).toBeFocused();
+      await collection.getByLabel("Manage Collection", { exact: true }).click();
+      await expectInsideViewport(collection.getByLabel("Manage Collection", { exact: true }).locator(".. > div"));
+      await page.screenshot({ path: test.info().outputPath(`collection-toolbar-narrow-${theme}.png`) });
+      await page.keyboard.press("Escape");
       assertDesktopEngineHealthy(desktop.logs);
       expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
     } finally { await cleanupDesktopWorkspace(desktop, workspace); }

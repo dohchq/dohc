@@ -30,6 +30,18 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 }
 afterEach(cleanup);
 
+it("keeps an empty multi-select visible and editable", async () => {
+  const description = dataset();
+  description.tables[0]!.fields.find(field => field.fieldId === status)!.type = "multi-select";
+  description.operations.find(operation => operation.operationId === edit)!.fieldIds.push(status);
+  const invoke = vi.fn(async () => ({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [status]: [] } }], nextCursor: null } }));
+  setup({ dataset: description, invoke });
+  const cell = await screen.findByRole("button", { name: "Edit Status for record 1" });
+  expect(cell.textContent).toBe("—");
+  fireEvent.click(cell);
+  expect(screen.getByRole("checkbox", { name: "Reviewed" })).toBeTruthy();
+});
+
 it("labels saved-page coverage without implying the entire Collection is downloaded", async () => {
   const copy = {offline:true,savedAtMs:1,coverage:"saved-pages" as const};
   setup({copy}); await screen.findByText("Alice");

@@ -39,6 +39,7 @@ function History(props: CollectionHistoryDialogProps) {
   return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Collection history", className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(720px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
     <div className="flex items-center justify-between gap-3"><h2 className="m-0 flex min-w-0 items-center gap-2 text-sm font-semibold"><HistoryIcon size={16} strokeWidth={1.9} aria-hidden /><span className="truncate">History · {props.name}</span></h2><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
     <div className="flex items-center justify-between text-[12px] text-muted"><span>Saved changes</span><span>Newest first</span></div>
+    <p className="m-0 text-[11px] text-muted">Reads and refused requests do not appear here.</p>
     {props.pendingUndo && <div className="flex items-center gap-2 text-[12px] text-muted"><span>{props.undoBusy ? "Reversing edit…" : "Undo not confirmed"}</span>{!props.undoBusy && <SecondaryButton onClick={() => props.onUndo?.(props.pendingUndo!)}>Try again</SecondaryButton>}</div>}
     {busy && <p role="status" className="m-0 text-[12px] text-muted">Loading history…</p>}
     {page && !page.entries.length && <p className="m-0 text-[13px] text-muted">No saved operations on this page. Refresh to check for changes.</p>}

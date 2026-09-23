@@ -121,7 +121,7 @@ export function TransactionalCollectionViews(props: Props) {
         groupCount={(_group,index)=>`${loaded.columns[index]!.page.rows.length}${loaded.columns[index]!.page.nextCursor ? "+" : ""}`}
         groupFooter={(_group,index)=>{const column=loaded.columns[index]!,key=JSON.stringify(column.value);return pageControls(positions[key]??beginning(),column.page,next=>setPositions({...positions,[key]:next}),display(column.value)||"No value",false);}} /></div>
       {groups.length===0&&<p className="m-0 text-sm text-muted">No records match this board. Change the filters or add a record.</p>}
-      <footer className="flex items-center gap-2 text-[12px] text-muted"><span className="mr-auto">{groups.length} groups · Counts show this page{loaded.moreGroups?" · More groups":""}</span>
+      <footer className="flex items-center gap-2 text-[12px] text-muted"><span className="mr-auto">{groups.length} groups · Card counts are for this page{loaded.moreGroups?" · More groups":""}</span>
         <IconButton aria-label="Previous groups" title="Previous groups" disabled={disabled||!groupHistory.length} onClick={()=>{setOffset(Math.max(0,offset-BOARD_GROUP_PAGE_SIZE));setGroupAfter(groupHistory.at(-1)??null);setGroupHistory(groupHistory.slice(0,-1));setPositions({});}}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton>
         <IconButton aria-label="Next groups" title="Next groups" disabled={disabled||!loaded.moreGroups} onClick={()=>{setOffset(offset+BOARD_GROUP_PAGE_SIZE);setGroupAfter(loaded.nextGroup);setGroupHistory([...groupHistory,groupAfter]);setPositions({});}}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></footer>
     </> : <>

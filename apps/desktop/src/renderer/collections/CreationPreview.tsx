@@ -14,13 +14,14 @@ export function CollectionCreationPreview({ name, fields, documents }: {
   fields: readonly { name: string; type: string; required?: boolean }[];
   documents: boolean;
 }) {
+  const Icon = documents ? FileText : Table2;
   return <section aria-label="Collection preview" className="min-w-0 bg-panel-2 p-5 min-[900px]:overflow-y-auto">
     <div className="mb-4 flex items-center justify-between text-[12px] text-muted"><span>Preview</span><span className="font-mono">0 records</span></div>
     <div className="overflow-hidden rounded-lg border border-line bg-bg">
-      <div className="flex items-center gap-2 border-b border-line p-3 text-sm font-semibold text-ink"><Table2 size={16} strokeWidth={1.9} aria-hidden="true" /><span className="truncate">{name.trim().replace(/\/+$/, "").split("/").at(-1) || "New collection"}</span></div>
+      <div className="flex items-center gap-2 border-b border-line p-3 text-sm font-semibold text-ink"><Icon size={16} strokeWidth={1.9} aria-hidden="true" /><span className="truncate">{name.trim().replace(/\/+$/, "").split("/").at(-1) || "New collection"}</span></div>
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left text-[12px]">
-          <thead><tr>{fields.map((field, index) => <th key={index} className="min-w-28 border-b border-r border-line bg-panel px-3 py-2 font-medium last:border-r-0"><span className="flex items-center gap-1.5 whitespace-nowrap"><FieldTypeIcon type={field.type} />{field.name.trim() || "Field name"}{field.required ? <span title="Required" className="text-muted">*</span> : null}</span></th>)}</tr></thead>
+        <table className="w-full border-separate border-spacing-0 text-left text-[12px]">
+          <thead><tr>{fields.map((field, index) => <th key={index} className="border-b border-r border-line bg-panel px-3 py-2 font-medium last:border-r-0"><span className="flex items-center gap-1.5 whitespace-nowrap"><FieldTypeIcon type={field.type} />{field.name.trim() || "Field name"}{field.required ? <span title="Required"><span aria-hidden="true">*</span><span className="sr-only">Required</span></span> : null}</span></th>)}</tr></thead>
           <tbody aria-hidden="true"><tr>{fields.map((_, index) => <td key={index} className="h-16 border-r border-line last:border-r-0" />)}</tr></tbody>
         </table>
       </div>
