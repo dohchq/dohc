@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { CHANNELS } from "./channels";
-import { registerWorkspaceSearchIpcHandlers } from "./workspaceSearchIpc";
+import { workspaceSearchOperations as ops } from "./bridgeContract";
+import { registerOperations } from "./operationTable";
+import { workspaceSearchHandlers } from "./workspaceSearchIpc";
 
 interface TestEvent {
-  trusted: boolean;
   sender: {
     id: number;
     isDestroyed(): boolean;
@@ -18,7 +18,7 @@ function harness() {
   let rendererSessionCurrent = true;
   const handlers = new Map<
     string,
-    (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
+    (event: TestEvent, payload: unknown) => Promise<unknown>
   >();
   const workspace = {
     workspaceId: "workspace-1",
@@ -34,12 +34,7 @@ function harness() {
     return rendererSessionCurrent;
   });
   const onActivityError = vi.fn();
-  registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
-    registerHandler: (channel, handler) => handlers.set(channel, handler),
-    assertTrustedSender: (event) => {
-      trace.push("trust");
-      if (!event.trusted) throw new Error("Untrusted renderer.");
-    },
+  const search = workspaceSearchHandlers<TestEvent, typeof workspace>({
     withWorkspaceOperation: async (_event, workspaceId, work) => {
       trace.push(`workspace:${workspaceId}`);
       if (workspaceId !== workspace.workspaceId) {
@@ -61,8 +56,17 @@ function harness() {
     owner,
     onActivityError,
   });
+  registerOperations<typeof ops, TestEvent, unknown>(
+    {
+      handle: (channel, handler) => { handlers.set(channel, handler); },
+      assertTrustedSender: () => { trace.push("trust"); },
+      withActiveWorkspace: () =>
+        Promise.reject(new Error("Search rows take no workspace guard.")),
+    },
+    ops,
+    search,
+  );
   const event: TestEvent = {
-    trusted: true,
     sender: {
       id: 19,
       isDestroyed: () => false,
@@ -82,22 +86,13 @@ function harness() {
     retireRendererSession() {
       rendererSessionCurrent = false;
     },
-    channels: [...handlers.keys()],
     invoke: async (channel: string, payload: unknown, invokedEvent = event) =>
       await handlers.get(channel)!(invokedEvent, payload),
   };
 }
 
 describe("workspace search IPC registration", () => {
-  it("registers the start and cancel commands", () => {
-    const test = harness();
-    expect(test.channels).toEqual([
-      CHANNELS.searchWorkspace,
-      CHANNELS.cancelWorkspaceSearch,
-    ]);
-  });
-
-  it("checks trust, parses the request, and resolves workspace authority before start", async () => {
+  it("checks trust and resolves workspace authority before start", async () => {
     const test = harness();
     const payload = {
       workspaceId: "workspace-1",
@@ -105,7 +100,7 @@ describe("workspace search IPC registration", () => {
       query: "needle",
     };
 
-    await expect(test.invoke(CHANNELS.searchWorkspace, payload)).resolves.toEqual({
+    await expect(test.invoke(ops.searchWorkspace.channel, payload)).resolves.toEqual({
       status: "accepted",
     });
 
@@ -125,34 +120,16 @@ describe("workspace search IPC registration", () => {
     );
   });
 
-  it("rejects untrusted, malformed, and unauthorized starts before the owner", async () => {
-    const untrusted = harness();
-    await expect(
-      untrusted.invoke(
-        CHANNELS.searchWorkspace,
-        null,
-        { ...untrusted.event, trusted: false },
-      ),
-    ).rejects.toThrow("Untrusted renderer.");
-    expect(untrusted.trace).toEqual(["trust"]);
-
-    const malformed = harness();
-    await expect(
-      malformed.invoke(CHANNELS.searchWorkspace, { workspaceId: "" }),
-    ).rejects.toThrow();
-    expect(malformed.trace).toEqual(["trust"]);
-
+  it("rejects an unauthorized start before the owner", async () => {
     const unauthorized = harness();
     await expect(
-      unauthorized.invoke(CHANNELS.searchWorkspace, {
+      unauthorized.invoke(ops.searchWorkspace.channel, {
         workspaceId: "workspace-2",
         searchId: "search-1",
         query: "needle",
       }),
     ).rejects.toThrow("Renderer has no authority for this workspace.");
     expect(unauthorized.trace).toEqual(["trust", "workspace:workspace-2"]);
-    expect(untrusted.owner.start).not.toHaveBeenCalled();
-    expect(malformed.owner.start).not.toHaveBeenCalled();
     expect(unauthorized.owner.start).not.toHaveBeenCalled();
   });
 
@@ -161,7 +138,7 @@ describe("workspace search IPC registration", () => {
     test.setActiveWorkspaceId("workspace-2");
 
     await expect(
-      test.invoke(CHANNELS.searchWorkspace, {
+      test.invoke(ops.searchWorkspace.channel, {
         workspaceId: "workspace-1",
         searchId: "search-1",
         query: "needle",
@@ -178,7 +155,7 @@ describe("workspace search IPC registration", () => {
     );
 
     await expect(
-      test.invoke(CHANNELS.searchWorkspace, {
+      test.invoke(ops.searchWorkspace.channel, {
         workspaceId: "workspace-1",
         searchId: "search-1",
         query: "needle",
@@ -201,7 +178,7 @@ describe("workspace search IPC registration", () => {
     );
 
     await expect(
-      test.invoke(CHANNELS.searchWorkspace, {
+      test.invoke(ops.searchWorkspace.channel, {
         workspaceId: "workspace-1",
         searchId: "search-1",
         query: "needle",
@@ -218,7 +195,7 @@ describe("workspace search IPC registration", () => {
     test.retireRendererSession();
 
     await expect(
-      test.invoke(CHANNELS.searchWorkspace, {
+      test.invoke(ops.searchWorkspace.channel, {
         workspaceId: "workspace-1",
         searchId: "search-after-reload",
         query: "needle",
@@ -231,7 +208,7 @@ describe("workspace search IPC registration", () => {
   it("cancels only the caller's named search", async () => {
     const test = harness();
 
-    await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
+    await test.invoke(ops.cancelWorkspaceSearch.channel, { searchId: "search-1" });
 
     expect(test.trace).toEqual(["trust"]);
     expect(test.authorizeCancel).toHaveBeenCalledWith(test.event);
@@ -242,7 +219,7 @@ describe("workspace search IPC registration", () => {
     const test = harness();
     test.retireRendererSession();
 
-    await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
+    await test.invoke(ops.cancelWorkspaceSearch.channel, { searchId: "search-1" });
 
     expect(test.owner.cancel).not.toHaveBeenCalled();
   });

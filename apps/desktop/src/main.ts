@@ -26,7 +26,7 @@ import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
-import { registerWorkspaceVersionsIpcHandlers } from "./ipc/workspaceVersionsIpc";
+import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
@@ -82,6 +82,8 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  workspaceSearchOperations,
+  workspaceVersionOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -90,7 +92,8 @@ import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
-import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
+import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -3812,6 +3815,16 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   }
 }
 
+const operationBoundary: OperationBoundary<
+  IpcMainInvokeEvent,
+  DesktopRendererWorkspaceOperation
+> = {
+  handle: (channel, listener) => ipcMain.handle(channel, listener),
+  assertTrustedSender,
+  withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+    withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+};
+
 const senderWorkspaceAuthority = {
   requireTrustedSender(event: IpcMainInvokeEvent): WebContents {
     assertTrustedSender(event);
@@ -4327,11 +4340,9 @@ function registerIpcHandlers(): void {
     activeEngineFileIndex, readOwnedWorkspaceText,
   });
 
-  registerWorkspaceVersionsIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, requireEngineCapture, requireWorkspace, notifyRenderer,
-    activity, tryInVersionSessions, desktopMarks,
-  });
+  registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
+    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+  }));
 
   workspaceEngineIpc.registerHistory();
 
@@ -4390,12 +4401,10 @@ function registerIpcHandlers(): void {
 
   settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
-  registerWorkspaceSearchIpcHandlers<
+  registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
     RegistryEntry & { readonly attachmentId: symbol }
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender,
     withWorkspaceOperation: (event, workspaceId, work) =>
       withRendererWorkspaceOperation(
         event.sender,
@@ -4422,7 +4431,7 @@ function registerIpcHandlers(): void {
     onActivityError: (error) => {
       console.error("[desktop] workspace search activity:", error);
     },
-  });
+  }));
 
   workspaceEngineIpc.registerYDoc();
 

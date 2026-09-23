@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createStartSitePreviewHandler } from "./ipc/sitePreviewIpc";
-import { CHANNELS } from "./ipc/channels";
-import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
@@ -89,18 +88,12 @@ describe("renderer reload admission", () => {
       onError: vi.fn(),
     });
 
-    const searchHandlers = new Map<
-      string,
-      (event: { sender: typeof renderer }, payload: unknown) => unknown
-    >();
     const searchStart = vi.fn(async () => ({ settled: Promise.resolve() }));
     const searchCancel = vi.fn();
-    registerWorkspaceSearchIpcHandlers<
+    const search = workspaceSearchHandlers<
       { sender: typeof renderer },
       typeof workspace
     >({
-      registerHandler: (channel, handler) => searchHandlers.set(channel, handler),
-      assertTrustedSender: () => undefined,
       withWorkspaceOperation: async (event, workspaceId, work) => {
         const session = sessions.current(event.sender);
         if (!session || session.workspaceId !== workspaceId) {
@@ -136,13 +129,13 @@ describe("renderer reload admission", () => {
       }),
     ).resolves.toEqual({ available: false });
     await expect(
-      searchHandlers.get(CHANNELS.searchWorkspace)!(
-        { sender: renderer },
+      search.searchWorkspace(
         {
           workspaceId: workspace.workspaceId,
           searchId: "search-after-reload",
           query: "needle",
         },
+        { event: { sender: renderer } },
       ),
     ).rejects.toThrow("no active lease");
 
@@ -156,15 +149,15 @@ describe("renderer reload admission", () => {
 
     const replacement = sender(renderer.id);
     await sessions.open(replacement, physical(workspace.workspaceId), "document-2");
-    await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
-      { sender: renderer },
+    await search.cancelWorkspaceSearch(
       { searchId: "reused-search-id" },
+      { event: { sender: renderer } },
     );
     expect(searchCancel).not.toHaveBeenCalled();
 
-    await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
-      { sender: replacement },
+    await search.cancelWorkspaceSearch(
       { searchId: "reused-search-id" },
+      { event: { sender: replacement } },
     );
     expect(searchCancel).toHaveBeenCalledWith(
       replacement.id,

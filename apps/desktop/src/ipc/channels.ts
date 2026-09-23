@@ -142,6 +142,8 @@ export const ENGINE_YDOC_SAVE_STATES = [
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
 
+// Channels not yet in an operation table (operationTable.ts). A table row owns
+// its own channel name, so a migrated operation has no entry here.
 export const CHANNELS = {
   reloadRenderer: "desktop:reload-renderer",
   pickWorkspaceRoot: "desktop:pick-workspace-root",
@@ -288,13 +290,6 @@ export const CHANNELS = {
   refreshShareMounts: "desktop:refresh-share-mounts",
   unmountShare: "desktop:unmount-share",
   openWorkspace: "desktop:open-workspace",
-  listWorkspaceVersions: "desktop:list-workspace-versions",
-  createWorkspaceVersion: "desktop:create-workspace-version",
-  switchWorkspaceVersion: "desktop:switch-workspace-version",
-  compareWorkspaceVersions: "desktop:compare-workspace-versions",
-  mergeWorkspaceVersion: "desktop:merge-workspace-version",
-  listWorkspaceVersionConflicts: "desktop:list-workspace-version-conflicts",
-  resolveWorkspaceVersionConflict: "desktop:resolve-workspace-version-conflict",
   listEngineMoments: "desktop:list-engine-moments",
   readEngineMoment: "desktop:read-engine-moment",
   restoreEngineMomentFile: "desktop:restore-engine-moment-file",
@@ -336,9 +331,6 @@ export const CHANNELS = {
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",
   getAgentRunStatus: "desktop:get-agent-run-status",
-  tryInWorkspaceVersion: "desktop:try-in-workspace-version",
-  getTryInVersionState: "desktop:get-try-in-version-state",
-  dismissTryInVersionReview: "desktop:dismiss-try-in-version-review",
   getMcpConfig: "desktop:get-mcp-config",
   probeAgentDrivers: "desktop:probe-agent-drivers",
   getAgentSessionState: "desktop:get-agent-session-state",
@@ -360,8 +352,6 @@ export const CHANNELS = {
   userSettingsChanged: "desktop:user-settings-changed",
   getWorkspaceUiState: "desktop:get-workspace-ui-state",
   setWorkspaceUiState: "desktop:set-workspace-ui-state",
-  searchWorkspace: "desktop:search-workspace",
-  cancelWorkspaceSearch: "desktop:cancel-workspace-search",
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",

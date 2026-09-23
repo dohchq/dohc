@@ -1,24 +1,9 @@
-import {
-  WorkspaceIdPayload,
-  ListWorkspaceVersionsResult,
-  CreateWorkspaceVersionPayload,
-  SwitchWorkspaceVersionPayload,
-  SwitchWorkspaceVersionResult,
-  CompareWorkspaceVersionsPayload,
-  CompareWorkspaceVersionsResult,
-  MergeWorkspaceVersionPayload,
-  MergeWorkspaceVersionResult,
-  ListWorkspaceVersionConflictsPayload,
-  ListWorkspaceVersionConflictsResult,
-  ResolveWorkspaceVersionConflictPayload,
-  ResolveWorkspaceVersionConflictResult,
-  TryInVersionStateResult,
-  TryInWorkspaceVersionPayload,
-  TryInWorkspaceVersionResult,
+import type {
   WorkspaceVersionRecord,
+  workspaceVersionOperations,
 } from "./bridgeContract";
-import { CHANNELS } from "./channels";
 import { versionConflictForIpc } from "./engineHistoryIpc";
+import type { OperationHandlers } from "./operationTable";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { createTryInVersionSessions } from "../agents/tryInVersion";
 
@@ -32,19 +17,15 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "resolveConflict"
 >;
 
-export function registerWorkspaceVersionsIpcHandlers<Event>(dependencies: {
-  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
-  assertTrustedSender(event: Event): void;
+export function workspaceVersionHandlers(dependencies: {
   requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
-  requireWorkspace(workspaceId: string): unknown;
   notifyRenderer(target: { workspaceId: string }): void;
   activity: { queueCloudSync(workspaceId: string): void };
   tryInVersionSessions: Pick<ReturnType<typeof createTryInVersionSessions>, "start" | "snapshot" | "dismiss">;
   desktopMarks: { mark(name: string): void; measureSince(name: string, start: string): unknown };
-}): void {
+}): OperationHandlers<typeof workspaceVersionOperations> {
   const {
-    registerHandler, assertTrustedSender, requireEngineCapture, requireWorkspace,
-    notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
   } = dependencies;
 
   async function requireVersionOperations(workspaceId: string) {
@@ -72,85 +53,69 @@ export function registerWorkspaceVersionsIpcHandlers<Event>(dependencies: {
     };
   }
 
-  registerHandler(CHANNELS.listWorkspaceVersions, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const snapshot = await capture.listVersions();
-    return ListWorkspaceVersionsResult.parse({
-      versions: snapshot.versions.map(workspaceVersionForIpc),
-      activeVersionId: snapshot.activeVersionId,
-    });
-  });
+  return {
+    async listWorkspaceVersions(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const snapshot = await capture.listVersions();
+      return {
+        versions: snapshot.versions.map(workspaceVersionForIpc),
+        activeVersionId: snapshot.activeVersionId,
+      };
+    },
 
-  registerHandler(CHANNELS.createWorkspaceVersion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateWorkspaceVersionPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const snapshot = await capture.createVersion(input.name);
-    notifyRenderer({ workspaceId: input.workspaceId });
-    return ListWorkspaceVersionsResult.parse({
-      versions: snapshot.versions.map(workspaceVersionForIpc),
-      activeVersionId: snapshot.activeVersionId,
-    });
-  });
+    async createWorkspaceVersion(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const snapshot = await capture.createVersion(input.name);
+      notifyRenderer({ workspaceId: input.workspaceId });
+      return {
+        versions: snapshot.versions.map(workspaceVersionForIpc),
+        activeVersionId: snapshot.activeVersionId,
+      };
+    },
 
-  registerHandler(CHANNELS.switchWorkspaceVersion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SwitchWorkspaceVersionPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const result = await capture.switchVersion(input.versionId);
-    notifyRenderer({ workspaceId: input.workspaceId });
-    return SwitchWorkspaceVersionResult.parse(result);
-  });
+    async switchWorkspaceVersion(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const result = await capture.switchVersion(input.versionId);
+      notifyRenderer({ workspaceId: input.workspaceId });
+      return result;
+    },
 
-  registerHandler(CHANNELS.compareWorkspaceVersions, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CompareWorkspaceVersionsPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const page = await capture.compareVersions(input.versionId, {
-      ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
-    });
-    return CompareWorkspaceVersionsResult.parse(page);
-  });
+    async compareWorkspaceVersions(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return await capture.compareVersions(input.versionId, {
+        ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
+      });
+    },
 
-  registerHandler(CHANNELS.mergeWorkspaceVersion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = MergeWorkspaceVersionPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const result = await capture.mergeVersionIntoMain(input.versionId);
-    notifyRenderer({ workspaceId: input.workspaceId });
-    // The merge reports a count; the rows are open conflicts in the engine,
-    // read back one page at a time like every other conflict reader.
-    const page =
-      result.conflictCount > 0
-        ? await capture.listOpenConflictsPage()
-        : { conflicts: [], nextAfterConflictId: null };
-    return MergeWorkspaceVersionResult.parse({
-      mergedFileCount: result.mergedFileCount,
-      unchangedFileCount: result.unchangedFileCount,
-      conflictCount: result.conflictCount,
-      conflicts: page.conflicts.map(versionConflictForIpc),
-      nextAfterConflictId: page.nextAfterConflictId,
-    });
-  });
+    async mergeWorkspaceVersion(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const result = await capture.mergeVersionIntoMain(input.versionId);
+      notifyRenderer({ workspaceId: input.workspaceId });
+      // The merge reports a count; the rows are open conflicts in the engine,
+      // read back one page at a time like every other conflict reader.
+      const page =
+        result.conflictCount > 0
+          ? await capture.listOpenConflictsPage()
+          : { conflicts: [], nextAfterConflictId: null };
+      return {
+        mergedFileCount: result.mergedFileCount,
+        unchangedFileCount: result.unchangedFileCount,
+        conflictCount: result.conflictCount,
+        conflicts: page.conflicts.map(versionConflictForIpc),
+        nextAfterConflictId: page.nextAfterConflictId,
+      };
+    },
 
-  registerHandler(CHANNELS.listWorkspaceVersionConflicts, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListWorkspaceVersionConflictsPayload.parse(payload);
-    const capture = await requireVersionOperations(input.workspaceId);
-    const page = await capture.listOpenConflictsPage(input.afterConflictId);
-    return ListWorkspaceVersionConflictsResult.parse({
-      conflicts: page.conflicts.map(versionConflictForIpc),
-      nextAfterConflictId: page.nextAfterConflictId,
-    });
-  });
+    async listWorkspaceVersionConflicts(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const page = await capture.listOpenConflictsPage(input.afterConflictId);
+      return {
+        conflicts: page.conflicts.map(versionConflictForIpc),
+        nextAfterConflictId: page.nextAfterConflictId,
+      };
+    },
 
-  registerHandler(
-    CHANNELS.resolveWorkspaceVersionConflict,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      const input = ResolveWorkspaceVersionConflictPayload.parse(payload);
+    async resolveWorkspaceVersionConflict(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const resolution =
         input.resolution.kind === "keep-current"
@@ -164,46 +129,35 @@ export function registerWorkspaceVersionsIpcHandlers<Event>(dependencies: {
       // open until an unrelated edit happened to trigger a sync.
       activity.queueCloudSync(input.workspaceId);
       notifyRenderer({ workspaceId: input.workspaceId });
-      return ResolveWorkspaceVersionConflictResult.parse({
+      return {
         conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: outcome.remaining.nextAfterConflictId,
-      });
+      };
     },
-  );
 
-  // "Try it in a version". The gesture handler double-gates on the engine
-  // capture (requireVersionOperations here, and the manager's own
-  // operationsFor) so a workspace without one rejects before anything runs.
-  registerHandler(CHANNELS.tryInWorkspaceVersion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = TryInWorkspaceVersionPayload.parse(payload);
-    await requireVersionOperations(input.workspaceId);
-    desktopMarks.mark("try-in-version-start");
-    const result = await tryInVersionSessions.start(
-      input.workspaceId,
-      input.task,
-      input.driverId,
-    );
-    // Gesture latency evidence (create+switch+run-start, excluding any agent
-    // process startup on the bare-run path), read via the test-gated marks.
-    desktopMarks.measureSince("try-in-version-gesture", "try-in-version-start");
-    return TryInWorkspaceVersionResult.parse(result);
-  });
+    // "Try it in a version". The gesture handler double-gates on the engine
+    // capture (requireVersionOperations here, and the manager's own
+    // operationsFor) so a workspace without one rejects before anything runs.
+    async tryInWorkspaceVersion(input) {
+      await requireVersionOperations(input.workspaceId);
+      desktopMarks.mark("try-in-version-start");
+      const result = await tryInVersionSessions.start(
+        input.workspaceId,
+        input.task,
+        input.driverId,
+      );
+      // Gesture latency evidence (create+switch+run-start, excluding any agent
+      // process startup on the bare-run path), read via the test-gated marks.
+      desktopMarks.measureSince("try-in-version-gesture", "try-in-version-start");
+      return result;
+    },
 
-  registerHandler(CHANNELS.getTryInVersionState, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    return TryInVersionStateResult.parse({
-      state: tryInVersionSessions.snapshot(input.workspaceId),
-    });
-  });
+    getTryInVersionState(input) {
+      return { state: tryInVersionSessions.snapshot(input.workspaceId) };
+    },
 
-  registerHandler(CHANNELS.dismissTryInVersionReview, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    tryInVersionSessions.dismiss(input.workspaceId);
-  });
-
+    dismissTryInVersionReview(input) {
+      tryInVersionSessions.dismiss(input.workspaceId);
+    },
+  };
 }

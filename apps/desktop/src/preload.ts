@@ -66,8 +66,9 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
   WorkbenchMenuCommand,
-  WorkspaceSearchStartResult,
   WorkspaceSummary,
+  workspaceSearchOperations,
+  workspaceVersionOperations,
   parseInvokePluginPanelSdkPayloadForIpc,
   parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
@@ -76,6 +77,7 @@ import {
   parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
+import { operationBridge } from "./ipc/operationTable";
 import type { z } from "zod";
 
 // Main→renderer events are validated here before renderer code sees them: a
@@ -92,6 +94,10 @@ function onEvent<Schema extends z.ZodType>(
   };
   ipcRenderer.on(channel, handler);
   return () => ipcRenderer.removeListener(channel, handler);
+}
+
+function invoke(channel: string, payload: unknown): Promise<unknown> {
+  return ipcRenderer.invoke(channel, payload);
 }
 
 async function invokeParsed<Schema extends z.ZodType>(
@@ -500,26 +506,7 @@ const bridge: DohcDesktopBridge = {
       ...payload,
       rendererDocumentId,
     }),
-  listWorkspaceVersions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),
-  createWorkspaceVersion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceVersion, payload),
-  switchWorkspaceVersion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.switchWorkspaceVersion, payload),
-  compareWorkspaceVersions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.compareWorkspaceVersions, payload),
-  mergeWorkspaceVersion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.mergeWorkspaceVersion, payload),
-  listWorkspaceVersionConflicts: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceVersionConflicts, payload),
-  resolveWorkspaceVersionConflict: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resolveWorkspaceVersionConflict, payload),
-  tryInWorkspaceVersion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.tryInWorkspaceVersion, payload),
-  getTryInVersionState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getTryInVersionState, payload),
-  dismissTryInVersionReview: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissTryInVersionReview, payload),
+  ...operationBridge(workspaceVersionOperations, invoke),
   listEngineMoments: (payload) =>
     ipcRenderer.invoke(CHANNELS.listEngineMoments, payload),
   readEngineMoment: (payload) =>
@@ -683,12 +670,7 @@ const bridge: DohcDesktopBridge = {
   },
   // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
-  searchWorkspace: async (payload) =>
-    WorkspaceSearchStartResult.parse(
-      await ipcRenderer.invoke(CHANNELS.searchWorkspace, payload),
-    ),
-  cancelWorkspaceSearch: (payload) =>
-    ipcRenderer.invoke(CHANNELS.cancelWorkspaceSearch, payload),
+  ...operationBridge(workspaceSearchOperations, invoke),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   // Engine Y.Doc editor binding.

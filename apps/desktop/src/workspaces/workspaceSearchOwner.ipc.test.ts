@@ -2,8 +2,9 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import type { WorkspaceSearchPayload } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
-import { registerWorkspaceSearchIpcHandlers } from "../ipc/workspaceSearchIpc";
+import { workspaceSearchHandlers } from "../ipc/workspaceSearchIpc";
 import {
   createSearchRegistry,
   type SearchBatch,
@@ -35,10 +36,6 @@ interface TestEvent {
 }
 
 function harness(input: { capture: boolean; rootPath: string }) {
-  const handlers = new Map<
-    string,
-    (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
-  >();
   const starts: Array<{
     request: { includeGlob?: string };
     allowPath: (path: string) => boolean;
@@ -77,9 +74,7 @@ function harness(input: { capture: boolean; rootPath: string }) {
     queryEngine: vi.fn(async () => []),
     logError: vi.fn(),
   });
-  registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
-    registerHandler: (channel, handler) => handlers.set(channel, handler),
-    assertTrustedSender: () => undefined,
+  const search = workspaceSearchHandlers<TestEvent, typeof workspace>({
     withWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
       return work({
@@ -101,8 +96,8 @@ function harness(input: { capture: boolean; rootPath: string }) {
   };
   return {
     starts,
-    invoke: async (payload: unknown) =>
-      await handlers.get(CHANNELS.searchWorkspace)!({ sender }, payload),
+    invoke: async (payload: WorkspaceSearchPayload) =>
+      await search.searchWorkspace(payload, { event: { sender } }),
   };
 }
 
