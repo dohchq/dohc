@@ -2,6 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DATASET_MAX_FIELDS, type DatasetDescription, type DatasetField } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
+import { FileCode2, LockKeyhole } from "lucide-react";
+import { DatasetFormPreview } from "./collections/CreationPreview";
+import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
@@ -63,6 +66,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   const [publicLabels, setPublicLabels] = useState<Record<string, string>>({});
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; input: { fieldId: string; labelFieldId: string } } | null>(null);
   const first = useRef<HTMLInputElement>(null);
+  const sourceFolder = useRef<HTMLDetailsElement>(null);
   const alive = useRef(true), locked = useRef(false), active = useRef<AbortController | null>(null);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; active.current?.abort(); }; }, []);
   useEffect(() => { first.current?.focus(); }, []);
@@ -105,7 +109,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   function submit(): void {
     if (!create || locked.current) return;
     const root = appRoot.trim(), formTitle = title.trim();
-    if (!isShareablePath(root) || !/^[A-Za-z0-9_@./-]+$/.test(root) || root.length > 900) { setInvalid("Choose a workspace folder for the form."); return; }
+    if (!isShareablePath(root) || !/^[A-Za-z0-9_@./-]+$/.test(root) || root.length > 900) { if (sourceFolder.current) { sourceFolder.current.open = true; sourceFolder.current.querySelector("input")?.focus(); } setInvalid("Choose a workspace folder for the form."); return; }
     if (!formTitle || formTitle.length > 200 || /[\u0000-\u001f\u007f]/u.test(formTitle)) { setInvalid("Use a form title with 1 to 200 characters."); return; }
     if (!selected.length || selected.length > DATASET_MAX_FIELDS) { setInvalid(`Show 1 to ${DATASET_MAX_FIELDS} fields on the form.`); return; }
     if (required.some(field => !selected.includes(field.fieldId))) { setInvalid("Show every required field on the form."); return; }
@@ -121,18 +125,20 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
     void execute({ datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId, createOperationId: create.operationId, appRoot: root, title: formTitle, fieldIds: [...selected], ...(choices.length ? { relationChoices: choices } : {}) });
   }
   if (!table || !create) return <Overlay onClose={props.onClose}><div className="dohc-elevated w-130 max-w-[85vw] rounded-xl border border-line bg-panel p-5"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="mt-2 text-[13px] text-muted">This collection has no approved public create action.</p><SecondaryButton className="mt-3" onClick={props.onClose}>Close</SecondaryButton></div></Overlay>;
-  return <Overlay onClose={pending ? undefined : props.onClose}><form onSubmit={event => { event.preventDefault(); submit(); }} data-testid="create-dataset-form-dialog" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
-    <div><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="m-0 text-[12px] text-muted">{dataset.name} · {table.name}</p></div>
+  return <Overlay onClose={pending ? undefined : props.onClose}><form onSubmit={event => { event.preventDefault(); submit(); }} data-testid="create-dataset-form-dialog" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[960px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-line bg-panel">
+    <div className="shrink-0 border-b border-line px-5 py-4"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="m-0 text-[12px] text-muted">{dataset.name} · {table.name}</p></div>
+    <div className="min-h-0 overflow-y-auto min-[900px]:grid min-[900px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] min-[900px]:overflow-hidden">
+    <div className="flex min-w-0 flex-col gap-4 p-5 min-[900px]:overflow-y-auto">
     <label className="text-[12px] text-muted">Form title<input ref={first} aria-label="Form title" value={title} maxLength={200} disabled={pending} className={`${inputClass} mt-1`} onChange={event => setTitle(event.target.value)} /></label>
-    <label className="text-[12px] text-muted">App folder<input aria-label="App folder" value={appRoot} disabled={pending} className={`${inputClass} mt-1 font-mono`} onChange={event => setAppRoot(event.target.value)} /><span className="mt-1 block text-[11px] text-subtle">The form source stays in this workspace folder.</span></label>
+
     {operations.length > 1 ? <label className="text-[12px] text-muted">Create action<select aria-label="Create action" value={operationId} disabled={pending} className={`${selectClass} mt-1`} onChange={event => {
       const next = operations.find(operation => operation.operationId === event.target.value)!;
       setOperationId(next.operationId); setSelected(table.fields.filter(field => next.fieldIds.includes(field.fieldId) && (field.type !== "relation" || (field.required && !Object.hasOwn(field, "default")))).map(field => field.fieldId)); setInvalid(null);
     }}>{operations.map(operation => <option key={operation.operationId} value={operation.operationId}>{operation.label}</option>)}</select></label> : null}
-    <fieldset disabled={pending} className="m-0 flex flex-col gap-2 border-0 p-0"><legend className="text-[12px] font-medium text-ink">Fields shown on form</legend>
-      <p className="m-0 text-[11px] text-muted">This form can submit only these fields.</p>
-      {allowed.map(field => <div key={field.fieldId}>
-        <label className="flex items-center gap-2 text-[13px] text-ink"><input aria-label={field.name} type="checkbox" checked={selected.includes(field.fieldId)} disabled={required.includes(field)} onChange={event => setSelected(current => event.target.checked ? [...current, field.fieldId] : current.filter(id => id !== field.fieldId))} />{field.name}{field.type === "attachment" ? " (file)" : ""}{required.includes(field) ? <span className="text-[11px] text-subtle">Required</span> : null}</label>
+    <fieldset disabled={pending} className="m-0 flex flex-col border-0 p-0"><legend className="text-[12px] font-medium text-ink">Fields shown on form</legend>
+      <p className="m-0 mb-2 text-[11px] text-muted">This form can submit only these fields.</p>
+      {allowed.map(field => <div key={field.fieldId} className="border-b border-line py-2.5">
+        <label className="flex items-center gap-2 text-[13px] text-ink"><input aria-label={field.name} type="checkbox" checked={selected.includes(field.fieldId)} disabled={required.includes(field)} onChange={event => setSelected(current => event.target.checked ? [...current, field.fieldId] : current.filter(id => id !== field.fieldId))} /><FieldTypeIcon type={field.type} /><span className="min-w-0 flex-1 break-words">{field.name}</span>{required.includes(field) ? <span title="Required" className="flex items-center gap-1 text-[11px] text-muted"><LockKeyhole size={12} strokeWidth={1.9} aria-hidden="true" />Required</span> : null}</label>
         {field.type === "relation" && selected.includes(field.fieldId) ? <div className="ml-6 mt-2 flex flex-col gap-1">
           <label className="text-[12px] text-muted">Public choices<select aria-label={`Public choices for ${field.name}`} className={selectClass}
             value={(() => { const choice = relationChoices.find(choice => choice.fieldId === field.fieldId); return choice ? `${choice.operationId}:${choice.labelFieldId}` : ""; })()}
@@ -159,7 +165,13 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
       <SecondaryButton disabled={pending || loadingSource} onClick={() => void loadSource()}>{loadingSource ? "Loading source…" : "Review action source"}</SecondaryButton>
       {source ? <details open><summary className="text-[12px] text-ink">Approved action source</summary><p className="break-all font-mono text-[11px] text-muted">{source.path}<br />{source.sha256}</p><pre className="max-h-60 overflow-auto rounded-md border border-line bg-bg p-2 text-[12px] text-ink">{source.source}</pre></details> : null}
     </div> : null}
+    <details ref={sourceFolder} className="text-[12px] text-muted"><summary className="cursor-pointer text-ink"><FileCode2 size={14} strokeWidth={1.9} aria-hidden="true" className="mr-1.5 inline-block" />Source folder</summary><div className="mt-2"><label className="text-[12px] text-muted">App folder<input aria-label="App folder" value={appRoot} disabled={pending} className={`${inputClass} mt-1 font-mono`} onChange={event => setAppRoot(event.target.value)} /></label></div></details>
+    </div>
+    <DatasetFormPreview title={title} fields={selected.flatMap(id => allowed.filter(field => field.fieldId === id))} />
+    </div>
+    <div className="flex shrink-0 flex-col gap-3 border-t border-line px-5 py-4">
     {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}
     <div className="flex justify-end gap-2"><SecondaryButton disabled={pending} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Creating…" : "Create form"}</PrimaryButton></div>
+    </div>
   </form></Overlay>;
 }

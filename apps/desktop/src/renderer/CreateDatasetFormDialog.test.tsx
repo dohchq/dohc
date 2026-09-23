@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
@@ -18,6 +18,36 @@ function setup(overrides: Partial<CreateDatasetFormDialogProps> = {}) {
 const submit = () => fireEvent.click(screen.getByRole("button", { name: "Create form" }));
 afterEach(cleanup);
 describe("CreateDatasetFormDialog", () => {
+  it("previews the selected field order, types, and defaults without accepting responses", () => {
+    const description = dataset();
+    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "select", options: ["New", "Reviewed"], default: "New" };
+    setup({ dataset: description });
+    const preview = within(screen.getByRole("region", { name: "Form preview" }));
+    fireEvent.change(screen.getByLabelText("Form title"), { target: { value: "Pickleball registration" } });
+    expect(preview.getByRole("heading").textContent).toBe("Pickleball registration");
+    const select = preview.getByLabelText("Preview Note") as HTMLSelectElement;
+    expect(select.value).toBe("New");
+    expect(select.disabled).toBe(true);
+    expect(preview.getByText("Choose file")).toBeTruthy();
+    expect(preview.queryByRole("button")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Note"));
+    expect(preview.queryByLabelText("Preview Note")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Note"));
+    const region = screen.getByRole("region", { name: "Form preview" });
+    expect(region.textContent!.indexOf("Receipt")).toBeLessThan(region.textContent!.indexOf("Note"));
+  });
+
+  it("opens the source folder when its hidden value needs correction", () => {
+    setup();
+    const folder = screen.getByLabelText("App folder");
+    const disclosure = folder.closest("details")!;
+    expect(disclosure.open).toBe(false);
+    fireEvent.change(folder, { target: { value: "../outside" } });
+    submit();
+    expect(disclosure.open).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("workspace folder");
+  });
+
   it("locks required approved fields and sends the source destination and presentation subset", async () => {
     const { onCreate } = setup();
     expect((screen.getByLabelText("Name") as HTMLInputElement).checked).toBe(true);

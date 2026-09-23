@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCollectionSchema } from "@dohc/workspace-contracts";
 import type { CollectionRef } from "@dohc/workspace-contracts/collection-data";
@@ -40,6 +40,20 @@ function renderDialog(onCreated: (ref: CollectionRef) => void = () => undefined,
 }
 
 describe("NewCollectionDialog", () => {
+  it("previews the collection name and fields without inventing records", () => {
+    renderDialog(() => undefined, false);
+    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "events/registrations" } });
+    fireEvent.change(screen.getByLabelText("Field name"), { target: { value: "Player" } });
+    const preview = within(screen.getByRole("region", { name: "Collection preview" }));
+    expect(preview.getByText("registrations")).toBeTruthy();
+    expect(preview.getByRole("columnheader", { name: "Player" })).toBeTruthy();
+    expect(preview.getByText("0 records")).toBeTruthy();
+    expect(preview.queryByRole("textbox")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Documents"));
+    expect(preview.queryByRole("columnheader", { name: "Player" })).toBeNull();
+    expect(preview.getByRole("columnheader", { name: "Name" })).toBeTruthy();
+  });
+
   it("defaults to data and creates a typed backend without an app or SQL input", async () => {
     bridgeMock.dataset.mockImplementation(async (request: { definition: DatasetDefinition }) => ({ kind: "approved", revision: { datasetId: request.definition.datasetId } }));
     const onCreated = vi.fn();
