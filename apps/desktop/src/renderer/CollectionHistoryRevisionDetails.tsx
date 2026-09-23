@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
 import { SecondaryButton } from "./ui/controls";
+import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 
 export interface HistoryRevisionControls {
   onLoadRevision?(hash: string, signal: AbortSignal): Promise<DatasetHistoryRevision>;
@@ -39,8 +40,8 @@ export function CollectionHistoryRevisionDetails(props: HistoryRevisionControls 
       {props.onReviewSource && <SecondaryButton disabled={busy} onClick={props.onReviewSource}>Review source migration</SecondaryButton>}</div>
     {versions && <><p className="m-0 text-muted">Current records and access stay intact. Conflicting changes need a source migration. Restoring a source file does not activate rules.</p>
       <div className="grid gap-3 sm:grid-cols-2">{versions.map((version, index) => <section key={version.revision.revisionSha256} aria-label={index ? "After change" : "Before change"} className="min-w-0 space-y-2 rounded-lg border border-line p-3">
-        <h3 className="m-0 text-[12px] font-semibold">{index ? "After" : "Before"} Â, Revision {version.revision.revision}</h3>
-        <div>{version.revision.definition.tables.map(table => <section key={table.tableId}><h4 className="my-2 font-medium">{table.name}</h4><ul className="m-0 space-y-1 pl-4">{table.fields.map(field => <li key={field.fieldId}>{field.name} , {field.type}{field.required ? " , required" : ""}</li>)}</ul></section>)}</div>
+        <h3 className="m-0 flex items-center justify-between gap-2 text-[12px] font-semibold">{index ? "After" : "Before"}<span className="font-mono text-[11px] font-normal text-muted">Revision {version.revision.revision}</span></h3>
+        <div>{version.revision.definition.tables.map(table => <section key={table.tableId}><h4 className="my-2 font-medium">{table.name}</h4><ul className="m-0 list-none space-y-2 p-0">{table.fields.map(field => <li key={field.fieldId} className="flex items-center gap-2"><FieldTypeIcon type={field.type} className="shrink-0 text-muted" /><span className="min-w-0 break-words">{field.name}</span><span className="ml-auto text-[11px] text-muted">{field.type}</span>{field.required ? <span title="Required" className="text-muted">*</span> : null}</li>)}</ul></section>)}</div>
         <details><summary className="cursor-pointer">Field and action definitions</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(version.revision.definition, null, 2)}</pre></details>
         {([{ label: "Rules", path: version.revision.definition.operationsPath, hash: version.revision.operationsSha256, content: version.operationSource },
           { label: "Schema", path: version.revision.definition.schemaPath, hash: version.revision.schemaSha256, content: version.schemaSql }]).map(source => <details key={source.label}>

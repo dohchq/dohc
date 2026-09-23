@@ -28,6 +28,18 @@ it("keeps binary values inspectable without rounding or replacing them", () => {
   render(<CollectionMigrationDataPreview {...props} />);
   expect(screen.getByText('""')).toBeTruthy(); expect(screen.getByText("AAEC/w==")).toBeTruthy(); expect(screen.getByText("Binary value")).toBeTruthy();
 });
+it("puts changed values first and retains unchanged fields in a disclosure", () => {
+  const props = fixture();
+  const change = props.preview.firstPage.changes[0]!;
+  change.before = { id: "same-id", name: "Before" };
+  change.after = { id: "same-id", name: "After" };
+  render(<CollectionMigrationDataPreview {...props} />);
+  const retained = screen.getByText('"same-id"');
+  expect(retained.closest("details")?.open).toBe(false);
+  expect(screen.getByText('"Before"').closest("details")).toBeNull();
+  expect(screen.getByText('"After"').closest("details")).toBeNull();
+  expect(screen.getByText("1 unchanged field")).toBeTruthy();
+});
 it("rejects a cursor loop and reports through the shell without discarding the current page", async () => {
   const props = fixture(); props.onLoad = vi.fn(async () => ({changes: props.preview.firstPage.changes, nextCursor: "next"}));
   render(<CollectionMigrationDataPreview {...props} />); fireEvent.click(screen.getByRole("button", {name: "More changes"}));

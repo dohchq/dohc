@@ -118,7 +118,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await recovered.getByRole("button", { name: "History", exact: true }).click();
     const history = restored.getByRole("dialog", { name: "Collection history", exact: true });
     const latest = history.locator("details").first();
-    await latest.locator("summary").click();
+    await latest.locator(":scope > summary").click();
     await expect(latest.getByText('"Before owner edit"', { exact: true })).toBeVisible();
     await restored.screenshot({ path: test.info().outputPath("restored-history.png") });
     await latest.getByRole("button", { name: "Undo edit", exact: true }).click();

@@ -89,7 +89,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await reopened.getByRole("button", { name: "History", exact: true }).click();
     const history = desktop.page.getByRole("dialog", { name: "Collection history", exact: true });
     const latest = history.locator("details").first();
-    await latest.locator("summary").click();
+    await latest.locator(":scope > summary").click();
     await expect(latest.getByText('"Synthetic participant"', { exact: true })).toBeVisible();
     await desktop.page.screenshot({ path: test.info().outputPath("collection-durable-undo.png") });
     await latest.getByRole("button", { name: "Undo edit", exact: true }).click();
@@ -149,6 +149,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await fields.getByRole("button", { name: "Review change", exact: true }).click();
     const review = page.getByRole("dialog", { name: "Review Collection change" });
     await expect(review.getByRole("region", { name: "Field changes" })).toContainText("Location");
+    await page.screenshot({ path: test.info().outputPath("collection-change-review.png") });
     await review.getByRole("checkbox", { name: "I reviewed this change and its effect on existing data" }).check();
     await review.getByRole("button", { name: "Approve change" }).click();
     await expect(review).toBeHidden();
@@ -174,6 +175,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await page.keyboard.press("Enter");
     await expect(fields.getByLabel("Name", { exact: true })).toBeFocused();
     await fields.getByRole("button", { name: "Cancel", exact: true }).click();
+    await openManagement(collection);
     await collection.getByRole("button", { name: "Archive", exact: true }).click();
     const archive = page.getByRole("dialog", { name: "Archive Equipment?" });
     await archive.getByRole("button", { name: "Archive Collection" }).click();

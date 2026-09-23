@@ -66,6 +66,8 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   const [publicLabels, setPublicLabels] = useState<Record<string, string>>({});
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; input: { fieldId: string; labelFieldId: string } } | null>(null);
   const first = useRef<HTMLInputElement>(null);
+  const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  function close() { props.onClose(); if (returnFocus.current?.isConnected) returnFocus.current.focus(); }
   const sourceFolder = useRef<HTMLDetailsElement>(null);
   const alive = useRef(true), locked = useRef(false), active = useRef<AbortController | null>(null);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; active.current?.abort(); }; }, []);
@@ -104,7 +106,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   if (review && props.onPrepareChoices && props.onApproveChoices && props.onDiscardChoices && props.onLoadPreview) {
     return <CollectionMigrationReviewDialog workspaceId={props.workspaceId} datasetId={dataset.datasetId} initialPreparation={review.preparation} generatedChange
       onPrepare={(_input, signal) => props.onPrepareChoices!(review.input, signal)} onApprove={props.onApproveChoices} onDiscard={props.onDiscardChoices}
-      onLoadPreview={props.onLoadPreview} onError={props.onError} onClose={props.onClose} />;
+      onLoadPreview={props.onLoadPreview} onError={props.onError} onClose={close} />;
   }
   function submit(): void {
     if (!create || locked.current) return;
@@ -124,9 +126,9 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
     const choices = relationChoices.filter(choice => selected.includes(choice.fieldId));
     void execute({ datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId, createOperationId: create.operationId, appRoot: root, title: formTitle, fieldIds: [...selected], ...(choices.length ? { relationChoices: choices } : {}) });
   }
-  if (!table || !create) return <Overlay onClose={props.onClose}><div className="dohc-elevated w-130 max-w-[85vw] rounded-xl border border-line bg-panel p-5"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="mt-2 text-[13px] text-muted">This collection has no approved public create action.</p><SecondaryButton className="mt-3" onClick={props.onClose}>Close</SecondaryButton></div></Overlay>;
-  return <Overlay onClose={pending ? undefined : props.onClose}><form onSubmit={event => { event.preventDefault(); submit(); }} data-testid="create-dataset-form-dialog" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[960px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-line bg-panel">
-    <div className="shrink-0 border-b border-line px-5 py-4"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="m-0 text-[12px] text-muted">{dataset.name} · {table.name}</p></div>
+  if (!table || !create) return <Overlay onClose={close}><div className="dohc-elevated w-130 max-w-[85vw] rounded-xl border border-line bg-panel p-5"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="mt-2 text-[13px] text-muted">This collection has no approved public create action.</p><SecondaryButton className="mt-3" onClick={close}>Close</SecondaryButton></div></Overlay>;
+  return <Overlay onClose={pending ? undefined : close}><form onSubmit={event => { event.preventDefault(); submit(); }} data-testid="create-dataset-form-dialog" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[960px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-line bg-panel">
+    <div className="shrink-0 border-b border-line px-5 py-4"><h2 className="m-0 text-sm font-semibold text-ink">Create form</h2><p className="m-0 text-[12px] text-muted">{dataset.name}{dataset.name !== table.name ? ` · ${table.name}` : ""}</p></div>
     <div className="min-h-0 overflow-y-auto min-[900px]:grid min-[900px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] min-[900px]:overflow-hidden">
     <div className="flex min-w-0 flex-col gap-4 p-5 min-[900px]:overflow-y-auto">
     <label className="text-[12px] text-muted">Form title<input ref={first} aria-label="Form title" value={title} maxLength={200} disabled={pending} className={`${inputClass} mt-1`} onChange={event => setTitle(event.target.value)} /></label>
@@ -171,7 +173,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
     </div>
     <div className="flex shrink-0 flex-col gap-3 border-t border-line px-5 py-4">
     {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}
-    <div className="flex justify-end gap-2"><SecondaryButton disabled={pending} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Creating…" : "Create form"}</PrimaryButton></div>
+    <div className="flex justify-end gap-2"><SecondaryButton disabled={pending} onClick={close}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Creating…" : "Create form"}</PrimaryButton></div>
     </div>
   </form></Overlay>;
 }

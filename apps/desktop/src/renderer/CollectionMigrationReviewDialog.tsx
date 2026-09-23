@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight, Minus, Pencil, Plus } from "lucide-react";
 import { datasetRevisionsPreserveAccess, type DatasetRevision, type DatasetField } from "@dohc/security-contract/dataset";
 import { DatasetMigrationCandidate, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -29,6 +30,17 @@ function fieldSummary(field: DatasetField): string {
     ...(Object.hasOwn(field, "default") ? [`default: ${JSON.stringify(field.default)}`] : []), ...(field.options ? [`options: ${field.options.join(", ")}`] : []),
     ...(field.relation ? [`related field: ${field.relation.fieldId}${field.relation.many ? " (many)" : ""}`] : [])].join(" · ");
 }
+function changedFieldSummary(before: DatasetField, after: DatasetField): { before: string; after: string } {
+  const attributes = ["name", "type", "required", "unique", "default", "options", "relation", "sqlColumn"] as const;
+  const labels = { name: "Name", type: "Type", required: "Required", unique: "Unique", default: "Default", options: "Options", relation: "Relation", sqlColumn: "Column" };
+  const changed = attributes.filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+  const summary = (field: DatasetField) => changed.map(key => {
+    const value = field[key];
+    const text = value === undefined ? "Not set" : typeof value === "boolean" ? value ? "Yes" : "No" : typeof value === "string" ? value : JSON.stringify(value);
+    return `${labels[key]}: ${text}`;
+  }).join("\n");
+  return { before: summary(before), after: summary(after) };
+}
 function validPath(path: string): boolean { return isShareablePath(path) && /^[A-Za-z0-9_@./-]+$/.test(path) && path.length <= 1024; }
 function matchingCandidate(preparation: DatasetMigrationPreparation, workspaceId: string, datasetId: string): boolean {
   const parsed = DatasetMigrationCandidate.safeParse(preparation.candidate);
@@ -50,7 +62,7 @@ function changes(before: DatasetRevision, after: DatasetRevision): Change[] {
       const prior = oldFields.get(field.fieldId);
       if (!prior) { output.push({ kind: "added", table: table.name, field: field.name, detail: "Field added", after: fieldSummary(field) }); continue; }
       const changed = prior.name !== field.name || prior.sqlColumn !== field.sqlColumn || prior.type !== field.type || prior.required !== field.required || prior.unique !== field.unique || JSON.stringify(prior.default) !== JSON.stringify(field.default) || JSON.stringify(prior.options) !== JSON.stringify(field.options) || JSON.stringify(prior.relation) !== JSON.stringify(field.relation);
-      if (changed) output.push({ kind: "changed", table: table.name, field: field.name, detail: "Field definition changed", before: `${fieldSummary(prior)} · column: ${prior.sqlColumn}`, after: `${fieldSummary(field)} · column: ${field.sqlColumn}` });
+      if (changed) output.push({ kind: "changed", table: table.name, field: field.name, detail: "Field definition changed", ...changedFieldSummary(prior, field) });
       oldFields.delete(field.fieldId);
     }
     for (const field of oldFields.values()) output.push({ kind: "removed", table: table.name, field: field.name, detail: "Field removed", before: fieldSummary(field) });
@@ -115,8 +127,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
       <label className="text-[12px] text-muted">Migration file<input aria-label="Migration file" value={migrationPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setMigrationPath(event.target.value)} /></label></> : <p className="m-0 text-[12px] text-muted">Prepare a fresh review before applying these field changes.</p>}
       {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}<div className="flex justify-end gap-2"><SecondaryButton type="button" disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={busy}>{busy ? "Preparing…" : "Review change"}</PrimaryButton></div>
     </form> : <>
-      {!namesOnly && <div className="grid grid-cols-2 gap-3 text-[12px]"><div className="rounded-lg border border-line bg-panel-2 p-3"><span className="text-muted">Current revision</span><strong className="mt-1 block font-mono text-ink">{preparation.previousRevision.revision}</strong></div><div className="rounded-lg border border-line bg-panel-2 p-3"><span className="text-muted">New revision</span><strong className="mt-1 block font-mono text-ink">{preparation.revision.revision}</strong></div></div>}
-      <section aria-label="Field changes" className="rounded-lg border border-line bg-panel p-3"><h3 className="m-0 text-[12px] font-semibold text-ink">Fields</h3>{diff.length ? <ul className="m-0 mt-2 flex list-none flex-col gap-3 p-0">{diff.map((change, index) => <li key={`${change.table}:${change.field}:${index}`} className="text-[12px]"><div className="flex items-baseline gap-2"><span className={change.kind === "removed" ? "text-danger" : change.kind === "added" ? "text-success" : "text-ink"}>{change.kind === "removed" ? "Removed" : change.kind === "added" ? "Added" : "Changed"}</span><span className="text-ink">{change.table}{change.field ? ` · ${change.field}` : ""}</span><span className="text-muted">{change.detail}</span></div><div className="mt-1 grid grid-cols-2 gap-3 break-words text-muted"><div><span className="font-medium">Before</span><p className="m-0">{change.before ?? "—"}</p></div><div><span className="font-medium">After</span><p className="m-0">{change.after ?? "—"}</p></div></div></li>)}</ul> : <p className="m-0 mt-2 text-[12px] text-muted">No field changes in this revision.</p>}</section>
+      {!namesOnly && <div className="flex items-center gap-3 border-b border-line pb-3 text-[12px] text-muted"><span>Current revision <strong className="ml-1 font-mono text-ink">{preparation.previousRevision.revision}</strong></span><ArrowRight size={14} strokeWidth={1.9} aria-hidden /><span>New revision <strong className="ml-1 font-mono text-ink">{preparation.revision.revision}</strong></span></div>}
+      <section aria-label="Field changes"><h3 className="m-0 text-[12px] font-semibold text-ink">Fields</h3>{diff.length ? <ul className="m-0 mt-2 flex list-none flex-col gap-3 p-0">{diff.map((change, index) => {
+        const ChangeIcon = change.kind === "removed" ? Minus : change.kind === "added" ? Plus : Pencil;
+        return <li key={`${change.table}:${change.field}:${index}`} className="rounded-lg border border-line text-[12px]"><div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel-2 px-3 py-2"><span className={`inline-flex items-center gap-1 ${change.kind === "removed" ? "text-danger" : change.kind === "added" ? "text-success" : "text-ink"}`}><ChangeIcon size={12} strokeWidth={1.9} aria-hidden />{change.kind === "removed" ? "Removed" : change.kind === "added" ? "Added" : "Changed"}</span><span className="font-medium text-ink">{change.table}{change.field ? ` · ${change.field}` : ""}</span><span className="ml-auto text-[11px] text-muted">{change.detail}</span></div><div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-3 p-3"><div className="min-w-0"><span className="text-[11px] text-muted">Before</span><p className="m-0 mt-1 whitespace-pre-wrap break-words text-muted">{change.before ?? "—"}</p></div><ArrowRight size={14} strokeWidth={1.9} aria-hidden className="mt-6 text-muted" /><div className="min-w-0"><span className="text-[11px] text-muted">After</span><p className="m-0 mt-1 whitespace-pre-wrap break-words text-ink">{change.after ?? "—"}</p></div></div></li>;
+      })}</ul> : <p className="m-0 mt-2 text-[12px] text-muted">No field changes in this revision.</p>}</section>
       {!namesOnly && (candidateMatches ? <CollectionMigrationDataPreview workspaceId={props.workspaceId} preparationId={preparation.preparationId}
         previousRevision={preparation.previousRevision} revision={preparation.revision} preview={preparation.candidate.preview}
         onLoad={props.onLoadPreview} onError={props.onError} /> : <p className="m-0 text-[12px] text-muted">This review has no matching data preview. Prepare the change again.</p>)}
