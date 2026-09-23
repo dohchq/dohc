@@ -1671,6 +1671,40 @@ describe("owner link contract", () => {
     });
   });
 
+  it("revokes an active dependent grant that is no longer current", async () => {
+    const { storage, dbPath } = await newStorageWithPath();
+    const h = handler(storage);
+    await seedFileShare(h, "edit");
+    seedStorageLink(storage, { grantId: "link-narrowed", access: "edit" });
+    expect(
+      seedDependentGrant(storage, {
+        shareId: "share-existing",
+        parentGrantId: "link-narrowed",
+        grantId: "named-above-parent",
+        principalUserId: "named-above-parent-user",
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({ ok: true, grant: { access: "edit" } });
+    const database = inspectDatabase(dbPath);
+    database
+      .prepare("UPDATE sync_relay_share_grants SET access = 'view' WHERE grant_id = 'link-narrowed'")
+      .run();
+    database.close();
+
+    const response = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/grants/named-above-parent/revoke",
+        jsonBody({ workspaceId: WORKSPACE }),
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(storage.getShareGrant("named-above-parent")).toMatchObject({
+      access: "edit",
+      status: "revoked",
+    });
+  });
+
   it("rechecks the requested workspace inside link and named grant transactions", async () => {
     for (const transition of ["retune", "promote", "revoke"] as const) {
       const { storage, dbPath } = await newStorageWithPath();

@@ -2,6 +2,7 @@ import type { StorageContext } from "./context";
 import type { SyncRelayLinkPrincipalRow } from "./types";
 import { nullableText, rowToLinkPrincipalRow } from "./rows";
 import { LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES } from "./limits";
+import { currentShareGrantSql } from "./currentShareGrant";
 
 export interface LinkSessionCredentials {
   readonly capabilityHash: string;
@@ -11,19 +12,16 @@ export interface LinkSessionCredentials {
 /** Call inside the caller's transaction; reading never enrolls a principal. */
 export function readLinkEnrollment(storage: StorageContext, input: LinkSessionCredentials, now: number) {
   const authority = storage.db.prepare(`SELECT session.session_id, session.principal_id AS session_principal_id,
-      session.grant_id, session.generation AS session_generation, session.minted_at_ms, session.expires_at_ms,
-      grant.share_id, grant.generation AS grant_generation, grant.access, grant.status, grant.revoked_at_ms,
-      grant.principal_kind, share.workspace_id, share.granter_user_id, share.link_writes_paused_at_ms,
-      share.discussion_revision, workspace.owner_user_id
+      session.grant_id, session.minted_at_ms, session.expires_at_ms,
+      grant.share_id, grant.generation AS grant_generation, grant.access,
+      share.workspace_id, share.link_writes_paused_at_ms, share.discussion_revision
     FROM sync_relay_link_sessions AS session
     JOIN sync_relay_share_grants AS grant ON grant.grant_id = session.grant_id
     JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-    JOIN sync_relay_workspaces AS workspace ON workspace.workspace_id = share.workspace_id
-    WHERE session.capability_hash = ? LIMIT 1`).get(input.capabilityHash);
-  if (!authority || authority.principal_kind !== "link" || authority.status !== "active" || authority.revoked_at_ms !== null ||
-    Number(authority.session_generation) !== Number(authority.grant_generation) ||
-    Number(authority.minted_at_ms) > now || Number(authority.expires_at_ms) <= now ||
-    authority.owner_user_id !== authority.granter_user_id) return null;
+    WHERE session.capability_hash = ? AND grant.principal_kind = 'link' AND grant.generation = session.generation
+      AND ${currentShareGrantSql("grant", "share")}
+    LIMIT 1`).get(input.capabilityHash);
+  if (!authority || Number(authority.minted_at_ms) > now || Number(authority.expires_at_ms) <= now) return null;
   const row = storage.db.prepare(`SELECT principal_id, grant_id, mint_generation, profile_token_hash,
       display_name, created_at_ms, blocked_at_ms, discussion_revision, storage_bytes
     FROM sync_relay_link_principals WHERE grant_id = ? AND profile_token_hash = ? LIMIT 1`)

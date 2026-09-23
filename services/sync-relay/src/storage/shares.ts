@@ -16,6 +16,7 @@ import {
 } from "./types";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
+import { readCurrentShareGrant } from "./currentShareGrant";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -431,15 +432,12 @@ export function mintLinkSession(storage: StorageContext, input: {
     }
     return storage.tx(() => {
       input.guard?.();
-      const grant = storage.getShareGrant(session.grantId);
-      if (
-        !grant ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.generation !== session.generation
-      ) {
-        return false;
-      }
+      const current = readCurrentShareGrant(storage, {
+        grantId: session.grantId,
+        principal: { kind: "link" },
+        generation: session.generation,
+      });
+      if (!current) return false;
       storage.db
         .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
         .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
