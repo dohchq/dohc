@@ -882,6 +882,13 @@ function relayShareErrorCopy(
       return "That path can't be shared.";
     case "not_found":
       return "That share isn't available anymore.";
+    // One relay code for every chat refusal, and the desktop refuses the
+    // general group, the agent lane, and direct-message-as-group before it
+    // asks the relay. What remains is a group the relay has not synced yet.
+    case "invalid_channel":
+      return "This can't be shared yet. Wait for it to sync, then try again.";
+    case "ambiguous_selector":
+      return "Share a group or direct message on its own, without files or a version.";
     default:
       return data?.error ?? `Sharing failed (${status}).`;
   }

@@ -6,6 +6,7 @@ import type {
   LinkedChatStore,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
+import { cliGroupKind, FILES_GROUP } from "../cli/cliServer";
 
 type RunnerThreadStore = Pick<
   LinkedChatStore,
@@ -64,7 +65,7 @@ export async function buildRunnerThreadContext(
     ? channels.find((candidate) => candidate.id === thread.channelId)
     : undefined;
   if (thread.channelId && !channel) {
-    throw new Error(`Chat group for thread ${JSON.stringify(input.threadId)} was not found.`);
+    throw new Error(`The group, direct message, or agent lane holding thread ${JSON.stringify(input.threadId)} was not found.`);
   }
   const decisionByMessage = new Map(
     decisions.map((decision) => [
@@ -85,14 +86,9 @@ export async function buildRunnerThreadContext(
             id: channel.id,
             name: channel.kind === "agent" ? "my-agent" : channel.name,
             slug: channel.slug,
-            kind: channel.kind === "channel" ? "group" : channel.kind,
+            kind: cliGroupKind(channel.kind),
           }
-        : {
-            id: "files",
-            name: "files",
-            slug: "files",
-            kind: "group",
-          },
+        : FILES_GROUP,
       commentCount: Math.max(0, messages.length - 1),
       openDecisionCount: decisions.filter((decision) => decision.state === "open").length,
     },

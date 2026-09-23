@@ -351,7 +351,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_groups",
     {
       description:
-        "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. Requires the workspace engine.",
+        "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
     },
     async () => text(await listGroups(ctx)),

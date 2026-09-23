@@ -48,7 +48,7 @@ describe("executeCli", () => {
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 1, groups: [group] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 2, groups: [group] }, null, 2)}\n`,
     });
   });
 
@@ -63,7 +63,7 @@ describe("executeCli", () => {
       exitCode: 0,
       stderr: "",
       stdout: `${JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         threadIds: ["th_one", "th_two"],
       }, null, 2)}\n`,
     });

@@ -325,12 +325,25 @@ export function cliMessageId(id: string): string {
   return formatMessageHandle(id);
 }
 
+// The engine's `channel` kind is a Group everywhere a reader sees it.
+export function cliGroupKind(kind: ChatChannelSummary["kind"]): CliGroup["kind"] {
+  return kind === "channel" ? "group" : kind;
+}
+
+// A thread linked to a file belongs to no engine channel; it lists here.
+export const FILES_GROUP: CliGroup = {
+  id: "files",
+  name: "files",
+  slug: "files",
+  kind: "group",
+};
+
 function groupForCli(channel: ChatChannelSummary): CliGroup {
   return {
     id: cliChannelId(channel.id),
     name: channel.kind === "agent" ? "my-agent" : channel.name,
     slug: channel.slug,
-    kind: channel.kind === "channel" ? "group" : channel.kind,
+    kind: cliGroupKind(channel.kind),
     ...(channel.purpose ? { purpose: channel.purpose } : {}),
   };
 }
@@ -342,13 +355,6 @@ async function listCliChannelThreads(context: CliWorkspaceContext, channel: Chat
   })));
   return pages.flat();
 }
-
-const FILES_GROUP: CliGroup = {
-  id: "files",
-  name: "files",
-  slug: "files",
-  kind: "group",
-};
 
 function authorForCli(message: ChatMessage): CliAuthor {
   return {
@@ -1715,7 +1721,7 @@ async function dispatch(
             id: channel.id,
             name: channel.name,
             slug: channel.slug,
-            kind: channel.kind === "channel" ? "group" : channel.kind,
+            kind: cliGroupKind(channel.kind),
             threadCount: threads.length,
             ...(channel.purpose ? { purpose: channel.purpose } : {}),
             threads: threads.map((entry) => ({

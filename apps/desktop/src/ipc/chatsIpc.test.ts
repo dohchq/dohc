@@ -348,6 +348,20 @@ describe("registered channels and personal chat projections", () => {
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
   });
 
+  it("names the group when the engine refuses a taken or malformed name", async () => {
+    const test = fixture();
+    test.storeMethods.createChannel.mockRejectedValueOnce(new Error("channel-exists"));
+    await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" }))
+      .rejects.toThrow("A group with that name already exists.");
+    test.storeMethods.createChannel.mockRejectedValueOnce(new Error("invalid-channel-name"));
+    await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" }))
+      .rejects.toThrow("Use a group name of 1 to 80 characters with no control characters.");
+    // Any other engine refusal keeps its own reason.
+    test.storeMethods.createChannel.mockRejectedValueOnce(new Error("disk full"));
+    await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" }))
+      .rejects.toThrow("disk full");
+  });
+
   it("requires a usable default folder and creates no channel if the folder fails", async () => {
     const test = fixture();
     await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "💥" }))

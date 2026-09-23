@@ -174,7 +174,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         credentials: null,
         resolvedAuthorUserId: undefined,
       }),
-    ).toThrowError("Sign in to your server to send a message in this shared group.");
+    ).toThrowError("Sign in to your server to send a message here.");
   });
 
   it("requires credentials from the joined channel relay", () => {
@@ -185,7 +185,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         authorUserId: "user-1",
         resolvedAuthorUserId: "user-1",
       }),
-    ).toThrowError("Sign in to the cloud server this shared group uses.");
+    ).toThrowError("Sign in to the cloud server this was shared from.");
   });
 
   it("requires the account that joined the shared channel", () => {
@@ -195,7 +195,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         credentials: { ...credentials, userId: "user-2" },
         resolvedAuthorUserId: undefined,
       }),
-    ).toThrowError("Sign in to the account that joined this shared group.");
+    ).toThrowError("Sign in to the account that joined this.");
   });
 
   it("allows matching shared-channel identity and local messages", () => {

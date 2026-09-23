@@ -8,7 +8,7 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPubl
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
 export const CLI_PROTOCOL_VERSION = 4;
-export const CLI_JSON_SCHEMA_VERSION = 1;
+export const CLI_JSON_SCHEMA_VERSION = 2;
 
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;

@@ -195,7 +195,7 @@ describe("chat writes", () => {
     it.each(["send", "start", "react", "decide"] as const)(`refuses %s in a ${grant} joined channel before any row`, async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
-      await expect(test.writeEach[kind]()).rejects.toThrow("This shared group is read-only for you.");
+      await expect(test.writeEach[kind]()).rejects.toThrow("You can only read this.");
       expect(test.attachments).not.toHaveBeenCalled();
       expectNothingWritten(test);
     });
@@ -222,11 +222,11 @@ describe("chat writes", () => {
     const test = fixture();
     test.row.sharedChannels = [joined];
     test.setCredentials(null);
-    await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to your server to send a message in this shared group.");
+    await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to your server to send a message here.");
     expect(test.attachments).not.toHaveBeenCalled();
     expectNothingWritten(test);
     test.setCredentials(signedIn("user-2"));
-    await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to the account that joined this shared group.");
+    await expect(test.writeEach[kind]()).rejects.toThrow("Sign in to the account that joined this.");
     expectNothingWritten(test);
   });
 
@@ -236,15 +236,15 @@ describe("chat writes", () => {
     const changes = {
       "sign-out": {
         apply: (test: ReturnType<typeof fixture>) => test.setCredentials(null),
-        refusal: "Sign in to your server to send a message in this shared group.",
+        refusal: "Sign in to your server to send a message here.",
       },
       "account switch": {
         apply: (test: ReturnType<typeof fixture>) => test.setCredentials(signedIn("user-2")),
-        refusal: "Sign in to the account that joined this shared group.",
+        refusal: "Sign in to the account that joined this.",
       },
       "read-only downgrade": {
         apply: (test: ReturnType<typeof fixture>) => { test.row.sharedChannels = [{ ...joined, access: "read-only" }]; },
-        refusal: "This shared group is read-only for you.",
+        refusal: "You can only read this.",
       },
     };
     const cases = [
@@ -303,7 +303,7 @@ describe("chat writes", () => {
         test.row.sharedChannels = [{ ...joined, access: "read-only" }];
         return [];
       });
-      await expect(test.writeEach.send()).rejects.toThrow("This shared group is read-only for you.");
+      await expect(test.writeEach.send()).rejects.toThrow("You can only read this.");
       expectNothingWritten(test);
     });
 
@@ -311,10 +311,10 @@ describe("chat writes", () => {
     // continuation chained on the attachment promise runs after the module's
     // own await of it, so it lands wherever the module next yields.
     it.each([
-      ["send", "a sign-out", "Sign in to your server to send a message in this shared group."],
-      ["send", "a read-only downgrade", "This shared group is read-only for you."],
-      ["start", "a sign-out", "Sign in to your server to send a message in this shared group."],
-      ["start", "a read-only downgrade", "This shared group is read-only for you."],
+      ["send", "a sign-out", "Sign in to your server to send a message here."],
+      ["send", "a read-only downgrade", "You can only read this."],
+      ["start", "a sign-out", "Sign in to your server to send a message here."],
+      ["start", "a read-only downgrade", "You can only read this."],
     ] as const)("refuses %s after %s chained on its attachments", async (kind, change, refusal) => {
       const test = fixture();
       test.row.sharedChannels = [joined];

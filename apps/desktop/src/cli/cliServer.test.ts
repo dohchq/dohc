@@ -984,7 +984,7 @@ describe("CLI socket server", () => {
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared group is read-only for you.");
+    })).rejects.toThrow("You can only read this.");
     await expect(invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -992,7 +992,7 @@ describe("CLI socket server", () => {
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared group is read-only for you.");
+    })).rejects.toThrow("You can only read this.");
     expect(calls.writes).toBe(0);
     expect(writeTargets).toEqual([]);
     expect(await store.listMessages({
@@ -3020,7 +3020,7 @@ describe("CLI socket server", () => {
         resolve: opened.messageId,
         body: "Reply before access changed",
       });
-      expect(reply.warning).toContain("could not be resolved: This shared group is read-only for you.");
+      expect(reply.warning).toContain("could not be resolved: You can only read this.");
       expect(reply.resolvedMessageId).toBeUndefined();
       const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
       expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
