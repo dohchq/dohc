@@ -888,7 +888,7 @@ function relayShareErrorCopy(
     case "invalid_channel":
       return "This can't be shared yet. Wait for it to sync, then try again.";
     case "ambiguous_selector":
-      return "Share a group or direct message on its own, without files or a version.";
+      return "A group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
       return data?.error ?? `Sharing failed (${status}).`;
   }

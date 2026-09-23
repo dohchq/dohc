@@ -873,7 +873,7 @@ export function registerChatsIpcHandlers<
   // the name, so the toast names the group and what to change.
   const GROUP_CREATE_REFUSALS = new Map<string, string>([
     ["channel-exists", "A group with that name already exists."],
-    ["invalid-channel-name", "Use a group name of 1 to 80 characters with no control characters."],
+    ["invalid-channel-name", "Use 1 to 80 characters, with at least one letter from a to z or a digit."],
   ]);
   function groupCreateRefusal(error: unknown): unknown {
     const copy = error instanceof Error ? GROUP_CREATE_REFUSALS.get(error.message) : undefined;
