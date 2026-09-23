@@ -73,7 +73,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(form).toBeHidden();
       await expect(collection.getByRole("button", { name: "Create form", exact: true })).toBeFocused();
       await collection.getByLabel("Manage Collection", { exact: true }).click();
-      await expectInsideViewport(collection.getByLabel("Manage Collection", { exact: true }).locator(".. > div"));
+      await expectInsideViewport(collection.getByLabel("Manage Collection", { exact: true }).locator("..").locator(":scope > div"));
       await page.screenshot({ path: test.info().outputPath(`collection-toolbar-narrow-${theme}.png`) });
       await page.keyboard.press("Escape");
       assertDesktopEngineHealthy(desktop.logs);
