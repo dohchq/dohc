@@ -90,6 +90,9 @@ if (config) {
   );
   check(compilerResource?.filter?.includes("**/*") === true,
     "app compiler ships all staged assets as unpacked extraResources");
+  const backendResource = extraResources.find(entry => entry?.from === "resources/app-backend-runtime" && entry?.to === "app-backend-runtime");
+  check(backendResource?.filter?.includes("**/*") === true,
+    "app backend runtime ships its child and Wasm closure as unpacked extraResources");
   check(
     extraResources.some(
       (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",

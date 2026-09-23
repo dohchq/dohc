@@ -13,7 +13,7 @@ RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
 WORKDIR /source
 COPY . .
 RUN pnpm --filter @dohc/workspace-api... --filter @dohc/sync-relay... --filter @dohc/share-web... install --frozen-lockfile
-RUN pnpm --filter @dohc/workspace-api build && pnpm --filter @dohc/sync-relay build && pnpm --filter @dohc/share-web build
+RUN pnpm --filter @dohc/app-backend-runtime build && pnpm --filter @dohc/workspace-api build && pnpm --filter @dohc/sync-relay build && pnpm --filter @dohc/share-web build
 RUN mkdir -p /release/services/workspace-api/dist /release/services/sync-relay/dist /release/services/share-web/dist /release/services/share-web/viewer/dist /release/scripts/lib /release/packages/workspace-postgres/src/db /release/tools/self-host && \
     cp -a node_modules /release/node_modules && \
     cp -a packages/. /release/packages/ && \
@@ -27,9 +27,10 @@ RUN mkdir -p /release/services/workspace-api/dist /release/services/sync-relay/d
     cp scripts/migrate-postgres.mjs /release/scripts/ && \
     cp scripts/lib/apply-migrations.mjs /release/scripts/lib/ && \
     cp -r packages/workspace-postgres/src/db/migrations /release/packages/workspace-postgres/src/db/ && \
-    cp tools/self-host/entrypoint.mjs tools/self-host/health.mjs /release/tools/self-host/ && \
+    cp tools/self-host/entrypoint.mjs tools/self-host/health.mjs tools/self-host/app-backend-smoke.mjs /release/tools/self-host/ && \
     ln -sf ../services/workspace-api/node_modules/pg /release/node_modules/pg && \
     printf '{"type":"module"}\n' > /release/package.json
+RUN cd /release && node tools/self-host/app-backend-smoke.mjs
 
 FROM node:24.14.0-bookworm-slim AS runtime
 ARG DOHC_REVISION=unknown

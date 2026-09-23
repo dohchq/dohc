@@ -1,7 +1,7 @@
 import {it,expect,vi} from 'vitest';
 import {MessageChannel as NodeMessageChannel, type MessagePort as NodeMessagePort} from 'node:worker_threads';
 import {once} from 'node:events';
-import {attachAppCollectionBroker} from './appCollectionBroker';
+import {attachAppCollectionBroker} from '@dohc/app-browser/broker';
 
 function harness(send:(body:unknown,signal:AbortSignal)=>Promise<Response> = async body=>Response.json(body)) {
   vi.stubGlobal('MessageChannel',NodeMessageChannel);
@@ -11,12 +11,44 @@ function harness(send:(body:unknown,signal:AbortSignal)=>Promise<Response> = asy
   const request=(body:unknown)=>{const response=once(port,'message');port.postMessage(body);return response.then(([value])=>value);};
   return {frame,port,lifetime,request,close(){lifetime.abort();vi.unstubAllGlobals();}};
 }
-it('forwards only collection list/create and returns data without session material',async()=>{
+it('forwards collection list/create and returns data without session material',async()=>{
   const calls:unknown[]=[];const f=harness(async body=>{calls.push(body);return Response.json({records:[],nextPath:null});});
   try{expect(await f.request({id:'list',op:'collection.list',limit:50})).toEqual({id:'list',ok:true,value:{records:[],nextPath:null}});
     expect((await f.request({id:'create',op:'collection.create',idempotencyKey:'vote',fields:{destination:'Tokyo'}})).ok).toBe(true);
     expect(await f.request({id:'fetch',op:'fetch',url:'https://private'})).toEqual({id:'fetch',ok:false,status:400});
     expect(await f.request({id:'extra',op:'collection.list',limit:1,authorityRevision:99})).toEqual({id:'extra',ok:false,status:400});expect(calls).toHaveLength(2);
+  }finally{f.close();}
+});
+it('forwards backend operations, uploads, and file reads while rejecting supplied authority',async()=>{
+  const calls:unknown[]=[];const f=harness(async body=>{calls.push(body);return Response.json({result:null});});
+  try{
+    const invoke={id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
+    const upload={id:'upload',op:'backend.upload',idempotencyKey:'upload-1',name:'receipt.pdf',contentType:'application/pdf',bytesBase64:'JVBERg=='};
+    const file={id:'file',op:'backend.file',fileId:'file_0123456789abcdef',operation:'receipt.read',input:{}};
+    const attempt={id:'attempt',op:'backend.attempt',operation:'register',request:{action:'get'}};
+    for(const body of [invoke,upload,file,attempt])expect((await f.request(body)).ok).toBe(true);
+    for(const body of [{...invoke,caller:{kind:'owner'}},{...upload,path:'private'},{...file,authorityRevision:1}])expect((await f.request(body)).status).toBe(400);
+    expect((await f.request({...attempt,principalKey:'other'})).status).toBe(400);
+    expect(calls).toEqual([invoke,upload,file,attempt]);
+  }finally{f.close();}
+});
+it('uses bounded file budgets without widening operation replies',async()=>{
+  const f=harness(async()=>Response.json({bytesBase64:'A'.repeat(2*1024*1024)}));
+  try{
+    expect((await f.request({id:'file',op:'backend.file',fileId:'file_0123456789abcdef',operation:'receipt.read',input:{}})).ok).toBe(true);
+    expect((await f.request({id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'read-1',input:{}})).status).toBe(503);
+    expect((await f.request({id:'large',op:'backend.invoke',operation:'read',idempotencyKey:'read-1',input:'x'.repeat(128*1024)})).status).toBe(413);
+    expect((await f.request({id:'upload',op:'backend.upload',idempotencyKey:'upload-1',name:'file',contentType:'application/pdf',bytesBase64:'A'.repeat(2*1024*1024)})).ok).toBe(true);
+    expect((await f.request({id:'oversize',op:'backend.upload',idempotencyKey:'upload-2',name:'file',contentType:'application/pdf',bytesBase64:'A'.repeat(8*1024*1024)})).status).toBe(413);
+  }finally{f.close();}
+});
+it('bounds backend workflow bursts while preserving the collection budget',async()=>{
+  const f=harness();
+  try{
+    for(let index=0;index<30;index++)expect((await f.request({id:'u'+index,op:'backend.upload',idempotencyKey:'upload-'+index,name:'file',contentType:'application/pdf',bytesBase64:'JVBERg=='})).ok).toBe(true);
+    for(let index=0;index<12;index++)expect((await f.request({id:'c'+index,op:'collection.list',limit:1})).ok).toBe(true);
+    expect((await f.request({id:'list',op:'collection.list',limit:1})).status).toBe(429);
+    expect((await f.request({id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}})).status).toBe(429);
   }finally{f.close();}
 });
 it('bounds requests, pending messages and repeated request ids',async()=>{
@@ -47,4 +79,14 @@ it('bounds reply bytes and cancels unread error bodies',async()=>{
   const f=harness(async()=>responses.shift()!);
   try{expect(await f.request({id:'large',op:'collection.list',limit:1})).toEqual({id:'large',ok:false,status:503});expect(await f.request({id:'error',op:'collection.list',limit:1})).toEqual({id:'error',ok:false,status:404});expect(cancelled).toBe(true);}
   finally{f.close();}
+});
+
+it('returns safe app refusal text and hides invalid backend errors',async()=>{
+  const values=[{code:'full',message:'This session is full.'},{code:'full',message:'private',stack:'secret'},{code:'full',message:'x'.repeat(8193)}];
+  const f=harness(async()=>Response.json(values.shift(),{status:409}));
+  try{
+    const request={op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
+    expect(await f.request({...request,id:'safe'})).toEqual({id:'safe',ok:false,status:409,error:{code:'full',message:'This session is full.'}});
+    for(const id of ['private','large'])expect(await f.request({...request,id})).toEqual({id,ok:false,status:503});
+  }finally{f.close();}
 });

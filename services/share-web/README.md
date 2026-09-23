@@ -62,10 +62,31 @@ For app collection responses, also set `DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PE
 on the relay to a positive integer. This limits accepted creates over each grant's lifetime.
 Leave it unset or set it to `0` to disable collection access. Owners must approve each app's collection capability.
 Disabling collection access still lets owners revoke an existing approval.
+
+Published apps use their approved datasets without a separate backend setting.
+`DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT`
+limits enrolled link principals per grant and defaults to `1000`. Set a positive
+safe integer; `0` is invalid. This counts browser identities, not submitted rows.
+Backend operations do not require the collection-create setting or public Edit.
+See the [app backend guide](../../docs/how-to/app-backend.md) for publication,
+runtime packaging, private uploads, and recovery.
+
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
 `DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
 registrable domain. App launch stays off when the app domain is unset. Setting
 it without a public origin stops share-web at startup.
+
+Launch issuance allows each authorized link browser profile or signed-in account
+session a burst of 12, refilling 0.2 per second. People on the same network have
+separate allowances. The relay must authorize the publication before this budget
+is charged; a supplied profile or account cookie alone is not authority.
+Account session rotation starts a new session allowance.
+Before authorization, issuance admits 600 probes per address, refilling ten per
+second, and 2,400 globally, refilling 40 per second. Each address may hold 16 of
+the 64 issue slots. Bodies are limited to 1 KiB with a 15-second deadline.
+These issuance limits return 429. Document builds, status checks, and app
+operations retain separate admission lanes, so stalled issue bodies do not
+occupy their slots.
 
 Limits are shared with the desktop: 512 source files, 32 MiB per bundle,
 20 MiB per blob, and 256 KiB for the complete publication request.
@@ -87,6 +108,20 @@ uses the first address that is not a trusted proxy. The service sends that
 derived address to its internal handler as `x-dohc-share-web-client-ip` for
 pre-authentication rate limiting. The public proxy must not accept that
 internal header from clients.
+
+Link exchange admits valid credentials per share grant, so people on one network
+do not share the invalid-credential allowance. The relay allows a burst of 960
+valid exchanges per grant and refills 16 per second. Both services bound all
+exchange probes to a burst of 2,400, refilling 40 per second, with 64 requests
+in flight. These budgets use the existing app and share-read admission sizes.
+Before spending the global allowance, each address has a burst of 600 probes,
+refilling ten per second, and at most 16 requests in flight. This preserves
+room for other networks during a flood or stalled request bodies from one address.
+Malformed viewer requests and invalid relay credentials use a separate per-IP
+allowance of 12, refilling 0.2 per second. Exhausted budgets return 429.
+The relay still performs a bounded credential lookup to distinguish a valid
+secret after the per-IP allowance is exhausted; the global budget bounds this
+work. Request bodies and relay responses have size limits and ten-second deadlines.
 
 Link secrets reach the server only in a POST body or cookie; URL fragments stay
 in the browser. Strip query strings from proxy access logs. Do not log request

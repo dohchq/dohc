@@ -23,6 +23,10 @@ Local work remains available when the server is offline.
 App publishing is disabled in the default self-host bundle.
 It needs a separate HTTPS app domain and additional relay limits.
 Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
+Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
+Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.
+Reading an app does not consume this limit. Uploads and write operations do. Workspace storage quotas still apply.
+The release includes the isolated app runtime. The release build checks its compiled child and Wasm dependencies before creating the image.
 
 ## Prepare the host
 

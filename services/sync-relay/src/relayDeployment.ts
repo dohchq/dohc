@@ -197,7 +197,8 @@ export function openRelayDeployment(configPath: string, options: OpenSyncRelaySt
     const history = createLiveJournalHistoryAuthority({ namespace: config.namespace, reconciled: true });
     attachLiveJournalHistory(storage as StorageContext, history);
     storage.unavailable.addEventListener("abort", () => history.markUnreconciled(), { once: true });
-    return { storage, history };
+    // Keep worker ownership manifests across process restarts so startup can reclaim crashed previews.
+    return { storage, history, datasetDirectory: join(dirname(config.relayPath), "dataset-workers") };
   } catch (error) {
     if (!transferred) {
       side.close();

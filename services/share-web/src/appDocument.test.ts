@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { createAppDocument, type AppDocumentFile } from "./appDocument";
+import { createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {

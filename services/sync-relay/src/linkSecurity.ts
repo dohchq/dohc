@@ -22,6 +22,11 @@ export const LINK_SESSIONS_PER_GRANT_LIMIT = 10_000;
 export const LINK_EXCHANGE_BUCKET_CAPACITY = 12;
 export const LINK_EXCHANGE_REFILL_PER_SECOND = 0.2;
 export const LINK_EXCHANGE_MAX_IPS = 10_000;
+// Credential probes still do a bounded HMAC and indexed lookup before their
+// validity is known. Keep that work bounded across the relay as well as per IP.
+// These values match the existing global app admission budget.
+export const LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY = 2_400;
+export const LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND = 40;
 export const LINK_READ_BUCKET_CAPACITY = 240;
 export const LINK_READ_REFILL_PER_SECOND = 4;
 export const LINK_READ_MAX_CAPABILITIES = 10_000;

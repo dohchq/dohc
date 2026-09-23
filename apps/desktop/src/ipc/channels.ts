@@ -244,6 +244,7 @@ export const CHANNELS = {
   resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
+  dataset: "desktop:dataset",
   retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",

@@ -226,6 +226,16 @@ describe("SitePreviewPage", () => {
     expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
   });
 
+  it("offers approval for a generated form without a standalone preview entry", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, entryPath: null,
+      sourceFiles: ["report/dohc.json", "report/app.publish.json", "report/frontend.js"], shareManifest: noRunnableArtifact });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
+    expect(screen.getByText("Review this app to open it on this device or publish it to a shared link.")).toBeTruthy();
+    expect(screen.queryByText("This app has no previewable entry, dev script, or build output yet.")).toBeNull();
+    expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
+  });
+
   it("keeps a stored preview mode over the workspace default", async () => {
     window.localStorage.setItem("dohc.site-preview-mode.v1:ws-sites:report", "static");
     bridgeMock.getSitePackage.mockResolvedValueOnce({

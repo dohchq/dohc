@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { parseAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
+
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -142,7 +144,7 @@ export interface ListAppPublicationsInput {
   appRoot?: string;
 }
 export type AppPublicationListRow = {
-  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null;
+  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null; datasetCapability: AppDatasetCapability | "unavailable" | null;
 } & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
 
 function publicationLinkIsCurrent(storage: StorageContext, owner: PublicationOwner): boolean {
@@ -160,6 +162,8 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
     const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>(row => {
       const publicationId = String(row.publication_id);
       let collectionCapability: AppPublicationListRow["collectionCapability"] = null;
+
+      let datasetCapability: AppPublicationListRow["datasetCapability"] = null;
       if (row.capability_json !== null) {
         try { collectionCapability = parseAppCollectionCapability(JSON.parse(String(row.capability_json))); }
         catch { collectionCapability = "unavailable"; }
@@ -167,14 +171,17 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
       try {
         const publication = stored(storage, {...input, publicationId});
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
+        const capability = publication.candidate.capabilities[0];
+
+        if (capability?.kind === "dataset") datasetCapability = parseAppDatasetCapability(capability);
         return [{publicationId, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
           shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
-          sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability}];
+          sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability, datasetCapability}];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
         const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
         return [{publicationId, authorityRevision: state.authorityRevision, manifestUnavailable: true,
-          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability}];
+          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability, datasetCapability: null}];
       }
     });
     return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
@@ -251,7 +258,7 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
   if (sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !== publication.publicationId) throw notFound();
   const result: LinkAppPublicationAuthority = {
     descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
-      files: candidate.files},
+      files: candidate.files.filter(file => file.path === "bundle.js" || file.path === "bundle.css")},
     shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
     sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
   };

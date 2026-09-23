@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OwnerAppPublicationResult } from "./appPublication";
+import { parseCliArguments } from "./args";
 
 const capability = { kind: "collection-create", collectionPath: "responses", schemaSha256: "a".repeat(64),
   allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields: ["destination"] };
@@ -8,12 +9,30 @@ const prepared = { kind: "prepared", approvalId: "00000000-0000-4000-8000-000000
   capabilities: [capability], externalNetwork: true };
 
 describe("owner publication review contract", () => {
+  it("retains independent dataset binding metadata in preparation and local listings", () => {
+    const datasetCapability = { kind: "dataset", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
+      operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link", readOnly: false }] };
+    expect(OwnerAppPublicationResult.parse({ ...prepared, capabilities: [datasetCapability] })).toMatchObject({ capabilities: [datasetCapability] });
+    const publication = { publicationId: "b".repeat(64), authorityRevision: 1, appRoot: "app", sourceRevision: "c".repeat(64), active: true, datasetCapability };
+    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [publication] })).toEqual({ kind: "localListed", publications: [publication] });
+    const shared = { ...publication, shareId: "share", grantId: "grant", linkCurrent: true, manifestUnavailable: false, collectionCapability: null };
+    expect(OwnerAppPublicationResult.parse({ kind: "listed", publications: [shared], nextCursor: null })).toEqual({ kind: "listed", publications: [shared], nextCursor: null });
+    expect(OwnerAppPublicationResult.safeParse({ ...prepared, capabilities: [{ ...datasetCapability, source: "replace rules" }] }).success).toBe(false);
+  });
+  it("supports local preparation and approved bundle launch without share identities", () => {
+    expect(parseCliArguments(["app", "prepareLocal", JSON.stringify({ workspaceId: "w", appRoot: "app" })], {})).toMatchObject({
+      verb: "appPublication", request: { action: "prepareLocal", workspaceId: "w", appRoot: "app" },
+    });
+    expect(parseCliArguments(["app", "launchLocal", JSON.stringify({ workspaceId: "w", publicationId: "a".repeat(64) })], {})).toMatchObject({
+      verb: "appPublication", request: { action: "launchLocal", workspaceId: "w", publicationId: "a".repeat(64) },
+    });
+  });
   it("requires current collection approval state and preserves damaged approvals", () => {
     const row = {publicationId:"d".repeat(64),authorityRevision:2,shareId:"s",grantId:"g",active:true,linkCurrent: true, manifestUnavailable: false,appRoot:"app",sourceRevision:"c".repeat(64)};
     const list = (publication: unknown) => ({kind:"listed",publications:[publication],nextCursor:null});
     expect(OwnerAppPublicationResult.safeParse(list(row)).success).toBe(false);
     for (const collectionCapability of [null, capability, "unavailable"]) {
-      const value = list({...row,collectionCapability});
+      const value = list({...row,collectionCapability,datasetCapability:null});
       expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
     }
   });

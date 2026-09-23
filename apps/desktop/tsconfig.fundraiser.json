@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "incremental": false },
+  "include": ["../../examples/fundraiser/frontend.ts", "../../examples/fundraiser/client.ts", "../../examples/fundraiser/recovery.ts", "../../examples/fundraiser/ui-types.ts", "../../examples/fundraiser/style.d.ts"]
+}

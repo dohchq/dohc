@@ -43,7 +43,7 @@ export function createPrepareFixture(root, buildSource) {
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-workspace-engine'},executable})};
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
-      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','packages/sdk/dist'])
+      for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','apps/desktop/resources/app-backend-runtime','packages/sdk/dist'])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       return {};
     }

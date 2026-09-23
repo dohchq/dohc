@@ -182,7 +182,7 @@ export function authorizeLinkShareAction(
   return result as AuthorizedShareAction<ShareSelector>;
 }
 
-function authorizeShareGrantAction(
+export function authorizeShareGrantAction(
   input: ShareGrantAuthorizationInput,
 ): ShareAuthorizationResult {
   const validated = validateShareGrant(input);

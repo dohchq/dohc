@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { editorTitle, Explorer, type ExplorerProps } from "./Explorer";
-import { collectionTabPath } from "./workbenchState";
+import { collectionTabPath, transactionalCollectionTabPath } from "./workbenchState";
 
 afterEach(cleanup);
 
@@ -58,6 +58,18 @@ function treeRow(path: string): HTMLElement {
 }
 
 describe("Explorer collection folders", () => {
+  it("uses the human table label for open data Collections and a neutral loading label",()=>{
+    const path=transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002");
+    expect(editorTitle(path,"Registrations")).toBe("Registrations");expect(editorTitle(path)).toBe("Collection");
+  });
+  it("offers recovery before the workspace has any data Collections", () => {
+    const onRestoreCollection = vi.fn();
+    const view = render(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection })} />);
+    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Restore from recovery file" }));
+    expect(onRestoreCollection).toHaveBeenCalledOnce();
+    view.rerender(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
+    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+  });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);

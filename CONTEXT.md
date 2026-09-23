@@ -21,15 +21,15 @@ _Avoid_: Drive connection (for a self-hosted server)
 ### Collections
 
 **Collection**:
-A folder whose schema file types its records. Shares, permissions, and sync address it by its path.
-_Avoid_: database (that is the SQLite file feature), table
+A workspace view of structured records with typed fields. It can show transactional dataset records or editable documents.
+_Avoid_: database (for the user-facing Collection), table
 
 **Record**:
-One markdown file in a collection: typed properties plus a document body. A stable id identifies it; the filename is a label anyone can change.
+One identifiable item in a Collection, with typed fields and, for document records, an editable document body. Its identity survives a change of name.
 _Avoid_: row, page, item
 
 **Field**:
-One typed property the collection's schema defines. A value the schema cannot validate stays in the record and is flagged; validation never drops data.
+One typed property defined for a Collection. Document records flag invalid values; transactional records require values accepted by the dataset rules.
 _Avoid_: column, attribute, metadata
 
 **Relation**:
@@ -37,7 +37,7 @@ A field that references records by id, so renames and moves cannot break it. A p
 _Avoid_: link (that is a body link), backlink
 
 **View**:
-A named, shared way to render a collection: table, board, or calendar. Which view a person has open is their own local state.
+A named way to render a Collection, such as a table, board, or calendar. Available views depend on the Collection; the current view is local state.
 _Avoid_: dashboard (see App), layout
 
 ### Sharing
@@ -93,3 +93,11 @@ _Avoid_: site, dashboard, artifact
 **Publication**:
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
+
+**Dataset**:
+A workspace-owned transactional data domain with its schema, operations, records, and file associations. Apps receive permission to use approved operations; they do not own a separate backend.
+_Avoid_: app backend, private app database
+
+**Dataset operation**:
+A named action in an approved dataset revision with declared caller access and read or write authority. Forms, apps, owner views, and agents use the same operation to enforce its rules.
+_Avoid_: raw database edit (for a governed data change)

@@ -1,5 +1,5 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -11,6 +11,8 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
+import { verifyAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
   workspace: Workspace; signal: AbortSignal; scope?: string; assertCurrent(): void;
@@ -24,6 +26,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
+  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null>;
+  beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
+  /** May resolve local approved rules before an explicit authority transfer at publication. */
+  resolveDatasetRevision?(workspace: Workspace, binding: AppDatasetBinding, signal: AbortSignal): Promise<DatasetRevision>;
+
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
@@ -39,9 +46,18 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Only the original workspace can publish this app.");
+      const local = await dependencies.localPublication?.(input, callerKey, operation);
+      operation.assertCurrent(); operation.signal.throwIfAborted();
+      if (local) return local;
+      if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
       const remote = await dependencies.remoteForWorkspace(operation.workspace);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
+      const remoteData = createRemoteDatasetData({ workspaceId: input.workspaceId, ...remote, signal: operation.signal,
+        currentCredentialGeneration: dependencies.currentCredentialGeneration, assertCurrent: () => operation.assertCurrent(), relayJson: dependencies.relayJson });
+      const resolveDatasetRevision = (binding: AppDatasetBinding) => session.run(() => dependencies.resolveDatasetRevision
+        ? dependencies.resolveDatasetRevision(operation.workspace, binding, operation.signal)
+        : resolveRemoteDatasetRevision(remoteData, binding));
       clearExpired();
       const remember = (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }) => {
         session.assertCurrent(); operation.signal.throwIfAborted();
@@ -66,6 +82,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (!row || row.publicationId !== input.publicationId || row.active !== false || row.owner?.workspaceId !== input.workspaceId || row.owner.ownerUserId !== remote.credentials.userId ||
             !Number.isSafeInteger(row.authorityRevision) || row.authorityRevision! < 1 || !Number.isSafeInteger(row.owner.generation) || row.owner.generation! < 1) throw new Error("This app publication cannot be republished. Refresh the publication list.");
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
+        const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
+        if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));
         const selection = OwnerAppPublicationRequest.parse({ action: "prepare", workspaceId: input.workspaceId, appRoot: candidate.appRoot, shareId: row.owner.shareId, grantId: row.owner.grantId });
         if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
         return remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! });
@@ -109,11 +127,30 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         // Consume before the first upload so duplicate approvals cannot race.
         entry.clear();
         const { prepared } = entry, { candidate } = prepared;
+        await dependencies.beforeSharedPublish?.(operation.workspace, candidate, operation.signal);
+        session.assertCurrent(); operation.signal.throwIfAborted();
+        const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
+        if (dataset) verifyAppDatasetCapability(dataset, await resolveRemoteDatasetRevision(remoteData, dataset));
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
           if (published.kind !== "published") throw new Error("Invalid publication result.");
           const capability = candidate.capabilities[0];
           if (!capability) return published;
+          if (capability.kind === "dataset") {
+            try {
+              const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+                `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/activate`,
+                { method: "POST", signal: operation.signal, body: JSON.stringify({ authorityRevision: published.authorityRevision }) }));
+              const activated = raw as { publicationId?: unknown; authorityRevision?: unknown; datasetId?: unknown } | null;
+              if (!activated || activated.publicationId !== published.publicationId || activated.authorityRevision !== published.authorityRevision ||
+                activated.datasetId !== capability.datasetId) throw new Error("Collection access could not be confirmed.");
+              return published;
+            } catch (error) {
+              operation.signal.throwIfAborted(); session.assertCurrent();
+              if (error instanceof Error && error.name === "AbortError") throw error;
+              throw new Error(`The app is published. ${error instanceof Error ? error.message : "Collection access could not be confirmed."} Reload the publications before trying again.`);
+            }
+          }
           try {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
             `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/collection-approval`,
@@ -178,7 +215,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       if (!grant) throw new Error("This app link is unavailable. Choose an active link.");
       await session.run(() => dependencies.flushCapture(operation.workspace));
       const prepared = await session.run(() => dependencies.withAdapter(operation.workspace, adapter => prepareOwnerAppPublication(input, grant!, {
-        adapter, signal: operation.signal, assertCurrent: assertPreparing, compile: dependencies.compile,
+        adapter, signal: operation.signal, assertCurrent: assertPreparing, compile: dependencies.compile, resolveDatasetRevision,
       })));
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const { candidate } = prepared;

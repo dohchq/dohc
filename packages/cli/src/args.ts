@@ -2,6 +2,7 @@ import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import {OwnerAppResponsesRequest} from "./appResponses";
+import { DatasetRequest } from "./dataset";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -10,6 +11,7 @@ interface ParsedCliBase {
 
 export type ParsedCliCommand = ParsedCliBase &
   (
+    | { verb: "dataset"; request: DatasetRequest }
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
     | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
     | { verb: "channels" }
@@ -353,6 +355,18 @@ export function parseCliArguments(
 ): ParsedCliCommand {
   const global = stripGlobalFlags(argv);
   const [family, verb, ...tokens] = global.tokens;
+  if (family === "dataset") {
+    const [json, ...rest] = tokens;
+    if (!verb || !json || rest.length) fail("usage: dohc dataset <list|describe|history|lifecycle|archive|restore|deletePreview|delete|pendingAttempts|reconcileAttempt|cancelAttempt|create|prepare|approve|discard|invoke> '<JSON>'");
+    try {
+      const value: unknown = JSON.parse(json);
+      if (!value || typeof value !== "object" || Array.isArray(value) || ("action" in value && value.action !== verb)) fail("dataset arguments must match the requested action");
+      const request = DatasetRequest.parse({...value, action:verb});
+      if (request.action === "prepareRecovery" && !request.sourcePath) fail("dataset recovery requires an explicit sourcePath");
+      if (request.action === "export" && !request.savePath) fail("dataset export requires an explicit savePath");
+      return {actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "dataset", request};
+    } catch { fail("invalid dataset arguments; run dohc dataset --help"); }
+  }
   if (family === "app") {
     const [json, ...rest] = tokens;
     if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|revokeCollection|reviewReactivation|responses> '<JSON>'");

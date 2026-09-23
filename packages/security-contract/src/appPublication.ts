@@ -2,6 +2,8 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+import { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
+export { parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
   APP_COLLECTION_CURSOR_BYTES,APP_COLLECTION_PAGE_BYTES,APP_COLLECTION_RESPONSE_BYTES,
@@ -31,7 +33,7 @@ export interface AppPublicationCandidate {
   inputs: AppPublicationFile[];
   dependencies: string[];
   files: Array<AppPublicationFile & { contentType: string }>;
-  capabilities: AppCollectionCapability[];
+  capabilities: Array<AppCollectionCapability | AppDatasetCapability>;
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
@@ -57,7 +59,7 @@ function path(value: unknown, max: number): string {
   if (!checked.ok || checked.normalized !== raw || classifyEngineFilePath(raw).kind !== "tracked") throw new Error("Invalid publication source path.");
   return raw;
 }
-/** Fixed compiled bundles with at most one bounded create-only collection. */
+/** Fixed compiled bundles with at most one explicit data capability. */
 export function parseAppPublicationCandidate(value: unknown, limits: AppPublicationLimits): AppPublicationCandidate {
   if (!limits || typeof limits !== "object" ||
       !Number.isSafeInteger(limits.maxFiles) || limits.maxFiles < 1 ||
@@ -100,11 +102,12 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     if (!seen.has(target)) throw new Error("Publication package is outside selected inputs.");
     return [name, target] as const;
   }).sort(([a], [b]) => compare(a, b)));
+  const capabilities = row.capabilities.map(value => value?.kind === "dataset" ? parseAppDatasetCapability(value) : parseAppCollectionCapability(value));
   const outputs = new Set<string>();let total = 0;
   const files = row.files.map(value => {
     const file = object(value, ["path", "sha256", "byteLength", "contentType"]);
     if (file.path !== "bundle.js" && file.path !== "bundle.css") throw new Error("Unsupported publication bundle path.");
-    const contentType = file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8";
+    const contentType = file.path === "bundle.css" ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8";
     if (file.contentType !== contentType || outputs.has(file.path)) throw new Error("Invalid publication bundle type or duplicate.");
     outputs.add(file.path);const byteLength = size(file.byteLength);total += byteLength;
     if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes || byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Publication bundle bound exceeded.");
@@ -117,7 +120,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     sourceRevision: hash(row.sourceRevision), sourceDigest: hash(row.sourceDigest),
     dependencyLockDigest: hash(row.dependencyLockDigest), bundleDigest: hash(row.bundleDigest), buildDigest: hash(row.buildDigest),
     compilerIdentity: { recipe: readText(compiler.recipe), version: readText(compiler.version), binarySha256: hash(compiler.binarySha256) },
-    inputs, dependencies, files, capabilities: row.capabilities.map(parseAppCollectionCapability),
+    inputs, dependencies, files, capabilities,
   };
   if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes) throw new Error("Publication metadata bound exceeded.");
   return candidate;

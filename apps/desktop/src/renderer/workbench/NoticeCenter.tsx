@@ -45,6 +45,7 @@ type Notice = {
 // on the clipboard; `seen` means its toast was closed and only the row in
 // Notices remains.
 export interface WorkspaceErrorNotice {
+  tone?: "success";
   id: string;
   message: string;
   details: string;
@@ -467,7 +468,7 @@ export function NoticeCenter(props: {
     )) {
       next.push({
         id: error.id,
-        tone: "danger",
+        tone: error.tone ?? "danger",
         title: error.message,
         body: "",
         ...(error.canRetry && props.onRetryWorkspaceError
@@ -483,7 +484,7 @@ export function NoticeCenter(props: {
           : {}),
         timeMs: error.atMs,
         copyText: error.details,
-        Icon: AlertTriangle,
+        Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
     for (const failure of props.automationFailures ?? []) {
@@ -751,6 +752,11 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
+  useEffect(() => {
+    if (errorToast?.tone !== "success" || !props.onHideWorkspaceError) return;
+    const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), 6000);
+    return () => clearTimeout(timer);
+  }, [errorToast?.id, errorToast?.tone, props.onHideWorkspaceError]);
 
   return (
     <>
@@ -762,11 +768,11 @@ export function NoticeCenter(props: {
         <div data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <div
-              data-testid="workspace-shell-error"
-              role="alert"
+              data-testid={errorToast.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
+              role={errorToast.tone === "success" ? "status" : "alert"}
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+              {errorToast.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
               <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
                 {errorToast.message}
               </span>
@@ -783,14 +789,14 @@ export function NoticeCenter(props: {
               <CopyDetailsButton
                 key={errorToast.id}
                 iconOnly
-                label="Copy error details"
+                label={errorToast.tone === "success" ? "Copy notice details" : "Copy error details"}
                 data-testid="workspace-shell-error-copy"
                 details={() => errorToast.details}
               />
               {props.onHideWorkspaceError ? (
                 <button
                   type="button"
-                  aria-label="Dismiss workspace error"
+                  aria-label={errorToast.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
                   onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
                   className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
                 >

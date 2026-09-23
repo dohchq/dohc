@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -17,6 +18,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   createRecord,
+  dataset,
   createWorkspaceDirectory,
   listChannels,
   queryCollection,
@@ -108,6 +110,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
+
+  registerWrite("dohc_dataset", {
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+    inputSchema: {request: DatasetRequest},
+  }, async ({request}) => text(await dataset(ctx, request)));
 
   server.registerTool(
     "dohc_list_workspaces",

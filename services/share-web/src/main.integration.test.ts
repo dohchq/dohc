@@ -494,16 +494,16 @@ describe("share-web Node request adapter", () => {
     ) {
       const response = await sendExchange(
         server.port,
-        `198.51.100.${exchangeNumber}`,
+        `198.51.100.${exchangeNumber}`, true,
       );
       expect(response, `exchange ${exchangeNumber}`).toMatchObject({
         kind: "response",
-        status: 200,
+        status: 404,
       });
     }
 
-    const limited = await sendExchange(server.port, "203.0.113.99");
-    expect(limited).toMatchObject({ kind: "response", status: 404 });
+    const limited = await sendExchange(server.port, "203.0.113.99", true);
+    expect(limited).toMatchObject({ kind: "response", status: 429 });
   });
 
   it("uses the rightmost untrusted address from a trusted proxy", async () => {
@@ -516,19 +516,19 @@ describe("share-web Node request adapter", () => {
     ) {
       const response = await sendExchange(
         server.port,
-        `198.51.100.${exchangeNumber}, 203.0.113.5, 10.0.0.2`,
+        `198.51.100.${exchangeNumber}, 203.0.113.5, 10.0.0.2`, true,
       );
       expect(response, `exchange ${exchangeNumber}`).toMatchObject({
         kind: "response",
-        status: 200,
+        status: 404,
       });
     }
 
     const limited = await sendExchange(
       server.port,
-      "198.51.100.99, 203.0.113.5, 10.0.0.2",
+      "198.51.100.99, 203.0.113.5, 10.0.0.2", true,
     );
-    expect(limited).toMatchObject({ kind: "response", status: 404 });
+    expect(limited).toMatchObject({ kind: "response", status: 429 });
   });
 
   it("keeps two forwarded clients in distinct buckets behind one trusted proxy", async () => {
@@ -539,15 +539,15 @@ describe("share-web Node request adapter", () => {
       exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
       exchangeNumber += 1
     ) {
-      const response = await sendExchange(server.port, "198.51.100.1");
+      const response = await sendExchange(server.port, "198.51.100.1", true);
       expect(response, `first client exchange ${exchangeNumber}`).toMatchObject({
         kind: "response",
-        status: 200,
+        status: 404,
       });
     }
 
-    const secondClient = await sendExchange(server.port, "198.51.100.2");
-    expect(secondClient).toMatchObject({ kind: "response", status: 200 });
+    const secondClient = await sendExchange(server.port, "198.51.100.2", true);
+    expect(secondClient).toMatchObject({ kind: "response", status: 404 });
   });
 
   it("limits each session to 8 blob proxies and releases settled slots", { timeout: 30_000 }, async () => {
@@ -1237,8 +1237,8 @@ async function stopRelay(server: Server): Promise<void> {
   });
 }
 
-function sendExchange(port: number, forwardedFor: string): Promise<RawSocketResult> {
-  const body = JSON.stringify({ secret: EXCHANGE_SECRET });
+function sendExchange(port: number, forwardedFor: string, malformed = false): Promise<RawSocketResult> {
+  const body = malformed ? "{" : JSON.stringify({ secret: EXCHANGE_SECRET });
   return sendRawRequest(
     port,
     "POST /api/exchange HTTP/1.1\r\n" +

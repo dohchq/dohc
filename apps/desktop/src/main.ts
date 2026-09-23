@@ -6,6 +6,7 @@ import {
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
+import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -17,6 +18,23 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
+import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
+import { createNamedDatasetData } from "./workspaces/namedDataset";
+import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
+import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
+import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
+import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
+import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
+import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
+import { createDatasetHandler } from "./ipc/datasetIpc";
+import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { createHash } from "node:crypto";
+import { createFile as createDatasetSourceFile } from "./workspaces/workspaceFiles";
+import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
+import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
@@ -735,6 +753,8 @@ type CloudSessionCredentials = NonNullable<
   Awaited<ReturnType<CloudLogin["credentials"]>>
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
+const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
+const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
@@ -747,16 +767,24 @@ const credentialSessionCache =
     ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
+      .catch(error => console.error("Collection copy cleanup failed", error));
+    // A credential load publishes a temporary null first. Keep saved pages until the account is known.
+    if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
+      .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
   });
-function refreshCredentialCache(): Promise<void> {
-  return credentialSessionCache.refresh(() => cloudLogin().credentials());
+async function refreshCredentialCache(): Promise<void> {
+  try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
+  finally { if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null); }
 }
-function warmCredentialCache(): Promise<void> {
-  return credentialSessionCache.warm(() => cloudLogin().credentials());
+async function warmCredentialCache(): Promise<void> {
+  await credentialSessionCache.warm(() => cloudLogin().credentials());
+  if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
 }
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
+  void namedDatasetPages.credentialsChanged(null).catch(error => console.error("Saved Collection page cleanup failed", error));
   peekedReceivedGrantKinds.clear();
   // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
   // transition (login adoption, logout, or a current-session 401 — all three
@@ -874,6 +902,29 @@ type RelayShareJsonOptions =
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
+async function relayShareResponseWithCredentials(
+  credentials: CloudSessionCredentials, path: string, init: RequestInit,
+  classifyNamedOffline = false,
+): Promise<Response> {
+  if (!credentials.relayUrl) throw new Error("Reconnect your sharing server, then try again.");
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${credentials.token}`);
+  const fetchResponse = (signal = init.signal) => relayShareFetch(`${normalizeServerUrl(credentials.relayUrl!)}${path}`, {
+    ...init, signal, headers, redirect: "error", cache: "no-store", credentials: "omit",
+  });
+  const response = await (classifyNamedOffline ? namedDatasetFetch(fetchResponse, init.signal) : fetchResponse());
+  if (response.status === 401) {
+    await handleRelayUnauthorized({
+      requestCredentials: credentials, currentCredentials: cachedCredentials,
+      clearCachedCredentials: () => clearCachedCredentials(),
+      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      invalidatePersistedSessionIf: expected => cloudLogin().invalidateSessionIf(expected),
+    });
+  }
+  return response;
+}
+
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -935,7 +986,10 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (options && "retainRestoreConflict" in options
+  const datasetRoute = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+  const data = (datasetRoute
+    ? await readDatasetResponse(response, datasetRoute[2] ?? (datasetRoute[1] ? "describe" : "list"), init?.signal ?? new AbortController().signal)
+    : options && "retainRestoreConflict" in options
     ? await readOwnerRestoreResponse(response)
     : await response.json().catch(() => null)) as {
     ok?: boolean;
@@ -3005,6 +3059,8 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
+let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
+const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 const chatWrites = createChatWrites({
   findWorkspace,
   warmCredentials: warmCredentialCache,
@@ -3023,6 +3079,10 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  dataset: input => {
+    if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
+    return datasetForCli(input);
+  },
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
@@ -3701,7 +3761,13 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopAgentSessions: () => cachedAgentSessions?.stopAll() ?? Promise.resolve(),
     settleYDocs: closeAllEngineYDocSessions,
     stopAgentIntegration: () => agentIntegration.stopAll(),
-    closeWorkspaces: () => workspaceAuthorities.close(),
+    closeWorkspaces: async () => {
+      await workspaceAuthorities.close();
+      await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
+      activeDatasetHosts.clear();
+      await ownerDatasetCopies.closeAll();
+      await namedDatasetPages.close();
+    },
     disposeDatabase: () => workspaceDatabaseWorker.dispose(),
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
@@ -4078,9 +4144,222 @@ function registerIpcHandlers(): void {
       if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
-  registerOwnerAppPublicationIpc(ownerPublicationDependencies);
+  const localDatasetHosts = new WeakMap<AbortSignal, Promise<LocalDatasetHost>>();
+  let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
+  const datasetRuntimePath = join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
+  const datasetForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+      signal.throwIfAborted(); operation.assertCurrent();
+      if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+      let pending = localDatasetHosts.get(operation.signal);
+      if (!pending) {
+        const lifetime = operation.signal;
+        pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
+          assertCurrent: () => { lifetime.throwIfAborted(); },
+          runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(datasetRuntimePath, "child.mjs") },
+          persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
+          compile: async (source, path, signal) => {
+            installedDatasetCompiler ??= createInstalledDatasetCompiler(pluginResourcesBasePath());
+            return (await installedDatasetCompiler)(source, path, signal);
+          },
+        });
+        localDatasetHosts.set(lifetime, pending);
+        activeDatasetHosts.add(pending);
+        const ownedPending = pending;
+        void pending.then(host => {
+          const close = () => { void host.close().catch(error => console.error("Collection shutdown failed", error)).finally(() => activeDatasetHosts.delete(ownedPending)); };
+          if (lifetime.aborted) close(); else lifetime.addEventListener("abort", close, { once: true });
+        }, () => { localDatasetHosts.delete(lifetime); activeDatasetHosts.delete(ownedPending); });
+      }
+      const host = await pending;
+      signal.throwIfAborted(); operation.assertCurrent();
+      return host;
+    });
+  const datasetDependencies = {
+    hostForWorkspace: datasetForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    namedDataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      await warmCredentialCache();
+      const credentials = requireCredentials(cachedCredentials), credentialGeneration = credentialCacheGeneration;
+      signal.throwIfAborted();
+      const marker = workspace.shareView as { shareId?: unknown; grantedSelector?: unknown; ended?: unknown } | null;
+      const cache = namedDatasetPages.scope({ owner: datasetCopyOwnerKey(credentials),
+        binding: [workspace.workspaceId, workspace.rootPath, marker?.shareId, credentials.relayUrl],
+        localAuthority: [marker?.grantedSelector, marker?.ended ?? false],
+        assertCurrent: () => { signal.throwIfAborted(); if (credentialGeneration !== credentialCacheGeneration) throw Error("Your server session changed. Reopen this workspace."); },
+      });
+      try { return createNamedDatasetData({ workspaceId: workspace.workspaceId, shareView: workspace.shareView, credentials, credentialGeneration, signal,
+        currentCredentialGeneration: () => credentialCacheGeneration,
+        assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials,
+        offline: { relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init, true), cache },
+      }); } catch (error) { await cache.clear(); throw error; }
+    },
+    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      const local = await datasetForWorkspace(workspace, signal);
+      return createDatasetAuthorityRouter(local, {
+        status: async datasetId => { signal.throwIfAborted(); return local.transferStatus(datasetId); },
+        remote: async (targetOrigin, datasetId) => {
+          const remote = await remoteForWorkspace(workspace);
+          signal.throwIfAborted();
+          if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) {
+            throw new Error("Sign in to the server that hosts this Collection.");
+          }
+          const data = createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+            currentCredentialGeneration: () => credentialCacheGeneration,
+            assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
+          const ownerKey = datasetCopyOwnerKey(remote.credentials);
+          const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+            signal.throwIfAborted(); operation.assertCurrent();
+            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
+              datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
+              assertOwner: () => {
+                if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
+              },
+              runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
+            });
+          });
+          const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
+            ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,
+            assertCurrent: () => signal.throwIfAborted(), relayResponse: relayShareResponseWithCredentials,
+            onAccessLost: () => copy.accessLost() });
+          return copy.data(data, source, signal);
+        },
+      });
+    },
+    flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      await openWorkspaceActivity(workspace);
+      const captured = await withEngineAdapter(workspace, async adapter => {
+        signal.throwIfAborted();
+        let capture = await adapter.reconcileCapture();
+        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+          signal.throwIfAborted();
+          capture = await adapter.flushCapture();
+        }
+        signal.throwIfAborted();
+        if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+        return true;
+      });
+      if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+    },
+    withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
+      const result = await withEngineAdapter(workspace, work);
+      if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+      return result;
+    },
+    createSources: async (workspace: DesktopRendererWorkspaceOperation["workspace"], files: Record<string, string>, signal: AbortSignal) => {
+      assertWritableWorkspace(workspace);
+      const entries = Object.entries(files).sort(([left], [right]) => Number(left.endsWith("dataset.json")) - Number(right.endsWith("dataset.json")));
+      for (const [path, source] of entries) {
+        signal.throwIfAborted();
+        await createDatasetSourceFile(workspace.rootPath, path, source);
+      }
+      await openWorkspaceActivity(workspace);
+      const captured = await withEngineAdapter(workspace, async adapter => {
+        let capture = await adapter.reconcileCapture();
+        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+          signal.throwIfAborted();
+          capture = await adapter.flushCapture();
+        }
+        if (!capture.settled || !capture.running || capture.degraded) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
+        const metadata = await adapter.captureSourceMetadata({ workspaceId: workspace.workspaceId, versionId: "main", paths: Object.keys(files),
+          bounds: { maxInputFiles: 64, maxInputBytes: 2 * 1024 * 1024 }, signal });
+        if (metadata.files.length !== entries.length || metadata.files.some(file => !Object.hasOwn(files, file.path) || file.sha256 !== createHash("sha256").update(files[file.path]!).digest("hex"))) {
+          throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
+        }
+        return true;
+      });
+      if (!captured) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
+      signal.throwIfAborted();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+    },
+  };
+  const exportDatasetArchive = async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string,
+    path: string, overwrite: boolean | undefined, signal: AbortSignal, authorize: () => void) => {
+    const local = await datasetForWorkspace(workspace, signal);
+    const transfer = local.transferStatus(datasetId);
+    if (transfer) {
+      if (transfer.state !== "imported") throw new Error("Finish sharing this Collection before exporting it.");
+      const remote = await remoteForWorkspace(workspace);
+      const archive = await openRemoteDatasetRecoveryExport({ workspaceId: workspace.workspaceId, datasetId,
+        origin: transfer.targetOrigin, ...remote, currentCredentialGeneration: () => credentialCacheGeneration,
+        signal, assertCurrent: authorize, maxBytes: 1024 * 1024 * 1024 + 2 * 1024 * 1024,
+        relayResponse: relayShareResponseWithCredentials });
+      try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream, maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+      finally { await archive.dispose(); }
+    }
+    const archive = await local.prepareExport(datasetId, { signal });
+    try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+    finally { await archive.dispose(); }
+  };
+  const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+    ...datasetDependencies,
+    chooseRecoveryFile: async (_workspace, signal) => {
+      const chosen = await dialog.showOpenDialog({ title: "Restore Collection recovery", properties: ["openFile"],
+        filters: [{ name: "Collection recovery", extensions: ["dohc-recovery"] }] });
+      signal.throwIfAborted();
+      return chosen.canceled ? null : chosen.filePaths[0] ?? null;
+    },
+    exportArchive: async (workspace, input, signal, authorize) => {
+      if (input.savePath !== undefined || input.overwrite !== undefined) throw new Error("Choose the recovery export location in the save dialog.");
+      const chosen = await dialog.showSaveDialog({ title: "Export Collection recovery", defaultPath: `collection-${input.datasetId.slice(0, 8)}.dohc-recovery`,
+        filters: [{ name: "Collection recovery", extensions: ["dohc-recovery"] }] });
+      signal.throwIfAborted(); authorize();
+      if (chosen.canceled || !chosen.filePath) return null;
+      return exportDatasetArchive(workspace, input.datasetId, chosen.filePath, true, signal, authorize);
+    },
+    withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
+  });
+  ipcMain.handle(CHANNELS.dataset, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
+  });
+  const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
+    ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+    exportArchive: async (workspace, input, signal, authorize) => {
+      if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
+      return exportDatasetArchive(workspace, input.datasetId, input.savePath, input.overwrite, signal, authorize);
+    },
+  });
+  datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
+  const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
+  const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
+    { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
+      ...ownerPublicationDependencies, datasetForWorkspace,
+      launchLocalDataset: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+        signal.throwIfAborted(); operation.assertCurrent();
+        const host = await datasetForWorkspace(workspace, signal);
+        let pending = localDatasetLaunches.get(host);
+        if (!pending) {
+          pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
+          localDatasetLaunches.set(host, pending);
+          void pending.catch(() => localDatasetLaunches.delete(host));
+        }
+        const launcher = await pending;
+        signal.throwIfAborted(); operation.assertCurrent();
+        return launcher.launch(publicationId, signal);
+      }),
+    });
+  const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
+    const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
+    if (dataset) {
+      const remote = await remoteForWorkspace(workspace);
+      signal.throwIfAborted();
+      if (!remote.credentials.relayUrl) throw new Error("Reconnect your sharing server before publishing.");
+      const local = await datasetForWorkspace(workspace, signal);
+      const targetOrigin = new URL(remote.credentials.relayUrl).origin;
+      const target = createRemoteDatasetTransferTarget({ workspaceId: workspace.workspaceId, datasetId: dataset.datasetId, origin: targetOrigin,
+        ...remote, currentCredentialGeneration: () => credentialCacheGeneration, signal, assertCurrent: () => signal.throwIfAborted(),
+        relayStream: relayShareJsonWithCredentials });
+      await local.transferToShared({ datasetId: dataset.datasetId, targetOrigin, target, signal });
+      return;
+    }
+  };
+  const resolveDatasetRevision = async (workspace: DesktopRendererWorkspaceOperation["workspace"], binding: import("@dohc/security-contract/dataset").AppDatasetBinding, signal: AbortSignal) =>
+    resolveRemoteDatasetRevision(await datasetDependencies.dataForWorkspace(workspace, signal), binding);
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, resolveDatasetRevision });
   const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerPublicationDependencies,
+    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, resolveDatasetRevision,
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
@@ -4100,7 +4379,6 @@ function registerIpcHandlers(): void {
     ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
-
   const {
     assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,

@@ -1,0 +1,130 @@
+import { test, expect } from "@playwright/test";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createLocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
+import { createLocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
+import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
+import { prepareLocalAppPublication, type AppPublicationPreparationDependencies } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
+import { dataset as agentDataset, type ToolContext } from "../../../packages/mcp/src/tools";
+import { DatasetRequest } from "../../../packages/cli/src/dataset";
+
+const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+test("stock orders use custom apps, relations, transactions, and attachments through the same Collection and agent APIs", async ({ browser }, info) => {
+  test.setTimeout(90000);
+  const directory = await mkdtemp(join(tmpdir(), "dohc-stock-browser-"));
+  const host = await createLocalDatasetHost({workspaceId:"stock-workspace",workspaceRoot:directory});
+  const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({backend:host.apps,lifetime:lifetime.signal});
+  const context = await browser.newContext();
+  const sources = new Map<string,Uint8Array>();
+  const adapter: AppPublicationPreparationDependencies["adapter"] = {
+    async captureSourceMetadata({workspaceId,versionId,paths}) {
+      const files = await Promise.all([...paths].sort().map(async path => {
+        const bytes = await readFile(new URL(`../../../examples/${path}`,import.meta.url));sources.set(path,bytes);
+        return {path,objectId:path,contentKind:"text" as const,sha256:sha(bytes),byteLength:bytes.byteLength,latestMomentId:"source"};
+      }));
+      return {workspaceId,versionId,files,totalBytes:files.reduce((total,file)=>total+file.byteLength,0),sourceDigest:sha(JSON.stringify(["dohc-source-capture-v1",workspaceId,versionId,files]))};
+    },
+    async hydrateCapturedSources(capture) { return capture.files.map(file=>({path:file.path,sha256:file.sha256,bytes:sources.get(file.path)!})); },
+  };
+  try {
+    const prepared = await host.prepare({descriptorPath:"stock-orders/dataset.json",adapter});
+    const revision = await host.approve({preparationId:prepared.preparationId,revisionSha256:prepared.revision.revisionSha256});
+    const selection = {datasetId:revision.datasetId,revision:revision.revision,revisionSha256:revision.revisionSha256};
+    const operation = (name:string)=>revision.definition.operations.find(operation=>operation.name===name)!.operationId;
+    const field = (table:string,column:string)=>revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId;
+    const ownerRead = (name:string,input:Record<string,any>={})=>host.query({...selection,operationId:operation(name),input,idempotencyKey:randomUUID()});
+    const publish = async (appRoot:string) => {
+      const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
+      expect(source.candidate.inputs.some(file=>file.path.endsWith("backend.ts")||file.path.endsWith("schema.sql"))).toBe(false);
+      return host.apps.activate(source,lifetime.signal);
+    };
+    const shop = await publish("stock-orders"), board = await publish("stock-orders/board");
+    const shopPage = await context.newPage(), boardPage = await context.newPage();
+    await boardPage.goto(await launcher.launch(board.publicationId,lifetime.signal));
+    const inventory = boardPage.frameLocator("iframe");
+    await expect(inventory.locator('[data-item-id="shirt-s"]')).toContainText("20 available");
+    await shopPage.goto(await launcher.launch(shop.publicationId,lifetime.signal));
+    const form = shopPage.frameLocator("iframe");
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    await form.getByLabel("Your name",{exact:true}).fill("Synthetic Shop Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("2");
+    await form.getByLabel("Quantity: Fundraiser shirt, medium",{exact:true}).fill("3");
+    const receipt = Buffer.from("%PDF-1.7 synthetic stock receipt\n%%EOF");
+    await form.getByLabel("Receipt (optional)",{exact:true}).setInputFiles({name:"receipt.pdf",mimeType:"application/pdf",buffer:receipt});
+    await shopPage.setViewportSize({width:390,height:844});await shopPage.emulateMedia({colorScheme:"dark",reducedMotion:"reduce"});
+    expect(await form.locator("body").evaluate(body=>body.scrollWidth<=innerWidth)).toBe(true);
+    await form.getByRole("button",{name:"Place order",exact:true}).focus();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeFocused();
+    await shopPage.screenshot({path:info.outputPath("stock-order-mobile-dark.png")});
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("Order saved");
+    await expect(form.getByRole("status")).toContainText("75.00");
+    await inventory.getByRole("button",{name:"Refresh stock",exact:true}).click();
+    await expect(inventory.locator('[data-item-id="shirt-s"]')).toContainText("18 available");
+    await expect(inventory.locator('[data-item-id="shirt-m"]')).toContainText("17 available");
+    await boardPage.screenshot({path:info.outputPath("stock-custom-board.png")});
+    const rows = (await ownerRead("tableOrders")).result as any;
+    expect(rows.rows).toHaveLength(1);
+    const orderId = rows.rows[0].id, receiptId = rows.rows[0].values[field("orders","receipt_file_id")];
+    expect(rows.rows[0].values[field("orders","customer_name")]).toBe("Synthetic Shop Customer");
+    const lines = (await ownerRead("tableOrderItems")).result as any;
+    expect(lines.rows).toHaveLength(2);
+    expect(lines.rows.every((line:any)=>line.values[field("order_items","order_id")]===orderId)).toBe(true);
+    expect(revision.definition.tables.find(table=>table.sqlName==="order_items")!.fields.find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
+    expect(Buffer.from((await host.file({...selection,fileId:receiptId})).bytesBase64,"base64")).toEqual(receipt);
+    const request = {action:"invoke",workspaceId:"stock-workspace",...selection,operationId:operation("tableOrders"),input:{},idempotencyKey:"agent-stock-read"};
+    const agentContext: ToolContext = {root:directory,home:directory,request:async envelope=>{
+      expect(envelope.verb).toBe("dataset");
+      const parsed = DatasetRequest.parse((envelope.args as {request:unknown}).request);
+      if(parsed.action!=="invoke"||parsed.workspaceId!=="stock-workspace")throw Error("Wrong agent request scope");
+      return {kind:"invoked",...await (parsed.operationId===operation("editOrderStatus") ? host.action(parsed) : host.query(parsed))};
+    }};
+    const agent = await agentDataset(agentContext,request);
+    expect(agent).toMatchObject({kind:"invoked",result:rows});
+    await expect(host.action({...selection,operationId:operation("placeOrder"),input:{customerName:"Overbooked",items:[{itemId:"shirt-m",quantity:1},{itemId:"shirt-s",quantity:100}]},idempotencyKey:"atomic-refusal"})).rejects.toThrow();
+    expect((await ownerRead("tableOrderItems")).result).toEqual(lines);
+    await inventory.getByRole("button",{name:"Refresh stock",exact:true}).click();
+    await expect(inventory.locator('[data-item-id="shirt-m"]')).toContainText("17 available");
+    await expect(host.apps.request(board.publicationId,"invoke",{authorityRevision:board.authorityRevision,operation:"placeOrder",input:{customerName:"Forbidden",items:[{itemId:"shirt-m",quantity:1}]},idempotencyKey:"forbidden-board-write"})).rejects.toThrow();
+    const cancelled = await agentDataset(agentContext,{...request,operationId:operation("editOrderStatus"),idempotencyKey:"agent-cancel",input:{id:orderId,expectedVersion:1,values:{[field("orders","status")]:"cancelled"}}});
+    expect(cancelled).toMatchObject({kind:"invoked",result:{id:orderId,version:2}});
+    await inventory.getByRole("button",{name:"Refresh stock",exact:true}).click();
+    await expect(inventory.locator('[data-item-id="shirt-s"]')).toContainText("20 available");
+    await expect(inventory.locator('[data-item-id="shirt-m"]')).toContainText("20 available");
+    await form.getByRole("button",{name:"Place another order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    await form.getByLabel("Your name",{exact:true}).fill("Refused Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("1000");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("no longer has enough stock");
+    await shopPage.reload();
+    await form.getByRole("button",{name:"Discard pending order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("It may already be saved");
+    await form.getByRole("button",{name:"Discard this order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    let loseSaveReply = true;
+    await shopPage.route("**/backend", async route => {
+      const input = route.request().postDataJSON();
+      if (loseSaveReply && input.op === "backend.attempt" && input.request.action === "save") {
+        loseSaveReply = false; const response = await route.fetch(); expect(response.status()).toBe(200);
+        await route.fulfill({status:503,body:""});
+      } else await route.continue();
+    });
+    await form.getByLabel("Your name",{exact:true}).fill("Lost Save Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("1");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await form.getByRole("button",{name:"Discard pending order",exact:true}).click();
+    await form.getByRole("button",{name:"Discard this order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    await form.getByLabel("Your name",{exact:true}).fill("Corrected Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("2");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("Order saved");
+    const finalOrders = (await ownerRead("tableOrders")).result as any;
+    expect(finalOrders.rows).toHaveLength(2);
+    expect(finalOrders.rows.map((row:any)=>row.values[field("orders","customer_name")]).sort()).toEqual(["Corrected Customer","Synthetic Shop Customer"]);
+    await info.attach("collection-agent-records",{body:JSON.stringify({rows,lines,agent}),contentType:"application/json"});
+  } finally {await context.close();lifetime.abort();await launcher.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
+});

@@ -1,4 +1,5 @@
 import { createAppLaunchHandler } from "./appLaunch";
+import { createNamedAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
@@ -37,6 +38,11 @@ const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
+// Match the relay's global app admission budget. Valid link holders behind
+// one network do not share the malformed-request allowance.
+export const EXCHANGE_GLOBAL_BUCKET_CAPACITY = 2_400;
+const EXCHANGE_GLOBAL_REFILL_PER_SECOND = 40;
+const MAX_EXCHANGES_IN_FLIGHT = 64;
 const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
@@ -338,9 +344,7 @@ function parseCookies(header: string | null): Map<string, string> {
 
 async function exchangeInput(request: Request): Promise<string | null> {
   try {
-    const text = await request.text();
-    if (Buffer.byteLength(text) > MAX_EXCHANGE_BODY_BYTES) return null;
-    const input = asRecord(JSON.parse(text));
+    const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(DEFAULT_RELAY_REQUEST_TIMEOUT_MS)])));
     if (!input) return null;
     const secret = input.secret;
     return typeof secret === "string" && LINK_SECRET_PATTERN.test(secret)
@@ -846,6 +850,10 @@ export function createShareWebApplication({
     EXCHANGE_REFILL_PER_SECOND,
     EXCHANGE_MAX_IPS,
   );
+  const exchangeGlobalRateLimiter = new TokenBucketLimiter(EXCHANGE_GLOBAL_BUCKET_CAPACITY, EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1);
+  const exchangeAddressProbes = new TokenBucketLimiter(600, 10, EXCHANGE_MAX_IPS);
+  const exchangeAddressInFlight = new Map<string, number>();
+  let exchangesInFlight = 0;
   const blobProxyLimiter = new ShareWebInFlightLimiter(
     MAX_BLOB_PROXIES_PER_SESSION,
     MAX_BLOB_PROXIES_PER_GRANT,
@@ -1103,7 +1111,11 @@ export function createShareWebApplication({
   }
 
   if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host)) throw new TypeError("App viewer origin must be an exact configured public Host.");
-  const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
+  if (appLaunchConfig && accountAuth && accountAuth.publicOrigin !== appLaunchConfig.viewerOrigin) throw new TypeError("Named app accounts must use the app viewer origin.");
+  const resolveNamedAppMaterial = appLaunchConfig && accountAuth && relayExchangeKey ? createNamedAppMaterialResolver({
+    relayUrl, publicOrigin: appLaunchConfig.viewerOrigin, exchangeKey: relayExchangeKey, fetchRelay,
+  }) : undefined;
+  const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial, resolveNamedMaterial: resolveNamedAppMaterial}) : undefined;
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
   const handle = async (request: Request): Promise<Response> => {
     if (appLaunch?.matches(request)) return appLaunch.handle(request);
@@ -1186,70 +1198,83 @@ export function createShareWebApplication({
       const agent = pathname === "/api/mcp/exchange";
       if (agent && (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin || request.headers.get("sec-fetch-site") === "cross-site")) return refused();
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
-      if (!exchangeRateLimiter.allow(clientIp, nowMs())) return refused();
-      let secret: string | null = null;
+      const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
+      if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
+          !exchangeGlobalRateLimiter.allow("global", nowMs())) return refused(429);
+      exchangeAddressInFlight.set(clientIp, addressPending + 1);
+      exchangesInFlight++;
       try {
-        if (agent) {
-          const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
-          if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
-        } else secret = await exchangeInput(request);
-      } catch {return refused();}
-      if (!secret) return refused();
-      try {
-        const relayResponse = await fetchRelay(
-          relayRequest(relayUrl, "/sync/link-exchange", {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "x-dohc-relay-client-ip": clientIp,
-              ...(relayExchangeKey
-                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                : {}),
+        const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : refused(429);
+        let secret: string | null = null;
+        try {
+          if (agent) {
+            const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
+            if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
+          } else secret = await exchangeInput(request);
+        } catch {return malformed();}
+        if (!secret) return malformed();
+        try {
+          const bounded = boundedRelayRequest(request.signal, relayUrl, "/sync/link-exchange", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-dohc-relay-client-ip": clientIp,
+                ...(relayExchangeKey
+                  ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+                  : {}),
+              },
+              body: JSON.stringify({ secret }),
+            }, relayTimeoutMs);
+          let exchanged: ReturnType<typeof parsedRelaySession>;
+          try {
+            const relayResponse = await fetchRelay(bounded.request);
+            if (relayResponse.status !== 200) {await relayResponse.body?.cancel();return refused(relayResponse.status === 429 ? 429 : 404);}
+            exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
+          } finally {bounded.dispose();}
+          if (!exchanged) return refused();
+          const discriminator = linkDiscriminator(exchanged.grantId);
+          const token = newSessionToken();
+          if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
+          const cookies = parseCookies(request.headers.get("cookie"));
+          const existingProfile = agent ? undefined : cookies.get(profileCookieName(discriminator));
+          const profile =
+            existingProfile && LINK_SECRET_PATTERN.test(existingProfile)
+              ? existingProfile
+              : newProfileSecret();
+          if (!LINK_SECRET_PATTERN.test(profile)) return refused();
+          sessions.set(
+            token,
+            {
+              discriminator,
+              grantId: exchanged.grantId,
+              capabilityToken: exchanged.capabilityToken,
+              expiresAtMs: exchanged.expiresAtMs,
+              createdAtMs: nowMs(),
+              ...(agent ? {agentProfileSecret: profile} : {}),
             },
-            body: JSON.stringify({ secret }),
-          }),
-        );
-        if (relayResponse.status !== 200) return refused();
-        const exchanged = parsedRelaySession(await relayResponse.json(), nowMs(), publicEditRelease);
-        if (!exchanged) return refused();
-        const discriminator = linkDiscriminator(exchanged.grantId);
-        const token = newSessionToken();
-        if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
-        const cookies = parseCookies(request.headers.get("cookie"));
-        const existingProfile = agent ? undefined : cookies.get(profileCookieName(discriminator));
-        const profile =
-          existingProfile && LINK_SECRET_PATTERN.test(existingProfile)
-            ? existingProfile
-            : newProfileSecret();
-        if (!LINK_SECRET_PATTERN.test(profile)) return refused();
-        sessions.set(
-          token,
-          {
-            discriminator,
-            grantId: exchanged.grantId,
-            capabilityToken: exchanged.capabilityToken,
-            expiresAtMs: exchanged.expiresAtMs,
-            createdAtMs: nowMs(),
-            ...(agent ? {agentProfileSecret: profile} : {}),
-          },
-          nowMs(),
-        );
-        if (agent) return jsonResponse({ok: true, bearer: `${discriminator}.${token}`, endpoint: "/mcp"});
-        const responseHeaders = new Headers();
-        responseHeaders.append(
-          "set-cookie",
-          sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
-        );
-        responseHeaders.append(
-          "set-cookie",
-          profileCookie(discriminator, profile),
-        );
-        return jsonResponse(
-          { ok: true, session: discriminator },
-          { headers: responseHeaders },
-        );
-      } catch {
-        return refused();
+            nowMs(),
+          );
+          if (agent) return jsonResponse({ok: true, bearer: `${discriminator}.${token}`, endpoint: "/mcp"});
+          const responseHeaders = new Headers();
+          responseHeaders.append(
+            "set-cookie",
+            sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
+          );
+          responseHeaders.append(
+            "set-cookie",
+            profileCookie(discriminator, profile),
+          );
+          return jsonResponse(
+            { ok: true, session: discriminator },
+            { headers: responseHeaders },
+          );
+        } catch {
+          return refused();
+        }
+      } finally {
+        exchangesInFlight--;
+        const remaining = exchangeAddressInFlight.get(clientIp)! - 1;
+        if (remaining) exchangeAddressInFlight.set(clientIp, remaining); else exchangeAddressInFlight.delete(clientIp);
       }
     }
 

@@ -4676,7 +4676,7 @@ describe("relay capability reads", () => {
     ];
     const storage = await newStorage();
     const h = handler(storage, {
-      linkExchangeRateLimiter: exchangeLimiter,
+      linkExchangeGlobalRateLimiter: exchangeLimiter,
       linkReadRateLimiter: readLimiter,
       linkGrantReadRateLimiter: grantReadLimiter,
       linkLogReadRateLimiter: logLimiter,
@@ -4697,7 +4697,7 @@ describe("relay capability reads", () => {
           request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
         )
       ).status,
-    ).toBe(404);
+    ).toBe(429);
     const callsAfterPublicExhaustion = limiterCalls.map(
       (spy) => spy.mock.calls.length,
     );

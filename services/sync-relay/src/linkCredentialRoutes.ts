@@ -1,4 +1,4 @@
-import { jsonResponse, type TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { LinkExchangeResult, PublicEditRelease } from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
@@ -58,6 +58,8 @@ export function createLinkCredentialRoutes(
   newLinkBearer: () => string,
   newLinkHandoffCode: () => string,
   linkExchangeRateLimiter: TokenBucketLimiter,
+  linkExchangeGlobalRateLimiter: TokenBucketLimiter,
+  linkExchangeGrantRateLimiter: TokenBucketLimiter,
   linkRedeemRateLimiter: TokenBucketLimiter,
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
@@ -101,102 +103,121 @@ export function createLinkCredentialRoutes(
     };
   };
 
+  // One network may host an event, but cannot spend the whole service budget.
+  const exchangeAddressProbes = new TokenBucketLimiter(600, 10, 10_000);
+  const exchangeAddressInFlight = new Map<string, number>();
+  let exchangesInFlight = 0;
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     if (!linkKey) return refused();
     if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
-    if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
-
-    let secret = "";
-    let wellFormed = false;
+    const addressPending = exchangeAddressInFlight.get(ip) ?? 0;
+    if (addressPending >= 16 || exchangesInFlight >= 64 || !exchangeAddressProbes.allow(ip, nowMs()) ||
+        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+    exchangeAddressInFlight.set(ip, addressPending + 1);
+    exchangesInFlight++;
     try {
-      const input = await readJsonObject(request);
-      if (typeof input.secret === "string") {
-        secret = input.secret;
-        wellFormed = LINK_SECRET_PATTERN.test(secret);
-      }
-    } catch {
-      // The exchange never distinguishes malformed JSON from a bad bearer.
-    }
 
-    try {
-      // Hash before deciding whether the input was well formed. The lookup and
-      // comparison also run for garbage, against a digest that cannot match.
-      const secretHash = hashLinkBearer(secret, linkKey);
-      const dummyHash = hashLinkBearer("", linkKey);
-      const found = storage.findLinkGrantByCredentialHash(secretHash);
-      const hashMatches = constantTimeHashEqual(
-        secretHash,
-        found?.credential.secretHash ?? dummyHash,
-      );
-      if (!wellFormed || !found || !hashMatches) return refused();
-
-      const authorized = authorizeLinkShareAction({
-        storage,
-        grantId: found.grant.grantId,
-        action: "read",
-      });
-      if (
-        !authorized.ok ||
-        authorized.grant.generation !== found.credential.generation ||
-        (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
-      ) {
-        return refused();
+      let secret = "";
+      let wellFormed = false;
+      try {
+        const input = await readBoundedJson(request, 4096, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]));
+        if (input && typeof input === "object" && !Array.isArray(input) && "secret" in input && typeof input.secret === "string") {
+          secret = input.secret;
+          wellFormed = LINK_SECRET_PATTERN.test(secret);
+        }
+      } catch {
+        // The exchange never distinguishes malformed JSON from a bad bearer.
       }
 
-      const capabilityToken = newLinkBearer();
-      const mintedAtMs = nowMs();
-      const capabilityExpiresAtMs = mintedAtMs + LINK_SESSION_TTL_MS;
-      const minted = storage.mintLinkSession({
-        session: {
-          sessionId: newId(),
-          capabilityHash: hashLinkBearer(capabilityToken, linkKey),
-          grantId: authorized.grant.grantId,
-          generation: authorized.grant.generation,
-          mintedAtMs,
-          expiresAtMs: capabilityExpiresAtMs,
-        },
-        // This is the commit-time check. Rotation, retuning, revocation, owner
-        // loss, or selector damage that lands after the first lookup wins.
-        guard: () => {
-          const current = storage.findLinkGrantByCredentialHash(secretHash);
-          const currentMatches = constantTimeHashEqual(
-            secretHash,
-            current?.credential.secretHash ?? dummyHash,
-          );
-          if (
-            !current ||
-            !currentMatches ||
-            current.credential.credentialId !== found.credential.credentialId
-          ) {
-            throw notFound();
-          }
-          const fresh = authorizeLinkShareAction({
-            storage,
-            grantId: current.grant.grantId,
-            action: "read",
-          });
-          if (
-            !fresh.ok ||
-            fresh.grant.generation !== found.grant.generation ||
-            fresh.grant.generation !== current.credential.generation ||
-            fresh.grant.access !== authorized.grant.access
-          ) {
-            throw notFound();
-          }
-        },
-      });
-      if (!minted) return refused();
+      try {
+        // Hash before deciding whether the input was well formed. The lookup and
+        // comparison also run for garbage, against a digest that cannot match.
+        const secretHash = hashLinkBearer(secret, linkKey);
+        const dummyHash = hashLinkBearer("", linkKey);
+        const found = storage.findLinkGrantByCredentialHash(secretHash);
+        const hashMatches = constantTimeHashEqual(
+          secretHash,
+          found?.credential.secretHash ?? dummyHash,
+        );
+        if (!wellFormed || !found || !hashMatches) {
+          if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+          return refused();
+        }
 
-      const exchange = linkExchangeResult(
-        authorized,
-        capabilityToken,
-        capabilityExpiresAtMs,
-      );
-      return jsonResponse({ ok: true, ...exchange });
-    } catch (error) {
-      if (error instanceof RelayError) return refused();
-      throw error;
+        const authorized = authorizeLinkShareAction({
+          storage,
+          grantId: found.grant.grantId,
+          action: "read",
+        });
+        if (
+          !authorized.ok ||
+          authorized.grant.generation !== found.credential.generation ||
+          (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
+        ) {
+          if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+          return refused();
+        }
+        if (!linkExchangeGrantRateLimiter.allow(found.grant.grantId, nowMs())) throw relayError("link_read_rate_limited");
+
+        const capabilityToken = newLinkBearer();
+        const mintedAtMs = nowMs();
+        const capabilityExpiresAtMs = mintedAtMs + LINK_SESSION_TTL_MS;
+        const minted = storage.mintLinkSession({
+          session: {
+            sessionId: newId(),
+            capabilityHash: hashLinkBearer(capabilityToken, linkKey),
+            grantId: authorized.grant.grantId,
+            generation: authorized.grant.generation,
+            mintedAtMs,
+            expiresAtMs: capabilityExpiresAtMs,
+          },
+          // This is the commit-time check. Rotation, retuning, revocation, owner
+          // loss, or selector damage that lands after the first lookup wins.
+          guard: () => {
+            const current = storage.findLinkGrantByCredentialHash(secretHash);
+            const currentMatches = constantTimeHashEqual(
+              secretHash,
+              current?.credential.secretHash ?? dummyHash,
+            );
+            if (
+              !current ||
+              !currentMatches ||
+              current.credential.credentialId !== found.credential.credentialId
+            ) {
+              throw notFound();
+            }
+            const fresh = authorizeLinkShareAction({
+              storage,
+              grantId: current.grant.grantId,
+              action: "read",
+            });
+            if (
+              !fresh.ok ||
+              fresh.grant.generation !== found.grant.generation ||
+              fresh.grant.generation !== current.credential.generation ||
+              fresh.grant.access !== authorized.grant.access
+            ) {
+              throw notFound();
+            }
+          },
+        });
+        if (!minted) return refused();
+
+        const exchange = linkExchangeResult(
+          authorized,
+          capabilityToken,
+          capabilityExpiresAtMs,
+        );
+        return jsonResponse({ ok: true, ...exchange });
+      } catch (error) {
+        if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) return refused();
+        throw error;
+      }
+    } finally {
+      exchangesInFlight--;
+      const remaining = exchangeAddressInFlight.get(ip)! - 1;
+      if (remaining) exchangeAddressInFlight.set(ip, remaining); else exchangeAddressInFlight.delete(ip);
     }
   };
 

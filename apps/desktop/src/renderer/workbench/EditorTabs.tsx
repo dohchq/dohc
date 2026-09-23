@@ -23,6 +23,7 @@ import {
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
+  parseTransactionalCollectionTabPath,
 } from "./workbenchState";
 
 export function momentDiffName(label?: string): string {
@@ -36,6 +37,7 @@ export function momentDiffName(label?: string): string {
 // from the path is the fallback until then (a tab restored on launch has no
 // page yet).
 function fileName(path: string, label?: string): string {
+  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
@@ -60,6 +62,7 @@ function fileName(path: string, label?: string): string {
 }
 
 function tabTitle(path: string, label?: string): string {
+  if (parseTransactionalCollectionTabPath(path)) return label ? `Collection: ${label}` : "Collection";
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);

@@ -110,7 +110,7 @@ export function directoryFingerprint(path) {
 function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "packages/sdk/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist",
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
 

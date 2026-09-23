@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./dataset-conversion": "./src/datasetConversion.ts",
+    "./dataset-attempts": "./src/datasetAttempts.ts",
+    "./dataset-artifacts": "./src/datasetArtifacts.ts",
+    "./app-backend": "./src/appBackend.ts",
+    "./dataset": "./src/dataset.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",

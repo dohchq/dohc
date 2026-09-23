@@ -1,5 +1,7 @@
 # Writable app data is a narrow, owner-approved lane
 
+The create-only, no-files, browser-only scope below is superseded for datasets by [the dataset authority decision](0010-app-backends-own-private-transactional-data.md). The narrow collection capability remains supported. Explicit owner approval and separation from the trusted sharing service still apply.
+
 Published apps must let link holders act: a trip poll that waits for owner approval per vote is dead. But a general writable-data interface for anonymous strangers is unshippable. The lane is narrow: owner-approved app data is the only non-document application state a link holder may change without a proposal, and v1 ships at most one typed create-only collection with a fixed schema, idempotency keys, server-set principal fields, per-grant quotas, append-only history, and one owner-visible bulk undo. Update-own-row arrives only when a real app requires it. Files are never part of this lane.
 
 Before this lane ships, the design must name the authoritative store for app data and its sync, export, backup, restore, and deletion path, for dohc Drive and self-hosters alike. A "writable" boolean is not an authorization model; capabilities name the app publication, dataset, operation, and row policy.

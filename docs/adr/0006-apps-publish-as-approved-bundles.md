@@ -8,6 +8,10 @@ Published apps use ordinary browser networking, subject to browser rules and the
 
 Before approval, the owner sees which data and operations the app receives and that the app may send received data elsewhere. Before launch, the recipient sees that the app can contact other sites and that the viewer's remote-media privacy guarantee does not apply. Unpublishing refuses new launches and subsequent protected app reads and writes. Revoking or narrowing a capability stops subsequent unauthorized dohc reads and writes at the server's authority check. These actions cannot recall received data or guarantee that a loaded app stops external traffic. The interface may close an embedded app after withdrawal without presenting closure as network enforcement.
 
+Collection responses are ordinary files within the share's selector. People with that share can read each response in full, including fields omitted by the app's collection view. Collection approval must permit reading every submitted field. Private responses require an app backend whose data is separate from shared files. Filtering the collection view does not create that boundary.
+
+Dataset publications pin an approved dataset revision and granted operations alongside the frontend. [ADR 0010](0010-app-backends-own-private-transactional-data.md) keeps operations isolated and commits through the dataset authority. Browser networking rules above do not grant backend networking or access to host credentials.
+
 The publication pins the executable bundle. Remote script and module loading remain blocked; dependencies must be included in the approved build. This constrains browser script loading, not every possible use of fetched data by approved code. Credential isolation, origin isolation, selector containment, server authorization, and abuse budgets remain mandatory with external networking enabled.
 
 ## Why networking is not a dohc capability

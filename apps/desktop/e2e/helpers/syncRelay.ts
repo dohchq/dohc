@@ -17,6 +17,7 @@ export interface SyncRelayHandle {
   port: number;
   dbPath: string;
   stop(): Promise<void>;
+  diagnostics(): { stdout: string; stderr: string };
 }
 
 export interface SyncRelayLinkBoundary {
@@ -31,6 +32,7 @@ export async function spawnSyncRelay(input: {
   // desktop app already has in its credential file.
   port?: number;
   linkBoundary?: SyncRelayLinkBoundary;
+  appPublications?: boolean;
 }): Promise<SyncRelayHandle> {
   const child: ChildProcess = spawn(
     process.execPath,
@@ -46,6 +48,7 @@ export async function spawnSyncRelay(input: {
         SYNC_RELAY_TEST_AUTH: "1",
         SYNC_RELAY_PORT: String(input.port ?? 0),
         SYNC_RELAY_DB_PATH: input.dbPath,
+        ...(input.appPublications ? { DOHC_RELAY_APP_PUBLICATIONS: "1" } : {}),
         ...(input.linkBoundary
           ? {
               DOHC_RELAY_LINK_KEY: input.linkBoundary.linkKey,
@@ -59,9 +62,9 @@ export async function spawnSyncRelay(input: {
     },
   );
 
+  let stdout = "";
+  let stderr = "";
   const baseUrl = await new Promise<string>((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
       reject(
@@ -94,6 +97,7 @@ export async function spawnSyncRelay(input: {
     baseUrl,
     port,
     dbPath: input.dbPath,
+    diagnostics: () => ({ stdout, stderr }),
     stop: () =>
       new Promise<void>((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) {

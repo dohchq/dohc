@@ -1,0 +1,11 @@
+{
+  "name": "@dohc/app-browser",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./document": "./src/document.ts",
+    "./broker": "./src/broker.ts"
+  },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "devDependencies": { "@types/node": "^24.13.3", "typescript": "^7.0.2" }
+}

@@ -39,6 +39,9 @@ export interface CalendarViewProps {
   personLabel?: (userId: string) => string | null;
   /** The date whose month opens first. Defaults to today. */
   defaultDate?: Date;
+  /** A querying host controls the visible month and loads its full date range. */
+  date?: Date;
+  onNavigate?: (date: Date) => void;
 }
 
 export interface CalendarRecordEvent {
@@ -69,6 +72,8 @@ export function CalendarView({
   onOpenRecord,
   personLabel,
   defaultDate,
+  date,
+  onNavigate,
 }: CalendarViewProps) {
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const titleField = fields[0] ?? null;
@@ -107,7 +112,7 @@ export function CalendarView({
     [dateField, onCellChange],
   );
 
-  if (records.length === 0) {
+  if (records.length === 0 && !onNavigate) {
     return <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>;
   }
 
@@ -117,9 +122,12 @@ export function CalendarView({
         localizer={localizer}
         events={events}
         defaultDate={defaultDate}
+        date={date}
+        onNavigate={onNavigate}
         defaultView="month"
         views={["month"]}
         resizable={false}
+        draggableAccessor={() => !!onCellChange}
         onEventDrop={handleEventDrop}
         onSelectEvent={
           onOpenRecord ? (event) => onOpenRecord(event.record) : undefined

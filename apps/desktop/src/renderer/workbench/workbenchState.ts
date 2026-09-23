@@ -91,6 +91,18 @@ const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 // A collection folder opened as its views (Phase 2 collections). Keyed by
 // the folder path, so reopening re-activates instead of duplicating.
 const COLLECTION_TAB_PREFIX = "dohc://collection/";
+const DATA_COLLECTION_TAB_PREFIX = "dohc://data-collection/";
+
+export function transactionalCollectionTabPath(datasetId: string, tableId: string): string {
+  return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetId)}/${encodeURIComponent(tableId)}`;
+}
+export function parseTransactionalCollectionTabPath(path: string | null): { datasetId: string; tableId: string } | null {
+  if (!path?.startsWith(DATA_COLLECTION_TAB_PREFIX)) return null;
+  const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (parts.length !== 2 || !parts.every(part => uuid.test(part))) return null;
+  return { datasetId: parts[0], tableId: parts[1] };
+}
 
 export function collectionTabPath(collectionPath: string): string {
   return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
@@ -356,6 +368,7 @@ export function isRemovedVirtualTabPath(path: string | null): boolean {
 
 export function isVirtualTabPath(path: string | null): boolean {
   return (
+    parseTransactionalCollectionTabPath(path) !== null ||
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
     isChatsTabPath(path) ||

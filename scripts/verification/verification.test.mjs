@@ -294,6 +294,10 @@ test("verification prepares the engine after Rust without changing gate scope", 
       put(adapterPath, readFileSync(join(root, adapterPath), "utf8").replace("export async function run(", "async function prepareRun(") + `
         export async function run(command,args,options={}) {
           const {enginePath,assertPrepared,hashFile}=await import('./build.mjs');
+          if(command==='pnpm' && args[1]==='@dohc/app-backend-runtime') {
+            assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
+            return {stdout:'compiled runtime'};
+          }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
@@ -414,6 +418,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
         const js = mode === "pr" && job !== "rust";
         assert.deepEqual(report.steps.map(({name})=>name), [
           ...(mode === "pr" ? ["install"] : []),
+          "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js ? ["typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
         ]);
@@ -718,6 +723,9 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
   assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), { rust: true, js: true });
+  for (const file of ["packages/app-backend-runtime/src/child.ts", "examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+  }
   for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }

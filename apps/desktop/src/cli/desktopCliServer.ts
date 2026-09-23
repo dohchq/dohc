@@ -33,6 +33,7 @@ import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 
 interface DesktopCliServerDependencies<State> {
+  dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -128,21 +129,26 @@ export function createDesktopCliServer<State>(
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(await collectionEditContextFor(operation)),
       );
-    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.ownerAppResponses)
-      ? await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+    const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;
-      }) : undefined;
+      });
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
+          if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
+          return dependencies.dataset!(request);
+        }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
-          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment?.aborted)throw new Error("The response workspace attachment changed.");
+          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
       ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment?.aborted) throw new Error("The app publication workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
           return dependencies.ownerAppPublication!(request);
         }) } : {}),
       rootPath: workspace.rootPath,

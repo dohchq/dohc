@@ -3280,7 +3280,7 @@ describe("durable link usage inventory", () => {
     let now = 2_000;
     const limited = handler(storage, {
       relayExchangeKey,
-      linkExchangeRateLimiter: limiter,
+      linkExchangeGlobalRateLimiter: limiter,
       nowMs: () => now,
     });
     await seedFileShare(limited);
@@ -3319,7 +3319,7 @@ describe("durable link usage inventory", () => {
       }),
     );
     expect([absentKey, wrongKey, wrongSecret, rateLimited].map((response) => response.status))
-      .toEqual([404, 404, 404, 404]);
+      .toEqual([404, 404, 404, 429]);
     expect(await ownerLinkInventoryRow(limited, grantId)).toMatchObject({
       lastUsedAtMs: null,
     });
@@ -5566,27 +5566,67 @@ describe("relay link grants", () => {
     }
   });
 
-  it("rate-limits by socket IP before a storage lookup and bounds the bucket map", async () => {
+  it("admits 100 valid same-network exchanges despite invalid probes and still refuses revoked secrets", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h), secret = linkSecret(created.url);
+    const exchange = (value: string) => h(request(null,"/sync/link-exchange",{
+      ...jsonBody({secret:value}),headers:{"content-type":"application/json","x-dohc-relay-client-ip":"192.0.2.10"},
+    }));
+    for(let index=0;index<12;index++) expect((await exchange("z".repeat(43))).status).toBe(404);
+    expect((await exchange("z".repeat(43))).status).toBe(429);
+    for(let index=0;index<100;index++) expect((await exchange(secret)).status).toBe(200);
+    storage.revokeShareGrant({shareId:"share-existing",grantId:String(created.grantId),revokedAtMs:2_001});
+    expect((await exchange(secret)).status).toBe(429);
+    const otherRequest=request(null,"/sync/link-exchange",jsonBody({secret}));
+    otherRequest.headers.set("x-dohc-relay-client-ip","192.0.2.11");
+    const otherIp=await h(otherRequest);
+    expect(otherIp.status).toBe(404);
+  });
+
+  it("bounds global credential probes before a storage lookup", async () => {
     const storage = await newStorage();
     const counted = countStorageCalls(storage, "findLinkGrantByCredentialHash");
     const limiter = new TokenBucketLimiter(1, 0.000_001, 2);
-    const h = handler(counted.storage, { linkExchangeRateLimiter: limiter });
-    const first = await denialBytes(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: "g".repeat(43) })),
-      ),
+    const h = handler(counted.storage, { linkExchangeGlobalRateLimiter: limiter });
+    await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: "g".repeat(43) })),
     );
-    const limited = await denialBytes(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
-      ),
+    const limitedResponse = await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
     );
-    expect(limited).toBe(first);
+    expect(limitedResponse.status).toBe(429);
+    expect(await limitedResponse.json()).toMatchObject({ok:false,code:"link_read_rate_limited"});
     expect(counted.calls).toHaveLength(1);
 
     expect(limiter.allow("192.0.2.11", 2_000)).toBe(true);
     expect(limiter.allow("192.0.2.12", 2_000)).toBe(true);
     expect(limiter.size).toBe(2);
+  });
+
+  it("preserves other networks' exchange allowance during invalid floods and stalled bodies", async () => {
+    const storage=await newStorage(),counted=countStorageCalls(storage,"findLinkGrantByCredentialHash");
+    const h=handler(counted.storage);await seedFileShare(h);
+    const created=await createLink(h),secret=linkSecret(created.url);
+    const exchange=(ip:string,value=secret)=>{
+      const input=request(null,"/sync/link-exchange",jsonBody({secret:value}));
+      input.headers.set("x-dohc-relay-client-ip",ip);return h(input);
+    };
+    const before=counted.calls.length;
+    for(let index=0;index<2_500;index++) expect([404,429]).toContain((await exchange("bad-network","z".repeat(43))).status);
+    expect(counted.calls.length-before).toBe(600);
+    expect((await exchange("other-network")).status).toBe(200);
+    const controller=new AbortController();
+    const pending=Array.from({length:16},()=>{
+      const input=request(null,"/sync/link-exchange",{method:"POST",signal:controller.signal,body:new ReadableStream<Uint8Array>(),duplex:"half"} as RequestInit);
+      input.headers.set("x-dohc-relay-client-ip","slow-network");return h(input);
+    });
+    try {
+      expect((await exchange("slow-network")).status).toBe(429);
+      expect((await exchange("other-network")).status).toBe(200);
+    } finally {controller.abort();await Promise.all(pending);}
+    expect((await exchange("slow-network")).status).toBe(200);
   });
 
   it("never writes a minted secret or capability to relay logs", async () => {

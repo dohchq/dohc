@@ -1,7 +1,9 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
+import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { tmpdir } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   fatal,
@@ -11,6 +13,7 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { Pool } from "pg";
+import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
@@ -28,7 +31,7 @@ import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
-import { readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
+import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -181,6 +184,10 @@ const appPublicationLimits = (() => {
   try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
   catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
 })();
+const appBackendMaxParticipantsPerGrant = (() => {
+  try { return readAppBackendParticipantLimit(process.env.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app backend participant limit"}`); }
+})();
 const appCollectionPolicy = (() => {
   try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
   catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
@@ -219,6 +226,11 @@ if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FAT
 const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+// Worker files are disposable materializations. The relay database retains authority and recovery history.
+const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
+  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -318,6 +330,7 @@ const relayApplication = createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
+  datasetHost,
   appCollectionPolicy,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -555,6 +568,8 @@ installShutdown(server, {
     await selfHost?.close();
     await configuredServiceHost?.close();
     await liveValidation.close();
+    await datasetHost?.close();
+    if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
     storage.close();
     try {
       await pool?.end();

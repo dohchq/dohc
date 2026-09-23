@@ -1816,6 +1816,7 @@ describe("EngineClient", () => {
       });
 
       await vi.advanceTimersByTimeAsync(25);
+      await vi.advanceTimersToNextTimerAsync();
       await rejection;
       await expect(expired).rejects.toBeInstanceOf(EngineRequestDeadlineError);
       peer.send({ type: "response", id: requests[0]!.id, result: "late" });

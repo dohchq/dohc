@@ -1,5 +1,13 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import type { AppBackendRoute } from "./appBackendRoutes";
+import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
+import { createDatasetAppRoutes, createDatasetRoutes, type DatasetRoute } from "./datasetRoutes";
+import { createDatasetReplicaRoutes, type DatasetReplicaRoute } from "./datasetReplicaRoutes";
+import { createDatasetRecoveryExport } from "./datasetRecoveryExport";
+import type { RelayDatasetHost } from "./datasetHost";
+import { hashLinkProfileSecret } from "./linkSecurity";
+import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
 import {readOwnerAppResponses,type OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
@@ -29,6 +37,8 @@ import {
   LINK_EXCHANGE_BUCKET_CAPACITY,
   LINK_EXCHANGE_REFILL_PER_SECOND,
   LINK_EXCHANGE_MAX_IPS,
+  LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY,
+  LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND,
   LINK_READ_BUCKET_CAPACITY,
   LINK_READ_REFILL_PER_SECOND,
   LINK_READ_MAX_CAPABILITIES,
@@ -72,6 +82,8 @@ export type SyncRelayHandler = (request: Request) => Promise<Response>;
 export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
   appCollectionPolicy?: AppCollectionPolicy;
+  appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
+  datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -110,6 +122,8 @@ export interface CreateSyncRelayHandlerOptions {
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
   linkExchangeRateLimiter?: TokenBucketLimiter;
+  linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
+  linkExchangeGrantRateLimiter?: TokenBucketLimiter;
   linkRedeemRateLimiter?: TokenBucketLimiter;
   linkReadRateLimiter?: TokenBucketLimiter;
   linkGrantReadRateLimiter?: TokenBucketLimiter;
@@ -123,6 +137,10 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | AppBackendRoute
+  | DatasetRoute
+  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" }
+  | DatasetReplicaRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -156,6 +174,8 @@ const MAX_LINK_CURRENT_FILES = 5_000;
 export function createSyncRelayHandler({
   appPublicationLimits,
   appCollectionPolicy,
+  appBackendAdmissionLimits,
+  datasetHost,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -175,6 +195,8 @@ export function createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
+  linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
+  linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkGrantReadRateLimiter = new TokenBucketLimiter(
@@ -201,6 +223,10 @@ export function createSyncRelayHandler({
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
+  const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -392,11 +418,7 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
-  const requireLinkRead = (
-    request: Request,
-    capabilityRateLimiter: TokenBucketLimiter,
-    grantRateLimiter: TokenBucketLimiter,
-  ) => {
+  const requireLinkCapability = (request: Request) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
       request.headers.get("authorization") ?? "",
@@ -410,6 +432,14 @@ export function createSyncRelayHandler({
       nowMs: nowMs(),
     });
     if (!capability) throw invalidLinkCapability();
+    return {capabilityToken, capability};
+  };
+  const requireLinkRead = (
+    request: Request,
+    capabilityRateLimiter: TokenBucketLimiter,
+    grantRateLimiter: TokenBucketLimiter,
+  ) => {
+    const {capabilityToken, capability} = requireLinkCapability(request);
     const admittedAtMs = nowMs();
     if (
       !capabilityRateLimiter.allow(
@@ -509,6 +539,8 @@ export function createSyncRelayHandler({
     newLinkBearer,
     newLinkHandoffCode,
     linkExchangeRateLimiter,
+    linkExchangeGlobalRateLimiter,
+    linkExchangeGrantRateLimiter,
     linkRedeemRateLimiter,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
@@ -591,6 +623,43 @@ export function createSyncRelayHandler({
       ) {
         return await respondToLinkRead(request, route);
       }
+      if (route.route === "named-dataset") {
+        if (!respondToDataset) throw notFound();
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || request.headers.has("x-dohc-dataset-grant") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, { headers: { authorization: authorization! }, signal: request.signal }), "");
+        const granted = requireShareAction(route.shareId, actor.userId, "read");
+        if (granted.grant.principalKind !== "user" || granted.grant.principalUserId !== actor.userId) throw notFound();
+        const auth = { kind: "named" as const, workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId };
+        const fingerprint = datasetHost!.offlineAccessFingerprint(auth);
+        const response = await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action, named: true }, auth);
+        const currentFingerprint = datasetHost!.offlineAccessFingerprint(auth);
+        if (fingerprint !== currentFingerprint) {
+          await response.body?.cancel();
+          return Response.json({ message: "Collection access changed. Refresh the Collection." }, { status: 409,
+            headers: { "cache-control": "no-store", "x-dohc-dataset-access": currentFingerprint } });
+        }
+        response.headers.set("x-dohc-dataset-access", fingerprint);
+        return response;
+      }
+      if (route.route === "dataset" || route.route === "dataset-replica") {
+        if (!respondToDataset) throw notFound();
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {headers: {authorization: authorization!}, signal: request.signal}), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        const grant = request.headers.get("x-dohc-dataset-grant");
+        if(route.route==="dataset"&&route.action==="export") {
+          if(!respondToDatasetExport||grant!==null||!route.datasetId||new URL(request.url).search)throw notFound();
+          return respondToDatasetExport(request,{workspaceId:route.workspaceId,datasetId:route.datasetId,action:"export"},{kind:"named",workspaceId:route.workspaceId,userId:actor.userId});
+        }
+        if (route.route === "dataset-replica") {
+          if (!respondToDatasetReplica || grant !== null) throw notFound();
+          return await respondToDatasetReplica(request,route,{kind:"named",workspaceId:route.workspaceId,userId:actor.userId});
+        }
+        return await respondToDataset(request, route, {kind:"named", workspaceId:route.workspaceId, userId:actor.userId,
+          ...(grant === null ? {} : {grantId: parseShareId(grant)})});
+      }
       if (route.route === "owner-app-publication" || route.route === "owner-app-responses") {
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
@@ -601,6 +670,33 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         if(route.route==="owner-app-responses")return readOwnerAppResponses(request,route,actor.userId,storage);
         return await respondToOwnerAppPublication(request, route, actor.userId);
+      }
+      if (route.route === "app-backend") {
+        if (!appPublicationLimits || !respondToDatasetApp) throw notFound();
+        if (!route.workspaceId) {
+          if (!linkKey || request.headers.has("cookie")) throw notFound();
+          const {capability} = requireLinkCapability(request);
+          const secret = request.headers.get("x-dohc-link-profile-secret");
+          if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
+          const auth = {kind:"link" as const, capabilityHash:capability.session.capabilityHash,
+            profileTokenHash:hashLinkProfileSecret(secret, linkKey)};
+          return await respondToDatasetApp(request, route, auth);
+        }
+        const authorization = request.headers.get("authorization");
+        let actorRequest: Request;
+        if (request.headers.has("cookie")) {
+          // Browser account authority is accepted only through the trusted viewer.
+          if (authorization || !shareWebOrigin || !relayExchangeKeyHash ||
+              request.headers.get("origin") !== shareWebOrigin || !hasValidRelayExchangeKey(request)) throw notFound();
+          actorRequest = request;
+        } else {
+          if (!/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+          actorRequest = new Request(request.url, {headers:{authorization:authorization!},signal:request.signal});
+        }
+        const actor = await resolveNamedActor(actorRequest, route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        const auth = {kind:"named" as const, workspaceId:route.workspaceId,userId:actor.userId};
+        return await respondToDatasetApp(request, route, auth);
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
@@ -720,6 +816,9 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "link-app-publication", publicationId};
     if (parts.length === 5 && parts[4] === "collection") return {route: "link-app-collection", publicationId};
+    if (parts.length === 6 && parts[4] === "backend" && (parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt")) {
+      return {route:"app-backend", publicationId, action:parts[5]};
+    }
     if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
       return {route: "link-app-publication", publicationId, sha256: parts[5]};
     }
@@ -769,6 +868,14 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts[1] === "shares") {
     if (parts.length === 2) return { route: "shares-list" };
     const shareId = parseShareId(parts[2]);
+    if (parts[3] === "datasets") {
+      if (parts.length === 4) return { route: "named-dataset", shareId, action: "list" };
+      const datasetId = parts[4];
+      if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
+      if (parts.length === 5) return { route: "named-dataset", shareId, datasetId, action: "describe" };
+      if (parts.length === 6 && ["invoke", "upload", "file"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" };
+      throw notFound();
+    }
     if (parts.length === 3) return { route: "share", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {
@@ -834,6 +941,18 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts[2] === "datasets") {
+    if (parts.length === 3) return {route:"dataset", workspaceId, action:"list"};
+    const datasetId = parts[3];
+    if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
+    if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
+    if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
+    if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
+    if (parts.length === 5 && ["activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
+    if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
+    throw notFound();
+  }
   if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "owner-app-publication", workspaceId, action: "publish"};
@@ -843,6 +962,14 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
     if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
+    if (parts.length === 6 && parts[4] === "backend" &&
+        (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
+         parts[5] === "descriptor")) {
+      return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
+    }
+    if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {
+      return {route:"app-backend",workspaceId,publicationId,action:"blob",sha256:parts[6]};
+    }
     throw notFound();
   }
   if (parts[2] === "live-restores") {

@@ -105,6 +105,7 @@ import {
 } from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
   advanceCollectionWriteLineage,
@@ -198,6 +199,8 @@ import {
   isMomentDiffTabPath,
   momentDiffTabPath,
   collectionTabPath,
+  transactionalCollectionTabPath,
+  parseTransactionalCollectionTabPath,
   isCollectionTabPath,
   parseCollectionTabPath,
   defaultWorkbenchState,
@@ -376,6 +379,9 @@ const LazyChatsView = lazy(() =>
 );
 const LazyCollectionPage = lazy(() =>
   import("./CollectionPage").then((mod) => ({ default: mod.CollectionPage })),
+);
+const LazyTransactionalCollection = lazy(() =>
+  import("./ConnectedTransactionalCollection").then(mod => ({ default: mod.ConnectedTransactionalCollection })),
 );
 
 // Every folder above a path — expanded when a create/open must reveal it.
@@ -579,6 +585,7 @@ export function DesktopWorkspaceShell(props: {
   const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(
     null,
   );
+  const [recoveryWorkspaceId, setRecoveryWorkspaceId] = useState<string | null>(null);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   // The address a failed attempt used. Only set when a notice's Try again has
@@ -776,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSuccessNotice,
     dismissShellError,
     retryShellError,
   } = useShellError(workspaceId);
@@ -1392,11 +1400,15 @@ export function DesktopWorkspaceShell(props: {
   const isShareView = Boolean(props.workspace.shareView);
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !isShareView && workspaceSynced;
-  const { collectionFolders, refreshCollections } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     isShareView,
   );
+  useEffect(() => {
+    if (!workspaceIsReady) return;
+    void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error, () => { void refreshDatasets(); }));
+  }, [workspaceIsReady, refreshDatasets, reportShellError]);
   // Engine history page state: newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -2281,6 +2293,18 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
+  const openDataCollection = useCallback(
+    (datasetId: string, tableId: string) => {
+      openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+    },
+    [openVirtualTab],
+  );
+  const onMoreDataCollections = useCallback(() => {
+    void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error));
+  }, [loadMoreDatasets, reportShellError]);
+  const onRestoreCollection = useCallback(() => {
+    setRecoveryWorkspaceId(workspaceId);
+  }, [workspaceId]);
   const openGraphTab = useCallback(() => {
     openVirtualTab(GRAPH_TAB_PATH);
   }, [openVirtualTab]);
@@ -2298,7 +2322,10 @@ export function DesktopWorkspaceShell(props: {
   });
   const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
     ? chatEditors.get(focusedTabPath).nav : undefined;
-  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles]), [knownTabLabels, chatEditors.titles]);
+  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
+    ...dataCollections.map(table => [transactionalCollectionTabPath(table.datasetId, table.tableId), table.name] as const),
+  ]), [knownTabLabels, chatEditors.titles, dataCollections]);
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => ({ ...state, chatsVisible: true }));
     setChatsPanelTab("all");
@@ -3404,7 +3431,10 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
-      if (!isShareView) void refreshCollections();
+      if (!isShareView) {
+        void refreshCollections();
+        void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+      }
     });
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
@@ -3433,6 +3463,7 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     isShareView,
     refreshCollections,
+    refreshDatasets,
     hasCommittedListing,
   ]);
 
@@ -4190,6 +4221,12 @@ export function DesktopWorkspaceShell(props: {
         onTogglePin={toggleExplorerPin}
         collectionFolders={collectionFolders}
         onOpenCollection={openCollectionTab}
+        dataCollections={dataCollections}
+        includeArchivedCollections={includeArchived}
+        onIncludeArchivedCollections={isShareView ? undefined : setIncludeArchived}
+        onOpenDataCollection={openDataCollection}
+        onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
+        onRestoreCollection={!isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -4340,8 +4377,9 @@ export function DesktopWorkspaceShell(props: {
     () =>
       shellErrors.map((error) => ({
         id: error.id,
+        ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([["Error", error.message], ...reportFacts()]),
+        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,
@@ -4384,6 +4422,7 @@ export function DesktopWorkspaceShell(props: {
     if (!storeUpdateRequired) return;
     setNewFileOpen(false);
     setNewCollectionFolder(null);
+    setRecoveryWorkspaceId(null);
     setQuickOpenOpen(false);
     setPaletteOpen(false);
     setShareTarget(null);
@@ -4916,6 +4955,7 @@ export function DesktopWorkspaceShell(props: {
                 : null;
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupCollectionPath = parseCollectionTabPath(tabPath);
+              const groupDataCollection = parseTransactionalCollectionTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetails = parsePluginDetailsTabPath(tabPath);
@@ -5212,6 +5252,7 @@ export function DesktopWorkspaceShell(props: {
                 <Suspense fallback={<PanelLoading label="app" />}>
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
+                    reportError={reportShellError}
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onShareSite={(target) =>
@@ -5227,6 +5268,20 @@ export function DesktopWorkspaceShell(props: {
                   }}
                 />
               )
+            ) : groupDataCollection ? (
+              <Suspense fallback={<PanelLoading label="collection" />}>
+                <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
+                  datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
+                  onOpenSource={openFile}
+                  owner={!isShareView}
+                  onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
+                  onError={reportShellError}
+                  onNotice={showSuccessNotice}
+                  onFormCreated={appRoot => {
+                    void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
+                    openVirtualTab(siteTabPath(appRoot));
+                  }} />
+              </Suspense>
             ) : isCollectionTabPath(tabPath) ? (
               groupCollectionPath ? (
                 <Suspense fallback={<PanelLoading label="collection" />}>
@@ -5795,6 +5850,21 @@ export function DesktopWorkspaceShell(props: {
           }}
         />
       ) : null}
+      {recoveryWorkspaceId === workspaceId && !isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
+        <ConnectedCollectionRecoveryRestore workspaceId={workspaceId} onError={reportShellError}
+          onClose={() => setRecoveryWorkspaceId(null)}
+          onRestored={(datasetId, tableId) => {
+            if (workspaceIdRef.current !== workspaceId) return;
+            openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+            showSuccessNotice("Restored the Collection. Sharing stays off.");
+            void refreshDatasets().catch(error => {
+              if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh Collections.", error);
+            });
+            void refreshFiles().catch(error => {
+              if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh workspace files.", error);
+            });
+          }} />
+      ) : null}
       {newCollectionFolder !== null && !isShareView ? (
         <NewCollectionDialog
           workspaceId={props.workspace.workspaceId}
@@ -5802,8 +5872,16 @@ export function DesktopWorkspaceShell(props: {
             ? { initialFolder: newCollectionFolder }
             : {})}
           onClose={() => setNewCollectionFolder(null)}
-          onCreated={(path) => {
+          onError={reportShellError}
+          onCreated={(ref) => {
             setNewCollectionFolder(null);
+            if (ref.kind === "transactional") {
+              void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+              void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
+              openVirtualTab(transactionalCollectionTabPath(ref.datasetId, ref.tableId));
+              return;
+            }
+            const path = ref.path;
             // Reveal the new collection folder in the tree and open its
             // views. The engine adopts the folder from the schema write;
             // refreshCollections routes Explorer clicks to the tab.

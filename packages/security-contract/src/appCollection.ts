@@ -8,6 +8,7 @@ export interface AppCollectionCapability {
   schemaSha256: string;
   allowedFields: string[];
   requiredFields: string[];
+  /** Fields returned by the app API. Shared response files remain readable in full. */
   readFields: string[];
 }
 export const APP_COLLECTION_SERVER_FIELDS = ["id", "created_at", "created_by", "grant_id", "idempotency_key", "acceptance_id"] as const;
