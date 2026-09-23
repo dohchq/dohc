@@ -1,11 +1,13 @@
 import { resolve, join, isAbsolute } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 
-export const usage = 'node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs 3] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario full|startup|switches|small-switch|small-tab] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]';
+export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak'];
+export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
+export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs 3] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--chat-messages 200] [--records 500] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]`;
 
 export function parseOptions(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
-  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'profile-renderer', 'profile-main']);
+  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'chat-messages', 'records', 'profile-renderer', 'profile-main']);
   const args = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].slice(2), value = argv[i + 1];
@@ -35,12 +37,16 @@ export function parseOptions(argv) {
     packageCommit: args.get('package-commit'), engineCommit: args.get('engine-commit') ?? args.get('package-commit'),
     runCount: integer('runs', 3), idleSeconds: integer('idle-seconds', 60), keystrokes: integer('keystrokes', 30),
     switches: integer('switches', 10), fixtureFiles: integer('files', 2, 2),
-    scenario: choice('scenario', ['full', 'startup', 'switches', 'small-switch', 'small-tab'], 'full'),
+    scenario: choice('scenario', SCENARIOS, 'full'),
+    soakMinutes: integer('soak-minutes', 10), chatMessages: integer('chat-messages', 200, 2), records: integer('records', 500),
     profileRenderer: choice('profile-renderer', ['true', 'false'], 'false') === 'true',
     profileMain: choice('profile-main', ['true', 'false'], 'false') === 'true',
   };
+  for (const [key, scenario] of [['soak-minutes', 'soak'], ['chat-messages', 'chat-history'], ['records', 'collection']]) {
+    if (args.has(key) && options.scenario !== scenario) throw Error(`--${key} requires --scenario ${scenario}`);
+  }
   if (options.profileMain && (options.scenario !== 'startup' || /\s/.test(options.output))) throw Error('--profile-main requires --scenario startup and an output path without whitespace');
-  if (options.profileRenderer && options.scenario === 'startup') throw Error('--profile-renderer requires a scenario with workspace switches');
+  if (options.profileRenderer && !SWITCHING_SCENARIOS.includes(options.scenario)) throw Error('--profile-renderer requires a scenario with workspace switches');
   return options;
 }
 

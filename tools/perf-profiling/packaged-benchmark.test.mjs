@@ -12,19 +12,13 @@ import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInp
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+import { observeSurface, observeSearchSubmit, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 
-function readinessPage(t) {
+// A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
+function fakePage(t, html) {
   const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
   const { JSDOM } = require('jsdom');
-  const dom = new JSDOM(`<div data-testid="workspace-shell" data-ready="true">
-    <button data-testid="workspace-switcher">workspace-0</button>
-    <div data-testid="workspace-workbench">
-      <section data-editor-group-id="primary" data-active="true">
-        <div role="tab" aria-selected="true" data-testid="tab-small.md">small.md</div>
-        <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
-      </section>
-    </div>
-  </div>`, { pretendToBeVisual: true, runScripts: 'outside-only' });
+  const dom = new JSDOM(html, { pretendToBeVisual: true, runScripts: 'outside-only' });
   t.after(() => dom.window.close());
   const w = dom.window;
   let now = 10, id = 0;
@@ -46,8 +40,25 @@ function readinessPage(t) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback(now);
   };
-  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
-  return { document: w.document, observe, step, frame, frames, timers };
+  const run = (observer, options) => w.eval(`(${observer.toString()})`)(options);
+  const keydown = (target, key) => target.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true }));
+  return { window: w, document: w.document, run, step, frame, frames, timers, keydown, now: () => now };
+}
+// MutationObserver callbacks are microtasks; settle them before driving the fake clock.
+const mutations = () => new Promise(resolve => setImmediate(resolve));
+
+function readinessPage(t) {
+  const p = fakePage(t, `<div data-testid="workspace-shell" data-ready="true">
+    <button data-testid="workspace-switcher">workspace-0</button>
+    <div data-testid="workspace-workbench">
+      <section data-editor-group-id="primary" data-active="true">
+        <div role="tab" aria-selected="true" data-testid="tab-small.md">small.md</div>
+        <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
+      </section>
+    </div>
+  </div>`);
+  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => p.run(observeStartupReadiness, { ...target, timeoutMs: 1000 });
+  return { ...p, observe };
 }
 
 test('startup observer records an already-ready document without inferring earlier readiness', async t => {
@@ -192,6 +203,144 @@ test('startup observer propagates the editing refusal', async t => {
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
+const paletteHtml = '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
+test('surface observer times a keydown-triggered palette to its focused input and two frames', async t => {
+  const p = fakePage(t, '<main></main>');
+  const pending = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'p', target: '[data-testid="quick-open"] input', focused: '[data-testid="quick-open"] input', countSelector: '[role="option"]', timeoutMs: 1000 });
+  p.step();
+  p.keydown(p.document.body, 'Control');
+  p.document.body.insertAdjacentHTML('beforeend', paletteHtml);
+  p.document.querySelector('input').focus();
+  await mutations(); p.step();
+  assert.equal(p.frames.size, 0, 'a surface present before the trigger is not a match');
+  p.keydown(p.document.body, 'p');
+  p.step();
+  assert.equal(p.frames.size, 1);
+  p.frame(); p.frame();
+  const observed = await pending;
+  assert.equal(observed.triggerMs, 110);
+  assert.equal(observed.triggerTrusted, false);
+  assert.equal(observed.matchedMs, 160);
+  assert.equal(observed.paintedMs, 192);
+  assert.equal(observed.count, 2);
+  assert.equal(observed.matchedCount, 1);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('surface observer waits for the typed value, a blurred input, and enough rows', async t => {
+  const p = fakePage(t, paletteHtml);
+  const input = p.document.querySelector('input');
+  input.focus();
+  const typed = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'x', target: 'input', value: 'x', focused: 'input', timeoutMs: 1000 });
+  p.keydown(input, 'x');
+  p.step();
+  assert.equal(p.frames.size, 0, 'the keystroke has not reached the input value yet');
+  input.value = 'x';
+  input.blur();
+  p.step();
+  assert.equal(p.frames.size, 0, 'focus left the input');
+  input.focus();
+  p.step(); p.frame(); p.frame();
+  assert.equal((await typed).text, '');
+  const rows = p.run(observeSurface, { target: '[role="option"]', minCount: 3, timeoutMs: 1000 });
+  p.step();
+  assert.equal(p.frames.size, 0);
+  p.document.querySelector('ul').insertAdjacentHTML('beforeend', '<li role="option">c.md</li>');
+  await mutations();
+  assert.equal(p.frames.size, 1, 'the mutation observer matched without waiting for the poll');
+  p.frame(); p.frame();
+  const observed = await rows;
+  assert.equal(observed.triggerMs, null);
+  assert.equal(observed.count, 3);
+  assert.equal(observed.text, 'a.md');
+});
+test('surface observer records a mousedown trigger and rejects unknown triggers and timeouts', async t => {
+  const p = fakePage(t, '<button>Open</button>');
+  await assert.rejects(p.run(observeSurface, { trigger: 'hover', target: 'button' }), /Unknown trigger/);
+  const clicked = p.run(observeSurface, { trigger: 'click', target: '[data-testid="collection-page"] [role="row"]', timeoutMs: 1000 });
+  p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  p.document.body.insertAdjacentHTML('beforeend', '<div data-testid="collection-page"><div role="row" data-index="0">Record 1</div></div>');
+  await mutations(); p.frame(); p.frame();
+  assert.equal((await clicked).triggerMs, 10);
+  const missing = p.run(observeSurface, { target: '[data-testid="absent"]', timeoutMs: 120 });
+  const rejected = assert.rejects(missing, /did not render within 120ms/);
+  p.step(); p.step(); p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+const searchHtml = '<div data-testid="search-view" data-state="idle" data-search-id=""><input data-testid="search-input"><ul></ul></div>';
+test('search observer times Enter to the first result row and to the complete state', async t => {
+  const p = fakePage(t, searchHtml);
+  const view = p.document.querySelector('[data-testid="search-view"]');
+  const input = p.document.querySelector('input');
+  const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
+  p.step();
+  p.keydown(p.document.body, 'Enter');
+  assert.equal(p.now(), 60);
+  p.keydown(input, 'Enter');
+  view.dataset.searchId = 's1'; view.dataset.state = 'searching';
+  view.querySelector('ul').innerHTML = '<li data-testid="search-result-row">hit</li>';
+  await mutations(); p.frame();
+  view.dataset.state = 'complete';
+  view.insertAdjacentHTML('beforeend', '<span data-testid="search-summary">1 result in 1 file</span>');
+  await mutations(); p.frame(); p.frame();
+  const observed = await pending;
+  assert.equal(observed.submitMs, 60);
+  assert.equal(observed.submitTrusted, false);
+  assert.equal(observed.debounceFiredBeforeSubmit, false);
+  assert.equal(observed.firstResultMs, 60);
+  assert.equal(observed.firstResultPaintedMs, 92);
+  assert.equal(observed.settledMs, 76);
+  assert.equal(observed.settledPaintedMs, 108);
+  assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('search observer flags a debounce that ran before Enter and keeps a missing first result missing', async t => {
+  const p = fakePage(t, searchHtml);
+  const view = p.document.querySelector('[data-testid="search-view"]');
+  const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
+  view.dataset.searchId = 'typed'; view.dataset.state = 'complete';
+  await mutations();
+  p.keydown(p.document.querySelector('input'), 'Enter');
+  view.dataset.searchId = 's2';
+  view.insertAdjacentHTML('beforeend', '<div data-testid="search-empty-state">No results found</div>');
+  await mutations(); p.frame(); p.frame();
+  const observed = await pending;
+  assert.equal(observed.debounceFiredBeforeSubmit, true);
+  assert.equal(observed.firstResultMs, null);
+  assert.equal(observed.emptyState, true);
+  assert.equal(observed.rowsRendered, 0);
+  const closed = fakePage(t, '<main></main>');
+  await assert.rejects(closed.run(observeSearchSubmit, {}), /Search view is not open/);
+});
+test('collection fixture writes the schema first and deterministic pre-minted record ids', () => {
+  const files = collectionFixtureFiles(3);
+  assert.deepEqual(files.map(f => f.path), ['records/collection.yaml', 'records/record-000001.md', 'records/record-000002.md', 'records/record-000003.md']);
+  assert.match(files[0].content, /^name: Records\nfields:\n {2}Name:\n {4}type: text\n/);
+  const ids = files.slice(1).map(f => f.content.match(/^id: (\S+)$/m)[1]);
+  for (const id of ids) assert.match(id, /^rec_[a-z2-7]{26}$/);
+  assert.equal(new Set(ids).size, 3);
+  assert.deepEqual(collectionFixtureFiles(3), files);
+  assert.match(files[1].content, /^Due: "2026-\d{2}-\d{2}"$/m);
+  assert.equal(recordId('records/1'), ids[0]);
+});
+test('process kinds come from the launched pid, engine name, and Chromium type flags', () => {
+  const processes = [
+    { pid: 1, name: 'dohc.exe', commandLine: '"C:\\dohc.exe" --user-data-dir=x', workingSetBytes: 100, privateBytes: 10 },
+    { pid: 2, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer --lang=en', workingSetBytes: 200, privateBytes: 20 },
+    { pid: 3, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer', workingSetBytes: 300, privateBytes: 30 },
+    { pid: 4, name: 'dohc.exe', commandLine: 'dohc.exe --type=gpu-process', workingSetBytes: 40, privateBytes: 4 },
+    { pid: 5, name: 'dohc.exe', commandLine: 'dohc.exe --type=utility --utility-sub-type=network.mojom.NetworkService', workingSetBytes: 50, privateBytes: 5 },
+    { pid: 6, name: 'dohc-workspace-engine.exe', commandLine: null, workingSetBytes: 60, privateBytes: 6 },
+    { pid: 7, name: 'dohc.exe', commandLine: 'dohc.exe --type=crashpad-handler', workingSetBytes: 7, privateBytes: 1 },
+    { pid: 8, name: 'pwsh.exe', commandLine: 'pwsh -File sampler.ps1', workingSetBytes: 8, privateBytes: 1 },
+  ];
+  assert.deepEqual(processes.map(p => classifyProcess(p, 1)), ['main', 'renderer', 'renderer', 'gpu', 'utility', 'engine', 'crashpad', 'other']);
+  const aggregate = aggregateByKind({ completedAtMs: 5, processes }, 1);
+  assert.equal(aggregate.processCount, 8);
+  assert.deepEqual(aggregate.kinds.renderer, { count: 2, workingSetBytes: 500, privateBytes: 50 });
+  assert.deepEqual(aggregate.kinds.main, { count: 1, workingSetBytes: 100, privateBytes: 10 });
+});
+
 const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
 test('packaged rehearsals opt out of OS registration with their own profile', () => {
   const profile = resolve('rehearsal/profile');
@@ -222,9 +371,20 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
     ['--files', '1'], ['--switches', '-1'], ['--idle-seconds', 'Infinity'], ['--runs', '2', '--runs', '3'],
     ['--label', 'candidate'], ['--profile-main', 'yes'], ['--profile-renderer', '1'], ['--scenario', 'typo'],
     ['--package-dir', 'other'], ['--engine-commit', 'HEAD'], ['--profile-main', 'true'],
-    ['--profile-renderer', 'true', '--scenario', 'startup'],
+    ['--profile-renderer', 'true', '--scenario', 'startup'], ['--profile-renderer', 'true', '--scenario', 'go-to'],
+    ['--soak-minutes', '5'], ['--chat-messages', '5'], ['--records', '5'], ['--scenario', 'soak', '--soak-minutes', '0'],
+    ['--scenario', 'chat-history', '--chat-messages', '1'], ['--scenario', 'soak', '--records', '5'],
   ]) assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
   assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
+});
+test('surface scenarios parse with their own sizes and defaults', () => {
+  for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
+    const options = parseOptions([...required, '--scenario', scenario]);
+    assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
+  }
+  assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
+  assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
+  assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1', '--files', '5000']).records, 1);
 });
 
 test('evidence directory is exclusive even for concurrent starts', async t => {
@@ -437,4 +597,41 @@ test('summary keeps absent timing samples missing and labels diagnostic measurem
   assert.deepEqual(summary.startupEvidence[0].rendererReadiness, rendererReadiness);
   assert.equal(summary.freshEditableObservedMs.p50, 50);
   assert.deepEqual(summary.limits, ['16ms floor']);
+  assert.deepEqual([summary.goTo, summary.commandPalette, summary.search, summary.chatHistory, summary.collection, summary.soak], [null, null, null, null, null, null]);
+});
+
+test('summary reports each surface scenario from its own runs and keeps unobserved samples missing', async () => {
+  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount });
+  const sample = (cycle, renderer, main) => ({ cycle, completedAtMs: 1000 + cycle * 60000, processCount: 5, kinds: { renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 }, main: { count: 1, workingSetBytes: main, privateBytes: main / 2 } } });
+  const summary = await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [
+    { index: 1, goTo: { query: 'fixture-004242', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
+      commandPalette: { cold: open(90, 12), warm: open(25, 12) },
+      search: [{ query: 'fixture', open: { clickToPaintedMs: 70 }, submitToFirstResultMs: 200, submitToSettledMs: 1500, debounceFiredBeforeSubmit: true, summary: '2000 results in 2000 files', limitHit: true, rowsRendered: 40 },
+        { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
+      chatHistory: { seed: { messages: 200, seedingObservedMs: 90000 }, channelOpen: { clickToPostsPaintedMs: 150 }, threadOpen: { clickToFirstCommentPaintedMs: 400, clickToAllCommentsPaintedMs: null, commentRowsRendered: 120 } },
+      collection: { records: 500, indexedWaitObservedMs: 800, clickToRowsPaintedMs: 210, rowsRendered: 24, loadedRecords: 100 },
+      soak: { minutes: 2, elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
+    { index: 2, goTo: { query: 'fixture-004242', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
+      chatHistory: { seed: { messages: 200, seedingObservedMs: 80000 }, channelOpen: { clickToPostsPaintedMs: 130 }, threadOpen: { clickToFirstCommentPaintedMs: 380, clickToAllCommentsPaintedMs: 900, commentRowsRendered: 199 } } },
+  ] });
+  assert.deepEqual(summary.goTo.query, ['fixture-004242']);
+  assert.deepEqual(summary.goTo.coldOpenToEditableInputMs, { count: 2, p50: 100, p95: 120, max: 120 });
+  assert.equal(summary.goTo.warmOpenToEditableInputMs.max, 40);
+  assert.equal(summary.goTo.keystrokeToResultsPaintedMs.count, 3);
+  assert.deepEqual(summary.goTo.lastKeystrokeToResultsPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
+  assert.deepEqual(summary.goTo.finalOptionCounts, [1]);
+  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12] });
+  assert.equal(summary.search.fixture.openToInputFocusedMs.p50, 70);
+  assert.equal(summary.search.fixture.debounceFiredBeforeSubmitCount, 1);
+  assert.deepEqual(summary.search.fixture.limitHit, [true]);
+  assert.deepEqual(summary.search['fixture 4242.'].submitToFirstResultMs, { count: 0, p50: null, p95: null, max: null });
+  assert.equal(summary.search['fixture 4242.'].openToInputFocusedMs.count, 0);
+  assert.deepEqual(summary.chatHistory.messages, [200]);
+  assert.equal(summary.chatHistory.threadOpenToAllCommentsPaintedMs.count, 1);
+  assert.equal(summary.chatHistory.allCommentsUnobservedCount, 1);
+  assert.deepEqual(summary.chatHistory.commentRowsRendered, [120, 199]);
+  assert.deepEqual(summary.collection, { records: [500], indexedWaitObservedMs: { count: 1, p50: 800, p95: 800, max: 800 }, openToRowsPaintedMs: { count: 1, p50: 210, p95: 210, max: 210 }, rowsRendered: [24], loadedRecords: [100] });
+  assert.equal(summary.soak.length, 1);
+  assert.deepEqual(summary.soak[0].kinds.renderer, { processCounts: [1], workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 }, privateBytes: { first: 200, last: 220, max: 225, delta: 20 } });
+  assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max], [2, 120000, 55000]);
 });
