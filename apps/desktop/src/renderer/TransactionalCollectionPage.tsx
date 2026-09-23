@@ -1,10 +1,11 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { MoreHorizontal } from "lucide-react";
+import { Archive, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Download, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, Square, Table2, Trash2, Undo2 } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import type { CollectionTableView } from "./collectionTableViews";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
@@ -86,7 +87,14 @@ function ValueInput({ field, value, disabled, onChange }: { field: Transactional
     }} />;
 }
 function Cell({ field, value }: { field: TransactionalField; value: AppBackendJson | undefined }) {
-  if (!supportsInput(field)) return <span className="truncate text-[13px] text-ink">{display(value) || "—"}</span>;
+  if (field.type === "checkbox" && typeof value === "boolean") {
+    const Icon = value ? CheckSquare : Square;
+    return <span className="inline-flex items-center"><Icon size={16} strokeWidth={1.9} aria-hidden className={value ? "text-accent" : "text-muted"} /><span className="sr-only">{value ? "Yes" : "No"}</span></span>;
+  }
+  if ((field.type === "select" || field.type === "multi-select") && value !== null && value !== undefined) {
+    const values = Array.isArray(value) ? value : [value];
+    return <span className="flex flex-wrap gap-1">{values.map((entry, index) => <span key={index} className="max-w-full truncate rounded border border-line bg-panel-2 px-1.5 py-0.5 text-[12px] text-ink">{display(entry)}</span>)}</span>;
+  }
   if (field.type === "checkbox") return <span className="text-[13px] text-ink">{value === true ? "Yes" : value === false ? "No" : "—"}</span>;
   return <span className="truncate text-[13px] text-ink">{display(value) || "—"}</span>;
 }
@@ -247,44 +255,46 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
-  const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || canCreateForm || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
+  const hasManagement = props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
-    <header className="flex items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
-      {canCreate ? <PrimaryButton className="shrink-0" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
+    <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
+      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}
     </header>
     <div className="flex flex-wrap items-center gap-2">
       {props.viewControls?.(disabled || editor !== null)}
-      <select aria-label="Collection layout" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor !== null} value={selectedView?.kind ?? "table"} onChange={event => {
+      <span className="relative flex items-center text-muted">
+        {selectedView?.kind === "board" ? <PanelsTopLeft size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" /> : selectedView?.kind === "calendar" ? <CalendarDays size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" /> : <Table2 size={14} strokeWidth={1.9} aria-hidden className="pointer-events-none absolute left-2.5" />}
+        <select aria-label="Collection layout" className={`${selectClass.replace("w-full", "w-auto").replace("px-2", "pl-8 pr-2")}`} disabled={disabled || editor !== null} value={selectedView?.kind ?? "table"} onChange={event => {
         const kind = event.target.value as CollectionTableView["kind"];
         setLocalView({viewId:"local",name:"Current view",search:query.search,filters:query.filters??[],sort:query.sort??null,kind,
           ...(kind==="board"?{groupBy:fields.find(field=>field.type==="select")?.fieldId??fields.find(supportsSort)?.fieldId}:{}),
           ...(kind==="calendar"?{dateField:fields.find(field=>field.type==="date")?.fieldId}:{})});
-      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar" disabled={!fields.some(field=>field.type==="date")}>Calendar</option></select>
+      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar" disabled={!fields.some(field=>field.type==="date")}>Calendar</option></select></span>
       {selectedView?.kind==="board" ? <select aria-label="Group board by" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.groupBy??""} onChange={event=>setLocalView({...selectedView,groupBy:event.target.value})}>{fields.filter(supportsSort).map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
       {selectedView?.kind==="calendar" ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.dateField??""} onChange={event=>setLocalView({...selectedView,dateField:event.target.value})}>{fields.filter(field=>field.type==="date").map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
-      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
+      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true }) className="flex items-center gap-1.5"><Undo2 size={14} strokeWidth={1.9} aria-hidden />Undo last edit</SecondaryButton> : null}
+      <form className="ml-auto flex min-w-40 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
+      <input aria-label="Search collection" placeholder="Search records" type="search" maxLength={200} className={`${inputClass.replace("w-full", "w-48 min-w-32 flex-1")}`} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
+      <IconButton type="submit" aria-label="Search" title="Search" disabled={readDisabled || editor !== null}><Search size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Refresh" title="Refresh" disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}><RefreshCw size={16} strokeWidth={1.9} aria-hidden /></IconButton>
+      </form>
+      {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={disabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
       {hasManagement ? <details className="group relative" onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
-        <summary aria-label="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden">
-          <MoreHorizontal size={14} aria-hidden /> <span>Manage</span>
+        <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink [&::-webkit-details-marker]:hidden">
+          <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
         </summary>
-        <div className="dohc-popover absolute left-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
-          {props.onReviewSchema ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onReviewSchema}>Fields and names</SecondaryButton> : null}
-          {props.onManageAccess ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onManageAccess}>Manage access</SecondaryButton> : null}
-          {props.onExportRecovery ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onExportRecovery}>Export recovery</SecondaryButton> : null}
-          {canCreateForm ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
-          {props.onTransferCsv ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
-          {props.onHistory ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onHistory}>History</SecondaryButton> : null}
-          {props.onPendingResponses ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}>Pending responses</SecondaryButton> : null}
-          {props.onArchive ? <SecondaryButton className="w-full text-left" disabled={disabled || editor !== null} onClick={props.onArchive}>Archive</SecondaryButton> : null}
+        <div className="dohc-popover absolute right-0 top-9 z-20 flex min-w-48 flex-col gap-1 rounded-lg border border-line bg-panel p-1">
+          {props.onReviewSchema ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onReviewSchema}><LayoutList size={14} strokeWidth={1.9} aria-hidden />Fields and names</SecondaryButton> : null}
+          {props.onManageAccess ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onManageAccess}><Shield size={14} strokeWidth={1.9} aria-hidden />Manage access</SecondaryButton> : null}
+          {props.onExportRecovery ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onExportRecovery}><Download size={14} strokeWidth={1.9} aria-hidden />Export recovery</SecondaryButton> : null}
+          {props.onTransferCsv ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onTransferCsv}><FileSpreadsheet size={14} strokeWidth={1.9} aria-hidden />Import or export CSV</SecondaryButton> : null}
+          {props.onHistory ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onHistory}><History size={14} strokeWidth={1.9} aria-hidden />History</SecondaryButton> : null}
+          {props.onPendingResponses ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onPendingResponses}><Inbox size={14} strokeWidth={1.9} aria-hidden />Pending responses</SecondaryButton> : null}
+          {props.onArchive ? <SecondaryButton className="flex w-full items-center gap-2 text-left" disabled={disabled || editor !== null} onClick={props.onArchive}><Archive size={14} strokeWidth={1.9} aria-hidden />Archive</SecondaryButton> : null}
         </div>
       </details> : null}
     </div>
-    <form className="flex gap-2" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
-      <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
-      <SecondaryButton type="submit" disabled={readDisabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>
-      {props.copy ? <span role="status" className="self-center text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
-    </form>
+    {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
     {visual && selectedView ? <Suspense fallback={<p role="status" className="text-sm text-muted">Opening view…</p>}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh}
@@ -295,19 +305,19 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       onMove={(row,fieldId,value)=>{const operation=operations.find(operation=>operation.kind==="edit"&&!operation.readOnly&&operation.fieldIds.includes(fieldId));if(!operation||disabled)return;
         void execute({operation,input:{id:row.id,expectedVersion:row.version,values:{[fieldId]:value}},key:crypto.randomUUID(),label:"Moved the record"});}} /></Suspense> : null}
     {!visual && page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
-    {!visual && page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
+    {!visual && page && page.rows.length > 0 ? <div className="min-h-0 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
-        {supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
+        {supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <span className="flex items-center gap-1.5"><FieldTypeIcon type={field.type} />{field.name}</span>}
       </th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
-      })}<td className="px-3 py-2"><div className="flex gap-2"><SecondaryButton size="compact" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}>Details</SecondaryButton>{remove && confirmDelete ? <SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton> : null}</div></td></tr>)}</tbody>
+        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
+      })}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><PanelsTopLeft size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
-    {!visual && page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
+    {!visual && page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="font-mono">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError}
       onClose={() => { setDetails(null); trigger.current?.focus(); }}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}

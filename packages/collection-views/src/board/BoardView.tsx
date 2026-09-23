@@ -227,7 +227,7 @@ function BoardColumn({
     >
       <div className="flex items-center gap-1.5 px-1 pb-2">
         <span className="truncate text-[12px] font-medium text-muted">{label}</span>
-        <span className="font-mono text-[11px] text-subtle">{count ?? group.records.length}</span>
+        <span className="rounded-full border border-line bg-panel px-1.5 py-0.5 font-mono text-[11px] text-muted">{count ?? group.records.length}</span>
       </div>
       <div
         ref={scrollRef}
