@@ -2,7 +2,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
-import { observeSurface, observeSearchSubmit, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
+import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
@@ -412,6 +412,7 @@ const surfaces = {
   commandPalette: { name: 'Command palette', shortcut: 'Control+Shift+P', key: 'p', palette: '[data-testid="command-palette"]', input: '[data-testid="command-palette"] input[aria-label="Command"]', option: '[data-testid="command-palette"] [role="option"]' },
 };
 const GO_TO_QUERY = 'fixture-004242';
+const CHAT_TITLE = 'Long history';
 const SEARCH_QUERIES = ['fixture', 'fixture 4242.'];
 const fromTrigger = observed => ({ keydownToReadyMs: observed.matchedMs - observed.triggerMs, keydownToPaintedMs: observed.paintedMs - observed.triggerMs });
 async function openPalette(page, surface, readyWhen) {
@@ -486,13 +487,14 @@ async function seedChatHistory(instance, workspace) {
   const cliEnv = { ...env, DOHC_STATE_DIR: profile, NODE_NO_WARNINGS: '1' };
   const cli = async args => (await exec(process.execPath, [cliLauncher, ...args], { cwd: workspace.rootPath, env: cliEnv, windowsHide: true, timeout: 60000, signal: cancellation.signal, maxBuffer: 4 * 1024 * 1024 })).stdout;
   const started = performance.now();
-  const posted = JSON.parse(await cli(['--json', 'chat', 'post', 'general', '--title', 'Long history', 'Message 0']));
+  const posted = JSON.parse(await cli(['--json', 'chat', 'post', 'general', '--title', CHAT_TITLE, 'Message 0']));
   if (typeof posted.threadId !== 'string') throw Error(`CLI post returned no thread id: ${JSON.stringify(posted)}`);
   for (let n = 1; n < chatMessages; n++) {
     await cli(['chat', 'reply', posted.threadId, `Message ${n}`]);
     if (n % 50 === 0) console.log(JSON.stringify({ label, phase: 'chat-seed', messages: n + 1 }));
   }
-  return { channel: 'general', threadId: posted.threadId, messages: chatMessages, seededThrough: cliLauncher, seedingObservedMs: performance.now() - started };
+  // cliThreadId is the CLI's th_ handle, not the engine id the DOM carries.
+  return { channel: 'general', title: CHAT_TITLE, cliThreadId: posted.threadId, messages: chatMessages, seededThrough: cliLauncher, seedingObservedMs: performance.now() - started };
 }
 async function openChatHistory(page, seed) {
   const panel = page.getByTestId('chats-panel');
@@ -507,10 +509,11 @@ async function openChatHistory(page, seed) {
   await channel.click();
   const channelObserved = await channelSettle();
   const channelObservedMs = performance.now() - channelStarted;
+  const domThreadId = await page.evaluate(seededPostThreadId, { title: seed.title });
   const comment = '[data-testid="chats-thread-view"] [data-testid="chats-comments"] [data-testid="chats-message"]';
   const threadSettle = await armSurface(page, observeSurface, { trigger: 'click', target: comment, countSelector: comment, timeoutMs: 120000 });
   const threadStarted = performance.now();
-  await page.locator(card).filter({ has: page.locator(`[data-testid="chats-thread"][data-thread-id="${seed.threadId}"]`) }).getByTestId('chats-post-title').click();
+  await page.locator(`${card}[data-thread-id="${domThreadId}"]`).getByTestId('chats-post-title').click();
   const first = await threadSettle();
   let all = null, allCommentsError = null;
   try { all = await (await armSurface(page, observeSurface, { target: comment, minCount: seed.messages - 1, countSelector: comment, timeoutMs: 120000 }))(); }
@@ -518,7 +521,7 @@ async function openChatHistory(page, seed) {
   return {
     seed,
     channelOpen: { observedMs: channelObservedMs, clickToPostsPaintedMs: channelObserved.paintedMs - channelObserved.triggerMs, postCards: channelObserved.count, observed: channelObserved },
-    threadOpen: { observedMs: performance.now() - threadStarted, clickToFirstCommentPaintedMs: first.paintedMs - first.triggerMs,
+    threadOpen: { domThreadId, observedMs: performance.now() - threadStarted, clickToFirstCommentPaintedMs: first.paintedMs - first.triggerMs,
       clickToAllCommentsPaintedMs: all ? all.paintedMs - first.triggerMs : null, commentRowsRendered: all?.count ?? first.count, allCommentsError, observed: first },
   };
 }

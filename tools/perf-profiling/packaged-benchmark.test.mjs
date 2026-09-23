@@ -12,7 +12,7 @@ import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInp
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
-import { observeSurface, observeSearchSubmit, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
+import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 
 // A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
 function fakePage(t, html) {
@@ -311,6 +311,14 @@ test('search observer flags a debounce that ran before Enter and keeps a missing
   assert.equal(observed.rowsRendered, 0);
   const closed = fakePage(t, '<main></main>');
   await assert.rejects(closed.run(observeSearchSubmit, {}), /Search view is not open/);
+});
+test('seeded post is found by its title and yields the engine thread id the DOM carries, not the CLI handle', t => {
+  const post = (id, title) => `<div data-testid="chats-post-card" data-thread-id="${id}"><div data-testid="chats-thread" data-thread-id="${id}"><span data-testid="chats-post-title"> ${title} </span></div></div>`;
+  const p = fakePage(t, `<div data-testid="chats-channel-view">${post('thread-f7a6fc48-3eb4', 'Other post')}${post('thread-0c1d2e3f-4a5b', 'Long history')}</div>`);
+  assert.equal(p.run(seededPostThreadId, { title: 'Long history' }), 'thread-0c1d2e3f-4a5b');
+  assert.throws(() => p.run(seededPostThreadId, { title: 'th_0c1d2e3f-4a5b' }), /found 0/);
+  p.document.querySelector('[data-testid="chats-channel-view"]').insertAdjacentHTML('beforeend', post('thread-dup', 'Long history'));
+  assert.throws(() => p.run(seededPostThreadId, { title: 'Long history' }), /found 2/);
 });
 test('collection fixture writes the schema first and deterministic pre-minted record ids', () => {
   const files = collectionFixtureFiles(3);

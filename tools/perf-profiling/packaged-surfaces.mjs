@@ -157,6 +157,16 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
   });
 }
 
+// Serialized into the renderer. The CLI reports its own `th_` handle for a thread while the
+// DOM carries the engine id, so the seeded post is found by the title the DOM shows and the
+// harness clicks the id the DOM holds.
+export function seededPostThreadId({ title }) {
+  const cards = [...document.querySelectorAll('[data-testid="chats-channel-view"] [data-testid="chats-post-card"]')]
+    .filter(card => card.querySelector('[data-testid="chats-post-title"]')?.textContent?.trim() === title);
+  if (cards.length !== 1) throw Error(`Expected one post titled ${JSON.stringify(title)}, found ${cards.length}`);
+  return cards[0].dataset.threadId;
+}
+
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
 function base32(bytes) {
   let bits = 0, value = 0, out = '';
