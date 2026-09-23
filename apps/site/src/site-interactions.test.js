@@ -378,7 +378,7 @@ describe('Drive waitlist', () => {
     return form;
   };
 
-  it('posts the email and group to the Loops form endpoint and confirms', async () => {
+  it('posts the email and source to the Loops form endpoint and confirms', async () => {
     vi.mocked(fetch).mockImplementation(async () => Response.json({ success: true }));
     const form = await join();
     await vi.waitFor(() => expect(form.dataset.state).toBe('joined'));
@@ -386,7 +386,7 @@ describe('Drive waitlist', () => {
     expect(url).toBe(form.action);
     expect(url).toMatch(/^https:\/\/app\.loops\.so\/api\/newsletter-form\//);
     expect(request.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
-    expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({ email: 'ada@example.com', userGroup: 'Drive waitlist' });
+    expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({ email: 'ada@example.com', source: 'Drive waitlist' });
     expect(document.querySelector('[data-waitlist-status]').textContent).toContain('on the list');
     expect(document.activeElement).toBe(document.querySelector('[data-waitlist-status]'));
   });
