@@ -465,27 +465,12 @@ body {
   border-bottom: 1.5px solid currentColor;
   transform: translateY(-3px) rotate(-45deg);
 }
-
-/* Figure captions label the machined models the way a manual would. */
-.fig-caption {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: center;
-  gap: 4px 10px;
-  color: var(--subtle);
-  font: 400 12.5px/1.5 var(--font-sans);
-  text-align: center;
-}
-.fig-number { color: var(--ink); font: italic 500 15px/1 var(--font-serif); }
-.hero-engine .fig-caption { margin-top: -18px; }
 @media (max-width: 780px) {
   .hero-with-engine { grid-template-columns: 1fr; text-align: center; gap: 28px; }
   .hero-with-engine h1 { margin-inline: auto; }
   .hero-with-engine .hero-sub { margin-inline: auto; }
   .hero-with-engine .hero-cta, .hero-facts { justify-content: center; }
   .hero-engine-view { height: auto; aspect-ratio: 1 / 1; }
-  .hero-engine .fig-caption { margin-top: 0; }
 }
 
 .section {
@@ -1564,8 +1549,7 @@ main::before {
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
 .waitlist[data-state='joined'] .waitlist-field { display: none; }
 .waitlist[data-state='joined'] .waitlist-status { margin-top: 0; color: var(--ink); font-size: 15px; }
-.drive-visual { min-width: 0; margin: 0; }
-.drive-visual .fig-caption { margin-top: -12px; }
+.drive-visual { min-width: 0; }
 .drive-model-stage canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .drive-model-stage { position: relative; height: 420px; }
 .drive-model-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }

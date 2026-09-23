@@ -1,6 +1,7 @@
 import * as T from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createSectionMaterial } from './figure-studio';
 
 export interface DriveModel {
   root: T.Group;
@@ -54,8 +55,12 @@ function workshop() {
   const bright = metal(0xe6ebef, .2);
   const steel = metal(0x717b84, .3);
   const dark = metal(0x242a30, .48, .75);
-
+  const cast = metal(0x7b848c, .52, .82);
   const brass = metal(0x9b8052, .32);
+  const section = createSectionMaterial(1.6);
+  materials.push(section);
+  textures.push(section.map!);
+
   const mesh = (geometry: T.BufferGeometry, material: T.Material, parent: T.Object3D = root, position = [0, 0, 0]) => {
     const part = new T.Mesh(geometry, material);
     part.position.set(position[0], position[1], position[2]);
@@ -78,24 +83,6 @@ function workshop() {
     const socket = mesh(new T.CylinderGeometry(size * .47, size * .47, .006, 6), dark, head, [0, size * .34, 0]);
     socket.castShadow = false;
   };
-  const label = (text: string, width: number, height: number, pos: number[], parent: T.Object3D = root, light = false) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1024; canvas.height = 256;
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = light ? '#d2d8dd' : '#343b42';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = '500 92px Arial';
-    ctx.fillText(text, 512, 128);
-    const texture = new T.CanvasTexture(canvas);
-    texture.colorSpace = T.SRGBColorSpace;
-    textures.push(texture);
-    const material = new T.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
-    materials.push(material);
-    const part = mesh(new T.PlaneGeometry(width, height), material, parent, pos);
-    part.rotation.x = -Math.PI / 2;
-    part.castShadow = false;
-    return part;
-  };
   const dispose = () => {
     const geometries = new Set<T.BufferGeometry>();
     root.traverse(object => { if (object instanceof T.Mesh) geometries.add(object.geometry); });
@@ -103,33 +90,70 @@ function workshop() {
     materials.forEach(material => material.dispose());
     textures.forEach(texture => texture.dispose());
   };
-  return { root, silver, bright, steel, dark, brass, mesh, box, cylinder, ring, bolt, label, dispose };
+  return { root, silver, bright, steel, dark, cast, brass, section, mesh, box, cylinder, ring, bolt, dispose };
+}
+
+interface GearSpec { teeth: number; inner: number; outer: number; height: number; cone: number; twist?: number; bore?: number; thickness?: number }
+
+/** Tapered teeth between two radii, chamfered, lifted onto the pitch cone
+ * and swept slightly so the gear reads as a spiral bevel. The axis is +y. */
+function bevelTeeth({ teeth, inner, outer, height, cone, twist = 0 }: GearSpec) {
+  const pitch = Math.PI * 2 / teeth;
+  const half = pitch * .24;
+  const at = (radius: number, angle: number) => new T.Vector2(Math.cos(angle) * radius, Math.sin(angle) * radius);
+  const shapes = Array.from({ length: teeth }, (_, i) => {
+    const a = i * pitch;
+    return new T.Shape([at(inner, a - half), at(outer, a - half + twist), at(outer, a + half + twist), at(inner, a + half)]);
+  });
+  const chamfer = Math.min(height * .22, half * inner * .45);
+  const geometry = new T.ExtrudeGeometry(shapes, { depth: height, bevelEnabled: true, bevelThickness: chamfer, bevelSize: chamfer, bevelOffset: -chamfer, bevelSegments: 1 });
+  const position = geometry.getAttribute('position');
+  const slope = Math.tan(cone);
+  for (let i = 0; i < position.count; i++) {
+    const radius = Math.hypot(position.getX(i), position.getY(i));
+    position.setZ(i, position.getZ(i) + (outer - radius) * slope);
+  }
+  geometry.rotateX(-Math.PI / 2);
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 export function createDifferential(): DriveModel {
   const w = workshop();
-  const { root, silver, bright, steel, dark, brass, mesh, box, cylinder, ring, bolt } = w;
+  const { root, silver, bright, steel, dark, cast, brass, section, mesh, box, cylinder, ring, bolt } = w;
   const axisX = new T.Group(); axisX.rotation.z = -Math.PI / 2; root.add(axisX);
-  // A sectioned cast housing leaves the crown wheel and carrier visible.
-  const housingShape = new T.Shape();
-  housingShape.absarc(0, 0, 1.44, Math.PI * .04, Math.PI * 1.06, false);
-  housingShape.absarc(0, 0, 1.23, Math.PI * 1.06, Math.PI * .04, true);
-  housingShape.closePath();
-  const casing = mesh(new T.ExtrudeGeometry(housingShape, { depth: 1.3, bevelEnabled: true, bevelThickness: .045, bevelSize: .035, bevelSegments: 3, curveSegments: 64 }), steel);
-  casing.rotation.set(Math.PI, Math.PI / 2, 0); casing.position.x = -.65;
-  for (const x of [-.72, .72]) {
-    const rim = mesh(new T.TorusGeometry(1.36, .075, 12, 80, Math.PI * 1.02), silver);
-    rim.rotation.set(Math.PI, Math.PI / 2, 0); rim.position.x = x;
-    for (let i = 0; i < 6; i++) {
-      const a = Math.PI * .12 + i * Math.PI * .16;
-      const boss = new T.Group(); boss.position.set(x, -Math.sin(a) * 1.36, Math.cos(a) * 1.36); boss.rotation.z = Math.PI / 2; root.add(boss);
-      cylinder(.12, .14, [0, 0, 0], silver, boss); bolt([0, .075, 0], .065, boss);
+
+  // Cast housing turned around the axle, with the quarter facing the viewer cut away.
+  const profile = new T.SplineCurve([[.5, -1.28], [.64, -1.08], [1.18, -.84], [1.5, -.52], [1.58, -.18], [1.5, .14], [1.18, .46], [.74, .78], [.62, 1.06], [.5, 1.28]]
+    .map(([r, h]) => new T.Vector2(r, h))).getPoints(48);
+  const wall = .13;
+  const inside = profile.map((point, i) => {
+    const before = profile[Math.max(0, i - 1)], after = profile[Math.min(profile.length - 1, i + 1)];
+    const normal = new T.Vector2(after.y - before.y, before.x - after.x).normalize();
+    return point.clone().addScaledVector(normal, -wall);
+  });
+  const housing = new T.Group(); axisX.add(housing);
+  const sweep = Math.PI * 1.5;
+  // Each run is one smooth stretch of a counter-clockwise profile; runs meet at hard edges.
+  const turned = (runs: T.Vector2[][]) => {
+    for (const run of runs) mesh(new T.LatheGeometry(run, 120, 0, sweep), cast, housing);
+    const outline = new T.Shape(runs.flatMap(run => run.slice(0, -1)));
+    for (const angle of [0, sweep]) {
+      const face = mesh(new T.ShapeGeometry(outline, 24), section, housing);
+      face.rotation.y = angle === 0 ? -Math.PI / 2 : Math.PI;
+      face.castShadow = false;
     }
+  };
+  const last = profile.length - 1;
+  turned([profile, [profile[last], inside[last]], [...inside].reverse(), [inside[0], profile[0]]]);
+  // The two housing halves bolt together at a flange just behind the crown wheel.
+  const flange = [[1.44, .08], [1.66, .08], [1.66, .2], [1.44, .2]].map(([r, h]) => new T.Vector2(r, h));
+  turned(flange.map((point, i) => [point, flange[(i + 1) % flange.length]]));
+  for (let i = 1; i < 12; i++) {
+    const a = i * sweep / 12;
+    bolt([Math.sin(a) * 1.56, .23, Math.cos(a) * 1.56], .045, housing);
   }
-  for (let i = 0; i < 6; i++) {
-    const rib = mesh(new T.TorusGeometry(1.42, .035, 8, 48, Math.PI), steel);
-    rib.rotation.set(Math.PI, Math.PI / 2, 0); rib.position.x = -.5 + i * .2;
-  }
+
   // Output shafts and bearing races share the differential axis.
   for (const sign of [-1, 1]) {
     cylinder(.19, 1.45, [0, sign * 1.45, 0], steel, axisX);
@@ -147,15 +171,20 @@ export function createDifferential(): DriveModel {
       spline.rotation.y = -a;
     }
   }
+
+  const gear = (parent: T.Object3D, position: number[], spec: GearSpec, body = silver) => {
+    const group = new T.Group(); group.position.set(position[0], position[1], position[2]); parent.add(group);
+    const { inner, outer, cone, bore = inner * .45, thickness = .12 } = spec;
+    const rise = (outer - inner) * Math.tan(cone);
+    mesh(new T.LatheGeometry([[bore, -thickness], [outer, -thickness], [outer, 0], [inner, rise], [bore, rise], [bore, -thickness]]
+      .map(([r, h]) => new T.Vector2(r, h)), 72), body, group);
+    mesh(bevelTeeth(spec), bright, group);
+    return group;
+  };
+
   const carrier = new T.Group(); axisX.add(carrier);
-  // Lathed crown wheel with individually cut, swept bevel teeth.
-  const crown = mesh(new T.LatheGeometry([new T.Vector2(.47, -.43), new T.Vector2(.95, -.43), new T.Vector2(1.17, -.32), new T.Vector2(1.17, -.17), new T.Vector2(.99, -.22), new T.Vector2(.47, -.22), new T.Vector2(.47, -.43)], 96), silver, carrier);
-  const toothGeometry = new T.BoxGeometry(.15, .12, .13);
-  for (let i = 0; i < 44; i++) {
-    const a = i * Math.PI * 2 / 44;
-    const tooth = mesh(toothGeometry, bright, crown, [Math.cos(a) * 1.1, -.135, Math.sin(a) * 1.1]);
-    tooth.rotation.set(.15, -a + .2, .35);
-  }
+  // A 41:11 crown and pinion: a 3.73 final drive.
+  gear(carrier, [0, -.34, 0], { teeth: 41, inner: .86, outer: 1.2, height: .1, cone: .12, twist: .1, bore: .47, thickness: .1 });
   for (const y of [-.43, .44]) {
     cylinder(.66, .10, [0, y, 0], steel, carrier);
     cylinder(.25, .14, [0, y, 0], bright, carrier);
@@ -169,30 +198,22 @@ export function createDifferential(): DriveModel {
     const bridge = box([.15, .85, .18], [Math.cos(a) * .53, 0, Math.sin(a) * .53], steel, carrier, .06);
     bridge.rotation.y = -a;
   }
-  const bevelGear = (radius: number, pos: number[], parent: T.Object3D, material = silver) => {
-    const gear = new T.Group(); gear.position.set(pos[0], pos[1], pos[2]); parent.add(gear);
-    cylinder(radius, .19, [0, 0, 0], material, gear, radius * .7);
-    cylinder(radius * .42, .25, [0, 0, 0], dark, gear);
-    for (let i = 0; i < 16; i++) {
-      const a = i * Math.PI / 8;
-      const tooth = box([.09, .1, .085], [Math.cos(a) * radius * .84, .08, Math.sin(a) * radius * .84], bright, gear, .008);
-      tooth.rotation.y = -a;
-    }
-    return gear;
-  };
-  bevelGear(.39, [0, -.23, 0], carrier);
-  const rightGear = bevelGear(.39, [0, .23, 0], carrier); rightGear.rotation.z = Math.PI;
-  const cross = cylinder(.07, 1.0, [0, 0, 0], bright, carrier); cross.rotation.z = Math.PI / 2;
-  const spider1 = bevelGear(.24, [.33, 0, 0], carrier, brass); spider1.rotation.z = Math.PI / 2;
-  const spider2 = bevelGear(.24, [-.33, 0, 0], carrier, brass); spider2.rotation.z = -Math.PI / 2;
+  const sideGear = { teeth: 16, inner: .17, outer: .36, height: .07, cone: Math.PI / 4, thickness: .08 };
+  gear(carrier, [0, -.26, 0], sideGear);
+  gear(carrier, [0, .26, 0], sideGear).rotation.z = Math.PI;
+  const cross = cylinder(.06, 1.0, [0, 0, 0], bright, carrier); cross.rotation.z = Math.PI / 2;
+  const spiderGear = { teeth: 10, inner: .1, outer: .22, height: .06, cone: Math.PI / 4, thickness: .07 };
+  gear(carrier, [.3, 0, 0], spiderGear, brass).rotation.z = Math.PI / 2;
+  gear(carrier, [-.3, 0, 0], spiderGear, brass).rotation.z = -Math.PI / 2;
+
   // Pinion and short prop shaft with a visible universal joint.
   const input = new T.Group(); input.rotation.x = Math.PI / 2; input.position.set(-.1, -.12, 0); root.add(input);
-  cylinder(.36, .48, [0, 1.3, 0], steel, input);
-  ring(.35, .04, [0, 1.53, 0], silver, input);
+  cylinder(.36, .5, [0, 1.55, 0], cast, input);
+  ring(.35, .04, [0, 1.8, 0], silver, input);
   const shaft = new T.Group(); input.add(shaft);
-  const pinion = bevelGear(.29, [0, .9, 0], shaft); pinion.rotation.z = Math.PI;
+  gear(shaft, [0, .92, 0], { teeth: 11, inner: .12, outer: .3, height: .08, cone: .6, twist: -.1, thickness: .1 }).rotation.z = Math.PI;
   cylinder(.16, 1.15, [0, 1.72, 0], bright, shaft);
-  cylinder(.28, .12, [0, 1.8, 0], steel, shaft);
+  cylinder(.28, .12, [0, 1.9, 0], steel, shaft);
   for (const x of [-.19, .19]) box([.12, .38, .18], [x, 2.28, 0], silver, shaft);
   const universal = cylinder(.08, .54, [0, 2.4, 0], steel, shaft); universal.rotation.z = Math.PI / 2;
   const crossJoint = cylinder(.08, .45, [0, 2.4, 0], bright, shaft); crossJoint.rotation.x = Math.PI / 2;
@@ -205,7 +226,6 @@ export function createDifferential(): DriveModel {
     const a = i * Math.PI / 2;
     bolt([Math.cos(a) * .27, 3.49, Math.sin(a) * .27], .035, shaft);
   }
-  w.label('dohc', .5, .15, [.0, -1.36, .7]);
   batchAssemblies([root, carrier, shaft]);
-  return { root, update: time => { carrier.rotation.y = time * .2; shaft.rotation.y = -time * .2 * 44 / 16; }, dispose: w.dispose };
+  return { root, update: time => { carrier.rotation.y = time * .2; shaft.rotation.y = -time * .2 * 41 / 11; }, dispose: w.dispose };
 }

@@ -106,13 +106,17 @@ export function mountEngine(host: HTMLElement) {
   }, { signal });
   const offscreen = canvas.transferControlToOffscreen();
   worker.postMessage({ type: 'init', canvas: offscreen, pixelRatio: Math.min(devicePixelRatio, 1.75), studioUrl: new URL('/engine-studio.hdr', location.href).href } satisfies EngineWorkerRequest, [offscreen]);
+  const theme = () => send({ type: 'theme', dark: document.documentElement.dataset.theme === 'dark' });
+  const themeObserver = new MutationObserver(theme);
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  theme();
 
   function dispose() {
     if (disposed) return;
     disposed = true;
     cancelAnimationFrame(frame);
     lifetime.abort();
-    resize.disconnect(); intersection.disconnect();
+    resize.disconnect(); intersection.disconnect(); themeObserver.disconnect();
     worker.terminate(); canvas.remove();
     host.classList.remove('engine-loaded');
   }
