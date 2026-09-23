@@ -14,6 +14,7 @@ import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { assertWorkspaceQuota } from "./storage/workspaces";
 import { requireLinkAppPublication } from "./storage/publications";
+import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
@@ -114,12 +115,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const bytes = storage.getBlob(auth.workspaceId, String(row.manifest_sha256));
     if (!bytes || bytes.byteLength > limits.maxMetadataBytes || hash(bytes) !== row.manifest_sha256) throw notFound();
     const candidate = parseAppPublicationCandidate(JSON.parse(Buffer.from(bytes).toString("utf8")), limits);
-    const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
-    const parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
-    const selector = parsed && grant && effectiveShareSelector(parsed, grant.access);
-    if (!share || !grant || share.workspaceId !== auth.workspaceId || share.granterUserId !== row.owner_user_id ||
-        grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation ||
-        !selector || "kind" in selector || targetVersionId(selector) !== candidate.versionId || visibleSharePath(selector, candidate.appRoot) !== candidate.appRoot ||
+    const currentGrant = readCurrentShareGrant(storage, {grantId: String(row.grant_id), generation: Number(row.grant_generation)});
+    if (!currentGrant || currentGrant.share.shareId !== row.share_id || currentGrant.share.workspaceId !== auth.workspaceId ||
+        currentGrant.share.granterUserId !== row.owner_user_id) throw notFound();
+    const {share, grant} = currentGrant;
+    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector = parsed && effectiveShareSelector(parsed, grant.access);
+    if (!selector || "kind" in selector || targetVersionId(selector) !== candidate.versionId || visibleSharePath(selector, candidate.appRoot) !== candidate.appRoot ||
         candidate.inputs.some(file => visibleSharePath(selector, file.path) !== file.path)) throw notFound();
     const publicationOwner = {workspaceId: auth.workspaceId, shareId: share.shareId, grantId: grant.grantId, generation: grant.generation, ownerUserId: String(row.owner_user_id)};
     if (hash(JSON.stringify(["dohc-app-publication-v1", publicationOwner, hash(JSON.stringify(candidate))])) !== publicationId) throw notFound();

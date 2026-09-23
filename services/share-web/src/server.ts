@@ -1224,7 +1224,7 @@ export function createShareWebApplication({
                   : {}),
               },
               body: JSON.stringify({ secret }),
-            }, DEFAULT_RELAY_REQUEST_TIMEOUT_MS);
+            }, relayTimeoutMs);
           let exchanged: ReturnType<typeof parsedRelaySession>;
           try {
             const relayResponse = await fetchRelay(bounded.request);

@@ -238,6 +238,43 @@ describe("share-web sessions", () => {
     expect(receivedClientAddress).toBe(clientAddress);
   });
 
+  it.each(["/api/exchange", "/api/mcp/exchange"])("cancels a stalled relay exchange at the configured timeout for %s", async path => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    try {
+      let markStarted!: (request: Request) => void;
+      const started = new Promise<Request>(resolve => { markStarted = resolve; });
+      let calls = 0;
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test", publicHosts: new Set([HOST]), relayTimeoutMs: 250, nowMs: () => 1_000,
+        fetchRelay: async relayRequest => {
+          expect(new URL(relayRequest.url).pathname).toBe("/sync/link-exchange");
+          if (++calls === 1) {
+            markStarted(relayRequest);
+            return new Promise<Response>((_resolve, reject) => {
+              relayRequest.signal.addEventListener("abort", () => reject(relayRequest.signal.reason), {once: true});
+            });
+          }
+          return Response.json({ok: true, grantId: "grant-alpha", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000});
+        },
+      });
+      const pending = handler(request(path, {...exchange(SECRET_ALPHA), signal: browserAbort.signal}));
+      const relayRequest = await started;
+      await vi.advanceTimersByTimeAsync(249);
+      expect(relayRequest.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(relayRequest.signal.aborted).toBe(true);
+      const refused = await pending;
+      expect(refused.status).toBe(404);
+      expect(refused.headers.has("set-cookie")).toBe(false);
+      expect((await handler(request(path, exchange(SECRET_ALPHA)))).status).toBe(200);
+      expect(calls).toBe(2);
+    } finally {
+      browserAbort.abort();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps two link sessions distinct when one link rotates", async () => {
     let alphaGeneration = 1;
     let tokenId = 0;

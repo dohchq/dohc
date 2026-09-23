@@ -197,6 +197,39 @@ it("allows only explicitly granted helper operations with view-only source acces
   await expect(f.invoke(helper, id(6), {}, publicationId)).rejects.toThrow();
 });
 
+it.each(["invalid principal", "revoked parent", "stale generation"] as const)("refuses named publication access with a %s", async reason => {
+  const f = await fixture(); await f.activate(); f.addHelper();
+  const publicationId = f.publish([id(6)]);
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  if (reason === "revoked parent") {
+    f.storage.tx(() => {
+      f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES('publication-parent','s','link',NULL,NULL,'view',1,'active',1,NULL,NULL)`).run();
+      f.storage.db.prepare("UPDATE sync_relay_share_grants SET principal_kind='user',principal_user_id='reader',parent_grant_id='publication-parent' WHERE grant_id='g'").run();
+    });
+  }
+  for (const auth of [owner, helper]) expect(f.host.publication(auth, publicationId)).toBeTruthy();
+  const readGrant = f.storage.getShareGrant.bind(f.storage);
+  const storedGrant = vi.spyOn(f.storage, "getShareGrant");
+  try {
+    if (reason === "invalid principal") {
+      storedGrant.mockImplementation(grantId => {
+        const grant = readGrant(grantId);
+        return grantId === "g" && grant ? {...grant, principalUserId: "unexpected-user"} : grant;
+      });
+    } else if (reason === "revoked parent") {
+      f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='publication-parent'").run());
+    } else {
+      f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run());
+    }
+    for (const auth of [owner, helper]) {
+      expect(() => f.host.publication(auth, publicationId)).toThrow();
+      await expect(f.invoke(auth, id(6), {}, publicationId)).rejects.toThrow();
+    }
+    expect(f.host.describe(helper, scope).operations.map(operation => operation.name)).toEqual(["read"]);
+  } finally { storedGrant.mockRestore(); }
+});
+
 it("rejects cross-workspace grant targets and returns metadata quota on revocation", async () => {
   const f = await fixture(); await f.activate(); f.addHelper();
   const before = workspaceUsageBytes(f.storage, "w");
