@@ -70,6 +70,34 @@ type RefreshAttempt =
   | { status: "invalid" }
   | { status: "unavailable" };
 
+interface BrowserSession {
+  discriminator: string;
+  token: string;
+  session: ShareWebSession;
+}
+
+/** One relay call made with a browser session's link capability. */
+interface RelayCall {
+  path: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  /** Sends the relay exchange key. */
+  exchangeKey?: boolean;
+  /** Extends the deadline by the time the relay may hold the read open. */
+  holdMs?: number;
+  /** Admits the call against a per-session and per-grant in-flight limit. */
+  limiter?: ShareWebInFlightLimiter;
+  /** Reads the whole relay body, up to the proxy limit, inside the deadline. */
+  buffered?: boolean;
+  /** Refuses with this status when the session changed before the call answered. */
+  ifSessionChanged?: 404 | 409;
+  /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
+  ok?(relayResponse: Response, holdSlot: () => () => void): Response | Promise<Response>;
+  /** Translates a relay refusal, or returns null for the generic refusal. */
+  refusal?(relayResponse: Response): Promise<Response | null>;
+}
+
 export interface CreateShareWebApplicationOptions {
   appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
@@ -83,7 +111,7 @@ export interface CreateShareWebApplicationOptions {
   newProfileSecret?: () => string;
   maxSessions?: number;
   viewerAssetsDir?: string;
-  handoffRelayTimeoutMs?: number;
+  relayTimeoutMs?: number;
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
@@ -471,6 +499,21 @@ async function discussionState(
   }
 }
 
+async function discussionRefusal(relayResponse: Response): Promise<Response | null> {
+  if (relayResponse.status !== 403 && relayResponse.status !== 413) return null;
+  const state = await discussionState(relayResponse);
+  return state && jsonResponse(
+    { ok: false, ...state },
+    { status: state.state === "limit-reached" ? 413 : 403 },
+  );
+}
+
+function relayJson(relayResponse: Response): Response {
+  return response(relayResponse.body, {
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function relayRequest(relayUrl: string, path: string, init: RequestInit = {}): Request {
   return new Request(new URL(path, `${relayUrl.replace(/\/+$/u, "")}/`), init);
 }
@@ -482,25 +525,16 @@ function boundedRelayRequest(
   init: RequestInit,
   timeoutMs: number,
 ): { request: Request; dispose: () => void } {
-  const relayAbort = new AbortController();
-  const abortFromClient = (): void => relayAbort.abort(clientSignal?.reason);
-  if (clientSignal) {
-    if (clientSignal.aborted) {
-      abortFromClient();
-    } else {
-      clientSignal.addEventListener("abort", abortFromClient, { once: true });
-    }
-  }
-  const deadline = setTimeout(() => relayAbort.abort(), timeoutMs);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
   return {
     request: relayRequest(relayUrl, path, {
       ...init,
-      signal: relayAbort.signal,
+      signal: clientSignal ? AbortSignal.any([clientSignal, deadline.signal]) : deadline.signal,
     }),
-    dispose: () => {
-      clearTimeout(deadline);
-      clientSignal?.removeEventListener("abort", abortFromClient);
-    },
+    // Disposing ends only the deadline: a streamed body outlives it but still
+    // stops when the browser leaves.
+    dispose: () => clearTimeout(timer),
   };
 }
 
@@ -679,7 +713,6 @@ function bodyBuffer(bytes: Uint8Array): ArrayBuffer {
 async function streamingBlobResponse(
   relayResponse: Response,
   release: () => void,
-  extraHeaders: HeadersInit = {},
 ): Promise<Response> {
   if (!relayResponse.body) {
     release();
@@ -687,7 +720,6 @@ async function streamingBlobResponse(
       headers: {
         "content-type": "application/octet-stream",
         "content-disposition": "attachment",
-        ...Object.fromEntries(new Headers(extraHeaders)),
       },
     });
   }
@@ -755,11 +787,10 @@ async function streamingBlobResponse(
   });
   return response(body, {
     headers: raster
-      ? { "content-type": raster, ...Object.fromEntries(new Headers(extraHeaders)) }
+      ? { "content-type": raster }
       : {
           "content-type": "application/octet-stream",
           "content-disposition": "attachment",
-          ...Object.fromEntries(new Headers(extraHeaders)),
         },
   });
 }
@@ -775,7 +806,7 @@ export function createShareWebApplication({
   newProfileSecret = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
-  handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+  relayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   accountAuth,
   fetchAuth,
   namedBrowserSessionLimits,
@@ -830,11 +861,7 @@ export function createShareWebApplication({
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
 
-  function readBrowserSession(discriminator: string, cookies: Map<string, string>): {
-    discriminator: string;
-    token: string;
-    session: ShareWebSession;
-  } | null {
+  function readBrowserSession(discriminator: string, cookies: Map<string, string>): BrowserSession | null {
     if (!isSessionDiscriminator(discriminator)) return null;
     const token = cookies.get(cookieName(discriminator));
     if (!token) return null;
@@ -869,11 +896,7 @@ export function createShareWebApplication({
   }
 
   async function refreshSession(
-    authenticated: {
-      discriminator: string;
-      token: string;
-      session: ShareWebSession;
-    },
+    authenticated: BrowserSession,
   ): Promise<
     | { ok: true; headers: Record<string, string> }
     | { ok: false; status: 404 | 503 }
@@ -905,7 +928,7 @@ export function createShareWebApplication({
                 : {}),
             },
           },
-          DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+          relayTimeoutMs,
         );
         try {
           const relayResponse = await fetchRelay(boundedRelay.request);
@@ -1003,6 +1026,79 @@ export function createShareWebApplication({
         } };
     } finally {
       signal.removeEventListener("abort", abort);
+    }
+  }
+
+  async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
+    const refreshed = await refreshSession(browser);
+    if (!refreshed.ok) return refused(refreshed.status);
+    const capabilityToken = browser.session.capabilityToken;
+    const current = (): boolean =>
+      sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
+    // Only an answer for a still-current session renews its cookie. A cookie
+    // for a dead session could overwrite a newer one.
+    const answer = (result: Response): Response => {
+      if (current()) {
+        for (const [name, value] of Object.entries(refreshed.headers)) result.headers.set(name, value);
+      }
+      return result;
+    };
+    const superseded = (): Response | null =>
+      call.ifSessionChanged && !current() ? refused(call.ifSessionChanged) : null;
+    const release = call.limiter
+      ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
+      : () => {};
+    if (!release) return answer(refused(429));
+    let slotHeld = false;
+    const holdSlot = (): (() => void) => {
+      slotHeld = true;
+      return release;
+    };
+    const bounded = boundedRelayRequest(
+      request.signal,
+      relayUrl,
+      call.path,
+      {
+        method: call.method,
+        headers: {
+          authorization: `LinkCapability ${capabilityToken}`,
+          ...(call.exchangeKey && relayExchangeKey
+            ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+            : {}),
+          ...call.headers,
+        },
+        body: call.body,
+      },
+      relayTimeoutMs + (call.holdMs ?? 0),
+    );
+    try {
+      let relayResponse = await fetchRelay(bounded.request);
+      // Eviction never waits on the body, which may be oversized or broken.
+      if (relayResponse.status === 401) {
+        const stale = superseded();
+        sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return stale ?? refused(404);
+      }
+      if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
+      const stale = superseded();
+      if (stale) {
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return stale;
+      }
+      if (relayResponse.status === 200) {
+        return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
+      }
+      const translated = await call.refusal?.(relayResponse);
+      if (translated) return answer(translated);
+      await relayResponse.body?.cancel().catch(() => undefined);
+      if (relayResponse.status === 429) return answer(refused(429));
+      return answer(refused(relayResponse.status >= 400 && relayResponse.status < 500 ? 404 : 503));
+    } catch {
+      return superseded() ?? answer(refused(503));
+    } finally {
+      bounded.dispose();
+      if (!slotHeld) release();
     }
   }
 
@@ -1159,60 +1255,23 @@ export function createShareWebApplication({
 
     if (pathname === "/api/handoff" && request.method === "POST") {
       if (!request.headers.has(LINK_SESSION_HEADER)) return refused();
-      const authenticated = await readSession(request);
+      const authenticated = readSession(request);
       if (!authenticated) return refused();
-      const refreshed = await refreshSession(authenticated);
-      if (!refreshed.ok) return refused(refreshed.status);
-      const capabilityToken = authenticated.session.capabilityToken;
-      const boundedRelay = boundedRelayRequest(
-        request.signal,
-        relayUrl,
-        "/sync/link-handoff",
-        {
-          method: "POST",
-          headers: {
-            authorization: `LinkCapability ${capabilityToken}`,
-            ...(relayExchangeKey
-              ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-              : {}),
-          },
-        },
-        handoffRelayTimeoutMs,
-      );
-      try {
-        const relayResponse = await fetchRelay(boundedRelay.request);
-        if (relayResponse.status === 429) {
-          return refused(429, refreshed.headers);
-        }
-        if (relayResponse.status !== 200) {
-          if (relayResponse.status === 401) {
-            sessions.deleteIfCapability(
-              authenticated.discriminator,
-              authenticated.token,
-              capabilityToken,
-            );
-          }
-          return refused(
-            relayResponse.status === 401 || relayResponse.status === 404 ? 404 : 503,
-            refreshed.headers,
-          );
-        }
-        const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-        if (!handoff) return refused(503, refreshed.headers);
-        return jsonResponse(
-          {
+      return await callRelay(request, authenticated, {
+        path: "/sync/link-handoff",
+        method: "POST",
+        exchangeKey: true,
+        ok: async (relayResponse) => {
+          const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
+          if (!handoff) return refused(503);
+          return jsonResponse({
             ok: true,
             code: handoff.code,
             relayUrl: publicRelayUrl,
             expiresAtMs: handoff.expiresAtMs,
-          },
-          { headers: refreshed.headers },
-        );
-      } catch {
-        return refused(503, refreshed.headers);
-      } finally {
-        boundedRelay.dispose();
-      }
+          });
+        },
+      });
     }
 
     if (
@@ -1226,16 +1285,16 @@ export function createShareWebApplication({
       ) {
         return refused();
       }
-      const authenticated = await readSession(request);
+      const authenticated = readSession(request);
       if (!authenticated) return refused();
 
       let relayPath: string;
-      let relayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS;
+      let holdMs = 0;
       if (isActivity) {
         const parsedPath = discussionActivityRelayPath(request);
         if (!parsedPath) return refused();
         relayPath = parsedPath.path;
-        relayTimeoutMs += parsedPath.holdMs;
+        holdMs = parsedPath.holdMs;
       } else if (request.method === "GET") {
         const parsedPath = discussionRelayPath(request);
         if (!parsedPath) return refused();
@@ -1260,205 +1319,52 @@ export function createShareWebApplication({
         if (appendBody === null) return refused();
       }
 
-      const refreshed = await refreshSession(authenticated);
-      if (!refreshed.ok) return refused(refreshed.status);
-      const capabilityToken = authenticated.session.capabilityToken;
-      const releaseActivityHold = isActivity
-        ? activityHoldLimiter.acquire(
-            sessionKey(authenticated.discriminator, authenticated.token),
-            authenticated.session.grantId,
-          )
-        : null;
-      if (isActivity && !releaseActivityHold) {
-        return refused(429, refreshed.headers);
-      }
-      const boundedRelay = boundedRelayRequest(
-        request.signal,
-        relayUrl,
-        relayPath,
-        {
-          method: request.method,
-          headers: {
-            authorization: `LinkCapability ${capabilityToken}`,
-            "x-dohc-link-profile-secret": profileSecret,
-            ...(request.method === "POST"
-              ? {
-                  "content-type": "application/json",
-                  "x-dohc-relay-exchange-key": relayExchangeKey!,
-                }
-              : {}),
-          },
-          ...(appendBody === null ? {} : { body: appendBody }),
+      return await callRelay(request, authenticated, {
+        path: relayPath,
+        method: request.method,
+        headers: {
+          "x-dohc-link-profile-secret": profileSecret,
+          ...(appendBody === null ? {} : { "content-type": "application/json" }),
         },
-        relayTimeoutMs,
-      );
-      try {
-        const relayResponse = await completeRelayResponse(
-          await fetchRelay(boundedRelay.request),
-        );
-        if (
-          !sessions.isCurrent(
-            authenticated.discriminator,
-            authenticated.token,
-            capabilityToken,
-            nowMs(),
-          )
-        ) {
-          await relayResponse.body?.cancel().catch(() => undefined);
-          return refused(isActivity ? 409 : 404);
-        }
-        if (relayResponse.status === 200) {
-          return response(relayResponse.body, {
-            headers: {
-              "content-type": "application/json",
-              ...refreshed.headers,
-            },
-          });
-        }
-        if (
-          (relayResponse.status === 403 || relayResponse.status === 413) &&
-          !isActivity
-        ) {
-          const discussionRefusal = await discussionState(relayResponse);
-          return discussionRefusal
-            ? jsonResponse(
-                { ok: false, ...discussionRefusal },
-                {
-                  status:
-                    discussionRefusal.state === "limit-reached" ? 413 : 403,
-                  headers: refreshed.headers,
-                },
-              )
-            : refused(404, refreshed.headers);
-        }
-        if (relayResponse.status === 401) {
-          sessions.deleteIfCapability(
-            authenticated.discriminator,
-            authenticated.token,
-            capabilityToken,
-          );
-          return refused(404, refreshed.headers);
-        }
-        if (relayResponse.status === 429) {
-          return refused(429, refreshed.headers);
-        }
-        return refused(
-          relayResponse.status >= 500 ? 503 : 404,
-          refreshed.headers,
-        );
-      } catch {
-        return refused(503, refreshed.headers);
-      } finally {
-        boundedRelay.dispose();
-        releaseActivityHold?.();
-      }
+        ...(appendBody === null ? {} : { body: appendBody, exchangeKey: true }),
+        holdMs,
+        buffered: true,
+        ...(isActivity
+          ? { limiter: activityHoldLimiter, ifSessionChanged: 409 }
+          : { ifSessionChanged: 404, refusal: discussionRefusal }),
+      });
     }
 
     if (pathname.startsWith("/api/view/")) {
-      const authenticated = await readSession(request);
-      if (!authenticated) return refused();
-      let relayPath: string | null = null;
-      let logHoldMs = 0;
-      if (request.method === "GET" && pathname === "/api/view/meta") {
-        relayPath = "/sync/link/share";
-      } else if (request.method === "GET" && pathname === "/api/view/current") {
-        relayPath = "/sync/link/current";
-      } else if (request.method === "GET" && pathname === "/api/view/log") {
+      const authenticated = readSession(request);
+      if (!authenticated || request.method !== "GET") return refused();
+      if (pathname === "/api/view/meta") {
+        return await callRelay(request, authenticated, { path: "/sync/link/share" });
+      }
+      if (pathname === "/api/view/current") {
+        return await callRelay(request, authenticated, { path: "/sync/link/current" });
+      }
+      if (pathname === "/api/view/log") {
         const hold = new URL(request.url).searchParams.get("hold") ?? "0";
         if (!DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
           return refused();
         }
-        logHoldMs = Number(hold);
-        relayPath = `/sync/link/log${search}`;
-      } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {
-        const sha = pathname.slice("/api/view/blob/".length);
-        if (SHA256_HEX_PATTERN.test(sha)) relayPath = `/sync/link/blobs/${sha}`;
-      }
-      if (!relayPath) return refused();
-
-      const refreshed = await refreshSession(authenticated);
-      if (!refreshed.ok) return refused(refreshed.status);
-
-      const isBlob = pathname.startsWith("/api/view/blob/");
-      const isLog = pathname === "/api/view/log";
-      const releaseBlobProxy = isBlob
-        ? blobProxyLimiter.acquire(
-            sessionKey(authenticated.discriminator, authenticated.token),
-            authenticated.discriminator,
-          )
-        : null;
-      if (isBlob && !releaseBlobProxy) return refused(429, refreshed.headers);
-      const releaseActivityHold = isLog
-        ? activityHoldLimiter.acquire(
-            sessionKey(authenticated.discriminator, authenticated.token),
-            authenticated.session.grantId,
-          )
-        : null;
-      if (isLog && !releaseActivityHold) return refused(429, refreshed.headers);
-
-      const readCapabilityToken = authenticated.session.capabilityToken;
-      const relayInit: RequestInit = {
-        headers: { authorization: `LinkCapability ${readCapabilityToken}` },
-        signal: request.signal,
-      };
-      const boundedLog = isLog ? boundedRelayRequest(
-        request.signal, relayUrl, relayPath, relayInit,
-        DEFAULT_RELAY_REQUEST_TIMEOUT_MS + logHoldMs,
-      ) : null;
-      try {
-        const relayResponse = await fetchRelay(
-          boundedLog?.request ?? relayRequest(relayUrl, relayPath, relayInit),
-        );
-        if (
-          isLog &&
-          !sessions.isCurrent(
-            authenticated.discriminator,
-            authenticated.token,
-            readCapabilityToken,
-            nowMs(),
-          )
-        ) {
-          await relayResponse.body?.cancel().catch(() => undefined);
-          return refused(409, refreshed.headers);
-        }
-        if (relayResponse.status !== 200) {
-          releaseBlobProxy?.();
-          if (relayResponse.status === 429) {
-            return refused(429, refreshed.headers);
-          }
-          if (relayResponse.status === 401) {
-            sessions.deleteIfCapability(
-              authenticated.discriminator,
-              authenticated.token,
-              readCapabilityToken,
-            );
-            return refused();
-          }
-          return refused(
-            relayResponse.status >= 500 ? 503 : 404,
-            refreshed.headers,
-          );
-        }
-        if (isBlob && releaseBlobProxy) {
-          return await streamingBlobResponse(
-            relayResponse,
-            releaseBlobProxy,
-            refreshed.headers,
-          );
-        }
-        return response(relayResponse.body, {
-          headers: {
-            "content-type": "application/json",
-            ...refreshed.headers,
-          },
+        return await callRelay(request, authenticated, {
+          path: `/sync/link/log${search}`,
+          holdMs: Number(hold),
+          limiter: activityHoldLimiter,
+          ifSessionChanged: 409,
         });
-      } catch {
-        releaseBlobProxy?.();
-        return refused(503, refreshed.headers);
-      } finally {
-        boundedLog?.dispose();
-        releaseActivityHold?.();
       }
+      const sha = pathname.slice("/api/view/blob/".length);
+      if (!pathname.startsWith("/api/view/blob/") || !SHA256_HEX_PATTERN.test(sha)) {
+        return refused();
+      }
+      return await callRelay(request, authenticated, {
+        path: `/sync/link/blobs/${sha}`,
+        limiter: blobProxyLimiter,
+        ok: (relayResponse, holdSlot) => streamingBlobResponse(relayResponse, holdSlot()),
+      });
     }
 
     return refused();
