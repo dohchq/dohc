@@ -1,26 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./ipc/channels";
 import {
   ListChatChannelSharesResult,
   MAX_CHAT_CHANNEL_SHARE_ROWS,
 } from "./ipc/bridgeContract";
 import {
-  assertChatWritable,
   chatShareSessionKey,
   chatViewerAuthorId,
   handleRelayUnauthorized,
   createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
   createMarkChatThreadReadIpcHandler,
-  createSetChatReactionIpcHandler,
-  createWritableChatIpcHandler,
   reactionsForViewer,
   readRelayChatShareLanes,
   RelaySessionError,
   awaitCredentialGeneration,
-  setChatReactionFromMain,
-  writeChatMessageFromMain,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
 import { scopeJoinedChannels } from "./workspaces/sharedChannels";
@@ -95,57 +89,6 @@ describe("runtime main chat IPC boundaries", () => {
     );
   });
 
-  it("passes the authenticated relay identity into the reaction mutation", async () => {
-    const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
-
-    await expect(
-      setChatReactionFromMain({
-        workspaceId: "workspace-1",
-        threadId: "thread-1",
-        messageId: "message-1",
-        emoji: "👍",
-        state: "added",
-        localFallbackAuthorId: "local-user-id",
-        localAuthorDisplayName: "Sam",
-        resolveReplicationAuthorId: async () => "verified-user-id",
-        revalidateReplicationAuthorId: async () => undefined,
-        setReaction,
-      }),
-    ).resolves.toEqual({ reactionId: "reaction-1" });
-    expect(setReaction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        author: expect.objectContaining({ authorId: "verified-user-id" }),
-        replicationAuthorId: "verified-user-id",
-      }),
-    );
-  });
-
-  it("keeps a signed-out reaction local and omits the replication author", async () => {
-    const setReaction = vi.fn(
-      async (mutation: {
-        author: { authorId: string };
-        replicationAuthorId?: string;
-      }) => ({ reactionId: "reaction-1", mutation }),
-    );
-
-    await setChatReactionFromMain({
-      workspaceId: "workspace-1",
-      threadId: "thread-1",
-      messageId: "message-1",
-      emoji: "👍",
-      state: "added",
-      localFallbackAuthorId: "local-user-id",
-      localAuthorDisplayName: "Sam",
-      resolveReplicationAuthorId: async () => undefined,
-      revalidateReplicationAuthorId: async () => undefined,
-      setReaction,
-    });
-
-    const mutation = setReaction.mock.calls[0]![0];
-    expect(mutation.author.authorId).toBe("local-user-id");
-    expect(mutation).not.toHaveProperty("replicationAuthorId");
-  });
-
   it("uses the same signed-in or local reaction identity for reaction reads", async () => {
     await expect(
       chatViewerAuthorId({
@@ -161,7 +104,7 @@ describe("runtime main chat IPC boundaries", () => {
     ).resolves.toBe("local-user-id");
   });
 
-  it("keeps signed-out reaction cells reversible after sign-in", async () => {
+  it("shows a signed-out reaction cell as the signed-in viewer's", () => {
     expect(
       reactionsForViewer(
         [
@@ -194,139 +137,9 @@ describe("runtime main chat IPC boundaries", () => {
         authorId: "verified-user-id",
       },
     ]);
-
-    const setReaction = vi.fn(
-      async (mutation: {
-        author: { authorId: string };
-        replicationAuthorId?: string;
-      }) => ({ reactionId: "reaction-1", mutation }),
-    );
-    await setChatReactionFromMain({
-      workspaceId: "workspace-1",
-      threadId: "thread-1",
-      messageId: "message-1",
-      emoji: "👍",
-      state: "removed",
-      localFallbackAuthorId: "local-user-id",
-      localAuthorDisplayName: "Sam",
-      resolveReplicationAuthorId: async () => "verified-user-id",
-      revalidateReplicationAuthorId: async () => undefined,
-      listReactions: async () => [
-        {
-          messageId: "message-1",
-          emoji: "👍",
-          author: { authorId: "local-user-id" },
-        },
-      ],
-      setReaction,
-    });
-
-    expect(setReaction).toHaveBeenCalledOnce();
-    expect(setReaction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        author: expect.objectContaining({ authorId: "local-user-id" }),
-        state: "removed",
-      }),
-    );
-    expect(setReaction.mock.calls[0]![0]).not.toHaveProperty(
-      "replicationAuthorId",
-    );
   });
 
-  it("checks message identity before attachments and passes one captured author to the writer", async () => {
-    const resolveAttachments = vi.fn(async () => ["attachment-1"]);
-    const revalidateAuthorUserId = vi.fn(async () => undefined);
-    const write = vi.fn(async () => ({ messageId: "message-1" }));
-
-    await expect(
-      writeChatMessageFromMain({
-        resolveAuthorUserId: async () => {
-          throw new Error(
-            "Sign in to your server to send a message in this shared channel.",
-          );
-        },
-        resolveAttachments,
-        revalidateAuthorUserId,
-        write,
-      }),
-    ).rejects.toThrow(/Sign in to your server/u);
-    expect(resolveAttachments).not.toHaveBeenCalled();
-    expect(revalidateAuthorUserId).not.toHaveBeenCalled();
-    expect(write).not.toHaveBeenCalled();
-
-    await expect(
-      writeChatMessageFromMain({
-        resolveAuthorUserId: async () => "verified-user-id",
-        resolveAttachments,
-        revalidateAuthorUserId,
-        write,
-      }),
-    ).resolves.toEqual({ messageId: "message-1" });
-    expect(revalidateAuthorUserId).toHaveBeenCalledWith("verified-user-id");
-    expect(write).toHaveBeenCalledWith({
-      authorUserId: "verified-user-id",
-      attachments: ["attachment-1"],
-    });
-  });
-
-  it("revalidates access after attachments and before the message write", async () => {
-    const events: string[] = [];
-    const write = vi.fn(async () => ({ messageId: "message-1" }));
-
-    await expect(
-      writeChatMessageFromMain({
-        resolveAuthorUserId: async () => {
-          events.push("identity");
-          return "verified-user-id";
-        },
-        resolveAttachments: async () => {
-          events.push("attachments");
-          return ["attachment-1"];
-        },
-        revalidateAuthorUserId: async (authorUserId) => {
-          events.push(`revalidate:${authorUserId}`);
-          throw new Error("This shared channel is read-only.");
-        },
-        write,
-      }),
-    ).rejects.toThrow("This shared channel is read-only.");
-
-    expect(events).toEqual([
-      "identity",
-      "attachments",
-      "revalidate:verified-user-id",
-    ]);
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it("revalidates the reaction author before the mutation", async () => {
-    const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
-    const revalidateReplicationAuthorId = vi.fn(async () => {
-      throw new Error("Your server session changed. Try again.");
-    });
-
-    await expect(
-      setChatReactionFromMain({
-        workspaceId: "workspace-1",
-        threadId: "thread-1",
-        messageId: "message-1",
-        emoji: "👍",
-        state: "added",
-        localFallbackAuthorId: "local-user-id",
-        localAuthorDisplayName: "Sam",
-        resolveReplicationAuthorId: async () => "verified-user-id",
-        revalidateReplicationAuthorId,
-        setReaction,
-      }),
-    ).rejects.toThrow("Your server session changed. Try again.");
-
-    expect(revalidateReplicationAuthorId).toHaveBeenCalledWith(
-      "verified-user-id",
-    );
-    expect(setReaction).not.toHaveBeenCalled();
-  });
-
-  it("rejects mutations in a read-only workspace", async () => {
+  it("rejects channel creation in a read-only workspace", async () => {
     const workspaceId = "shared-view";
     const contexts = new Map<string, TestContext>([
       [workspaceId, { workspace: { workspaceId, readOnly: true } }],
@@ -334,8 +147,6 @@ describe("runtime main chat IPC boundaries", () => {
     const deps = boundaryDeps(contexts);
     const ipc = runtimeHarness();
     const create = vi.fn(async () => ({ channelId: "channel-1" }));
-    const react = vi.fn(async () => ({ reactionId: "reaction-1" }));
-    const joinedSync = vi.fn();
     const cloudSync = vi.fn();
 
     ipc.handle(
@@ -346,30 +157,15 @@ describe("runtime main chat IPC boundaries", () => {
         queueCloudSync: cloudSync,
       }),
     );
-    ipc.handle(
-      CHANNELS.setChatReaction,
-      createSetChatReactionIpcHandler({
-        ...deps,
-        run: react,
-        syncJoinedChannels: joinedSync,
-        queueCloudSync: cloudSync,
-      }),
-    );
 
     await expect(ipc.invoke(CHANNELS.createChatChannel, { workspaceId })).rejects.toThrow(
       /read-only/u,
     );
-    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
-      /read-only/u,
-    );
-
     expect(create).not.toHaveBeenCalled();
-    expect(react).not.toHaveBeenCalled();
-    expect(joinedSync).not.toHaveBeenCalled();
     expect(cloudSync).not.toHaveBeenCalled();
   });
 
-  it("queues cloud sync after channel creation and both sync lanes after a reaction write", async () => {
+  it("queues cloud sync after channel creation", async () => {
     const workspaceId = "owned-workspace";
     const contexts = new Map<string, TestContext>([
       [workspaceId, { workspace: { workspaceId, readOnly: false } }],
@@ -389,29 +185,9 @@ describe("runtime main chat IPC boundaries", () => {
         queueCloudSync: (id) => events.push(`cloud:${id}`),
       }),
     );
-    ipc.handle(
-      CHANNELS.setChatReaction,
-      createSetChatReactionIpcHandler({
-        ...deps,
-        run: async () => {
-          events.push("reaction-write");
-          return { reactionId: "reaction-1" };
-        },
-        syncJoinedChannels: (id) => events.push(`joined:${id}`),
-        queueCloudSync: (id) => events.push(`cloud:${id}`),
-      }),
-    );
 
     await ipc.invoke(CHANNELS.createChatChannel, { workspaceId });
     expect(events).toEqual(["channel-write", `cloud:${workspaceId}`]);
-    events.length = 0;
-
-    await ipc.invoke(CHANNELS.setChatReaction, { workspaceId });
-    expect(events).toEqual([
-      "reaction-write",
-      `joined:${workspaceId}`,
-      `cloud:${workspaceId}`,
-    ]);
   });
 
   it("updates reader-local state without a write boundary", async () => {
@@ -1418,186 +1194,39 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
   });
 });
 
-// The write gate driven through the real handler factories: a refusal must
-// stop the store, not only precede it.
-describe("chat scope write gate", () => {
-  type ShareAccess = "view" | "comment" | "edit";
-  interface ShareChatScope {
-    access: ShareAccess | null;
-    genericChatWritable: boolean;
-    ended: boolean;
-  }
-  type ChatScope =
-    | { kind: "workspace"; workspace: { workspaceId: string } }
-    | ({ kind: "share"; workspace: { workspaceId: string } } & ShareChatScope);
-
+// Read state is the reader's own, written locally and never replicated, so a
+// share view marks threads read at every level, and after the share ends.
+describe("chat read state in a share view", () => {
   const workspaceId = "workspace-share";
 
-  function shareScope(over: Partial<ShareChatScope>): ChatScope {
-    return {
-      kind: "share",
-      workspace: { workspaceId },
-      access: "comment",
-      genericChatWritable: true,
-      ended: false,
-      ...over,
-    };
-  }
-
-  function harnessFor(scope: ChatScope) {
-    const ipc = runtimeHarness();
-    const run = vi.fn(async () => ({ ok: true }));
-    return {
-      ipc,
-      run,
-      deps: {
-        assertTrustedSender(event: TestEvent) {
-          if (!event.trusted) throw new Error("Untrusted renderer.");
-        },
-        parsePayload(payload: unknown) {
-          const parsed = payload as { workspaceId?: unknown };
-          if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");
-          return { workspaceId: parsed.workspaceId };
-        },
-        async requireContext() {
-          return scope;
-        },
-        run,
-      },
-    };
-  }
-
-  it("refuses a mutation on an ended share, whatever level it granted", async () => {
-    // The granter ended the share. The local copy stays readable and takes no
-    // writes — the same rule an ended chat-channel grant follows. Without
-    // this the row lands durably, the panel shows it, and the push bails on
-    // `ended` first thing: a write that looks sent and never is.
-    const { ipc, run, deps } = harnessFor(shareScope({ ended: true }));
-    ipc.handle(
-      CHANNELS.setChatReaction,
-      createSetChatReactionIpcHandler({
-        ...deps,
-        assertWritable: assertChatWritable,
-        syncJoinedChannels: () => undefined,
-        queueCloudSync: () => undefined,
-      }),
-    );
-    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
-      "Chats are read-only in this shared view.",
-    );
-    expect(
-      run,
-      "an ended share still writes a durable row nothing will ever send",
-    ).not.toHaveBeenCalled();
-  });
-  it("refuses thread creation before the store for an independent Comment share", async () => {
-    const { ipc, deps } = harnessFor(
-      shareScope({ access: "comment", genericChatWritable: true }),
-    );
-    const createThread = vi.fn(async () => ({ ok: true }));
-    ipc.handle(
-      CHANNELS.createFileChat,
-      createWritableChatIpcHandler({
-        ...deps,
-        assertWritable: assertChatWritable,
-        run: createThread,
-      }),
-    );
-
-    const outcome = await ipc
-      .invoke(CHANNELS.createFileChat, { workspaceId })
-      .then(() => "answered", (error: unknown) => String(error));
-    expect(
-      createThread,
-      "genericChatWritable admitted a received-share thread row",
-    ).not.toHaveBeenCalled();
-    expect(outcome).toContain("Chats are read-only in this shared view.");
-  });
-
-  it("refuses message and decision mutations before the store for an Edit share", async () => {
-    for (const [channel, label] of [
-      [CHANNELS.sendChatMessage, "message"],
-      [CHANNELS.resolveChatDecision, "decision"],
-    ] as const) {
-      const { ipc, deps } = harnessFor(
-        shareScope({ access: "edit", genericChatWritable: true }),
-      );
-      const writeRow = vi.fn(async () => ({ ok: true }));
-      ipc.handle(
-        channel,
-        createWritableChatIpcHandler({
-          ...deps,
-          assertWritable: assertChatWritable,
-          run: writeRow,
-        }),
-      );
-
-      const outcome = await ipc
-        .invoke(channel, { workspaceId })
-        .then(() => "answered", (error: unknown) => String(error));
-      expect(
-        writeRow,
-        `genericChatWritable admitted a received-share ${label} row`,
-      ).not.toHaveBeenCalled();
-      expect(outcome, label).toContain("Chats are read-only in this shared view.");
-    }
-  });
-
-  it("leaves a local workspace's chat writes untouched", async () => {
-    const { ipc, run, deps } = harnessFor({ kind: "workspace", workspace: { workspaceId } });
-    ipc.handle(
-      CHANNELS.setChatReaction,
-      createSetChatReactionIpcHandler({
-        ...deps,
-        assertWritable: assertChatWritable,
-        syncJoinedChannels: () => undefined,
-        queueCloudSync: () => undefined,
-      }),
-    );
-    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).resolves.toEqual({
-      ok: true,
-    });
-    expect(run).toHaveBeenCalledTimes(1);
-  });
-
   it("marks a thread read at every level and after the share ends", async () => {
-    // Read state is the reader's own, written locally and never replicated.
-    const cases = [
-      ["view", shareScope({ access: "view" })],
-      ["comment", shareScope({ access: "comment" })],
-      ["edit", shareScope({ access: "edit" })],
-      ["ended", shareScope({ ended: true })],
-    ] as const;
-    for (const [label, scope] of cases) {
-      const { ipc, run, deps } = harnessFor(scope);
+    for (const [label, over] of [
+      ["view", { access: "view" }],
+      ["comment", { access: "comment" }],
+      ["edit", { access: "edit" }],
+      ["ended", { access: "comment", ended: true }],
+    ] as const) {
+      const ipc = runtimeHarness();
+      const run = vi.fn(async () => ({ ok: true }));
       ipc.handle(
         CHANNELS.markChatThreadRead,
-        createMarkChatThreadReadIpcHandler(deps),
+        createMarkChatThreadReadIpcHandler({
+          assertTrustedSender(event: TestEvent) {
+            if (!event.trusted) throw new Error("Untrusted renderer.");
+          },
+          parsePayload(payload: unknown) {
+            const parsed = payload as { workspaceId?: unknown };
+            if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");
+            return { workspaceId: parsed.workspaceId };
+          },
+          requireContext: async () => ({ kind: "share" as const, workspace: { workspaceId }, ...over }),
+          run,
+        }),
       );
       await expect(ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId })).resolves.toEqual({
         ok: true,
       });
       expect(run, label).toHaveBeenCalledTimes(1);
     }
-  });
-
-  it("still refuses an untrusted sender before it ever resolves a scope", async () => {
-    const requireContext = vi.fn(async () => shareScope({}));
-    const { ipc, run, deps } = harnessFor(shareScope({}));
-    ipc.handle(
-      CHANNELS.setChatReaction,
-      createSetChatReactionIpcHandler({
-        ...deps,
-        requireContext,
-        assertWritable: assertChatWritable,
-        syncJoinedChannels: () => undefined,
-        queueCloudSync: () => undefined,
-      }),
-    );
-    await expect(
-      ipc.invoke(CHANNELS.setChatReaction, { workspaceId }, { trusted: false }),
-    ).rejects.toThrow("Untrusted renderer.");
-    expect(requireContext).not.toHaveBeenCalled();
-    expect(run).not.toHaveBeenCalled();
   });
 });

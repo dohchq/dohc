@@ -84,6 +84,8 @@ export function createShareGrantRoutes(
   };
   // The share and an active grant of `kind` on it, when the actor owns both
   // the share and its workspace right now. Anything else is a generic 404.
+  // Lifecycle steps must reach any active grant, including one that is no
+  // longer current, so this is not the current-grant rule.
   function requireOwnedGrant(
     kind: "link" | "user",
     shareId: string,

@@ -25,7 +25,9 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
+import { createChatWrites } from "../workspaces/chatWrites";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
+import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   CLI_ENDPOINT_FILE,
@@ -55,7 +57,6 @@ interface CallCounts {
   listWorkspaces: number;
   openWorkspace: number;
   identity: number;
-  writable: number;
   writes: number;
   reads: number;
 }
@@ -186,8 +187,19 @@ describe("CLI socket server", () => {
   let errors: unknown[];
   let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
+  // The registry row the real chatWrites module reads its gates from.
+  let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
+
+  async function makeChannelReadOnly(channelId: string): Promise<void> {
+    const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
+    if (!channelWireId) throw new Error("Channel has no wire id");
+    chatRow.sharedChannels = [{
+      shareId: "share", channelWireId, access: "read-only", granterEmail: null,
+      relayUrl: "https://relay.test", recipientUserId: "verified-user-id",
+    }];
+  }
 
   async function invoke<Verb extends CliVerb>(
     verb: Verb,
@@ -348,10 +360,10 @@ describe("CLI socket server", () => {
       listWorkspaces: 0,
       openWorkspace: 0,
       identity: 0,
-      writable: 0,
       writes: 0,
       reads: 0,
     };
+    chatRow = { remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-user-id" } };
     writeTargets = [];
     readTargets = [];
     onReadEffect = null;
@@ -382,10 +394,6 @@ describe("CLI socket server", () => {
       async readMoment(momentId) {
         return momentId === moments.detail.id ? moments.detail : null;
       },
-      async assertWritable() {
-        calls.writable += 1;
-      },
-      async assertMessageWritable() {},
     };
     serverOptions = {
       stateDir,
@@ -398,18 +406,29 @@ describe("CLI socket server", () => {
         expect(workspace).toEqual(registryWorkspace);
         return context;
       },
-      async identity() {
-        calls.identity += 1;
-        return {
-          displayName: "Sam",
-          authorUserId: "verified-user-id",
-          agentName: "Nova",
-          reactionAuthorId: "verified-user-id",
-        };
-      },
-      async onWrite(_workspace, target) {
+      chatWrites: createChatWrites({
+        findWorkspace: () => chatRow,
+        async warmCredentials() {
+          calls.identity += 1;
+        },
+        currentCredentials: () => ({
+          serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+          userId: "verified-user-id", email: "sam@test.invalid", token: "token",
+        }),
+        currentCredentialGeneration: () => 0,
+        localUserDisplayName: () => "Sam",
+        agentDisplayName: async () => "Nova",
+        localReactorFallbackId: () => "install-local-user-id",
+        projectChatBookmarks: () => undefined,
+        queueCloudSync: () => undefined,
+        async syncSharedChannelsForChatTarget(_workspaceId, target) {
+          writeTargets.push(target);
+        },
+        scanChatDispatch: async () => undefined,
+      }),
+      localUserDisplayName: () => "Sam",
+      async onWrite() {
         calls.writes += 1;
-        writeTargets.push(target);
       },
       async onRead(_workspace, target) {
         calls.reads += 1;
@@ -476,7 +495,6 @@ describe("CLI socket server", () => {
     expect(calls.listWorkspaces).toBe(0);
     expect(calls.openWorkspace).toBe(0);
     expect(calls.identity).toBe(0);
-    expect(calls.writable).toBe(0);
     expect(calls.writes).toBe(0);
   });
 
@@ -945,7 +963,9 @@ describe("CLI socket server", () => {
     })).toHaveLength(2);
   });
 
-  it("refuses post and reply by engine id before identity when assertWritable rejects the target", async () => {
+  // chatWrites.test.ts covers each gate. This proves post and reply hand
+  // their resolved engine target to it, and that a refusal lands nothing.
+  it("refuses post and reply by engine id in a read-only channel before any row", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
@@ -955,10 +975,7 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Sam" },
       body: "Existing message",
     });
-    context.assertWritable = async () => {
-      calls.writable += 1;
-      throw new Error("This shared channel is read-only.");
-    };
+    await makeChannelReadOnly(general.id);
 
     await expect(invoke("post", {
       cwd: workspaceRoot,
@@ -967,7 +984,7 @@ describe("CLI socket server", () => {
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared channel is read-only.");
+    })).rejects.toThrow("This shared channel is read-only for you.");
     await expect(invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -975,193 +992,13 @@ describe("CLI socket server", () => {
       attachments: [],
       needsDecision: false,
       body: "Must not land",
-    })).rejects.toThrow("This shared channel is read-only.");
-    expect(calls.writable).toBe(2);
-    expect(calls.identity).toBe(0);
+    })).rejects.toThrow("This shared channel is read-only for you.");
     expect(calls.writes).toBe(0);
+    expect(writeTargets).toEqual([]);
     expect(await store.listMessages({
       workspaceId: WORKSPACE_ID,
       threadId: existing.thread.id,
     })).toHaveLength(1);
-  });
-
-  it("rejects every message command before the store write when message identity is unavailable", async () => {
-    if (!store) throw new Error("Store is not available");
-    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    const existing = await store.startChannelThread({
-      workspaceId: WORKSPACE_ID,
-      channelId: general.id,
-      author: { kind: "human", displayName: "Sam" },
-      body: "Existing message",
-    });
-    const reason = "Sign in to your server to send a message in this shared channel.";
-    let messageGuardCalls = 0;
-    const writesBefore = calls.writes;
-    context.assertMessageWritable = async () => {
-      messageGuardCalls += 1;
-      throw new Error(reason);
-    };
-
-    await expect(post({
-      actor: "human",
-      title: "Blocked opening",
-      body: "Must not land",
-    })).rejects.toThrow(reason);
-    await expect(invoke("reply", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      thread: cliThreadId(existing.thread.id),
-      attachments: [],
-      needsDecision: false,
-      body: "Blocked reply by handle",
-    })).rejects.toThrow(reason);
-    await expect(invoke("reply", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      thread: existing.thread.id,
-      attachments: [],
-      needsDecision: false,
-      body: "Blocked reply by engine id",
-    })).rejects.toThrow(reason);
-
-    expect(messageGuardCalls).toBe(3);
-    expect(calls.identity).toBe(3);
-    expect(calls.writes).toBe(writesBefore);
-    expect(await store.listChannelThreads({
-      workspaceId: WORKSPACE_ID,
-      channelId: general.id,
-    })).toHaveLength(1);
-    expect(await store.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: existing.thread.id,
-    })).toHaveLength(1);
-  });
-
-  it("rejects post and reply by engine id when the account changes before mutation", async () => {
-    if (!store) throw new Error("Store is not available");
-    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    const existing = await store.startChannelThread({
-      workspaceId: WORKSPACE_ID,
-      channelId: general.id,
-      author: { kind: "human", displayName: "Sam" },
-      body: "Existing message",
-    });
-    let identityCalls = 0;
-    serverOptions.identity = async () => {
-      calls.identity += 1;
-      identityCalls += 1;
-      const userId = identityCalls % 2 === 1 ? "user-1" : "user-2";
-      return {
-        displayName: "Sam",
-        authorUserId: userId,
-        agentName: "Nova",
-        reactionAuthorId: "install-local-user-id",
-      };
-    };
-    const reason = "dohc: Your server session changed. Try again.";
-
-    await expect(
-      invoke("post", {
-        cwd: workspaceRoot,
-        actor: "agent",
-        channel: general.id,
-        attachments: [],
-        needsDecision: false,
-        body: "Blocked opening",
-      }),
-    ).rejects.toThrow(reason);
-    await expect(
-      invoke("reply", {
-        cwd: workspaceRoot,
-        actor: "agent",
-        thread: existing.thread.id,
-        attachments: [],
-        needsDecision: false,
-        body: "Blocked reply",
-      }),
-    ).rejects.toThrow(reason);
-
-    expect(identityCalls).toBe(4);
-    expect(
-      await store.listChannelThreads({
-        workspaceId: WORKSPACE_ID,
-        channelId: general.id,
-      }),
-    ).toHaveLength(1);
-    expect(
-      await store.listMessages({
-        workspaceId: WORKSPACE_ID,
-        threadId: existing.thread.id,
-      }),
-    ).toHaveLength(1);
-  });
-
-  it("rechecks access after modern post attachments resolve", async () => {
-    if (!store) throw new Error("Store is not available");
-    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    let writable = true;
-    let attachmentResolutions = 0;
-    const writesBefore = calls.writes;
-    context.assertWritable = async () => {
-      calls.writable += 1;
-      if (!writable) throw new Error("This shared channel is read-only.");
-    };
-    context.fileObjectIdForPath = async () => {
-      attachmentResolutions += 1;
-      writable = false;
-      return "object_tracked";
-    };
-
-    await expect(post({
-      actor: "human",
-      title: "Blocked after attachment",
-      body: "Must not land",
-      attachments: ["tracked.md"],
-    })).rejects.toThrow("This shared channel is read-only.");
-
-    expect(attachmentResolutions).toBe(1);
-    expect(calls.identity).toBe(1);
-    expect(calls.writable).toBe(2);
-    expect(calls.writes).toBe(writesBefore);
-    expect(await store.listChannelThreads({
-      workspaceId: WORKSPACE_ID,
-      channelId: general.id,
-    })).toEqual([]);
-  });
-
-  it("rejects modern post when the resolved author changes", async () => {
-    if (!store) throw new Error("Store is not available");
-    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    let identityCalls = 0;
-    const writesBefore = calls.writes;
-    serverOptions.identity = async () => {
-      calls.identity += 1;
-      identityCalls += 1;
-      const userId = identityCalls === 1 ? "user-1" : "user-2";
-      return {
-        displayName: "Sam",
-        authorUserId: userId,
-        agentName: "Nova",
-        reactionAuthorId: userId,
-      };
-    };
-
-    await expect(post({
-      actor: "human",
-      title: "Blocked account change",
-      body: "Must not land",
-      attachments: ["tracked.md"],
-    })).rejects.toThrow("Your server session changed. Try again.");
-
-    expect(identityCalls).toBe(2);
-    expect(calls.writes).toBe(writesBefore);
-    expect(await store.listChannelThreads({
-      workspaceId: WORKSPACE_ID,
-      channelId: general.id,
-    })).toEqual([]);
   });
 
   it("keeps MCP chat reads available in read-only workspaces while refusing writes", async () => {
@@ -1245,9 +1082,9 @@ describe("CLI socket server", () => {
     await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     await rm(join(workspaceRoot, "AGENTS.md"));
     context.readOnly = true;
-    context.assertWritable = async () => {
-      calls.writable += 1;
-      throw new Error("This is a shared view — ask its owner for changes.");
+    chatRow.shareView = {
+      shareId: "share", granterEmail: "owner@test.invalid", genericChatWritable: true,
+      grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
     };
 
     const channels = await invoke("channels", {
@@ -1259,7 +1096,7 @@ describe("CLI socket server", () => {
       actor: "human",
       title: "Forbidden",
       body: "Must not land",
-    })).rejects.toThrow("This is a shared view");
+    })).rejects.toThrow("Chats are read-only in this shared view.");
     expect(await store.listThreads({ workspaceId: WORKSPACE_ID })).toEqual([]);
     await expect(stat(join(workspaceRoot, "AGENTS.md"))).rejects.toMatchObject({
       code: "ENOENT",
@@ -1282,7 +1119,7 @@ describe("CLI socket server", () => {
     await expect(stat(join(tempRoot, "outside-export"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    expect(calls.writable).toBe(1);
+    expect(calls.identity).toBe(0);
     expect(calls.writes).toBe(0);
   });
 
@@ -1452,7 +1289,7 @@ describe("CLI socket server", () => {
       recordPath: "tasks/write-brief.md",
     });
     // A human CLI write is attributed as this device's local author under the
-    // identity's display name — still derived main-side.
+    // local display name — still derived main-side.
     await expect(invoke("collectionSetFields", {
       cwd: workspaceRoot,
       actor: "human",
@@ -2061,8 +1898,6 @@ describe("CLI socket server", () => {
         origin: "cli",
       },
     ]);
-    expect(calls.identity).toBe(5);
-    expect(calls.writable).toBe(5);
     expect(errors).toEqual([]);
   });
 
@@ -2107,6 +1942,16 @@ describe("CLI socket server", () => {
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
   });
 
+  // Provisioning General writes outside chatWrites, so only onWrite tells
+  // the desktop to notify the renderer and queue cloud sync for it.
+  it("reports the write when listing channels provisions General, and only then", async () => {
+    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
+    expect(calls.writes).toBe(1);
+    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
+    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    expect(calls.writes).toBe(1);
+  });
+
   it("does not provision an agent when listing channels", async () => {
     if (!store) throw new Error("Store is not available");
     const result = await invoke("channels", { cwd: workspaceRoot, actor: "agent" });
@@ -2124,7 +1969,7 @@ describe("CLI socket server", () => {
       name: "Alice",
       kind: "dm",
     });
-    const writableBefore = calls.writable;
+    const identityBefore = calls.identity;
 
     await expect(post({
       actor: "human",
@@ -2134,7 +1979,7 @@ describe("CLI socket server", () => {
     })).rejects.toThrow(
       "dohc: DMs are streams — use 'dohc chat reply <thread>'",
     );
-    expect(calls.writable).toBe(writableBefore);
+    expect(calls.identity).toBe(identityBefore);
     expect(await store.listChannelThreads({
       workspaceId: WORKSPACE_ID,
       channelId: dm.id,
@@ -3157,15 +3002,11 @@ describe("CLI socket server", () => {
       needsDecision: true,
     });
     if (!store) throw new Error("Store is not available");
-    let writable = true;
-    context.assertWritable = async () => {
-      calls.writable += 1;
-      if (!writable) throw new Error("This shared channel is read-only.");
-    };
     const originalSend = store.sendMessage.bind(store);
     store.sendMessage = async (input) => {
       const message = await originalSend(input);
-      writable = false;
+      const channelId = await store!.findThreadChannelId({ workspaceId: WORKSPACE_ID, threadId: input.threadId });
+      await makeChannelReadOnly(channelId!);
       return message;
     };
 
@@ -3179,7 +3020,7 @@ describe("CLI socket server", () => {
         resolve: opened.messageId,
         body: "Reply before access changed",
       });
-      expect(reply.warning).toContain("could not be resolved: This shared channel is read-only.");
+      expect(reply.warning).toContain("could not be resolved: This shared channel is read-only for you.");
       expect(reply.resolvedMessageId).toBeUndefined();
       const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
       expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
@@ -3301,100 +3142,6 @@ describe("CLI socket server", () => {
       message: opened.messageId,
       emoji: "👍",
     })).resolves.toEqual({ ...added, state: "removed" });
-  });
-
-  it("removes a signed-out reaction through its local alias after sign-in", async () => {
-    const opened = await post({
-      actor: "human",
-      title: "Local reaction target",
-      body: "React before signing in",
-    });
-    serverOptions.identity = async () => {
-      calls.identity += 1;
-      return {
-        displayName: "Sam",
-        agentName: "Nova",
-        reactionAuthorId: "install-local-user-id",
-      };
-    };
-    const added = await invoke("react", {
-      cwd: workspaceRoot,
-      actor: "human",
-      message: opened.messageId,
-      emoji: "👍",
-    });
-    expect(added).toEqual({
-      threadId: opened.threadId,
-      messageId: opened.messageId,
-      emoji: "👍",
-      state: "added",
-    });
-
-    serverOptions.identity = async () => {
-      calls.identity += 1;
-      return {
-        displayName: "Sam",
-        authorUserId: "verified-user-id",
-        agentName: "Nova",
-        reactionAuthorId: "install-local-user-id",
-      };
-    };
-    await expect(
-      invoke("react", {
-        cwd: workspaceRoot,
-        actor: "human",
-        message: opened.messageId,
-        emoji: "👍",
-      }),
-    ).resolves.toEqual({ ...added, state: "removed" });
-
-    if (!store) throw new Error("Store is not available");
-    const thread = (await store.listThreads({ workspaceId: WORKSPACE_ID })).find(
-      (candidate) => cliThreadId(candidate.id) === opened.threadId,
-    );
-    if (!thread) throw new Error("Reaction thread is not available");
-    expect(
-      await store.listReactions({
-        workspaceId: WORKSPACE_ID,
-        threadId: thread.id,
-      }),
-    ).toEqual([]);
-  });
-
-  it("rejects a reaction when the resolved author changes before mutation", async () => {
-    const opened = await post({
-      actor: "human",
-      title: "Reaction race target",
-      body: "React to this",
-    });
-    let identityCalls = 0;
-    serverOptions.identity = async () => {
-      calls.identity += 1;
-      identityCalls += 1;
-      const userId = identityCalls === 1 ? "user-1" : "user-2";
-      return {
-        displayName: "Sam",
-        authorUserId: userId,
-        agentName: "Nova",
-        reactionAuthorId: userId,
-      };
-    };
-
-    await expect(invoke("react", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      message: opened.messageId,
-      emoji: "👍",
-    })).rejects.toThrow("Your server session changed. Try again.");
-
-    if (!store) throw new Error("Store is not available");
-    const thread = (await store.listThreads({ workspaceId: WORKSPACE_ID }))
-      .find((candidate) => cliThreadId(candidate.id) === opened.threadId);
-    if (!thread) throw new Error("Reaction thread is not available");
-    expect(await store.listReactions({
-      workspaceId: WORKSPACE_ID,
-      threadId: thread.id,
-    })).toEqual([]);
   });
 
   // The TypeScript-backend twin of this scenario was removed with the legacy

@@ -44,7 +44,7 @@ import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
-import { registerWorkspaceVersionsIpcHandlers } from "./ipc/workspaceVersionsIpc";
+import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
@@ -100,6 +100,8 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  workspaceSearchOperations,
+  workspaceVersionOperations,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -108,7 +110,8 @@ import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
-import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
+import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -201,12 +204,12 @@ import {
   RELAY_FETCH_TIMEOUT_MS,
 } from "./workspaces/sharedChannels";
 import {
-  assertSharedChannelMessageIdentity,
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
+import { createChatWrites } from "./workspaces/chatWrites";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -1567,7 +1570,7 @@ const desktopChatBookmarks = createDesktopChatBookmarks({
     engineCaptureFor: (workspaceId, rootPath) => activity.engineCaptureFor(workspaceId, rootPath),
   },
 });
-const { queueChatBookmarkProjection, projectPendingChatBookmarksAfterPull } = desktopChatBookmarks;
+const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChatBookmarks;
 
 const {
   syncWorkspaceSharedChannels,
@@ -1589,7 +1592,7 @@ const {
   },
   setWorkspaceSharedChannels,
   notifyRenderer,
-  projectPendingChatBookmarksAfterPull,
+  projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
 });
 
@@ -1748,7 +1751,7 @@ function engineForWorkspace(
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: () =>
       withWorkspaceAttachmentAsync(workspace, () =>
-        projectPendingChatBookmarksAfterPull(workspace.workspaceId),
+        projectPendingChatBookmarks(workspace.workspaceId),
       ),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
@@ -2364,43 +2367,6 @@ async function chatRelayIdentityFor(
         target,
       }),
   });
-}
-
-async function verifiedChatAuthorUserIdFor(
-  workspaceId: string,
-  target: ChatRelayIdentityTarget,
-  store: DesktopLinkedChatStore,
-): Promise<string | undefined> {
-  const identity = await chatRelayIdentityFor(workspaceId, target, store);
-  assertSharedChannelMessageIdentity({
-    joinedChannel: identity.joinedChannel,
-    credentials: cachedCredentials,
-    authorUserId: identity.authorUserId,
-    resolvedAuthorUserId: identity.authorUserId,
-  });
-  return identity.authorUserId;
-}
-
-async function revalidateChatWrite(
-  workspace: { workspaceId: string; rootPath: string },
-  target: ChatRelayIdentityTarget,
-  authorUserId: string | undefined,
-  store: DesktopLinkedChatStore,
-): Promise<void> {
-  await assertSharedChannelWritable({
-    workspaceId: workspace.workspaceId,
-    sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-    store,
-    target,
-  });
-  const currentAuthorUserId = await verifiedChatAuthorUserIdFor(
-    workspace.workspaceId,
-    target,
-    store,
-  );
-  if (currentAuthorUserId !== authorUserId) {
-    throw new Error("Your server session changed. Try again.");
-  }
 }
 
 function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
@@ -3095,6 +3061,21 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 
 let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
+const chatWrites = createChatWrites({
+  findWorkspace,
+  warmCredentials: warmCredentialCache,
+  currentCredentials: () => cachedCredentials,
+  currentCredentialGeneration: () => credentialCacheGeneration,
+  localUserDisplayName,
+  agentDisplayName: async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
+  localReactorFallbackId,
+  projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
+  queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+  syncSharedChannelsForChatTarget,
+  scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
+});
+
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
@@ -3121,16 +3102,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   withEngineAdapter,
-  assertWritableWorkspace,
-  chatRelayIdentityFor,
-  currentCredentials: () => cachedCredentials,
+  chatWrites,
   startCliServer,
   stateDir,
-  warmCredentialCache,
   localUserDisplayName,
-  localReactorFallbackId,
   notifyRenderer,
-  queueChatBookmarkProjection,
   syncSharedChannelsForChatTarget,
   chatDispatchService,
   rememberPendingCliRunMessageLink,
@@ -3878,6 +3854,16 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   }
 }
 
+const operationBoundary: OperationBoundary<
+  IpcMainInvokeEvent,
+  DesktopRendererWorkspaceOperation
+> = {
+  handle: (channel, listener) => ipcMain.handle(channel, listener),
+  assertTrustedSender,
+  withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+    withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+};
+
 const senderWorkspaceAuthority = {
   requireTrustedSender(event: IpcMainInvokeEvent): WebContents {
     assertTrustedSender(event);
@@ -4415,7 +4401,7 @@ function registerIpcHandlers(): void {
     listWorkspaces,
     setWorkspaceSharedChannels,
     relayClientForWorkspace,
-    projectPendingChatBookmarksAfterPull,
+    projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
     normalizeServerUrl,
     peekedReceivedGrantKinds,
     peekReceivedGrantKindForShare,
@@ -4601,27 +4587,23 @@ function registerIpcHandlers(): void {
 
   const chatScope = createChatScopeCapability({
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, syncSharedChannelsForChatTarget, activity,
-    activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
   });
 
-  registerWorkspaceVersionsIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, requireEngineCapture, requireWorkspace, notifyRenderer,
-    activity, tryInVersionSessions, desktopMarks,
-  });
+  registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
+    requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
+  }));
 
   workspaceEngineIpc.registerHistory();
 
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, findWorkspace,
-    assertWritableWorkspace, warmCredentialCache, localUserId, localUserDisplayName,
-    localReactorFallbackId, currentCredentials: () => cachedCredentials,
-    verifiedChatAuthorUserIdFor, revalidateChatWrite, chatRelayIdentityFor,
+    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
+    assertWritableWorkspace, warmCredentialCache, localUserId,
+    localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
-    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    activity, desktopChatBookmarks, notifyRenderer,
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },
@@ -4668,12 +4650,10 @@ function registerIpcHandlers(): void {
 
   settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
-  registerWorkspaceSearchIpcHandlers<
+  registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
     RegistryEntry & { readonly attachmentId: symbol }
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender,
     withWorkspaceOperation: (event, workspaceId, work) =>
       withRendererWorkspaceOperation(
         event.sender,
@@ -4700,7 +4680,7 @@ function registerIpcHandlers(): void {
     onActivityError: (error) => {
       console.error("[desktop] workspace search activity:", error);
     },
-  });
+  }));
 
   workspaceEngineIpc.registerYDoc();
 

@@ -102,7 +102,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     });
   }
   function named(workspaceId: string, grantId: string, userId: string): DatasetAuthority {
-    const result = authorizeShareGrantAction({storage, grantId, principalKind: "user", principalUserId: userId, action: "read"});
+    const result = authorizeShareGrantAction({storage, grantId, principal: {kind: "user", userId}, action: "read"});
     if (!result.ok || result.share.workspaceId !== workspaceId || !["view", "comment", "edit"].includes(result.grant.access)) throw notFound();
     return {caller: {kind: "named", userId, grantId, access: result.grant.access as "view" | "comment" | "edit", helper: false},
       principalKey: principalKey(workspaceId, grantId, userId),

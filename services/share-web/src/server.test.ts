@@ -1010,223 +1010,6 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(0);
   });
 
-  it("relays a generic 429 for a throttled read and preserves the session", async () => {
-    let readCalls = 0;
-    const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      publicHosts: new Set([HOST]),
-      nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 22).toString("base64url"),
-      fetchRelay: async (relayRequest) => {
-        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
-          return Response.json({
-            ok: true,
-            grantId: "grant-throttled",
-            capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs: 901_000,
-          });
-        }
-        readCalls += 1;
-        if (readCalls === 1) {
-          return new Response("relay-specific throttle detail", { status: 429 });
-        }
-        return Response.json({
-          ok: true,
-          access: "view",
-          granterEmail: "owner@example.test",
-        });
-      },
-    });
-    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
-    const body = (await exchanged.json()) as { session: string };
-    const sessionHeaders = {
-      cookie: cookiePair(exchanged),
-      "x-dohc-link-session": body.session,
-    };
-
-    const throttled = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-
-    expect(throttled.status).toBe(429);
-    expect(await throttled.text()).toBe(shareWebRefusalBody);
-    expectSecurityHeaders(throttled);
-
-    const retried = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect(retried.status).toBe(200);
-    expect(await retried.json()).toMatchObject({ granterEmail: "owner@example.test" });
-    expect(readCalls).toBe(2);
-  });
-
-  it("returns a generic 503 for relay transport and received 5xx failures while a received 404 stays 404", async () => {
-    let readCalls = 0;
-    const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      publicHosts: new Set([HOST]),
-      nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 23).toString("base64url"),
-      fetchRelay: async (relayRequest) => {
-        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
-          return Response.json({
-            ok: true,
-            grantId: "grant-transport-failure",
-            capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs: 901_000,
-          });
-        }
-        readCalls += 1;
-        if (readCalls === 1) throw new Error("temporary relay outage");
-        if (readCalls === 2) {
-          return new Response("relay-specific missing resource", { status: 404 });
-        }
-        return new Response("relay-specific upstream failure", { status: 502 });
-      },
-    });
-    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
-    const body = (await exchanged.json()) as { session: string };
-    const sessionHeaders = {
-      cookie: cookiePair(exchanged),
-      "x-dohc-link-session": body.session,
-    };
-
-    const unavailable = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({ status: unavailable.status, body: await unavailable.text() }).toEqual({
-      status: 503,
-      body: shareWebRefusalBody,
-    });
-    expectSecurityHeaders(unavailable);
-
-    const receivedNotFound = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({
-      status: receivedNotFound.status,
-      body: await receivedNotFound.text(),
-    }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
-    });
-    expectSecurityHeaders(receivedNotFound);
-
-    const receivedUpstreamFailure = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({
-      status: receivedUpstreamFailure.status,
-      body: await receivedUpstreamFailure.text(),
-    }).toEqual({
-      status: 503,
-      body: shareWebRefusalBody,
-    });
-    expectSecurityHeaders(receivedUpstreamFailure);
-    expect(readCalls).toBe(3);
-  });
-
-  it("preserves the session after a relay 404 resource miss", async () => {
-    const missingSha = "a".repeat(64);
-    const expectedMetaBody = JSON.stringify({ ok: true, access: "view" });
-    const relayReads: string[] = [];
-    const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      publicHosts: new Set([HOST]),
-      nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 24).toString("base64url"),
-      fetchRelay: async (relayRequest) => {
-        const pathname = new URL(relayRequest.url).pathname;
-        if (pathname === "/sync/link-exchange") {
-          return Response.json({
-            ok: true,
-            grantId: "grant-resource-miss",
-            capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs: 901_000,
-          });
-        }
-        relayReads.push(pathname);
-        if (pathname === `/sync/link/blobs/${missingSha}`) {
-          return new Response("relay-specific missing resource", { status: 404 });
-        }
-        return new Response(expectedMetaBody, {
-          headers: { "content-type": "application/json" },
-        });
-      },
-    });
-    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
-    const body = (await exchanged.json()) as { session: string };
-    const sessionHeaders = {
-      cookie: cookiePair(exchanged),
-      "x-dohc-link-session": body.session,
-    };
-
-    const missing = await handler(
-      request(`/api/view/blob/${missingSha}`, { headers: sessionHeaders }),
-    );
-    expect({ status: missing.status, body: await missing.text() }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
-    });
-
-    const followUp = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({ status: followUp.status, body: await followUp.text() }).toEqual({
-      status: 200,
-      body: expectedMetaBody,
-    });
-    expect(relayReads).toEqual([`/sync/link/blobs/${missingSha}`, "/sync/link/share"]);
-  });
-
-  it("deletes the session after a relay 401 capability refusal", async () => {
-    let relayReads = 0;
-    const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      publicHosts: new Set([HOST]),
-      nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 25).toString("base64url"),
-      fetchRelay: async (relayRequest) => {
-        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
-          return Response.json({
-            ok: true,
-            grantId: "grant-invalid-capability",
-            capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs: 901_000,
-          });
-        }
-        relayReads += 1;
-        if (relayReads === 1) {
-          return new Response("relay-specific capability refusal", { status: 401 });
-        }
-        return Response.json({ ok: true, access: "view" });
-      },
-    });
-    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
-    const body = (await exchanged.json()) as { session: string };
-    const sessionHeaders = {
-      cookie: cookiePair(exchanged),
-      "x-dohc-link-session": body.session,
-    };
-
-    const unauthorized = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({ status: unauthorized.status, body: await unauthorized.text() }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
-    });
-
-    const followUp = await handler(
-      request("/api/view/meta", { headers: sessionHeaders }),
-    );
-    expect({ status: followUp.status, body: await followUp.text() }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
-    });
-    expect(relayReads).toBe(1);
-  });
-
   it("rejects hostile hosts and returns one refusal body for every public failure", async () => {
     let relayCalls = 0;
     const handler = createShareWebHandler({
@@ -1503,6 +1286,237 @@ describe("share-web sessions", () => {
     expect(svgResponse.headers.get("content-disposition")).toBe("attachment");
     expect(svgResponse.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await svgResponse.text()).toContain("<svg");
+  });
+});
+
+describe("share-web relay call", () => {
+  const blobSha = "f".repeat(64);
+  const routes: Array<{ name: string; path: string; method?: string; body?: string }> = [
+    { name: "handoff", path: "/api/handoff", method: "POST" },
+    { name: "discussion", path: "/api/view/discussion" },
+    {
+      name: "discussion append",
+      path: "/api/view/discussion",
+      method: "POST",
+      body: JSON.stringify({ body: "hello", idempotencyKey: "relay-call" }),
+    },
+    { name: "discussion activity", path: "/api/view/discussion/activity?since=0&hold=0&limit=100" },
+    { name: "meta", path: "/api/view/meta" },
+    { name: "current", path: "/api/view/current" },
+    { name: "log", path: "/api/view/log?since=0&hold=0" },
+    { name: "blob", path: `/api/view/blob/${blobSha}` },
+  ];
+
+  // The fake relay answers exchange and refresh itself; `relay` answers the route's call.
+  async function linkSession(
+    relay: (relayRequest: Request) => Promise<Response>,
+    capabilityExpiresAtMs = 901_000,
+  ) {
+    const calls: Request[] = [];
+    let tokenByte = 100;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "relay-call-key",
+      publicHosts: new Set([HOST]),
+      maxSessions: 1,
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, ++tokenByte).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange" || pathname === "/sync/link-refresh") {
+          const refresh = pathname === "/sync/link-refresh";
+          return Response.json({
+            ok: true,
+            grantId: "grant-relay-call",
+            capabilityToken: refresh ? CAP_ALPHA_2 : CAP_ALPHA_1,
+            capabilityExpiresAtMs: refresh ? 901_000 : capabilityExpiresAtMs,
+          });
+        }
+        calls.push(relayRequest);
+        return await relay(relayRequest);
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const sessionCookie = cookiePair(exchanged);
+    const cookie = cookieHeader(sessionCookie, profileCookiePair(exchanged));
+    return {
+      calls,
+      sessionCookie,
+      call: (target: (typeof routes)[number], signal?: AbortSignal) =>
+        handler(request(target.path, {
+          method: target.method ?? "GET",
+          headers: { cookie, "x-dohc-link-session": session },
+          body: target.body,
+          signal,
+        })),
+      // With one session allowed, a second exchange replaces this one.
+      replace: () => handler(request("/api/exchange", exchange(SECRET_ALPHA))),
+    };
+  }
+
+  const outcomes: Array<{ relay: number | string; status: number }> = [
+    { relay: 200, status: 200 },
+    { relay: 401, status: 404 },
+    { relay: "401, oversized body", status: 404 },
+    { relay: "401, body fails", status: 404 },
+    { relay: 403, status: 404 },
+    { relay: 404, status: 404 },
+    { relay: 409, status: 404 },
+    { relay: 413, status: 404 },
+    { relay: 429, status: 429 },
+    { relay: 500, status: 503 },
+    { relay: 502, status: 503 },
+    { relay: 204, status: 503 },
+    { relay: "network error", status: 503 },
+  ];
+
+  it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
+    for (const outcome of outcomes) {
+      const state = await linkSession(async () => {
+        switch (outcome.relay) {
+          case "network error":
+            throw new Error(`relay down ${CAP_ALPHA_2}`);
+          case 200:
+            return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
+          case 204:
+            return new Response(null, { status: 204 });
+          case "401, oversized body":
+            return new Response(new Uint8Array(2 * 1024 * 1024 + 1), { status: 401 });
+          case "401, body fails":
+            return new Response(new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(Uint8Array.of(1));
+              },
+              pull(controller) {
+                controller.error(new Error("relay body broke"));
+              },
+            }), { status: 401 });
+          default:
+            return new Response(`relay detail ${CAP_ALPHA_2}`, { status: Number(outcome.relay) });
+        }
+      }, 200_000);
+      const evicted = String(outcome.relay).startsWith("401");
+
+      const answer = await state.call(target);
+      const body = await answer.text();
+      expect({ relay: outcome.relay, status: answer.status }).toEqual(outcome);
+      if (outcome.status !== 200) expect(body).toBe(shareWebRefusalBody);
+      expectSecurityHeaders(answer);
+      // The call refreshed first. Only the refusal that evicts the session skips its cookie.
+      expect(state.calls.map((call) => call.headers.get("authorization"))).toEqual([
+        `LinkCapability ${CAP_ALPHA_2}`,
+      ]);
+      expect(cookiePairs(answer)).toEqual(evicted ? [] : [state.sessionCookie]);
+
+      await (await state.call(target)).body?.cancel();
+      expect(state.calls).toHaveLength(evicted ? 1 : 2);
+    }
+  });
+
+  it.each(routes)("ends $name at the relay deadline or when the browser leaves", async (target) => {
+    vi.useFakeTimers();
+    try {
+      let markStarted!: () => void;
+      const nextStart = () => new Promise<void>((resolve) => { markStarted = resolve; });
+      const state = await linkSession(async (relayRequest) => {
+        markStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          relayRequest.signal.addEventListener("abort", () => reject(relayRequest.signal.reason), {
+            once: true,
+          });
+        });
+      });
+
+      let started = nextStart();
+      const stalled = state.call(target);
+      await started;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(state.calls[0]!.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.calls[0]!.signal.aborted).toBe(true);
+      const timedOut = await stalled;
+      expect({ status: timedOut.status, body: await timedOut.text() }).toEqual({
+        status: 503,
+        body: shareWebRefusalBody,
+      });
+
+      started = nextStart();
+      const browser = new AbortController();
+      const abandoned = state.call(target, browser.signal);
+      await started;
+      browser.abort();
+      expect(state.calls[1]!.signal.aborted).toBe(true);
+      expect((await abandoned).status).toBe(503);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a blob's response head but not its streamed body", async () => {
+    vi.useFakeTimers();
+    try {
+      let send!: (chunk: Uint8Array) => void;
+      const state = await linkSession(async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(12));
+          send = (chunk) => controller.enqueue(chunk);
+        },
+      })));
+      const browser = new AbortController();
+
+      const blob = await state.call(routes.at(-1)!, browser.signal);
+      expect(blob.status).toBe(200);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const reader = blob.body!.getReader();
+      expect((await reader.read()).value).toEqual(new Uint8Array(12));
+      send(Uint8Array.of(1));
+      expect((await reader.read()).value).toEqual(Uint8Array.of(1));
+      expect(state.calls[0]!.signal.aborted).toBe(false);
+
+      browser.abort();
+      expect(state.calls[0]!.signal.aborted).toBe(true);
+      await reader.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  const supersededStatus: Record<string, number> = {
+    log: 409,
+    "discussion activity": 409,
+    discussion: 404,
+    "discussion append": 404,
+  };
+
+  it.each(routes.flatMap((target) => [
+    { ...target, settle: "answers" },
+    { ...target, settle: "fails" },
+  ]))("renews no cookie when $name $settle after its session was replaced", async (target) => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let settle!: () => void;
+    const state = await linkSession(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => { settle = resolve; });
+      if (target.settle === "fails") throw new Error("relay connection reset");
+      return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
+    }, 200_000);
+
+    const pending = state.call(target);
+    await started;
+    expect((await state.replace()).status).toBe(200);
+    settle();
+
+    const answer = await pending;
+    expect(answer.status).toBe(
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 503),
+    );
+    expect(answer.headers.has("set-cookie")).toBe(false);
+    await answer.body?.cancel();
   });
 });
 
@@ -2219,92 +2233,6 @@ describe("share-web protected discussion proxy", () => {
     } finally {
       for (const resolve of activityResolvers) resolve(Response.json(publicActivity));
       await Promise.all(pending);
-    }
-  });
-
-  it.each([
-    { name: "page read", method: "GET" as const },
-    { name: "append", method: "POST" as const },
-  ])("times out a stalled discussion $name and keeps the session retryable", async ({ method }) => {
-    vi.useFakeTimers();
-    const browserAbort = new AbortController();
-    try {
-      let discussionCalls = 0;
-      let stalledRequest: Request | undefined;
-      let markRelayStarted: (() => void) | undefined;
-      const relayStarted = new Promise<void>((resolve) => {
-        markRelayStarted = resolve;
-      });
-      const successBody = method === "GET"
-        ? {
-            ok: true,
-            activityRevision: 0,
-            messages: [],
-            nextCursor: null,
-            profileName: null,
-          }
-        : publicMessage("retry succeeded");
-      const handler = createShareWebHandler({
-        relayUrl: "http://relay.test",
-        relayExchangeKey: "discussion-relay-key",
-        publicHosts: new Set([HOST]),
-        nowMs: () => 1_000,
-        newSessionToken: () => Buffer.alloc(32, 61).toString("base64url"),
-        newProfileSecret: () => PROFILE_ALPHA,
-        fetchRelay: async (relayRequest) => {
-          if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
-            return Response.json({
-              ok: true,
-              grantId: "grant-discussion-timeout",
-              capabilityToken: CAP_ALPHA_1,
-              capabilityExpiresAtMs: 901_000,
-            });
-          }
-          discussionCalls += 1;
-          if (discussionCalls === 1) {
-            stalledRequest = relayRequest;
-            markRelayStarted?.();
-            return await rejectWhenAborted(relayRequest);
-          }
-          return Response.json(successBody);
-        },
-      });
-      const state = await discussionSession(handler);
-      const headers = {
-        ...sessionHeaders(state.session, state.cookies),
-        ...(method === "POST" ? { "content-type": "application/json" } : {}),
-      };
-      const init: RequestInit = {
-        method,
-        headers,
-        signal: browserAbort.signal,
-        ...(method === "POST"
-          ? {
-              body: JSON.stringify({
-                body: "retry succeeded",
-                idempotencyKey: "discussion-timeout",
-              }),
-            }
-          : {}),
-      };
-
-      const pending = handler(request("/api/view/discussion", init));
-      await relayStarted;
-      await vi.advanceTimersByTimeAsync(9_999);
-      expect(stalledRequest?.signal.aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(1);
-
-      expect(stalledRequest?.signal.aborted).toBe(true);
-      await expectDiscussionUnavailable(await pending);
-      const retry = await handler(request("/api/view/discussion", init));
-      expect({ status: retry.status, body: await retry.json() }).toEqual({
-        status: 200,
-        body: successBody,
-      });
-      expect(discussionCalls).toBe(2);
-    } finally {
-      browserAbort.abort();
-      vi.useRealTimers();
     }
   });
 
@@ -3287,79 +3215,6 @@ describe("share-web protected discussion proxy", () => {
     expect(discussionCalls).toBe(1);
   });
 
-  it("shares one forced refresh across concurrent discussion appends", async () => {
-    let now = 1_000;
-    let refreshCalls = 0;
-    const discussionCapabilities: string[] = [];
-    const discussionProfiles: string[] = [];
-    let releaseRefresh: (() => void) | undefined;
-    const refreshGate = new Promise<void>((resolve) => {
-      releaseRefresh = resolve;
-    });
-    const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      relayExchangeKey: "discussion-relay-key",
-      publicHosts: new Set([HOST]),
-      nowMs: () => now,
-      newSessionToken: () => Buffer.alloc(32, 52).toString("base64url"),
-      newProfileSecret: () => PROFILE_ALPHA,
-      fetchRelay: async (relayRequest) => {
-        const pathname = new URL(relayRequest.url).pathname;
-        if (pathname === "/sync/link-exchange") {
-          return Response.json({
-            ok: true,
-            grantId: "grant-refresh",
-            capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs: 901_000,
-          });
-        }
-        if (pathname === "/sync/link-refresh") {
-          refreshCalls += 1;
-          await refreshGate;
-          return Response.json({
-            ok: true,
-            grantId: "grant-refresh",
-            capabilityToken: CAP_ALPHA_2,
-            capabilityExpiresAtMs: now + 900_000,
-          });
-        }
-        discussionCapabilities.push(relayRequest.headers.get("authorization") ?? "");
-        discussionProfiles.push(
-          relayRequest.headers.get("x-dohc-link-profile-secret") ?? "",
-        );
-        return Response.json(publicMessage("refreshed"));
-      },
-    });
-    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
-    const { session } = (await exchanged.clone().json()) as { session: string };
-    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
-    const append = (idempotencyKey: string) =>
-      handler(
-        request("/api/view/discussion", {
-          method: "POST",
-          headers: {
-            ...sessionHeaders(session, cookies),
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ body: "refreshed", idempotencyKey }),
-        }),
-      );
-    now = 601_001;
-
-    const first = append("concurrent-one");
-    const second = append("concurrent-two");
-    await vi.waitFor(() => expect(refreshCalls).toBe(1));
-    releaseRefresh?.();
-    const responses = await Promise.all([first, second]);
-
-    expect(responses.map((response) => response.status)).toEqual([200, 200]);
-    expect(discussionCapabilities).toEqual([
-      `LinkCapability ${CAP_ALPHA_2}`,
-      `LinkCapability ${CAP_ALPHA_2}`,
-    ]);
-    expect(discussionProfiles).toEqual([PROFILE_ALPHA, PROFILE_ALPHA]);
-  });
-
   it("refuses an old append response after session replacement and retries exactly", async () => {
     let exchangeCalls = 0;
     let discussionCalls = 0;
@@ -3872,16 +3727,12 @@ describe("share-web handoff adapter", () => {
   async function exchangedSession(options: {
     fetchRelay: (request: Request) => Promise<Response>;
     nowMs?: () => number;
-    capabilityExpiresAtMs?: number;
-    sessionTokenByte?: number;
-    handoffRelayTimeoutMs?: number;
     publicRelayUrl?: string;
   }): Promise<{
     handler: ReturnType<typeof createShareWebHandler>;
     discriminator: string;
     cookie: string;
   }> {
-    const capabilityExpiresAtMs = options.capabilityExpiresAtMs ?? 901_000;
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
       relayExchangeKey: HANDOFF_EXCHANGE_KEY,
@@ -3892,15 +3743,13 @@ describe("share-web handoff adapter", () => {
             ok: true,
             grantId: "grant-handoff",
             capabilityToken: CAP_ALPHA_1,
-            capabilityExpiresAtMs,
+            capabilityExpiresAtMs: 901_000,
           });
         }
         return await options.fetchRelay(relayRequest);
       },
       nowMs: options.nowMs ?? (() => 1_000),
-      newSessionToken: () =>
-        Buffer.alloc(32, options.sessionTokenByte ?? 41).toString("base64url"),
-      handoffRelayTimeoutMs: options.handoffRelayTimeoutMs,
+      newSessionToken: () => Buffer.alloc(32, 41).toString("base64url"),
       ...(options.publicRelayUrl
         ? { publicRelayUrl: options.publicRelayUrl }
         : {}),
@@ -3928,131 +3777,6 @@ describe("share-web handoff adapter", () => {
       "x-dohc-link-session": discriminator,
     };
   }
-
-  it("aborts a handoff mint when the browser request closes without exposing relay secrets", async () => {
-    const relayUrl = `https://${HOST}/s#${SECRET_ALPHA}`;
-    let startedRelayRequest: Request | undefined;
-    let markRelayStarted: (() => void) | undefined;
-    const relayStarted = new Promise<void>((resolve) => {
-      markRelayStarted = resolve;
-    });
-    const state = await exchangedSession({
-      fetchRelay: async (relayRequest) => {
-        startedRelayRequest = relayRequest;
-        markRelayStarted?.();
-        return await new Promise<Response>((_resolve, reject) => {
-          const rejectWithSecrets = (): void => {
-            reject(
-              new Error(
-                `aborted ${HANDOFF_CODE} ${CAP_ALPHA_2} ${relayUrl}`,
-              ),
-            );
-          };
-          if (relayRequest.signal.aborted) {
-            rejectWithSecrets();
-          } else {
-            relayRequest.signal.addEventListener("abort", rejectWithSecrets, {
-              once: true,
-            });
-          }
-        });
-      },
-    });
-    const browserAbort = new AbortController();
-    const pendingResponse = state.handler(
-      request("/api/handoff", {
-        method: "POST",
-        headers: handoffHeaders(state.discriminator, state.cookie),
-        signal: browserAbort.signal,
-      }),
-    );
-    await relayStarted;
-
-    browserAbort.abort();
-
-    expect(startedRelayRequest?.signal.aborted).toBe(true);
-    const response = await pendingResponse;
-    const body = await response.clone().text();
-    expect(body).not.toContain(HANDOFF_CODE);
-    expect(body).not.toContain(CAP_ALPHA_2);
-    expect(body).not.toContain(SECRET_ALPHA);
-    expect(body).not.toContain(relayUrl);
-    await generic(response, 503);
-  });
-
-  it("times out a stalled handoff mint generically and leaves the session retryable", async () => {
-    vi.useFakeTimers();
-    try {
-      const relayUrl = `https://${HOST}/s#${SECRET_ALPHA}`;
-      let mintCalls = 0;
-      let startedRelayRequest: Request | undefined;
-      let markRelayStarted: (() => void) | undefined;
-      const relayStarted = new Promise<void>((resolve) => {
-        markRelayStarted = resolve;
-      });
-      const state = await exchangedSession({
-        handoffRelayTimeoutMs: 25,
-        fetchRelay: async (relayRequest) => {
-          mintCalls += 1;
-          if (mintCalls > 1) {
-            return Response.json({
-              ok: true,
-              code: HANDOFF_CODE,
-              expiresAtMs: 301_000,
-            });
-          }
-          startedRelayRequest = relayRequest;
-          markRelayStarted?.();
-          return await new Promise<Response>((_resolve, reject) => {
-            const rejectWithSecrets = (): void => {
-              reject(
-                new Error(
-                  `timed out ${HANDOFF_CODE} ${CAP_ALPHA_2} ${relayUrl}`,
-                ),
-              );
-            };
-            if (relayRequest.signal.aborted) {
-              rejectWithSecrets();
-            } else {
-              relayRequest.signal.addEventListener("abort", rejectWithSecrets, {
-                once: true,
-              });
-            }
-          });
-        },
-      });
-      const headers = handoffHeaders(state.discriminator, state.cookie);
-      const pendingResponse = state.handler(
-        request("/api/handoff", { method: "POST", headers }),
-      );
-      await relayStarted;
-
-      await vi.advanceTimersByTimeAsync(25);
-
-      expect(startedRelayRequest?.signal.aborted).toBe(true);
-      const response = await pendingResponse;
-      const body = await response.clone().text();
-      expect(body).not.toContain(HANDOFF_CODE);
-      expect(body).not.toContain(CAP_ALPHA_2);
-      expect(body).not.toContain(SECRET_ALPHA);
-      expect(body).not.toContain(relayUrl);
-      await generic(response, 503);
-
-      const retry = await state.handler(
-        request("/api/handoff", { method: "POST", headers }),
-      );
-      expect(retry.status).toBe(200);
-      expect(await retry.json()).toEqual({
-        ok: true,
-        code: HANDOFF_CODE,
-        relayUrl: PUBLIC_RELAY_URL,
-        expiresAtMs: 301_000,
-      });
-      expect(mintCalls).toBe(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
 
   it("requires an allowed Host, viewer cookie, and explicit handoff session header", async () => {
     let now = 1_000;
@@ -4198,152 +3922,31 @@ describe("share-web handoff adapter", () => {
     }
   });
 
-  it("refreshes first, mints with the installed capability, and renews the cookie", async () => {
-    let now = 1_000;
-    const relayPaths: string[] = [];
-    const mintAuthorizations: string[] = [];
-    const state = await exchangedSession({
-      nowMs: () => now,
-      capabilityExpiresAtMs: 601_001,
-      sessionTokenByte: 42,
-      fetchRelay: async (relayRequest) => {
-        const pathname = new URL(relayRequest.url).pathname;
-        relayPaths.push(pathname);
-        if (pathname === "/sync/link-refresh") {
-          expect(relayRequest.headers.get("authorization")).toBe(
-            `LinkCapability ${CAP_ALPHA_1}`,
-          );
-          expect(relayRequest.headers.get("x-dohc-relay-exchange-key")).toBe(
-            HANDOFF_EXCHANGE_KEY,
-          );
-          return Response.json({
-            ok: true,
-            grantId: "grant-handoff",
-            capabilityToken: CAP_ALPHA_2,
-            capabilityExpiresAtMs: now + 900_000,
-          });
-        }
-        mintAuthorizations.push(relayRequest.headers.get("authorization") ?? "");
-        expect(await relayRequest.text()).toBe("");
-        return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: now + 300_000 });
-      },
-    });
-    now = 301_002;
-
-    const response = await state.handler(
-      request("/api/handoff", {
-        method: "POST",
-        headers: handoffHeaders(state.discriminator, state.cookie),
-      }),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      ok: true,
-      code: HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: now + 300_000,
-    });
-    expect(relayPaths).toEqual(["/sync/link-refresh", "/sync/link-handoff"]);
-    expect(mintAuthorizations).toEqual([`LinkCapability ${CAP_ALPHA_2}`]);
-    expect(response.headers.get("set-cookie")).toContain(state.cookie);
-  });
-
-  it("shares one serialized refresh across concurrent handoff mints", async () => {
-    let now = 1_000;
-    let refreshCalls = 0;
-    let releaseRefresh: (() => void) | undefined;
-    const refreshGate = new Promise<void>((resolve) => {
-      releaseRefresh = resolve;
-    });
-    const mintAuthorizations: string[] = [];
-    const state = await exchangedSession({
-      nowMs: () => now,
-      capabilityExpiresAtMs: 601_001,
-      sessionTokenByte: 43,
-      fetchRelay: async (relayRequest) => {
-        const pathname = new URL(relayRequest.url).pathname;
-        if (pathname === "/sync/link-refresh") {
-          refreshCalls += 1;
-          await refreshGate;
-          return Response.json({
-            ok: true,
-            grantId: "grant-handoff",
-            capabilityToken: CAP_ALPHA_2,
-            capabilityExpiresAtMs: now + 900_000,
-          });
-        }
-        mintAuthorizations.push(relayRequest.headers.get("authorization") ?? "");
-        return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: now + 300_000 });
-      },
-    });
-    now = 301_002;
-    const headers = handoffHeaders(state.discriminator, state.cookie);
-
-    const first = state.handler(request("/api/handoff", { method: "POST", headers }));
-    const second = state.handler(request("/api/handoff", { method: "POST", headers }));
-    await vi.waitFor(() => expect(refreshCalls).toBe(1));
-    releaseRefresh?.();
-    const responses = await Promise.all([first, second]);
-
-    expect(responses.map((response) => response.status)).toEqual([200, 200]);
-    expect(mintAuthorizations).toEqual([
-      `LinkCapability ${CAP_ALPHA_2}`,
-      `LinkCapability ${CAP_ALPHA_2}`,
-    ]);
-    expect(mintAuthorizations).not.toContain(`LinkCapability ${CAP_ALPHA_1}`);
-    expect(responses.every((response) => response.headers.has("set-cookie"))).toBe(true);
-  });
-
-  it("maps handoff refusal and rate limit generically, and malformed or unavailable relay responses to 503", async () => {
-    const upstreamBody = JSON.stringify({
-      code: HANDOFF_CODE,
-      capabilityToken: CAP_ALPHA_2,
-      url: `https://${HOST}/s#${SECRET_ALPHA}`,
-    });
-    const attempts: Array<() => Promise<Response>> = [
-      async () => new Response(upstreamBody, { status: 404 }),
-      async () => new Response(upstreamBody, { status: 429 }),
-      async () => new Response(upstreamBody, { status: 502 }),
-      async () => new Response(null, { status: 204 }),
-      async () => new Response("not-json", { status: 200 }),
-      async () => Response.json({ ok: false, code: HANDOFF_CODE, expiresAtMs: 301_000 }),
-      async () => Response.json({ ok: true, code: "short", expiresAtMs: 301_000 }),
-      async () => Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 1_000 }),
-      async () => Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000.5 }),
-      async () =>
+  it("refuses malformed handoff mints with 503 and exposes nothing from them", async () => {
+    const attempts: Array<() => Response> = [
+      () => new Response("not-json", { status: 200 }),
+      () => Response.json({ ok: false, code: HANDOFF_CODE, expiresAtMs: 301_000 }),
+      () => Response.json({ ok: true, code: "short", expiresAtMs: 301_000 }),
+      () => Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 1_000 }),
+      () => Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000.5 }),
+      () =>
         Response.json({
           ok: true,
           code: HANDOFF_CODE,
           expiresAtMs: Number.MAX_SAFE_INTEGER + 1,
         }),
-      async () => {
-        throw new Error(`relay unavailable ${SECRET_ALPHA}`);
-      },
-      async () => new Response(upstreamBody, { status: 401 }),
     ];
     let attempt = 0;
     const state = await exchangedSession({
-      fetchRelay: async () => await attempts[attempt++]!(),
+      fetchRelay: async () => attempts[attempt++]!(),
     });
     const headers = handoffHeaders(state.discriminator, state.cookie);
-    const responses: Response[] = [];
     for (let index = 0; index < attempts.length; index += 1) {
-      responses.push(
+      await generic(
         await state.handler(request("/api/handoff", { method: "POST", headers })),
+        503,
       );
     }
-
-    for (const response of responses) {
-      const text = await response.clone().text();
-      expect(text).not.toContain(HANDOFF_CODE);
-      expect(text).not.toContain(CAP_ALPHA_2);
-      expect(text).not.toContain(SECRET_ALPHA);
-    }
-    await generic(responses[0]!, 404);
-    await generic(responses[1]!, 429);
-    for (const unavailable of responses.slice(2, -1)) await generic(unavailable, 503);
-    await generic(responses.at(-1)!, 404);
   });
 });
 

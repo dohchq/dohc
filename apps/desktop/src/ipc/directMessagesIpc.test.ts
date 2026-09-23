@@ -134,7 +134,6 @@ async function harness() {
     requireEngineCapture: async () => ({ workspace, capture }), linkedChatStoreFor,
     openWorkspaceActivity: async () => undefined,
     receivedShareEngine: { workspaceFor: input => ({ workspaceId: input.engineWorkspaceId, rootPath: input.rootPath, attachmentId: input.attachmentId }) },
-    syncSharedChannelsForChatTarget: async () => undefined, activity,
     activeEngineFileIndex: async () => ({ objectIdByPath: new Map() }),
     readOwnedWorkspaceText: async () => ({ text: "# Current heading\n" }),
   });

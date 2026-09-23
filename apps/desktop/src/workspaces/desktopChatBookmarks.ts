@@ -264,23 +264,6 @@ export function createDesktopChatBookmarks<
     }
   }
 
-  async function materializePendingChatBookmarks(
-    workspace: Workspace, capture: BookmarkCapture,
-  ): Promise<void> {
-    if (stopped || sharedViewOf(workspace.workspaceId)) return;
-    let lease: Lease | null = null;
-    try {
-      lease = acquireWorkspace(workspace);
-      await materializePendingForAuthority(canonicalWorkspaceFor(lease), capture, lease);
-      lease.assertCurrent();
-    } catch (error) {
-      console.error("[desktop] chat bookmark projection:", error);
-      if (lease) retryProjection(lease);
-    } finally {
-      lease?.release();
-    }
-  }
-
   async function archiveChatBookmark(
     workspace: Workspace, capture: BookmarkCapture, ownerUserId: string, bookmarkId: string,
   ): Promise<ChatBookmark> {
@@ -316,8 +299,9 @@ export function createDesktopChatBookmarks<
     }
   }
 
-  async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void> {
-    // Shared views ingest relay state without writing personal bookmark files.
+  // After a relay pull or a chat message. Shared views ingest relay state
+  // without writing personal bookmark files.
+  async function projectPendingChatBookmarks(workspaceId: string): Promise<void> {
     if (stopped || sharedViewOf(workspaceId) || !findWorkspace(workspaceId)) return;
     let lease: Lease | null = null;
     try {
@@ -328,7 +312,7 @@ export function createDesktopChatBookmarks<
       await materializePendingForAuthority(workspace, capture, lease);
       lease.assertCurrent();
     } catch (error) {
-      console.error(`[desktop] post-pull chat bookmark projection (${workspaceId}):`, error);
+      console.error(`[desktop] chat bookmark projection (${workspaceId}):`, error);
       if (lease) retryProjection(lease);
     } finally {
       lease?.release();
@@ -387,7 +371,6 @@ export function createDesktopChatBookmarks<
     timer = null;
   }
 
-  return { queueChatBookmarkProjection, materializeChatBookmark,
-    materializePendingChatBookmarks, archiveChatBookmark,
-    projectPendingChatBookmarksAfterPull, start, stop };
+  return { queueChatBookmarkProjection, materializeChatBookmark, archiveChatBookmark,
+    projectPendingChatBookmarks, start, stop };
 }

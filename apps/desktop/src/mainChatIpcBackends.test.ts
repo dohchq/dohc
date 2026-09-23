@@ -10,7 +10,6 @@ import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./ipc/channels";
 import {
   createChatChannelIpcHandler,
-  createSetChatReactionIpcHandler,
   createWritableChatIpcHandler,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
@@ -194,7 +193,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     CHANNELS.setChatReaction,
-    createSetChatReactionIpcHandler({
+    createWritableChatIpcHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -213,8 +212,6 @@ function registerChatFlowHandlers(
             displayName: "Sam",
           },
         }),
-      syncJoinedChannels: () => undefined,
-      queueCloudSync: () => undefined,
     }),
   );
   ipc.handle(

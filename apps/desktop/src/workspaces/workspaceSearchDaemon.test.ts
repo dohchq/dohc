@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "../ipc/channels";
-import { registerWorkspaceSearchIpcHandlers } from "../ipc/workspaceSearchIpc";
+import { workspaceSearchHandlers } from "../ipc/workspaceSearchIpc";
 import { queryWorkspaceSearchDaemon } from "./workspaceSearchDaemon";
 import { WorkspaceSearchOwner } from "./workspaceSearchOwner";
 
@@ -319,10 +319,6 @@ describe("desktop workspace-search owner wiring", () => {
           }),
         logError: vi.fn(),
       });
-      const handlers = new Map<
-        string,
-        (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
-      >();
       const sender = {
         id: 71,
         isDestroyed: () => false,
@@ -330,12 +326,10 @@ describe("desktop workspace-search owner wiring", () => {
         once: vi.fn(),
       };
       type TestEvent = { sender: typeof sender };
-      registerWorkspaceSearchIpcHandlers<
+      const search = workspaceSearchHandlers<
         TestEvent,
         { workspaceId: string; rootPath: string }
       >({
-        registerHandler: (channel, handler) => handlers.set(channel, handler),
-        assertTrustedSender: () => undefined,
         withWorkspaceOperation: async (_event, workspaceId, work) =>
           work({
             workspace: { workspaceId, rootPath },
@@ -348,11 +342,10 @@ describe("desktop workspace-search owner wiring", () => {
         onActivityError: vi.fn(),
       });
 
-      await handlers.get(CHANNELS.searchWorkspace)!({ sender }, {
-        workspaceId: "workspace-1",
-        searchId: "search-1",
-        query: "needle",
-      });
+      await search.searchWorkspace(
+        { workspaceId: "workspace-1", searchId: "search-1", query: "needle" },
+        { event: { sender } },
+      );
 
       expect(trace).toEqual(["flush", "page:1", "page:2"]);
       expect(queryPage).toHaveBeenNthCalledWith(2, {

@@ -1,4 +1,3 @@
-import { readCachedUserSettingsFile } from "../settings/userSettingsStore";
 import { resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
@@ -20,7 +19,6 @@ import type {
   startCliServer as startCliServerImplementation,
 } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -31,13 +29,8 @@ import {
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "../workspaces/collectionRecordEdits";
-import { assertSharedChannelWritable } from "../workspaces/sharedChannels";
-import {
-  assertSharedChannelMessageIdentity,
-  resolveWorkspaceRelayAuthorId,
-  type ChatRelayIdentityTarget,
-  type ResolvedChatRelayIdentity,
-} from "../workspaces/chatRelayIdentity";
+import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
+import type { ChatWrites } from "../workspaces/chatWrites";
 
 interface DesktopCliServerDependencies<State> {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -68,20 +61,11 @@ interface DesktopCliServerDependencies<State> {
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
   ): Promise<Result | null>;
-  assertWritableWorkspace(workspace: RegistryEntry): void;
-  chatRelayIdentityFor(
-    workspaceId: string,
-    target: ChatRelayIdentityTarget,
-    store: DesktopLinkedChatStore,
-  ): Promise<ResolvedChatRelayIdentity>;
-  currentCredentials(): CloudCredentials | null;
+  chatWrites: ChatWrites;
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
-  warmCredentialCache(): Promise<unknown>;
   localUserDisplayName(): string;
-  localReactorFallbackId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
-  queueChatBookmarkProjection(workspaceId: string): void;
   syncSharedChannelsForChatTarget(
     workspaceId: string,
     target?: ChatRelayIdentityTarget,
@@ -105,25 +89,21 @@ export function createDesktopCliServer<State>(
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
     withEngineAdapter,
-    assertWritableWorkspace,
-    chatRelayIdentityFor,
-    currentCredentials,
+    chatWrites,
     startCliServer,
     stateDir,
-    warmCredentialCache,
     localUserDisplayName,
-    localReactorFallbackId,
     notifyRenderer,
-    queueChatBookmarkProjection,
     syncSharedChannelsForChatTarget,
     chatDispatchService,
     rememberPendingCliRunMessageLink,
   } = dependencies;
 
   // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
-  // resolves the registry workspace and derives identity exactly like renderer
-  // chat sends. The client can claim only the behavior-bearing human/agent kind;
-  // it never supplies the user id or display identity.
+  // resolves the registry workspace, and chat writes go through the same
+  // chatWrites module renderer sends use. The client can claim only the
+  // behavior-bearing human/agent kind; it never supplies the user id or
+  // display identity.
   async function openCliWorkspace(
     requested: CliRegistryWorkspace,
   ): Promise<CliWorkspaceContext> {
@@ -273,28 +253,6 @@ export function createDesktopCliServer<State>(
         const detail = await capture.readMoment(momentId);
         return detail && !detail.protected ? detail.moment : null;
       },
-      assertWritable: async (target) => {
-        assertWritableWorkspace(workspace);
-        await assertSharedChannelWritable({
-          workspaceId: workspace.workspaceId,
-          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-          store,
-          target,
-        });
-      },
-      assertMessageWritable: async (target, authorUserId) => {
-        const identity = await chatRelayIdentityFor(
-          workspace.workspaceId,
-          target,
-          store,
-        );
-        assertSharedChannelMessageIdentity({
-          joinedChannel: identity.joinedChannel,
-          credentials: currentCredentials(),
-          authorUserId,
-          resolvedAuthorUserId: identity.authorUserId,
-        });
-      },
     };
   }
 
@@ -309,38 +267,15 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
-      identity: async (workspaceId, target) => {
-        await warmCredentialCache();
-        const workspace = findWorkspace(workspaceId);
-        const authorUserId = workspace
-          ? target
-            ? (
-                await chatRelayIdentityFor(
-                  workspaceId,
-                  target,
-                  linkedChatStoreFor(workspace),
-                )
-              ).authorUserId
-            : resolveWorkspaceRelayAuthorId(workspace, currentCredentials())
-          : undefined;
-        return {
-          displayName: localUserDisplayName(),
-          agentName: (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
-          ...(authorUserId ? { authorUserId } : {}),
-          reactionAuthorId: localReactorFallbackId(),
-        };
-      },
-      onWrite: (workspace, target) => {
+      chatWrites,
+      localUserDisplayName,
+      // The renderer did not make this change, so its windows hear about it
+      // here. Some CLI writes, such as provisioning General, skip chatWrites,
+      // so this queues cloud sync too. The sync engine debounces a second
+      // queue after a chatWrites write into one pass.
+      onWrite: (workspace) => {
         notifyRenderer({ workspaceId: workspace.workspaceId });
-        // A CLI or MCP reply can mark a live bookmark projection pending.
-        queueChatBookmarkProjection(workspace.workspaceId);
         activity.queueCloudSync(workspace.workspaceId);
-        void syncSharedChannelsForChatTarget(workspace.workspaceId, target).catch((error) => {
-          console.error("[desktop] shared channel sync:", error);
-        });
-        void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-          console.error("[desktop] CLI dispatch scan:", error);
-        });
       },
       // No renderer poll runs the sync pass on the CLI's or MCP's behalf:
       // Await (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same
