@@ -71,12 +71,11 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   const reach = size.y * 0.3;
   const target = new T.WebGLRenderTarget(512, 512);
   const blurTarget = new T.WebGLRenderTarget(512, 512);
-  target.texture.generateMipmaps = blurTarget.texture.generateMipmaps = false;
   const floorCamera = new T.OrthographicCamera(-width / 2, width / 2, depth / 2, -depth / 2, 0, reach);
   floorCamera.position.set(center.x, groundY, center.z);
   floorCamera.rotation.x = Math.PI / 2;
   floorCamera.updateMatrixWorld();
-  const depthMaterial = new T.MeshDepthMaterial({ depthTest: false, depthWrite: false });
+  const depthMaterial = new T.MeshDepthMaterial();
   depthMaterial.onBeforeCompile = shader => {
     shader.fragmentShader = shader.fragmentShader.replace(
       'gl_FragColor = vec4( vec3( 1.0 - fragCoordZ ), opacity );',
@@ -86,8 +85,8 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   const quad = new T.Mesh(new T.PlaneGeometry(2, 2));
   const quadCamera = new T.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   quadCamera.position.z = 0.5;
-  const horizontal = new T.ShaderMaterial(HorizontalBlurShader);
-  const vertical = new T.ShaderMaterial(VerticalBlurShader);
+  const horizontal = new T.ShaderMaterial({ ...HorizontalBlurShader, uniforms: T.UniformsUtils.clone(HorizontalBlurShader.uniforms) });
+  const vertical = new T.ShaderMaterial({ ...VerticalBlurShader, uniforms: T.UniformsUtils.clone(VerticalBlurShader.uniforms) });
   horizontal.depthTest = vertical.depthTest = false;
   const blur = (amount: number) => {
     quad.material = horizontal;
@@ -107,21 +106,17 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   contact.scale.y = -1;
   contact.position.set(center.x, groundY + 0.002, center.z);
   contact.renderOrder = 1;
-  const clear = new T.Color();
-  const clearAlpha = renderer.getClearAlpha();
-  renderer.getClearColor(clear);
   ground.visible = false;
   scene.overrideMaterial = depthMaterial;
-  renderer.setClearColor(0x000000, 0);
   renderer.setRenderTarget(target);
-  renderer.clear();
   renderer.render(scene, floorCamera);
   scene.overrideMaterial = null;
   ground.visible = true;
   blur(1.4);
   blur(0.6);
   renderer.setRenderTarget(null);
-  renderer.setClearColor(clear, clearAlpha);
+  // The bake ran with the floor hidden; draw the cast shadow again with it in place.
+  renderer.shadowMap.needsUpdate = true;
   blurTarget.dispose();
   depthMaterial.dispose(); horizontal.dispose(); vertical.dispose(); quad.geometry.dispose();
   scene.add(contact);
@@ -149,24 +144,3 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   };
 }
 
-/** Cut faces carry drafting hatch, the way a sectioned part is drawn in a manual. */
-export function createSectionMaterial(repeat: number) {
-  const canvas = new OffscreenCanvas(128, 128);
-  const context = canvas.getContext('2d')!;
-  context.fillStyle = '#d3d7da';
-  context.fillRect(0, 0, 128, 128);
-  context.strokeStyle = '#6a7279';
-  context.lineWidth = 3;
-  for (let offset = -128; offset <= 128; offset += 16) {
-    context.beginPath();
-    context.moveTo(offset, 128);
-    context.lineTo(offset + 128, 0);
-    context.stroke();
-  }
-  const texture = new T.CanvasTexture(canvas);
-  texture.colorSpace = T.SRGBColorSpace;
-  texture.wrapS = texture.wrapT = T.RepeatWrapping;
-  texture.repeat.set(repeat, repeat);
-  texture.anisotropy = 4;
-  return new T.MeshStandardMaterial({ map: texture, roughness: .55, metalness: .25, side: T.DoubleSide });
-}

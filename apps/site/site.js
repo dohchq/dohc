@@ -892,7 +892,7 @@ if (waitlist) {
     if (pending) return;
     pending = true;
     waitlist.dataset.state = 'pending';
-    submit.disabled = true;
+    submit.setAttribute('aria-disabled', 'true');
     submit.textContent = 'Joining…';
     status.textContent = 'Joining the waitlist…';
     try {
@@ -900,17 +900,18 @@ if (waitlist) {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(new FormData(waitlist)).toString(),
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout?.(10000),
       });
       const message = await failure(response);
       waitlist.dataset.state = message ? 'error' : 'joined';
       status.textContent = message ?? 'You\'re on the list. We\'ll email you when Drive opens.';
+      if (!message) status.focus();
     } catch {
       waitlist.dataset.state = 'error';
       status.textContent = 'Couldn\'t reach the waitlist. Check your connection and try again.';
     } finally {
       pending = false;
-      submit.disabled = false;
+      submit.removeAttribute('aria-disabled');
       submit.textContent = submitLabel;
     }
   });

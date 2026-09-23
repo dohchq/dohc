@@ -387,6 +387,7 @@ describe('Drive waitlist', () => {
     expect(request.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
     expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({ email: 'ada@example.com', userGroup: 'Drive waitlist' });
     expect(document.querySelector('[data-waitlist-status]').textContent).toContain('on the list');
+    expect(document.activeElement).toBe(document.querySelector('[data-waitlist-status]'));
   });
 
   it('explains a rate limit and lets the visitor try again', async () => {
@@ -395,7 +396,7 @@ describe('Drive waitlist', () => {
     await vi.waitFor(() => expect(form.dataset.state).toBe('error'));
     expect(document.querySelector('[data-waitlist-status]').textContent).toContain('Too many signups');
     const submit = form.querySelector('button[type="submit"]');
-    expect(submit.disabled).toBe(false);
+    expect(submit.hasAttribute('aria-disabled')).toBe(false);
     expect(submit.textContent).toBe('Join the waitlist');
   });
 
@@ -405,13 +406,13 @@ describe('Drive waitlist', () => {
     const form = await join();
     const status = document.querySelector('[data-waitlist-status]');
     expect(status.textContent).toBe('Joining the waitlist…');
-    expect(form.querySelector('button[type="submit"]').disabled).toBe(true);
+    expect(form.querySelector('button[type="submit"]').getAttribute('aria-disabled')).toBe('true');
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     expect(fetch).toHaveBeenCalledOnce();
     fail(new TypeError('offline'));
     await vi.waitFor(() => expect(form.dataset.state).toBe('error'));
     expect(status.textContent).toContain('Check your connection');
-    expect(form.querySelector('button[type="submit"]').disabled).toBe(false);
+    expect(form.querySelector('button[type="submit"]').hasAttribute('aria-disabled')).toBe(false);
   });
 
   it.each([

@@ -1,7 +1,6 @@
 import * as T from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { createSectionMaterial } from './figure-studio';
 
 export interface DriveModel {
   root: T.Group;
@@ -57,9 +56,28 @@ function workshop() {
   const dark = metal(0x242a30, .48, .75);
   const cast = metal(0x7b848c, .52, .82);
   const brass = metal(0x9b8052, .32);
-  const section = createSectionMaterial(1.6);
+  // Cut faces carry drafting hatch, the way a sectioned part is drawn in a manual.
+  const hatch = document.createElement('canvas');
+  hatch.width = hatch.height = 128;
+  const hatchContext = hatch.getContext('2d')!;
+  hatchContext.fillStyle = '#d3d7da';
+  hatchContext.fillRect(0, 0, 128, 128);
+  hatchContext.strokeStyle = '#6a7279';
+  hatchContext.lineWidth = 3;
+  for (let offset = -128; offset <= 128; offset += 16) {
+    hatchContext.beginPath();
+    hatchContext.moveTo(offset, 128);
+    hatchContext.lineTo(offset + 128, 0);
+    hatchContext.stroke();
+  }
+  const hatchTexture = new T.CanvasTexture(hatch);
+  hatchTexture.colorSpace = T.SRGBColorSpace;
+  hatchTexture.wrapS = hatchTexture.wrapT = T.RepeatWrapping;
+  hatchTexture.repeat.set(1.6, 1.6);
+  hatchTexture.anisotropy = 4;
+  textures.push(hatchTexture);
+  const section = new T.MeshStandardMaterial({ map: hatchTexture, roughness: .55, metalness: .25, side: T.DoubleSide });
   materials.push(section);
-  textures.push(section.map!);
 
   const mesh = (geometry: T.BufferGeometry, material: T.Material, parent: T.Object3D = root, position = [0, 0, 0]) => {
     const part = new T.Mesh(geometry, material);

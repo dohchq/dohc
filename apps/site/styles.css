@@ -1544,7 +1544,8 @@ main::before {
 }
 .waitlist-field input::placeholder { color: var(--subtle); }
 .waitlist-field .btn { flex: none; padding: 10px 16px; font-size: 13px; }
-.waitlist-field .btn:disabled { cursor: progress; }
+.waitlist-field .btn[aria-disabled='true'] { cursor: progress; }
+.waitlist-status:focus { outline: none; }
 .waitlist-status { min-height: 1.5em; margin-top: 10px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
 .waitlist[data-state='joined'] .waitlist-field { display: none; }
@@ -1562,7 +1563,7 @@ main::before {
   .downloads-heading { margin-bottom: 40px; }
   .download-card { padding: 24px 16px; gap: 20px 12px; }
   .download-card strong { font-size: 18px; }
-  .drive-offer { grid-template-columns: 1fr; gap: 24px; }
+  .drive-offer { grid-template-columns: minmax(0, 1fr); gap: 24px; }
   .drive-model-stage { height: 380px; }
 }
 @media (max-width: 360px) {
