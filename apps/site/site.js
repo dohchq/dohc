@@ -903,9 +903,11 @@ if (waitlist) {
         signal: AbortSignal.timeout?.(10000),
       });
       const message = await failure(response);
+      const focused = waitlist.contains(document.activeElement);
       waitlist.dataset.state = message ? 'error' : 'joined';
       status.textContent = message ?? 'You\'re on the list. We\'ll email you when Drive opens.';
-      if (!message) status.focus();
+      // Success hides the field; keep a keyboard user in place without pulling anyone else back.
+      if (!message && focused) status.focus();
     } catch {
       waitlist.dataset.state = 'error';
       status.textContent = 'Couldn\'t reach the waitlist. Check your connection and try again.';

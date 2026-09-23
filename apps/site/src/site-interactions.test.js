@@ -373,6 +373,7 @@ describe('Drive waitlist', () => {
     await mount('#drive');
     const form = document.querySelector('[data-waitlist]');
     form.querySelector('input[name="email"]').value = email;
+    form.querySelector('button[type="submit"]').focus();
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     return form;
   };
@@ -388,6 +389,18 @@ describe('Drive waitlist', () => {
     expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({ email: 'ada@example.com', userGroup: 'Drive waitlist' });
     expect(document.querySelector('[data-waitlist-status]').textContent).toContain('on the list');
     expect(document.activeElement).toBe(document.querySelector('[data-waitlist-status]'));
+  });
+
+  it('leaves focus alone when the visitor moved on before the signup finished', async () => {
+    let finish;
+    vi.mocked(fetch).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const form = await join();
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    finish(Response.json({ success: true }));
+    await vi.waitFor(() => expect(form.dataset.state).toBe('joined'));
+    expect(document.activeElement).toBe(elsewhere);
   });
 
   it('explains a rate limit and lets the visitor try again', async () => {
