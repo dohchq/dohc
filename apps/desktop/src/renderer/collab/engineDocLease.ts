@@ -319,6 +319,9 @@ export type EngineDocLeaseSnapshot = {
   deletion: { token: number; draftId: number | null } | null;
   readOnlyTransition: { token: number } | null;
   permanentFailure: { token: number } | null;
+  // How many saves replaced an outside write that overlapped the person's
+  // own. Each one is a notice; the save itself reads as "saved".
+  externalWritesInHistory: number;
   sceneRecoveryAssets: {
     token: number;
     state: "loading" | "missing";
@@ -356,6 +359,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
+    externalWritesInHistory: 0,
     sceneRecoveryAssets: null,
   };
 }
@@ -893,8 +897,22 @@ function createEngineDocSession(
     );
   };
 
-  const onSaveState = (event: EngineYDocSaveStateEvent): void => {
-    if (disposed || event.sessionId !== sessionId) return;
+  const onSaveState = (reported: EngineYDocSaveStateEvent): void => {
+    if (disposed || reported.sessionId !== sessionId) return;
+    // The file holds the document, so this is a save. The notice that the
+    // outside text went to History is counted now, not gated on the seq:
+    // the person is usually still typing, which holds the chip on "saving".
+    const externalWriteInHistory = reported.state === "external-write-in-history";
+    if (externalWriteInHistory && !writesRefused.current) {
+      publish((current) => ({
+        ...current,
+        externalWritesInHistory: current.externalWritesInHistory + 1,
+      }));
+    }
+    const event = {
+      ...reported,
+      state: externalWriteInHistory ? ("saved" as const) : reported.state,
+    };
     if (event.state === "deleted") {
       pendingSavedSeq = null;
       const doc = binding?.doc;

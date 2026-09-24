@@ -4872,3 +4872,92 @@ it("notifies durable owner observers only after commit and preserves lost-respon
     expect(changed).toHaveBeenCalledTimes(1);
   } finally {release(); await session.close(); adapter.dispose();}
 });
+
+describe("a write made outside dohc to an open document", () => {
+  const path = "notes/plan.md";
+  const base = "# Plan\n\nFirst paragraph.\n\nSecond paragraph.";
+  const diskSha256 = "a".repeat(64);
+  const staleTarget = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+
+  // The engine refuses every settle over the outside write until one names
+  // the bytes its doc folded in.
+  async function openOverAnOutsideWrite(disk: string | null) {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path, content: base, contentKind: "richdoc" });
+    const settles: Array<Record<string, JsonValue>> = [];
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.settle) {
+          const params = request.params as Record<string, JsonValue>;
+          settles.push(params);
+          if (params.externalSha256 !== diskSha256) throw staleTarget;
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const remoteUpdates: Uint8Array[] = [];
+    const outcomes: string[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path,
+      contentKind: "richdoc",
+      onRemoteUpdate: (update) => remoteUpdates.push(update),
+      onSettleError: () => undefined,
+      scheduleSettle: () => () => undefined,
+      readExternalWrite: async () => (disk === null ? null : { base, disk, diskSha256 }),
+      onExternalWrite: (outcome) => outcomes.push(outcome),
+    });
+    // The person types a new first paragraph before the settle runs.
+    await provider.applyLocalUpdate(richdocUpdate(provider.initialUpdate, "Typed by the person."));
+    return { provider, settles, remoteUpdates, outcomes };
+  }
+
+  it("merges a change to other lines into the doc and settles over the outside bytes", async () => {
+    const { provider, settles, remoteUpdates, outcomes } = await openOverAnOutsideWrite(
+      "# Plan\n\nFirst paragraph.\n\nSecond paragraph, rewritten by an agent.",
+    );
+    await provider.settleNow();
+    expect(ydocProjection.yDocToMarkdown(provider.doc)).toBe(
+      "Typed by the person.\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph, rewritten by an agent.",
+    );
+    expect(settles.map((params) => params.externalSha256 ?? null)).toEqual([null, diskSha256]);
+    expect(outcomes).toEqual(["merged"]);
+    // The editor receives the outside change like a collaborator's edit.
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, provider.initialUpdate);
+    Y.applyUpdate(editor, richdocUpdate(provider.initialUpdate, "Typed by the person."));
+    for (const update of remoteUpdates) Y.applyUpdate(editor, update);
+    expect(ydocProjection.yDocToMarkdown(editor)).toContain("rewritten by an agent");
+    await provider.close();
+  });
+
+  it("keeps the doc's own text when the outside change overlaps it", async () => {
+    const { provider, settles, outcomes } = await openOverAnOutsideWrite(
+      "An agent's first paragraph.\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.",
+    );
+    await provider.settleNow();
+    expect(ydocProjection.yDocToMarkdown(provider.doc)).toBe(
+      "Typed by the person.\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.",
+    );
+    // The settle still names the outside bytes, so the engine keeps them in
+    // History before replacing them.
+    expect(settles.map((params) => params.externalSha256 ?? null)).toEqual([null, diskSha256]);
+    expect(outcomes).toEqual(["kept-local"]);
+    await provider.close();
+  });
+
+  it("leaves any other stale-target refusal standing", async () => {
+    const { provider, settles, outcomes } = await openOverAnOutsideWrite(null);
+    await expect(provider.settleNow()).rejects.toBe(staleTarget);
+    expect(settles).toHaveLength(1);
+    expect(outcomes).toEqual([]);
+    await provider.close().catch(() => undefined);
+  });
+});

@@ -29,7 +29,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
-use dohc_engine_runtime::actor::YdocSeedMaterialization;
+use dohc_engine_runtime::actor::{ExternalWrite, YdocSeedMaterialization};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -271,6 +271,11 @@ struct YdocSettleParams {
     session_id: String,
     #[serde(default)]
     summary: Option<String>,
+    /// The sha of a write made to the file outside dohc that the client has
+    /// already folded into this session's doc. The settle records it as its
+    /// own moment first, then replaces it.
+    #[serde(default)]
+    external_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1195,6 +1200,7 @@ impl EngineService {
             handle.as_ref(),
             &params.session_id,
             params.summary.as_deref(),
+            params.external_sha256,
         )
         .await
     }
@@ -1205,8 +1211,15 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
+        external_sha256: Option<String>,
     ) -> Result<Value, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
+        let external_write = external_sha256.map(|sha256| ExternalWrite {
+            sha256,
+            author_json: lock(&open.capture)
+                .as_ref()
+                .and_then(|driver| driver.author_json()),
+        });
         let settled = open
             .actor
             .ydoc_settle(
@@ -1222,6 +1235,7 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
                 session.restore_generation,
+                external_write,
             )
             .await
             .map_err(map_runtime)?;
@@ -1309,6 +1323,7 @@ impl EngineService {
                     handle,
                     &params.session_id,
                     params.summary.as_deref(),
+                    None,
                 )
                 .await;
             match settled {
@@ -1327,6 +1342,7 @@ impl EngineService {
                         handle,
                         &params.session_id,
                         params.summary.as_deref(),
+                        None,
                     )
                     .await?;
                 }

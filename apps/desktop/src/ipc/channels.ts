@@ -129,6 +129,9 @@ export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 // handle releases — the user has nothing to do, so "error"'s advice would be
 // noise and "saved" would be a lie about the disk. "deleted" is terminal for
 // this live session: the path is gone and the renderer preserves its draft.
+// "external-write-in-history" is a save that replaced an outside write which
+// overlapped the person's own: the file holds the document, and the outside
+// text is in History, which the person must be told once.
 export const ENGINE_YDOC_SAVE_STATES = [
   "saved-to-host",
   "pending-share",
@@ -138,6 +141,7 @@ export const ENGINE_YDOC_SAVE_STATES = [
   "file-locked",
   "read-only",
   "changed-on-disk",
+  "external-write-in-history",
   "deleted",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];

@@ -39,6 +39,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     objectId: "object-1",
     versionId: "version-1",
     saveState: "saved",
+    externalWritesInHistory: 0,
     saveError: null,
     notInVersion: false,
     documentUnavailable: false,

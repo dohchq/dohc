@@ -734,8 +734,23 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         restore_generation: Option<i64>,
+        external_write: Option<ExternalWrite>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run(move |store, cache| {
+            if let Some(external_write) = external_write.as_ref() {
+                adopt_external_write_on_store(
+                    store,
+                    &root_dir,
+                    &key,
+                    &path,
+                    expected_lineage_claim_id.as_deref(),
+                    expected_head_sha.clone(),
+                    external_write,
+                    restore_generation,
+                    now_ms,
+                    faults.as_ref(),
+                )?;
+            }
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -1915,6 +1930,132 @@ pub struct YdocAppend {
     /// subscribed automation, committed in the append's own transaction. The
     /// service emits `automation.claimed` for each, post-commit.
     pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+}
+
+/// A write made to a live document's file outside dohc, which the session's
+/// client has already folded into its doc: merged, or set aside where it
+/// overlapped the person's own edits.
+#[derive(Debug, Clone)]
+pub struct ExternalWrite {
+    /// The sha of the file bytes the client read and folded.
+    pub sha256: String,
+    /// Who the capture pass would have named for this write (an agent run),
+    /// so History records the same author either way.
+    pub author_json: Option<String>,
+}
+
+/// Record the outside write as its own moment and make it the settle's
+/// expected preimage, so the settle that follows replaces it instead of
+/// refusing it as stale forever.
+///
+/// Capture cannot do this while the session holds the lease: its fold would
+/// rewrite the whole lineage to the file, over text the person is still
+/// typing. Here the client has already merged, so the moment only records the
+/// outside text. History then holds both texts before the settle overwrites
+/// the file.
+#[allow(clippy::too_many_arguments)]
+fn adopt_external_write_on_store(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    key: &DocKey,
+    path: &str,
+    expected_lineage_claim_id: Option<&str>,
+    expected_head_sha: Option<String>,
+    external_write: &ExternalWrite,
+    restore_generation: Option<i64>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
+        dohc_engine_collab::live_update_application::require_restore_generation(
+            conn,
+            key,
+            restore_generation,
+        )
+    })?;
+    let marker = dohc_engine_collab::read_marker(store, key)?
+        .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+        return Err(dohc_engine_collab::CollabError::LineageWriteStale {
+            expected: expected_lineage_claim_id.map(ToOwned::to_owned),
+            observed: marker.lineage_claim_id,
+        }
+        .into());
+    }
+    // Only the file may have moved. A head another writer advanced, or a path
+    // rebound to another object, is not an outside write to this document.
+    let head = VersionedTextStore::new(store)
+        .read_text(&key.workspace_id, &key.version_id, path)?
+        .ok_or(DomainError::ConflictStaleTarget)?;
+    let expected = dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
+    if head.object_id != key.object_id || expected.as_deref() != Some(head.blob_sha256.as_str()) {
+        return Err(DomainError::ConflictStaleTarget.into());
+    }
+    if head.blob_sha256 == external_write.sha256 {
+        return Ok(());
+    }
+    // The file must still hold exactly what the client folded. A second
+    // outside write refuses again, and the client folds that one too.
+    let text = dohc_engine_files::read_projection_target_text(root_dir, path)
+        .filter(|text| hex_sha256(text.as_bytes()) == external_write.sha256)
+        .ok_or(DomainError::ConflictStaleTarget)?;
+    let outcome = store.write_with(faults, |tx| {
+        let written = dohc_engine_domain::capture_ingest_in_tx(
+            tx,
+            &dohc_engine_domain::CaptureIngest {
+                workspace_id: key.workspace_id.clone(),
+                version_id: key.version_id.clone(),
+                path: path.to_owned(),
+                text,
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: external_write.author_json.clone(),
+                now_ms,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+        )?;
+        if written.snapshot.object_id != key.object_id {
+            return Err(DomainError::ConflictStaleTarget);
+        }
+        if !written.deduped {
+            upsert_file_search_index(
+                tx,
+                root_dir,
+                &key.workspace_id,
+                &key.version_id,
+                &written.snapshot.object_id,
+                &written.snapshot.path,
+                &written.snapshot.text,
+            )
+            .map_err(search_domain)?;
+        }
+        journal_moment_outbound_in_tx(
+            tx,
+            &key.workspace_id,
+            &written.moment.moment_id,
+            written.deduped,
+        )?;
+        tx.execute(
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                written.snapshot.blob_sha256,
+                now_ms,
+            ],
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        Ok(())
+    })?;
+    match outcome {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 fn ydoc_settle_disk_preimage(

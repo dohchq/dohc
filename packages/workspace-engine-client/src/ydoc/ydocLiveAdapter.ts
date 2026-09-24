@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
+import {
+  markdownToYDoc,
+  updateYDocToMarkdown,
+  yDocToMarkdown,
+} from "@dohc/ydoc-projection";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,
@@ -40,6 +45,13 @@ const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
 
 export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.engineDeliveredOrigin",
+);
+
+// A write made to the file outside dohc, folded into the doc here. The engine
+// records it like an editor's edit, and the editor receives it like a
+// collaborator's.
+const EXTERNAL_WRITE_ORIGIN: unique symbol = Symbol(
+  "dohc.workspaceEngineClient.externalWriteOrigin",
 );
 
 export interface EngineTransport extends DaemonRequesterClient {
@@ -318,6 +330,122 @@ function declareDohcRootSchema(
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
     doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
   }
+}
+
+const MARKDOWN_SOURCE_META_KEYS = [
+  "dohcMarkdownSource",
+  "dohcMarkdownSourceSha256",
+  "dohcMarkdownSourceProjectionSha256",
+] as const;
+
+// Keep the exact bytes a rich document stands for when its projection spells
+// them differently. The engine settles these bytes while the projection still
+// matches them, so an unedited document does not reformat its file.
+function recordMarkdownSource(doc: Y.Doc, source: string): void {
+  let projection: string | undefined;
+  try {
+    projection = yDocToMarkdown(doc);
+  } catch {
+    // The serializer rejects some accepted imports. They can still open, but
+    // cannot carry an exact-source witness yet.
+  }
+  const meta = doc.getMap("meta");
+  if (projection === undefined || projection === source) {
+    for (const key of MARKDOWN_SOURCE_META_KEYS) {
+      if (meta.has(key)) meta.delete(key);
+    }
+    return;
+  }
+  meta.set("dohcMarkdownSource", source);
+  meta.set(
+    "dohcMarkdownSourceSha256",
+    createHash("sha256").update(source).digest("hex"),
+  );
+  meta.set(
+    "dohcMarkdownSourceProjectionSha256",
+    createHash("sha256").update(projection).digest("hex"),
+  );
+}
+
+// A write made to a document's file outside dohc: the text dohc last recorded
+// for the file, and the text the outside writer left there.
+export interface ExternalWrite {
+  base: string;
+  disk: string;
+}
+
+// "merged": the doc now holds the outside change beside its own edits.
+// "kept-local": the change overlapped the doc's own edits, so the doc kept
+// its text.
+export type ExternalWriteOutcome = "merged" | "kept-local";
+
+// The text the doc should hold after folding in `write`, or null when the
+// outside change overlaps the doc's own edits since `base`. A rich document
+// compares every side in its projection's spelling, so reformatting alone
+// never reads as an edit.
+function externalWriteTarget(
+  doc: Y.Doc,
+  contentKind: YdocContentKind,
+  write: ExternalWrite,
+): string | null {
+  if (contentKind === "plaintext") {
+    const merged = mergeMarkdown({
+      base: write.base,
+      local: doc.getText("plainText").toString(),
+      remote: write.disk,
+    });
+    return merged.kind === "merged" ? merged.content : null;
+  }
+  const spelled = (markdown: string): string => {
+    const parsed = markdownToYDoc(markdown);
+    try {
+      return yDocToMarkdown(parsed);
+    } finally {
+      parsed.destroy();
+    }
+  };
+  let base: string;
+  let local: string;
+  let remote: string;
+  try {
+    base = spelled(write.base);
+    local = yDocToMarkdown(doc);
+    remote = spelled(write.disk);
+  } catch {
+    return null;
+  }
+  // Nothing typed since the base: take the outside bytes exactly.
+  if (local === base) return write.disk;
+  const merged = mergeMarkdown({ base, local, remote });
+  return merged.kind === "merged" ? merged.content : null;
+}
+
+// Replace only the span that differs, never splitting a surrogate pair, so a
+// concurrent insert outside that span keeps its place.
+function replaceChangedText(text: Y.Text, next: string): void {
+  const current = text.toString();
+  let start = 0;
+  while (
+    start < current.length &&
+    start < next.length &&
+    current[start] === next[start]
+  ) {
+    start += 1;
+  }
+  if (start > 0 && /[\uD800-\uDBFF]/.test(current[start - 1] ?? "")) start -= 1;
+  let end = 0;
+  while (
+    end + start < current.length &&
+    end + start < next.length &&
+    current[current.length - end - 1] === next[next.length - end - 1]
+  ) {
+    end += 1;
+  }
+  if (end > 0 && /[\uDC00-\uDFFF]/.test(current[current.length - end] ?? "")) end -= 1;
+  const removed = current.length - start - end;
+  if (removed > 0) text.delete(start, removed);
+  const inserted = next.slice(start, next.length - end);
+  if (inserted.length > 0) text.insert(start, inserted);
 }
 
 function createPlaintextSeedDoc(content: string): Y.Doc {
@@ -966,7 +1094,38 @@ export class YdocAdapterSession {
     return await this.requestRecordUpdate(replay, options);
   }
 
-  async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
+  /**
+   * Fold a write made to this document's file outside dohc into the doc.
+   *
+   * Where the outside change and this doc's edits since `write.base` touch
+   * different lines, the change becomes an edit here. Where they overlap, the
+   * doc keeps its own text. Either way the caller then settles with the
+   * outside bytes' sha, and the engine records them in History before the
+   * settle replaces them.
+   */
+  async mergeExternalWrite(write: ExternalWrite): Promise<ExternalWriteOutcome> {
+    this.assertOpen();
+    await this.recordChain;
+    this.assertOpen();
+    const target = externalWriteTarget(this.doc, this.contentKind, write);
+    if (target === null) return "kept-local";
+    await this.runLocalMutation(() => {
+      this.doc.transact(() => {
+        if (this.contentKind === "plaintext") {
+          replaceChangedText(this.doc.getText("plainText"), target);
+        } else {
+          updateYDocToMarkdown(this.doc, target);
+          recordMarkdownSource(this.doc, target);
+        }
+      }, EXTERNAL_WRITE_ORIGIN);
+    });
+    return "merged";
+  }
+
+  async settle(options?: {
+    summary?: string;
+    externalSha256?: string;
+  }): Promise<YdocSettleResult> {
     this.assertOpen();
     await this.recordChain;
     this.assertOpen();
@@ -977,6 +1136,9 @@ export class YdocAdapterSession {
     const params: YdocSettleParams = {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
+      ...(options?.externalSha256
+        ? { externalSha256: options.externalSha256 }
+        : {}),
     };
     let raw: Response["result"];
     try {
@@ -1232,7 +1394,7 @@ export class YdocAdapterSession {
         this.notifyListeners(this.remoteUpdateListeners, update);
         return;
       }
-      if (origin !== LOCAL_EDITOR_ORIGIN) return;
+      if (origin !== LOCAL_EDITOR_ORIGIN && origin !== EXTERNAL_WRITE_ORIGIN) return;
 
       const capture = this.activeLocalRecordCapture;
       assertDocUtf16IsSafe(
@@ -1250,8 +1412,11 @@ export class YdocAdapterSession {
         capture?.seedUpdate ?? false,
       );
       if (capture !== null) capture.operation = operation;
+      if (origin === EXTERNAL_WRITE_ORIGIN) {
+        this.notifyListeners(this.remoteUpdateListeners, update);
+      }
     } catch (error) {
-      if (origin === LOCAL_EDITOR_ORIGIN) {
+      if (origin === LOCAL_EDITOR_ORIGIN || origin === EXTERNAL_WRITE_ORIGIN) {
         const rejection =
           error instanceof Error ? error : new Error("Unknown local Y.Doc observer failure.");
         if (this.activeLocalRecordCapture !== null) {
@@ -1406,28 +1571,10 @@ export class YdocLiveAdapter {
             ? createPlaintextSeedDoc(result.seedContent)
             : markdownToYDoc(result.seedContent);
         try {
+          // The first replicated base must still match the captured file.
+          // The engine validates this source against the projection witness.
           if (result.contentKind === "richdoc") {
-            let projection: string | undefined;
-            try {
-              projection = yDocToMarkdown(seedDoc);
-            } catch {
-              // The serializer rejects some accepted imports. They can still
-              // open, but cannot carry an exact-source witness yet.
-            }
-            if (projection !== undefined && projection !== result.seedContent) {
-              // The first replicated base must still match the captured file.
-              // The engine validates this source against the projection witness.
-              const meta = seedDoc.getMap("meta");
-              meta.set("dohcMarkdownSource", result.seedContent);
-              meta.set(
-                "dohcMarkdownSourceSha256",
-                createHash("sha256").update(result.seedContent).digest("hex"),
-              );
-              meta.set(
-                "dohcMarkdownSourceProjectionSha256",
-                createHash("sha256").update(projection).digest("hex"),
-              );
-            }
+            recordMarkdownSource(seedDoc, result.seedContent);
           }
           await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
           // The exposed initial state must include the seed: consumers (the

@@ -27,6 +27,8 @@ export {
   YdocLiveAdapter,
   YdocOpenTimedOutError,
   type EngineTransport,
+  type ExternalWrite,
+  type ExternalWriteOutcome,
 } from "./ydoc/ydocLiveAdapter";
 export {
   YdocReleasedWithSettleFailureError,

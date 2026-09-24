@@ -5346,6 +5346,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
+                onError={showShellError}
                 surfaceKey={editorGroup.id}
                 onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}

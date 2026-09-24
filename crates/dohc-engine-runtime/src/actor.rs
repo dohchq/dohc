@@ -50,8 +50,8 @@ pub use relay::{
 pub use versioned::{BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult};
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};
 pub use ydoc::{
-    ArtifactAssetDescriptor, YdocAppend, YdocCloseSessionOutcome, YdocOpenState, YdocResyncState,
-    YdocSeedMaterialization, YdocSettleOutcome, YdocSettlement,
+    ArtifactAssetDescriptor, ExternalWrite, YdocAppend, YdocCloseSessionOutcome, YdocOpenState,
+    YdocResyncState, YdocSeedMaterialization, YdocSettleOutcome, YdocSettlement,
 };
 
 use crate::error::RuntimeError;

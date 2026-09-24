@@ -3624,6 +3624,156 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_that_adopts_an_outside_write_keeps_it_in_history_then_replaces_it() {
+    // An agent writes the file of a document someone has open. The client
+    // folds that text into its doc and names the bytes it folded; the settle
+    // records them as their own moment and then writes the doc over them.
+    // Without the adoption every settle refuses the outside bytes forever.
+    let scratch = ScratchDir::new().expect("scratch");
+    let path = "notes/plan.md";
+    write_file(scratch.path(), path, b"base");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-adopt", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    let object_id = opened["objectId"].as_str().expect("object id");
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update("merged text") }),
+    )
+    .await;
+
+    let outside = b"written by an agent";
+    write_file(scratch.path(), path, outside);
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id }),
+            ),
+        )
+        .await
+        .expect_err("a settle that has not folded the outside write must refuse");
+    assert_eq!(refused.message, "conflict-stale-target");
+
+    // A claim that names other bytes than the file holds adopts nothing.
+    let before_mismatch = settle_fingerprint(&scratch, "ws-rpc-ydoc-adopt");
+    let mismatched = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({
+                    "sessionId": session_id,
+                    "externalSha256": dohc_engine_storage::hex_sha256(b"some other bytes"),
+                }),
+            ),
+        )
+        .await
+        .expect_err("adopting bytes the file does not hold must refuse");
+    assert_eq!(mismatched.message, "conflict-stale-target");
+    assert_eq!(
+        settle_fingerprint(&scratch, "ws-rpc-ydoc-adopt"),
+        before_mismatch,
+        "a refused adoption must record nothing"
+    );
+
+    let settled = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.settle",
+        json!({
+            "sessionId": session_id,
+            "externalSha256": dohc_engine_storage::hex_sha256(outside),
+        }),
+    )
+    .await;
+    assert_eq!(settled["content"], json!("merged text"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).expect("settled file"),
+        "merged text"
+    );
+    let moments = call(
+        &transport,
+        &handle,
+        7,
+        "moments.list",
+        json!({ "objectId": object_id, "limit": 100 }),
+    )
+    .await;
+    let moments = moments["moments"].as_array().expect("moments");
+    let texts: Vec<(&str, &str)> = moments
+        .iter()
+        .map(|moment| {
+            (
+                moment["metadataOrigin"].as_str().unwrap_or_default(),
+                moment["afterText"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        texts.first(),
+        Some(&("ydoc", "merged text")),
+        "the settle is the newest moment: {texts:?}"
+    );
+    assert_eq!(
+        texts.get(1),
+        Some(&("capture", "written by an agent")),
+        "the outside write is its own moment just before the settle: {texts:?}"
+    );
+
+    // The session is not wedged: the next edit settles without adopting.
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": plaintext_update("more ") }),
+    )
+    .await;
+    let resettled = call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).expect("resettled file"),
+        resettled["content"].as_str().expect("content")
+    );
+    call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");

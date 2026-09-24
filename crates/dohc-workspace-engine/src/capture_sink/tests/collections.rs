@@ -69,6 +69,7 @@ fn set_richdoc_frontmatter_and_settle(
                     Arc::new(FilesNoFaults),
                     CancellationToken::new(),
                     None,
+                    None,
                 )
                 .await
                 .expect("settle rich-document frontmatter edit");

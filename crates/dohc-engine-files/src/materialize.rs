@@ -255,73 +255,97 @@ pub fn probe_projection_target(
     rel: &str,
     kind: ProjectionTargetKind,
 ) -> ProjectionTargetState {
-    let canonical_root = match std::fs::canonicalize(root) {
-        Ok(root) => root,
-        Err(_) => return ProjectionTargetState::UntrackedContent,
-    };
-    let target = match resolve_target(&canonical_root, rel) {
-        Ok(target) => target,
-        Err(_) => return ProjectionTargetState::UntrackedContent,
-    };
+    match read_projection_target(root, rel, kind) {
+        Ok(ProjectionTarget::Text(text)) => ProjectionTargetState::Text {
+            sha256: hex_sha256(text.as_bytes()),
+        },
+        Ok(ProjectionTarget::Binary(bytes)) => ProjectionTargetState::Binary {
+            sha256: hex_sha256(&bytes),
+        },
+        Err(state) => state,
+    }
+}
+
+/// The text a plaintext projection target holds, under the same containment
+/// and size rules as [`probe_projection_target`]. `None` whenever the probe
+/// would not answer `Text`.
+pub fn read_projection_target_text(root: &Path, rel: &str) -> Option<String> {
+    match read_projection_target(root, rel, ProjectionTargetKind::Plaintext) {
+        Ok(ProjectionTarget::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+enum ProjectionTarget {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+fn read_projection_target(
+    root: &Path,
+    rel: &str,
+    kind: ProjectionTargetKind,
+) -> Result<ProjectionTarget, ProjectionTargetState> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|_| ProjectionTargetState::UntrackedContent)?;
+    let target = resolve_target(&canonical_root, rel)
+        .map_err(|_| ProjectionTargetState::UntrackedContent)?;
     if ensure_target_symlink_free(&canonical_root, &target).is_err() {
-        return ProjectionTargetState::UntrackedContent;
+        return Err(ProjectionTargetState::UntrackedContent);
     }
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return if existing_ancestor_is_contained(&canonical_root, &target) {
-                ProjectionTargetState::Absent
-            } else {
-                ProjectionTargetState::UntrackedContent
-            };
+            return Err(
+                if existing_ancestor_is_contained(&canonical_root, &target) {
+                    ProjectionTargetState::Absent
+                } else {
+                    ProjectionTargetState::UntrackedContent
+                },
+            );
         }
-        Err(_) => return ProjectionTargetState::Unreadable,
+        Err(_) => return Err(ProjectionTargetState::Unreadable),
     };
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return ProjectionTargetState::UntrackedContent;
+        return Err(ProjectionTargetState::UntrackedContent);
     }
     if !existing_ancestor_is_contained(&canonical_root, &target) {
-        return ProjectionTargetState::UntrackedContent;
+        return Err(ProjectionTargetState::UntrackedContent);
     }
     let cap = match kind {
         ProjectionTargetKind::Plaintext => MAX_CAPTURE_BINARY_BYTES,
         ProjectionTargetKind::Secret => MAX_CAPTURE_TEXT_BYTES,
     };
     if metadata.len() > cap {
-        return ProjectionTargetState::UntrackedContent;
+        return Err(ProjectionTargetState::UntrackedContent);
     }
-    let file = match std::fs::File::open(&target) {
-        Ok(file) => file,
-        Err(_) => return ProjectionTargetState::Unreadable,
-    };
+    let file = std::fs::File::open(&target).map_err(|_| ProjectionTargetState::Unreadable)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     if file
         .take(cap.saturating_add(1))
         .read_to_end(&mut bytes)
         .is_err()
     {
-        return ProjectionTargetState::Unreadable;
+        return Err(ProjectionTargetState::Unreadable);
     }
     if bytes.len() as u64 > cap {
-        return ProjectionTargetState::UntrackedContent;
+        return Err(ProjectionTargetState::UntrackedContent);
     }
-    let sha256 = hex_sha256(&bytes);
     match kind {
-        ProjectionTargetKind::Secret => match String::from_utf8(bytes) {
-            Ok(_) => ProjectionTargetState::Text { sha256 },
-            Err(_) => ProjectionTargetState::UntrackedContent,
-        },
+        ProjectionTargetKind::Secret => String::from_utf8(bytes)
+            .map(ProjectionTarget::Text)
+            .map_err(|_| ProjectionTargetState::UntrackedContent),
         ProjectionTargetKind::Plaintext => {
             let media_type = media_type_for_path(rel);
             if !is_text_media_type(media_type, rel) {
-                return ProjectionTargetState::Binary { sha256 };
+                return Ok(ProjectionTarget::Binary(bytes));
             }
             match String::from_utf8(bytes) {
                 Ok(text) if text.len() as u64 <= MAX_CAPTURE_TEXT_BYTES => {
-                    ProjectionTargetState::Text { sha256 }
+                    Ok(ProjectionTarget::Text(text))
                 }
-                Ok(_) => ProjectionTargetState::UntrackedContent,
-                Err(_) => ProjectionTargetState::Binary { sha256 },
+                Ok(_) => Err(ProjectionTargetState::UntrackedContent),
+                Err(error) => Ok(ProjectionTarget::Binary(error.into_bytes())),
             }
         }
     }

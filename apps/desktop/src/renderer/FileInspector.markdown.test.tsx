@@ -47,6 +47,7 @@ const engineDocState: UseEngineDoc = {
   objectId: null,
   versionId: null,
   saveState: "saved",
+  externalWritesInHistory: 0,
   saveError: null,
   notInVersion: false,
   documentUnavailable: false,

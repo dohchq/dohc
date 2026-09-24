@@ -1,5 +1,6 @@
 import type * as Y from "yjs";
 import {
+  isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isTransientEngineRefusal,
 } from "../live/daemonLiveAdapter";
@@ -8,6 +9,8 @@ import {
   YdocLiveAdapter,
   YdocOwnerDraftPendingError,
   type ApplyLocalUpdateOptions,
+  type ExternalWrite,
+  type ExternalWriteOutcome,
   type YdocResyncNeededError,
   type EngineTransport,
   type YdocAdapterSession,
@@ -96,6 +99,17 @@ export interface EngineYdocProviderSessionOptions {
   // the caller must surface it, not just retry-if-reconnectable.
   onSettleError?: (error: unknown, token: number) => void;
   onSettled?: (result: YdocSettleResult, token: number) => void | Promise<void>;
+  // Read a write made to the file outside dohc while this document is open:
+  // the text dohc last recorded for the file, the text on disk now, and that
+  // text's sha. Null when the file holds no such write. Without it, a settle
+  // the engine refuses over an outside write stays refused.
+  readExternalWrite?: () => Promise<
+    (ExternalWrite & { diskSha256: string }) | null
+  >;
+  // A settle carried an outside write: merged into the doc, or kept out of
+  // it because it overlapped the doc's own edits. Fires after the settle
+  // committed, with the settle's token.
+  onExternalWrite?: (outcome: ExternalWriteOutcome, token: number) => void;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
 }
@@ -241,9 +255,7 @@ export async function openEngineYdocProviderSession(
         await session.resyncIfNeeded();
         await session.resendMissingState();
         if (localEditError !== null) throw localEditError;
-        const result = await session.settle(
-          summary !== undefined ? { summary } : undefined,
-        );
+        const result = await settleOverExternalWrite(token, summary);
         // onSettled is what lands the .md; its failure is a save failure too.
         await options.onSettled?.(result, token);
         // Any settle that reached disk resets the retry ladder.
@@ -259,6 +271,43 @@ export async function openEngineYdocProviderSession(
       () => undefined,
     );
     return operation;
+  }
+
+  // The engine refuses a settle whose file changed outside dohc. When that
+  // change is a readable text write, fold it into the doc and settle again
+  // naming the bytes folded, so the engine keeps them in History and the
+  // settle replaces them. Any other refusal stands.
+  async function settleOverExternalWrite(
+    token: number,
+    summary?: string,
+  ): Promise<YdocSettleResult> {
+    const settleOptions = summary !== undefined ? { summary } : {};
+    try {
+      return await session.settle(settleOptions);
+    } catch (error) {
+      if (
+        !isConflictStaleTargetRefusal(error) ||
+        session.contentKind === "scene" ||
+        options.readExternalWrite === undefined
+      ) {
+        throw error;
+      }
+      // A failed read proves nothing about the file, so the refusal stands
+      // and the next settle reads again.
+      const write = await options.readExternalWrite().catch(() => null);
+      if (write === null) throw error;
+      const outcome = await session.mergeExternalWrite(write);
+      const result = await session.settle({
+        ...settleOptions,
+        externalSha256: write.diskSha256,
+      });
+      try {
+        options.onExternalWrite?.(outcome, token);
+      } catch {
+        // Observer boundary, like notifyError.
+      }
+      return result;
+    }
   }
 
   // A settle refused by a transient condition retries on a doubling delay

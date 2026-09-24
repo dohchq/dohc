@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +59,10 @@ let requests: Request[] = [];
 // transport, where the real client turns the envelope into the refusal the
 // close path reads.
 let settleRefusal: unknown = null;
+// The daemon refuses a settle over a file that changed outside dohc until the
+// settle names the outside bytes its doc folded in. The loopback has no disk
+// preimage to check, so a test that needs the refusal arms it here.
+let refuseSettleOverOutsideWrite = false;
 // The same, for the RELEASE. The daemon refuses a local-only prune-close with
 // `unsettled-close` when the CRDT projection no longer matches
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and reinserts
@@ -98,6 +103,13 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
+      }
+      if (
+        request.method === "ydoc.settle" &&
+        refuseSettleOverOutsideWrite &&
+        params.externalSha256 === undefined
+      ) {
+        throw wireRefusal("conflict-stale-target");
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
@@ -184,6 +196,7 @@ beforeEach(async () => {
   await writeFile(join(root, PATH), INITIAL_MARKDOWN, "utf8");
   requests = [];
   settleRefusal = null;
+  refuseSettleOverOutsideWrite = false;
   closeRefusal = null;
   captureErrors = [];
   recordUpdateDelayMs = 0;
@@ -385,6 +398,14 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   // true — `changed-on-disk` says the FILE is not this document's, so the file
   // has to actually hold someone else's bytes for the close to say it.
   await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
+  // Capture ingested it, so the head holds the same bytes. An outside write
+  // the head does not hold yet is folded into the document instead.
+  versioned.seedTextFile({
+    workspace: WORKSPACE_ID,
+    versionId: "main",
+    path: PATH,
+    text: "# Solo\n\nEdited in another app.\n",
+  });
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.close()).resolves.toBeUndefined();
 
@@ -842,7 +863,7 @@ it("refuses an uncaptured artifact that has content, without calling it missing"
   expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
 });
 
-it.each([false, true])("checks a retained document on reopen without writing, outside edit=%s", async (outsideEdit) => {
+it.each([false, true])("reopens a retained document, folding in an outside edit=%s", async (outsideEdit) => {
   const previous = await openEngineYdocProviderSession({
     transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: PATH,
     contentKind: "richdoc", onRemoteUpdate: () => undefined, scheduleSettle: () => () => undefined,
@@ -857,14 +878,36 @@ it.each([false, true])("checks a retained document on reopen without writing, ou
   await previous.evict();
   editor.destroy();
   if (outsideEdit) await writeFile(join(root, PATH), "Outside edit.\n");
+  refuseSettleOverOutsideWrite = outsideEdit;
   const settlesBeforeOpen = methodCount("ydoc.settle");
   const states: string[] = [];
   const reopened = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined,
     onSaveState: state => states.push(state)});
-  expect(states).toEqual(outsideEdit ? ["error"] : []);
-  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
-  expect(await readFile(join(root, PATH), "utf8")).toBe(outsideEdit ? "Outside edit.\n" : INITIAL_MARKDOWN);
-  expect(reopened.doc.getXmlFragment("body").toString()).toContain(outsideEdit ? "Retained human edit." : "Start here.");
+  if (!outsideEdit) {
+    // Nothing changed on disk: opening writes nothing.
+    await capture.flush();
+    expect(states).toEqual([]);
+    expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
+    expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
+    expect(reopened.doc.getXmlFragment("body").toString()).toContain("Start here.");
+    return;
+  }
+  // The outside write replaced lines the retained edit did not touch, so the
+  // document takes both and the settle writes them.
+  await expect.poll(() => states.at(-1)).toBe("saved");
+  expect(
+    requests
+      .filter((request) => request.method === "ydoc.settle")
+      .slice(-2)
+      .map((request) => (request.params as { externalSha256?: string }).externalSha256),
+  ).toEqual([undefined, createHash("sha256").update("Outside edit.\n").digest("hex")]);
+  const settled = await readFile(join(root, PATH), "utf8");
+  expect(settled).toContain("Outside edit.");
+  expect(settled).toContain("Retained human edit.");
+  expect(settled).not.toContain("Start here.");
+  const body = reopened.doc.getXmlFragment("body").toString();
+  expect(body).toContain("Outside edit.");
+  expect(body).toContain("Retained human edit.");
 });
 
 it("opens a crash-orphaned draft the daemon resurrects, head absent and all", async () => {

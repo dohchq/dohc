@@ -139,67 +139,96 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
   }
 });
 
-async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>) {
-  const exited = new Promise<void>(resolve => desktop.app.process().once("exit", () => resolve()));
-  await desktop.app.evaluate(({app}) => {app.quit();});
-  await exited;
-  await desktop.close();
-}
+// An agent that works with ordinary files writes the file of a document the
+// person has open. Its write reaches the open document; where it overlaps the
+// person's typing, their text stays and the agent's text is in History.
+const outsideWritePath = "notes/plan.md";
+const outsideWriteBase = "# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n";
+type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
+type Temp = Awaited<ReturnType<typeof createTempWorkspace>>;
 
-test("an external edit to an idle open document is imported after restart", async () => {
-  test.setTimeout(120_000);
+async function withOpenOutsideWriteDoc(
+  run: (temp: Temp, page: Desktop["page"]) => Promise<void>,
+): Promise<void> {
   const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let desktop: Desktop | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n"}]);
+    await writeWorkspaceFiles(temp, [{path: outsideWritePath, contents: outsideWriteBase}]);
     desktop = await launchDesktopApp({workspace: temp});
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "notes/rich.md");
-    await openEngineDoc(desktop.page, "notes/rich.md");
-    await writeWorkspaceFiles(temp, [{path: "notes/rich.md", contents: "# Rich\n\nWritten outside dohc.\n"}]);
-    await quitDesktop(desktop);
-    desktop = await launchDesktopApp({workspace: temp});
-    await openWorkspaceFromFirstRun(desktop.page, temp);
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Written outside dohc.");
-    await expect.poll(() => momentTextsForPath(temp.rootPath, "notes/rich.md")).toEqual(expect.arrayContaining([expect.stringContaining("Written outside dohc.")]));
-  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, outsideWritePath);
+    await openEngineDoc(desktop.page, outsideWritePath);
+    await run(temp, desktop.page);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+}
+
+function diskText(temp: Temp): Promise<string> {
+  return readFile(join(temp.rootPath, outsideWritePath), "utf8");
+}
+
+test("an outside write to an idle open document appears in it", async () => {
+  test.setTimeout(120_000);
+  const outside = "# Plan\n\nFirst paragraph.\n\nWritten outside dohc.\n";
+  await withOpenOutsideWriteDoc(async (temp, page) => {
+    await writeWorkspaceFiles(temp, [{path: outsideWritePath, contents: outside}]);
+    await expect(page.getByTestId("markdown-editor")).toContainText("Written outside dohc.");
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    expect(await diskText(temp)).toBe(outside);
+    await expect.poll(() => momentTextsForPath(temp.rootPath, outsideWritePath)).toContain(outside);
+  });
 });
 
-test("an external edit to an open document remains recoverable after overlapping typing and restart", async () => {
+for (const order of ["before", "after"] as const) {
+  test(`an outside write ${order} the editor settles merges with typing that continues through it`, async () => {
+    test.setTimeout(120_000);
+    const settledWords = order === "after" ? " Settled words." : "";
+    const outside = `# Plan\n\nFirst paragraph.${settledWords}\n\nSecond paragraph, rewritten by an agent.\n`;
+    const typed = `First paragraph.${settledWords} The person keeps typing through the agent's write.`;
+    await withOpenOutsideWriteDoc(async (temp, page) => {
+      const editor = page.getByTestId("markdown-editor");
+      await editor.getByText("First paragraph.").click();
+      await page.keyboard.press("End");
+      if (order === "after") {
+        await page.keyboard.type(settledWords);
+        await expect.poll(() => diskText(temp)).toContain(settledWords);
+      }
+      await page.keyboard.type(" The person keeps typing");
+      await writeWorkspaceFiles(temp, [{path: outsideWritePath, contents: outside}]);
+      await page.keyboard.type(" through the agent's write.", {delay: 40});
+      await expect(editor).toContainText(typed);
+      await expect(editor).toContainText("Second paragraph, rewritten by an agent.");
+      await expect.poll(() => diskText(temp)).toContain(typed);
+      expect(await diskText(temp)).toContain("Second paragraph, rewritten by an agent.");
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+      // History keeps the agent's write as its own moment.
+      expect(momentTextsForPath(temp.rootPath, outsideWritePath)).toContain(outside);
+      await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
+    });
+  });
+}
+
+test("an outside write to the lines the person is typing keeps their text and names History", async () => {
   test.setTimeout(120_000);
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const external = "External agent wrote this straight to disk while the editor was open.";
-  const human = "Human continued typing in the open document.";
-  const path = "notes/rich.md";
-  try {
-    await writeWorkspaceFiles(temp, [{path, contents: "# Rich\n\nBase paragraph.\n"}]);
-    desktop = await launchDesktopApp({workspace: temp});
-    const {page} = desktop;
-    const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, workspace.workspaceId, path);
-    await openEngineDoc(page, path);
-    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
-    await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
-    // The live lease defers capture. Settlement must preserve the outside bytes.
-    await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press("ControlOrMeta+End");
-    await page.keyboard.type(human);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
-    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
-    await expect(page.getByTestId("markdown-editor")).toContainText(human);
-    await quitDesktop(desktop);
-    desktop = await launchDesktopApp({workspace: temp});
-    await openWorkspaceFromFirstRun(desktop.page, temp);
-    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
-    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
-    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
-    await desktop.page.getByTestId("markdown-source-toggle").click();
-    await desktop.page.getByTestId("markdown-source-copy").click();
-    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
-    await quitDesktop(desktop);
-  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+  const outside = "# Plan\n\nFirst paragraph.\n\nSecond paragraph, rewritten by an agent.\n";
+  const typed = "Second paragraph. The person is still writing here.";
+  await withOpenOutsideWriteDoc(async (temp, page) => {
+    const editor = page.getByTestId("markdown-editor");
+    await editor.getByText("Second paragraph.").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" The person is");
+    await writeWorkspaceFiles(temp, [{path: outsideWritePath, contents: outside}]);
+    await page.keyboard.type(" still writing here.", {delay: 40});
+    await expect(page.getByTestId("workspace-shell-error")).toContainText(
+      `${outsideWritePath} changed outside dohc while you were editing it. dohc kept your text. Open History to see the other version.`,
+    );
+    await expect(editor).toContainText(typed);
+    await expect(editor).not.toContainText("rewritten by an agent");
+    await expect.poll(() => diskText(temp)).toContain(typed);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    expect(momentTextsForPath(temp.rootPath, outsideWritePath)).toContain(outside);
+  });
 });
 
 // WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +

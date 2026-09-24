@@ -28,6 +28,7 @@ import {
 } from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
+  updateYFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
@@ -363,6 +364,71 @@ export function markdownToYDoc(markdown: string): Y.Doc {
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
   return doc
+}
+
+/**
+ * Change `doc` in place so it projects `markdown`, editing only what
+ * differs. A block the change leaves alone keeps its identity, so an edit
+ * another client makes to it at the same time still merges.
+ */
+export function updateYDocToMarkdown(doc: Y.Doc, markdown: string): void {
+  const {
+    meta,
+    body,
+    taggedFrontmatterPrefix,
+    taggedFrontmatterBaseline,
+  } = parseFrontmatter(markdown)
+  const usesCrlf = markdown.includes('\r\n')
+  const content = schema.nodeFromJSON(
+    parseRichdocMarkdown(usesCrlf ? body.replaceAll('\r\n', '\n') : body),
+  )
+  doc.transact(() => {
+    // The same diff `markdownToYDoc` runs into an empty fragment.
+    updateYFragment(doc, getDohcYDocBodyFragment(doc), content, {
+      mapping: new Map(),
+      isOMark: new Map(),
+    })
+    const frontmatter = doc.getMap(FRONTMATTER_FIELD)
+    const current = mapToObject(frontmatter)
+    for (const key of Object.keys(current)) {
+      if (!Object.hasOwn(meta, key)) frontmatter.delete(key)
+    }
+    writeMap(
+      frontmatter,
+      Object.fromEntries(
+        Object.entries(meta).filter(
+          ([key, value]) => !sameFrontmatterValue(current[key], value),
+        ),
+      ),
+    )
+    const internalMeta = doc.getMap(META_FIELD)
+    for (const [key, value] of [
+      [MARKDOWN_CRLF_META_KEY, usesCrlf ? true : undefined],
+      [TAGGED_FRONTMATTER_PREFIX_META_KEY, taggedFrontmatterPrefix],
+      [TAGGED_FRONTMATTER_BASELINE_META_KEY, taggedFrontmatterBaseline],
+    ] as const) {
+      if (value === undefined) {
+        if (internalMeta.has(key)) internalMeta.delete(key)
+      } else if (internalMeta.get(key) !== value) {
+        internalMeta.set(key, value)
+      }
+    }
+  })
+}
+
+function sameFrontmatterValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length
+      && left.every((value, index) => sameFrontmatterValue(value, right[index]))
+  }
+  if (isFrontmatterMap(left) && isFrontmatterMap(right)) {
+    const keys = Object.keys(left)
+    return keys.length === Object.keys(right).length
+      && keys.every((key) =>
+        Object.hasOwn(right, key) && sameFrontmatterValue(left[key], right[key]))
+  }
+  return false
 }
 
 function parseRichdocMarkdown(markdown: string): JSONContent {

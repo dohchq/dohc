@@ -168,6 +168,7 @@ impl Fixture {
                 Arc::new(NoFaults),
                 CancellationToken::new(),
                 None,
+                None,
             )
             .await
     }

@@ -14,6 +14,7 @@ export {
   markdownToYDoc,
   plainTextToYDoc,
   serializeRichdocBody,
+  updateYDocToMarkdown,
   yDocToMarkdown,
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";

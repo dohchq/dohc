@@ -393,6 +393,9 @@ type FileInspectorProps = {
   // finish its read and, when applicable, bind its live document session.
   surfaceKey?: string;
   onSurfaceReady?: (path: string, surfaceKey: string) => void;
+  // The shell's toast and Notices row, for what this document must tell the
+  // person once.
+  onError?: (message: string) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -549,6 +552,17 @@ export const FileInspector = memo(function FileInspector(
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
   });
+  // A save replaced an outside write that overlapped the person's own text.
+  // The document shows their text, so say once where the other text went.
+  const externalWritesSeen = useRef(engine.externalWritesInHistory);
+  const { onError } = props;
+  useEffect(() => {
+    if (engine.externalWritesInHistory <= externalWritesSeen.current) return;
+    externalWritesSeen.current = engine.externalWritesInHistory;
+    onError?.(
+      `${props.path} changed outside dohc while you were editing it. dohc kept your text. Open History to see the other version.`,
+    );
+  }, [engine.externalWritesInHistory, onError, props.path]);
   // Derived, never stored. #565 keys the hook's outcome to the request that
   // asked for it, so a refusal for the version the user just left cannot repaint
   // the one they just entered — which is what a sticky flag here used to risk.

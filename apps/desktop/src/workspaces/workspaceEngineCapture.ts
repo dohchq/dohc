@@ -51,6 +51,8 @@ import {
   type CollectionPendingAdoptionsPage,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
+  type ExternalWrite,
+  type ExternalWriteOutcome,
   type EngineTransport,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
@@ -315,6 +317,9 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // handle, the settle committed, and the provider retries with backoff until
 // the handle releases — distinct from "error" so the surface can say
 // what blocks the disk and that no user action is needed.
+// "external-write-in-history" is a save that replaced a write made outside dohc
+// which overlapped the person's own edits: the file holds the document, and
+// the outside text is a moment in History.
 export type EngineYDocSaveState =
   | "saved-to-host"
   | "pending-share"
@@ -322,7 +327,8 @@ export type EngineYDocSaveState =
   | "saved"
   | "error"
   | "file-locked"
-  | "changed-on-disk";
+  | "changed-on-disk"
+  | "external-write-in-history";
 
 export interface WorkspaceEngineYDocCloseOptions {
   settle?: boolean;
@@ -1532,6 +1538,11 @@ export function createWorkspaceEngineCapture(
     // caps at the same 10s as that TTL, so a delete landing right after
     // one retry can otherwise expire before the next retry arrives to ask.
     armRemovalSuppression: (expected: boolean, deletedAtMs: number) => void;
+    // The watcher saw this path's file change to `sha256`. A change this
+    // session did not write is folded into the document by the settle it
+    // asks for, so an open document shows an outside write without waiting
+    // for the person to type.
+    reconcileFileChange: (sha256: string) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
   // The detached locked-write debts, by path: each entry is the payment
@@ -1779,6 +1790,12 @@ export function createWorkspaceEngineCapture(
     ) => void | Promise<void>;
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
+    readExternalWrite?: EngineYdocProviderSessionOptions["readExternalWrite"];
+    onExternalWrite?: (
+      outcome: ExternalWriteOutcome,
+      token: number,
+      generation: number,
+    ) => void;
     // The first generation's answers to "does the entered version have a
     // snapshot for this path" and "did the daemon resume durable CRDT state".
     // Reported out because the absent-head contract (see
@@ -1952,6 +1969,11 @@ export function createWorkspaceEngineCapture(
               lockedSettlePending = false;
               return input.onSettled(result, token, generation);
             },
+            ...(input.readExternalWrite
+              ? { readExternalWrite: input.readExternalWrite }
+              : {}),
+            onExternalWrite: (outcome, token) =>
+              input.onExternalWrite?.(outcome, token, generation),
           });
           opened = providerOpened;
           openingRemoteUpdates.set(opened, opening);
@@ -3007,6 +3029,10 @@ export function createWorkspaceEngineCapture(
       // session's own door bypasses the TTL for that session entirely —
       // nothing here can expire, because nothing here is a map entry.
       for (const event of batch) {
+        if (event.operation === "update" && event.sha256 !== undefined) {
+          const live = liveYDocSessions.get(event.path);
+          if (live?.status === "live") live.reconcileFileChange(event.sha256);
+        }
         if (event.operation !== "delete") continue;
         const expected = peekExpectedEvent(event.path);
         if (!detachedLockedDebts.has(event.path)) {
@@ -3243,8 +3269,29 @@ export function createWorkspaceEngineCapture(
         // tombstone recorded at or after this moment might be exactly
         // that delete.
         const settleStartedAtMs = new Map<string, number>();
+        // Settles that replaced an outside write overlapping the person's own
+        // edits. Their save says so instead of a plain "saved".
+        const externalWritesInHistory = new Set<string>();
         const noteUpdate = (): void => {
           updatesSeen += 1;
+        };
+        // A write made to the file outside dohc: what dohc last recorded for
+        // the path, and the text the file holds now. The document folds it in
+        // and the settle keeps it in History. Null when the file holds no
+        // readable text, or holds what dohc already recorded.
+        const readExternalWrite = async (): Promise<
+          (ExternalWrite & { diskSha256: string }) | null
+        > => {
+          const disk = await readDiskTextState(rootPath, input.path);
+          if (disk.kind !== "text") return null;
+          const head = await engine.readTextFile({
+            workspaceId,
+            versionId,
+            path: input.path,
+          });
+          if (head === null) return null;
+          if ((head.sha256 ?? sha256Utf8(head.text)) === disk.sha256) return null;
+          return { base: head.text, disk: disk.text, diskSha256: disk.sha256 };
         };
         // The sha of the last settle that committed — what the file must not
         // hold for `changed-on-disk` to be true of it. An unverifiable read
@@ -3273,6 +3320,9 @@ export function createWorkspaceEngineCapture(
           // redeem.
           const claim = settleClaims.get(settleId(token, generation));
           settleClaims.delete(settleId(token, generation));
+          const externalWriteInHistory = externalWritesInHistory.delete(
+            settleId(token, generation),
+          );
           const startedAtMs = settleStartedAtMs.get(settleId(token, generation));
           settleStartedAtMs.delete(settleId(token, generation));
           if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
@@ -3389,7 +3439,10 @@ export function createWorkspaceEngineCapture(
             reportSaveState("changed-on-disk", token);
             return;
           }
-          reportSaveState("saved", token);
+          reportSaveState(
+            externalWriteInHistory ? "external-write-in-history" : "saved",
+            token,
+          );
         };
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the
@@ -3470,6 +3523,12 @@ export function createWorkspaceEngineCapture(
           onSettled,
           onSettleStart,
           onSettleError,
+          readExternalWrite,
+          onExternalWrite: (outcome, token, generation) => {
+            if (outcome === "kept-local") {
+              externalWritesInHistory.add(settleId(token, generation));
+            }
+          },
         });
         // Register the live session only after the open succeeds (a secret/
         // already-live/path-not-in-version rejection propagates to the caller
@@ -4238,6 +4297,10 @@ export function createWorkspaceEngineCapture(
           orphaned: false,
           close: closeEntry,
           armRemovalSuppression,
+          reconcileFileChange: (sha256) => {
+            if (sha256 === lastSettledSha) return;
+            void session.settleNow().catch(() => undefined);
+          },
         };
         entry = liveEntry;
         // A session whose release failed is still the daemon's: a refused
@@ -4380,28 +4443,29 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
-        // A retained document can reopen over an outside edit. Check the file
-        // without settling: opening a document must not trigger a write retry.
+        // A retained document can reopen over an outside write. Its settle
+        // folds that edit into the document, exactly as it does while open.
         if (head === "present" && lineage === "existing") {
           const openingUpdates = updatesSeen;
-          let drifted = false;
           try {
             const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
-            if (snapshot) {
-              const disk = await digestSettledFile(rootPath, input.path);
-              drifted =
-                disk.kind === "changed" ||
-                (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
+            const disk = snapshot ? await digestSettledFile(rootPath, input.path) : null;
+            if (disk?.kind === "sha256" && disk.sha256 !== snapshot?.sha256) {
+              liveEntry.reconcileFileChange(disk.sha256);
+            } else if (
+              disk?.kind === "changed" &&
+              updatesSeen === openingUpdates &&
+              lastSettledSha === null
+            ) {
+              // Gone or past the text cap: nothing to fold in, and the
+              // retained Y.Doc text is not a History moment yet, so the error
+              // state is the honest recovery surface. It carries no settle
+              // token because this report did not come from a settle.
+              reportSaveState("error", 0);
             }
           } catch {
-            // A failed read does not prove drift. Keep the existing state and
-            // let the next ordinary settle report a retryable read failure.
-          }
-          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
-            // The retained Y.Doc text is not a History moment yet, so the
-            // existing error state is the honest recovery surface. It carries
-            // no settle token because this report did not come from a settle.
-            reportSaveState("error", 0);
+            // A failed read does not prove drift. The next ordinary settle
+            // checks the file again.
           }
         }
         return {

@@ -231,6 +231,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       | "error"
       | "file-locked"
       | "read-only"
+      | "external-write-in-history"
       | "deleted",
     seq: number,
     sessionId?: string,

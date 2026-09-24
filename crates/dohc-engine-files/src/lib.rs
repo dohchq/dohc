@@ -57,7 +57,7 @@ pub use materialize::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, MaterializeOptions,
     NoBackoff, ProjectionTargetKind, ProjectionTargetState, ReplaceBackoff, StdBackoff,
     StdReplacer, backoff_delay, materialize_one, materialize_secret_delete_one,
-    materialize_secret_one, probe_projection_target, run_pending_jobs,
+    materialize_secret_one, probe_projection_target, read_projection_target_text, run_pending_jobs,
 };
 pub use policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,

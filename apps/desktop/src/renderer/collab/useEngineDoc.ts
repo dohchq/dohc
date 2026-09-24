@@ -68,6 +68,9 @@ export type UseEngineDoc = {
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
+  // How many saves replaced an outside write that overlapped the person's own
+  // text. The caller tells the person once per increase.
+  externalWritesInHistory: number;
   // A known terminal save failure. The save-state chip uses this instead of
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
@@ -233,6 +236,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     objectId,
     versionId,
     saveState: settled?.saveState ?? "saved",
+    externalWritesInHistory: settled?.externalWritesInHistory ?? 0,
     saveError: settled?.saveError ?? null,
     notInVersion,
     documentUnavailable,

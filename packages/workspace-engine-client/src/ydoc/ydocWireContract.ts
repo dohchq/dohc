@@ -66,6 +66,10 @@ export type YdocRecordUpdateResult = typeof RecordUpdateResultSchema.Type;
 export type YdocSettleParams = JsonObject & {
   sessionId: string;
   summary?: string;
+  // The sha of a write made to the file outside dohc that this session's doc
+  // has already folded in. The engine records those bytes as their own moment
+  // before the settle replaces them.
+  externalSha256?: string;
 };
 
 export type YdocSettleResult = typeof SettleResultSchema.Type;

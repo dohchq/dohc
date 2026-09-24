@@ -566,6 +566,32 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   );
 });
 
+it("counts a save that kept the person's text over an outside write, even while they type on", async () => {
+  // The notice must not wait for the chip: the person is usually still
+  // typing, which holds the chip on "saving" past this settle's seq.
+  await retainBound();
+  expect(retained.snapshot.externalWritesInHistory).toBe(0);
+
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  const firstSeq = harness.applied.at(-1)!.seq;
+  act(() => {
+    editDocument();
+  });
+
+  harness.emit("external-write-in-history", firstSeq);
+  expect(retained.snapshot.externalWritesInHistory).toBe(1);
+  expect(retained.snapshot.saveState).toBe("saving");
+
+  // It is a save like any other for the chip.
+  await flushLocalBatch();
+  harness.emit("external-write-in-history", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(retained.snapshot.saveState).toBe("saved"));
+  expect(retained.snapshot.externalWritesInHistory).toBe(2);
+});
+
 it("stays Saving while a rejected transport head retries ahead of later edits", async () => {
   harness.rejectNextApplyAttempts(1);
   await retainBound();

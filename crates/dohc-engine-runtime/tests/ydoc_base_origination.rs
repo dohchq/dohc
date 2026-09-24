@@ -2235,6 +2235,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+            None,
         )
         .await
         .expect("settle later text")
@@ -2339,6 +2340,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             450,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
             None,
         )
         .await
