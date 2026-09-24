@@ -4585,13 +4585,20 @@ describe("markdown editor unmount flush", () => {
     const parse = vi.spyOn(delimitedTextCodec, "parse");
     const serialize = vi.spyOn(delimitedTextCodec, "serialize");
     let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // A MutationObserver callback runs as a microtask right after the commit
       // that adds the cells, before the task that runs that commit's effects.
-      const edited = new Promise<void>((resolve) => {
+      // The wait is bounded like the suite's other waits, inside the 30 s test.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The table's cells did not appear within 10 s.")),
+          10_000,
+        );
         observer = new MutationObserver(() => {
           const cell = screen.queryByLabelText("Row 1 column 2");
           if (!cell) return;
+          clearTimeout(timer);
           observer?.disconnect();
           parse.mockClear();
           serialize.mockClear();
@@ -4619,6 +4626,7 @@ describe("markdown editor unmount flush", () => {
         expectedContentHash: TEST_CONTENT_HASH,
       });
     } finally {
+      clearTimeout(timer);
       observer?.disconnect();
       parse.mockRestore();
       serialize.mockRestore();
