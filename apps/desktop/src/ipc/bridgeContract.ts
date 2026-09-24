@@ -18,6 +18,7 @@ import type {
   CollectionAutomationRetry,
   CollectionAutomationRun,
   CollectionAutomationsFile,
+  CollectionAutomationUndo,
 } from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
@@ -5140,6 +5141,8 @@ export const AutomationFailureNotice = z.object({
   claimId: z.string().min(1),
   // A chain stop never ran, and no Try again can run it.
   chainStopped: z.boolean(),
+  // The automation's name in its automations.yaml, when dohc can read it.
+  name: z.string().nullable(),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
@@ -5198,6 +5201,15 @@ export const RetryCollectionAutomationPayload = z.object({
 });
 export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
 export type RetryCollectionAutomationResult = CollectionAutomationRetry;
+
+// Undo for a finished run, as the person who clicked it.
+export const UndoCollectionAutomationRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+});
+export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
+export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
 
 // A current editor allows a step that became reachable only because an
 // editor left. `seq` names the hold the person saw.
@@ -6507,6 +6519,7 @@ export interface DohcDesktopBridge
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
+  undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;

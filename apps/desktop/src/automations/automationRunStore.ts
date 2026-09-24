@@ -89,6 +89,7 @@ const StoredRunSchema = z.object({
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   created: z.array(z.object({ ordinal: z.number().int().nonnegative(), recordId: z.string(), path: z.string() })),
   superseded: z.boolean(),
+  undone: z.boolean(),
   settled: z.boolean(),
   compacted: z.boolean(),
   outcome: z.union([
@@ -129,6 +130,11 @@ export interface StoredRun {
   created: Array<{ ordinal: number; recordId: string; path: string }>;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
+  /**
+   * A person undid what this run changed. Its keys and record ids stay
+   * spent, so the claim can never run again.
+   */
+  undone: boolean;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
   /**

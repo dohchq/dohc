@@ -104,7 +104,7 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
 
 // A Collection automation's engine id is "collection:<collection path>#<id>".
 // Its definition lives in the Collection's automations.yaml, not in a plugin.
-function collectionAutomationOf(
+export function collectionAutomationOf(
   automationId: string,
 ): { collection: string; id: string } | null {
   if (!automationId.startsWith("collection:")) return null;
@@ -118,7 +118,9 @@ function collectionAutomationOf(
 // engine-recorded reason codes get their own honest sentences; every other
 // error is the handler's own text. The copy must never claim the handler
 // threw when it did not run at all (chain-stopped) or did not finish
-// (reclaim-exhausted).
+// (reclaim-exhausted). A Collection automation's way forward is the
+// notice's Try again and Open automation, so its body only states what
+// happened; a plugin's names its source.
 function automationFailureCopy(failure: AutomationFailureNotice): {
   title: string;
   body: string;
@@ -126,35 +128,25 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
   const collection = collectionAutomationOf(failure.automationId);
-  const name = collection?.id ?? failure.automationId;
-  const next = collection
-    ? {
-        chain: `Open ${collection.collection}/automations.yaml to shorten the chain.`,
-        check: `Open ${collection.collection}/automations.yaml to check the automation.`,
-        fix: `Open ${collection.collection}/automations.yaml to fix the automation.`,
-      }
-    : {
-        chain: "Open the plugin's source to shorten the chain.",
-        check: "Open the plugin's source to check the handler.",
-        fix: "Open the plugin's source to fix the handler.",
-      };
+  const name = failure.name ?? collection?.id ?? failure.automationId;
+  const next = (step: string) => (collection ? "" : ` Open the plugin's source to ${step}.`);
   if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
         `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${name}" did not run. ${next.chain}`,
+        `"${name}" did not run.${next("shorten the chain")}`,
     };
   }
   if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
       title: `Automation "${name}" did not finish`,
-      body: `${count}dohc stopped retrying a run that did not finish. ${next.check}`,
+      body: `${count}dohc stopped retrying a run that did not finish.${next("check the handler")}`,
     };
   }
   return {
     title: `Automation "${name}" failed`,
-    body: `${count}${sentence(failure.error)} ${next.fix}`,
+    body: `${count}${sentence(failure.error)}${next("fix the handler")}`,
   };
 }
 
@@ -279,6 +271,10 @@ export function NoticeCenter(props: {
     automationId: string,
     generation: number,
   ) => void;
+  // A Collection automation's failed run: run it again, or open the
+  // automation's runs in its Collection. A chain stop cannot run again.
+  onRetryAutomationFailure?: (failure: AutomationFailureNotice) => void;
+  onOpenAutomation?: (automationId: string) => void;
   // Automation steps that reach more now only because an editor left. Each
   // waits for someone who can edit the Collection to allow it.
   automationHolds?: readonly AutomationHoldNotice[];
@@ -557,12 +553,27 @@ export function NoticeCenter(props: {
       });
     }
     for (const failure of props.automationFailures ?? []) {
+      const collectionAutomation = collectionAutomationOf(failure.automationId) !== null;
       next.push({
         id: `automation-failure-${failure.automationId}`,
         tone: "warning",
         ...automationFailureCopy(failure),
         timeMs: failure.updatedAtMs,
+        copyText: errorDetails([
+          ["Automation", failure.automationId],
+          ["Run", failure.claimId],
+          ["Error", failure.error],
+          ["Time", new Date(failure.updatedAtMs).toISOString()],
+        ]),
         Icon: AlertTriangle,
+        actions: [
+          ...(collectionAutomation && props.onOpenAutomation
+            ? [{ label: "Open automation", onClick: () => props.onOpenAutomation?.(failure.automationId) }]
+            : []),
+          ...(collectionAutomation && !failure.chainStopped && props.onRetryAutomationFailure
+            ? [{ label: "Try again", onClick: () => props.onRetryAutomationFailure?.(failure) }]
+            : []),
+        ],
         ...(props.onDismissAutomationFailure
           ? {
               onDismiss: () =>
@@ -784,6 +795,8 @@ export function NoticeCenter(props: {
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
+    props.onRetryAutomationFailure,
+    props.onOpenAutomation,
     props.workspaceErrors,
     props.onRetryWorkspaceError,
     props.onWorkspaceErrorAction,

@@ -31,11 +31,13 @@ import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automat
 import {
   runCollectionAutomation,
   runsForClaim,
+  UNDONE_RUN_ERROR,
   UNREADABLE_RUN_ERROR,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
+import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
@@ -180,6 +182,10 @@ export interface CollectionAutomationRun {
   writes: RunWrite[];
   /** The run began under another version of the automation. */
   definitionChanged: boolean;
+  /** The chain depth cap stopped it before it ran, so Try again cannot run it. */
+  chainStopped: boolean;
+  /** A person undid what it changed. */
+  undone: boolean;
 }
 
 export type CollectionAutomationRetry =
@@ -192,6 +198,12 @@ export type CollectionAutomationRetry =
   // again starts from the beginning, and the person must choose that too.
   | { status: "progress-gone" }
   | { status: "refused"; reason: string };
+
+export type CollectionAutomationUndo =
+  | ({ status: "undone" } & CollectionAutomationUndone)
+  | { status: "refused"; reason: string };
+
+const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
 
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -252,8 +264,11 @@ export class CollectionAutomations {
    * before, so every run waits until someone resets the holds.
    */
   private verdictsUnreadable = false;
-  /** Claims a Try again is changing; they wait until it is done. */
-  private readonly retrying = new Set<string>();
+  /**
+   * Claims a Try again or an Undo is changing. The drain leaves them, and
+   * neither starts while the other runs.
+   */
+  private readonly changing = new Set<string>();
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
   /** Serializes index loads and subscription reconciles. */
@@ -546,6 +561,9 @@ export class CollectionAutomations {
         updatedAtMs: claim.updatedAtMs,
         writes: stored.flatMap((run) => run.applied.flatMap((effect) => effect.writes)),
         definitionChanged: hash !== null && stored.some((run) => run.definitionHash !== hash),
+        // The engine's rule: a chain stop is inserted failed and never served.
+        chainStopped: claim.state === "failed" && claim.attempts === 0,
+        undone: stored.length > 0 && stored.every((run) => run.undone),
       });
     }
     return runs;
@@ -568,6 +586,7 @@ export class CollectionAutomations {
     }
     const unsupported = unsupportedReason(automation);
     if (unsupported !== null) return { status: "refused", reason: unsupported };
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
     const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
     if (listed === null) throw new Error("The workspace engine is not running.");
     // Without its run history, dohc cannot tell what the run already did.
@@ -576,10 +595,12 @@ export class CollectionAutomations {
     }
     const runs = await runsForClaim(this.options.store, input, automation);
     if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
+    // An undone run's keys and record ids are spent, so it cannot run again.
+    if (runs.current?.undone || runs.changedSince?.undone) return { status: "refused", reason: UNDONE_RUN_ERROR };
     const progressGone = runs.done === null && runs.current?.compacted === true;
     const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
     if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
-    this.retrying.add(input.claimId);
+    this.changing.add(input.claimId);
     this.waitingFor.delete(input.claimId);
     try {
       const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
@@ -592,11 +613,56 @@ export class CollectionAutomations {
         }
       }
     } finally {
-      this.retrying.delete(input.claimId);
+      this.changing.delete(input.claimId);
     }
     this.notifyClaimed();
     this.options.onFailuresChanged();
     return { status: "queued" };
+  }
+
+  /**
+   * Undo for a finished run: its fields go back where no one changed them
+   * since, and the records it added move to the trash through `trash`.
+   */
+  async undo(
+    input: { automationId: string; claimId: string },
+    trash: (path: string) => Promise<void>,
+  ): Promise<CollectionAutomationUndo> {
+    await this.ready();
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    const claim = listed.claims.find((candidate) => candidate.claimId === input.claimId);
+    if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
+    if (claim.state !== "done" && claim.state !== "failed") {
+      return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
+    }
+    this.changing.add(input.claimId);
+    try {
+      const { runs, unreadable } = await this.options.store.runsOf(input.automationId, input.claimId);
+      if (unreadable) {
+        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
+      }
+      const shown = runs.filter((run) => !run.superseded);
+      if (shown.length > 0 && shown.every((run) => run.undone)) {
+        return { status: "refused", reason: "You already undid this run." };
+      }
+      const undone = await undoCollectionAutomationRuns({
+        withReads: (work) => this.withLiveEngine(work),
+        withRecordWrites: this.options.withRecordWrites,
+        trash,
+      }, shown, this.runAbort.signal);
+      for (const run of shown) await this.options.store.save({ ...run, undone: true, updatedAtMs: this.nowMs() });
+      return { status: "undone", ...undone };
+    } finally {
+      this.changing.delete(input.claimId);
+    }
+  }
+
+  /** The name an engine automation id's automation has in its file, or null. */
+  nameOf(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    return parsed ? (this.definitionFor(parsed)?.name ?? null) : null;
   }
 
   /** Waits for the open that reads the index. Only the workspace's own open starts one. */
@@ -889,7 +955,7 @@ export class CollectionAutomations {
 
   private async executeHeld(claim: AutomationClaim, stop: AbortSignal): Promise<ClaimAction | null> {
     const release = { kind: "release" } as const;
-    if (this.retrying.has(claim.claimId)) return release;
+    if (this.changing.has(claim.claimId)) return release;
     const id = parseCollectionAutomationId(claim.automationId);
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.

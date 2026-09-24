@@ -14,14 +14,17 @@ import {
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
   RetryCollectionAutomationPayload,
+  UndoCollectionAutomationRunPayload,
   WriteCollectionAutomationsPayload,
   type ConfirmCollectionAutomationStepResult,
+  type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
   type RetryCollectionAutomationResult,
+  type UndoCollectionAutomationRunResult,
   type WriteCollectionAutomationsResult,
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
@@ -55,6 +58,8 @@ export function registerCollectionAutomationsIpc<
   writeText(event: Event, payload: WriteWorkspaceTextPayload): Promise<{ status: "written"; contentHash: string } | { status: "conflict" }>;
   /** Shows a file in the system's file manager. */
   showItemInFolder(path: string): void;
+  /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
+  deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
@@ -91,6 +96,17 @@ export function registerCollectionAutomationsIpc<
     const input = RetryCollectionAutomationPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<RetryCollectionAutomationResult> =>
       await operation.state.collectionAutomations.retry(input));
+  });
+
+  // Undo for a finished run, as the person who clicked it. Records the run
+  // added go through the same delete as the Explorer's.
+  registerHandler(CHANNELS.undoCollectionAutomationRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = UndoCollectionAutomationRunPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<UndoCollectionAutomationRunResult> =>
+      await operation.state.collectionAutomations.undo(input, async (relativePath) => {
+        await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
+      }));
   });
 
   registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {

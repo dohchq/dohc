@@ -463,6 +463,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
   retryCollectionAutomation: (payload) =>
     ipcRenderer.invoke(CHANNELS.retryCollectionAutomation, payload),
+  undoCollectionAutomationRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.undoCollectionAutomationRun, payload),
   confirmCollectionAutomationStep: (payload) =>
     ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
   writeCollectionAutomations: (payload) =>

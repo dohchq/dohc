@@ -11,7 +11,7 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
     version: 2, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    created: [], superseded: false, settled, compacted: false,
+    created: [], superseded: false, undone: false, settled, compacted: false,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }

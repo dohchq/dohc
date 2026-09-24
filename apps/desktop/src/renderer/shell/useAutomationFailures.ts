@@ -45,5 +45,5 @@ export function useAutomationFailures(
     [workspaceId, reloadAutomationFailures, reportShellError],
   );
 
-  return { automationFailures, dismissAutomationFailure };
+  return { automationFailures, dismissAutomationFailure, reloadAutomationFailures };
 }

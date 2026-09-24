@@ -38,6 +38,7 @@ import type {
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  RetryCollectionAutomationResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
   DmRecord,
@@ -700,6 +701,9 @@ function makeBaseBridge(
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    retryCollectionAutomation: vi.fn(
+      async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" }),
+    ),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);
     },
@@ -9280,6 +9284,7 @@ describe("automation failure notices", () => {
     automationId: "hello-plugin/triage",
     claimId: "atc_failed",
     chainStopped: false,
+    name: null,
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,
@@ -9349,6 +9354,36 @@ describe("automation failure notices", () => {
     expect(notice.textContent).toContain("An automation chain stopped");
     expect(notice.textContent).toContain("did not run");
     expect(notice.textContent).toContain("2 failures so far.");
+  });
+
+  it("tries a failed Collection automation again from its notice, and opens its Collection", async () => {
+    const failure = {
+      automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
+      name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+    };
+    const noticeId = "notice-automation-failure-collection:tasks#stamp";
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId(noticeId);
+    expect(notice.textContent).toContain('Automation "Stamp the finish date" failed');
+    const reads = bridge.listAutomationFailures.mock.calls.length;
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId, claimId: "atc_failed", startOver: false,
+    });
+    // A repeated retry sends no failure event, so the notice reads again itself.
+    await waitFor(() => expect(bridge.listAutomationFailures.mock.calls.length).toBe(reads + 1));
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
   });
 
   it("ignores a poke for another workspace", async () => {
