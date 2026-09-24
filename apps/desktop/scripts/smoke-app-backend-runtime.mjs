@@ -63,7 +63,16 @@ try {
           recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
             source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
         } finally {await recovered.close();}
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,electron:process.versions.electron}));
+        // The CPU budget watch runs on a worker thread and ends the utility process from there.
+        const budgetDirectory=join(app.getPath('userData'),'budget');mkdirSync(budgetDirectory);
+        const budgeted=await openPersistentAppBackend({...config,directory:budgetDirectory,limits:{cpuBudgetMs:1000}},options);
+        let budgetResult;
+        try {
+          budgetResult=await budgeted.prepare({expected:cursor,caller:{kind:'owner'},operation:'spin',readOnly:true,input:{},requestId:'budget',nowMs:3,
+            source:"globalThis.operations={spin(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n');}}"})
+            .then(()=>'finished',error=>error.code);
+        } finally {await budgeted.close();}
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,budgetResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -92,5 +101,6 @@ try {
   assert.ok(result.changesetBytes > 0);
   assert.deepEqual(result.persistentResult, [{ id: 'persistent-fuse-proof', value: 43 }]);
   assert.deepEqual(result.recoveredResult, result.persistentResult);
-  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored.`);
+  assert.equal(result.budgetResult, 'worker_budget');
+  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored, over-budget worker ended.`);
 } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
