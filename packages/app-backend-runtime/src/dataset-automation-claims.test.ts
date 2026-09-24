@@ -196,6 +196,16 @@ it("commits a change it cannot read, failing only the automations that watch wha
   expect(f.charged).toBe(retained(f.db));
 });
 
+it("reads which tables a refused change holds without reading its values", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.claims.subscribe(scope, subscription("collection:tags#gone", ["removed"], null, TAGS));
+  // Text that is not UTF-8 is a value the reader refuses.
+  expect(f.commit("INSERT INTO tasks VALUES('a',CAST(x'80' AS TEXT),'')").kind).toBe("committed");
+  expect(f.db.prepare("SELECT automation_id,state,attempts FROM dohc_dataset_automation_claims").all())
+    .toEqual([{ automation_id: "collection:tasks#a", state: "failed", attempts: 0 }]);
+});
+
 it("names a record whose id is too long in one failed claim, never a cut id", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added"]));
@@ -326,7 +336,7 @@ it("carries small values whole and names fields whose values are too large", () 
   ]);
 });
 
-it("keeps a claim within 64 KiB when every field of the widest table changes by 8 KiB", () => {
+it("keeps a whole claim within 64 KiB when every field of the widest table changes", () => {
   const f = ledger(), WIDE = id(200);
   const columns = Array.from({ length: 127 }, (_, index) => `f${index}`);
   const wideSchema = `CREATE TABLE wide(id TEXT PRIMARY KEY NOT NULL,${columns.map(column => `${column} TEXT NOT NULL`).join(",")});`;
@@ -337,21 +347,28 @@ it("keeps a claim within 64 KiB when every field of the widest table changes by 
       ...columns.map((column, index) => ({ fieldId: id(300 + index), name: column, sqlColumn: column, type: "text" as const, required: true, unique: false })),
     ] }],
     operations: [{ operationId: id(202), name: "read", label: "Read", tableId: WIDE, kind: "read", access: "owner", readOnly: true, fieldIds: [id(201)] }] } });
+  // Most values are near the largest a claim carries whole; the last few fill what the budget leaves.
+  const sizes = columns.map((_, index) => index < 120 ? 8000 : [2100, 1050, 525, 262, 131, 65, 32][index - 120]!);
   const data = new DatabaseSync(":memory:"); data.exec(wideSchema);
-  data.prepare(`INSERT INTO wide VALUES(${["?", ...columns.map(() => "?")].join(",")})`).run("r".repeat(1000), ...columns.map(() => "a".repeat(8000)));
+  data.prepare(`INSERT INTO wide VALUES(${["?", ...columns.map(() => "?")].join(",")})`).run("r".repeat(1000), ...sizes.map(size => "a".repeat(size)));
   const session = data.createSession();
-  data.exec(`UPDATE wide SET ${columns.map(column => `${column}='${"b".repeat(8000)}'`).join(",")}`);
+  data.exec(`UPDATE wide SET ${columns.map((column, index) => `${column}='${"b".repeat(sizes[index]!)}'`).join(",")}`);
   const changeset = session.changeset(); session.close();
   const reported = { wide: data.prepare("PRAGMA table_info(wide)").all().map(column => String(column.name)) }; data.close();
   f.claims.subscribe(scope, subscription("collection:wide#any", ["changed"], null, WIDE));
   f.db.exec("BEGIN IMMEDIATE");
   f.claims.recordCommit({ cursor: { ...f.cursor, revision: 1, approvedRevisionHash: wide.revisionSha256 }, changeset, columns: reported, approved: wide, actor: { kind: "owner" } });
   f.db.exec("COMMIT");
-  const fact = f.claims.next(scope.workspaceId)!.fact!;
-  expect(Buffer.byteLength(JSON.stringify(fact))).toBeLessThanOrEqual(64 * 1024);
-  expect(fact.fields).toHaveLength(127);
-  expect(fact.fields.filter(field => !field.truncated).length).toBeGreaterThan(0);
-  expect(fact.fields.filter(field => field.truncated).length).toBeGreaterThan(100);
+  const started = f.claims.next(scope.workspaceId)!;
+  const served = Buffer.byteLength(JSON.stringify(started));
+  expect(served).toBeLessThanOrEqual(64 * 1024);
+  expect(served).toBeGreaterThan(62 * 1024);
+  expect(started.fact!.fields).toHaveLength(127);
+  expect(started.fact!.fields.filter(field => field.truncated).length).toBeGreaterThan(100);
+  // Its longest failure still fits: every quote in it doubles as JSON.
+  const failed = f.claims.settle(started, { state: "failed", error: '"'.repeat(5000) });
+  expect(Buffer.byteLength(JSON.stringify(failed.error))).toBeLessThanOrEqual(1024);
+  expect(Buffer.byteLength(JSON.stringify(failed))).toBeLessThanOrEqual(64 * 1024);
 });
 
 it("keeps subscriptions current, and forgets a deleted dataset", () => {

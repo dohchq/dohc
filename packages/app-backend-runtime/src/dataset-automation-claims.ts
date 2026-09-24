@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
-import { datasetChangeFacts, DatasetChangeFactsError, decodeChangeset, type DatasetChangeFact, type DatasetFieldChange } from "./dataset-change-facts.js";
+import { datasetChangeFacts, DatasetChangeFactsError, type DatasetChangeFact, type DatasetFieldChange } from "./dataset-change-facts.js";
 import type { DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetCommit } from "./supervisor.js";
 
@@ -38,11 +38,12 @@ export const DATASET_AUTOMATION_CHAIN_STOPPED = "chain-stopped";
 export const DATASET_AUTOMATION_CLAIM_LIMIT = "claim-limit";
 export const DATASET_AUTOMATION_RECORD_ID_TOO_LONG = "record-id-too-long";
 export const DATASET_AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
-// The same bounds as the engine's claim facts. A record id is JSON, so a claim
-// names its record whole or not at all.
-const VALUE_BYTES = 8 * 1024, FACT_BYTES = 64 * 1024, RECORD_ID_BYTES = 1024;
-// A failure keeps at most this much text. Each claim's charge reserves it, so
-// settling a claim never changes what it costs.
+// A served claim, as JSON, fits one response, as the engine's claims do. A
+// value travels whole up to the engine's bound. A record id is JSON, so a
+// claim names its record whole or not at all.
+const CLAIM_BYTES = 64 * 1024, VALUE_BYTES = 8 * 1024, RECORD_ID_BYTES = 1024;
+// A failure keeps at most this much JSON. Each claim's charge and size reserve
+// it, so settling a claim never changes what it costs or makes it too large.
 const ERROR_BYTES = 1024, ROW_BYTES = 256;
 
 export type DatasetChangeKind = DatasetChangeFact["kind"];
@@ -109,14 +110,17 @@ function sync<T>(run: () => T): T {
   if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Automation claim callbacks must be synchronous.");
   return result;
 }
-// Failure text never refuses a settle, which would leave its claim running until the reaper.
+// Failure text never refuses a settle, which would leave its claim running
+// until the reaper. It keeps whole characters while its JSON fits ERROR_BYTES.
 function failure(value: string): string {
   const trimmed = typeof value === "string" ? value.replaceAll("\0", "").trim() : "";
-  const whole = Buffer.from(trimmed || "The automation failed without saying why.");
-  let end = Math.min(whole.byteLength, ERROR_BYTES);
-  // Cut before a character, never inside one.
-  while (end < whole.byteLength && (whole[end]! & 0xc0) === 0x80) end--;
-  return whole.subarray(0, end).toString();
+  let kept = "", size = 2;
+  for (const character of trimmed || "The automation failed without saying why.") {
+    size += bytes(character) - 2;
+    if (size > ERROR_BYTES) break;
+    kept += character;
+  }
+  return kept;
 }
 
 function wants(subscription: Pick<DatasetAutomationSubscription, "tableId" | "kinds" | "fieldIds">, fact: DatasetChangeFact): boolean {
@@ -124,14 +128,16 @@ function wants(subscription: Pick<DatasetAutomationSubscription, "tableId" | "ki
   const fieldIds = subscription.fieldIds;
   return fact.kind !== "changed" || fieldIds === null || fact.fields.some(field => fieldIds.includes(field.fieldId));
 }
-// Only the watched fields, each named. Values travel in field order while
-// they fit; the rest read null with `truncated`. With at most 128 fields of
-// about 90 bytes each when bare, and a record id within RECORD_ID_BYTES, the
-// bare fact stays far under FACT_BYTES, so the budget never goes negative.
-function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null): DatasetClaimFact {
+// Only the watched fields, each named. Values travel in field order while the
+// claim fits CLAIM_BYTES; the rest read null with `truncated`. `envelope` is
+// the served claim's size without its fact, at its largest. With at most 128
+// fields of about 90 bytes each when bare, a record id within RECORD_ID_BYTES,
+// and identifiers within their bounds, the bare claim stays far under
+// CLAIM_BYTES, so the budget never goes negative.
+function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null, envelope: number): DatasetClaimFact {
   const fields = fieldIds === null ? fact.fields : fact.fields.filter(field => fieldIds.includes(field.fieldId));
   const bare = (field: DatasetFieldChange): DatasetClaimFieldChange => ({ fieldId: field.fieldId, previous: null, next: null, truncated: true });
-  let budget = FACT_BYTES - bytes({ ...fact, fields: fields.map(bare) });
+  let budget = CLAIM_BYTES - envelope - bytes({ ...fact, fields: fields.map(bare) });
   return { ...fact, fields: fields.map(field => {
     const extra = bytes(field) - bytes(bare(field));
     if (bytes(field.previous) > VALUE_BYTES || bytes(field.next) > VALUE_BYTES || extra > budget) return bare(field);
@@ -140,21 +146,61 @@ function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null): D
   }) };
 }
 
-const KIND_OF = { insert: "added", update: "changed", delete: "removed" } as const;
-// Each approved table and change kind a changeset holds, read from its headers
-// alone, so a refused value does not hide them. Null when even those are unreadable.
+// SQLite's INSERT, UPDATE, and DELETE codes, as change kinds.
+const KIND_OF: Readonly<Record<number, DatasetChangeKind>> = { 18: "added", 23: "changed", 9: "removed" };
+const tableNames = new TextDecoder("utf-8", { fatal: true });
+// Each approved table and change kind a changeset holds, read from its
+// structure alone: values are skipped, never decoded, so a value the reader
+// refuses does not hide them. Null when the structure itself is unreadable.
+// The layout is the one dataset-change-facts.ts describes.
 function touched(definition: DatasetDefinition, changeset: Uint8Array): Set<string> | null {
   const found = new Set<string>();
-  try {
-    for (const row of decodeChangeset(changeset)) {
-      const table = definition.tables.find(candidate => candidate.sqlName.toLowerCase() === row.table.toLowerCase());
-      if (table) found.add(`${table.tableId} ${KIND_OF[row.operation]}`);
+  let offset = 0;
+  const byte = () => { if (offset >= changeset.byteLength) throw new RangeError(); return changeset[offset++]!; };
+  const skip = (length: number) => { if (length > changeset.byteLength - offset) throw new RangeError(); offset += length; };
+  const varint = () => {
+    let value = 0;
+    for (let index = 0; index < 8; index++) {
+      const next = byte();
+      value = value * 128 + (next & 0x7f);
+      if (!(next & 0x80)) return value;
     }
-  } catch (error) {
-    if (error instanceof DatasetChangeFactsError) return null;
-    throw error;
+    return value * 256 + byte();
+  };
+  try {
+    while (offset < changeset.byteLength) {
+      if (byte() !== 0x54) return null;
+      const columns = varint();
+      skip(columns);
+      const end = changeset.indexOf(0, offset);
+      if (end < 0) return null;
+      const name = tableNames.decode(changeset.subarray(offset, end)).toLowerCase();
+      offset = end + 1;
+      const table = definition.tables.find(candidate => candidate.sqlName.toLowerCase() === name);
+      while (offset < changeset.byteLength && changeset[offset] !== 0x54) {
+        const kind = KIND_OF[byte()];
+        if (kind === undefined) return null;
+        skip(1);
+        for (let value = 0; value < (kind === "changed" ? 2 : 1) * columns; value++) {
+          const type = byte();
+          if (type === 1 || type === 2) skip(8);
+          else if (type === 3 || type === 4) skip(varint());
+          else if (type !== 0 && type !== 5) return null;
+        }
+        if (table) found.add(`${table.tableId} ${kind}`);
+      }
+    }
+    return found;
+  } catch {
+    // A short read or a table name that is not UTF-8.
+    return null;
   }
-  return found;
+}
+
+// A served claim's size without its fact, at its largest state, counters, and failure.
+function envelope(claim: Omit<DatasetAutomationClaim, "fact" | "state" | "attempts" | "run" | "error" | "createdAtMs" | "updatedAtMs">): number {
+  const most = Number.MAX_SAFE_INTEGER;
+  return bytes({ ...claim, fact: null, state: "pending", attempts: most, run: most, error: null, createdAtMs: most, updatedAtMs: most }) - bytes(null) * 2 + ERROR_BYTES;
 }
 
 function claim(row: Record<string, unknown>): DatasetAutomationClaim {
@@ -259,9 +305,11 @@ export function createDatasetAutomationClaims(options: {
         }
         const at = now(), stopped = depth >= DATASET_AUTOMATION_CHAIN_DEPTH, actorJson = JSON.stringify(actor), failed = new Set<string>();
         const statement = db.prepare("INSERT INTO dohc_dataset_automation_claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)");
-        const insert = (automationId: string, tableId: string, recordKey: string, fact: DatasetClaimFact | null, error: string | null) => {
+        const insert = (automationId: string, tableId: string, recordKey: string, error: string | null, change?: { fact: DatasetChangeFact; fieldIds: string[] | null }) => {
           const key = [cursor.workspaceId, cursor.datasetId, automationId, cursor.hostEpoch, cursor.revision, tableId, recordKey];
-          const claimId = digest(["dohc-dataset-automation-claim-v1", ...key]), factJson = fact === null ? null : JSON.stringify(fact);
+          const claimId = digest(["dohc-dataset-automation-claim-v1", ...key]);
+          const largest = envelope({ claimId, workspaceId: cursor.workspaceId, datasetId: cursor.datasetId, automationId, hostEpoch: cursor.hostEpoch, revision: cursor.revision, actor, depth });
+          const factJson = change === undefined ? null : JSON.stringify(bounded(change.fact, change.fieldIds, largest));
           const storageBytes = bytes([claimId, ...key, factJson, actorJson]) + ERROR_BYTES + ROW_BYTES;
           statement.run(claimId, ...key, factJson, actorJson, depth, error ? "failed" : "pending", error, at, at, storageBytes);
           delta += storageBytes; made++;
@@ -270,14 +318,14 @@ export function createDatasetAutomationClaims(options: {
         if (refusal !== undefined) {
           const reached = touched(input.approved.definition, input.changeset);
           for (const { automationId, tableId, kinds } of subscriptions) {
-            if (reached === null || kinds.some(kind => reached.has(`${tableId} ${kind}`))) insert(automationId, "", "", null, refusal);
+            if (reached === null || kinds.some(kind => reached.has(`${tableId} ${kind}`))) insert(automationId, "", "", refusal);
           }
         }
         else planned.forEach(({ subscription, fact }, index) => {
           const recordKey = JSON.stringify(fact.recordId), tooLong = Buffer.byteLength(recordKey) > RECORD_ID_BYTES;
           const error = index === DATASET_AUTOMATION_CLAIMS_PER_COMMIT ? DATASET_AUTOMATION_CLAIM_LIMIT
             : tooLong ? DATASET_AUTOMATION_RECORD_ID_TOO_LONG : stopped ? DATASET_AUTOMATION_CHAIN_STOPPED : null;
-          insert(subscription.automationId, fact.tableId, digest(recordKey), tooLong ? null : bounded(fact, subscription.fieldIds), error);
+          insert(subscription.automationId, fact.tableId, digest(recordKey), error, tooLong ? undefined : { fact, fieldIds: subscription.fieldIds });
         });
         for (const automationId of failed) delta -= trim(scope, automationId);
       }
