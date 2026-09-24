@@ -430,11 +430,16 @@ export function createShareRosters(dependencies: {
     const pulledSince = state.noAnswer === null && pulledSinceListing(workspaceId, state);
     if (state.running) await state.running;
     else if ((due(state) || pulledSince) && !cacheStandsIn) await refresh(workspaceId);
+    // A pull that ran during that listing may have brought changes the
+    // listing did not see, so the run lists once more. If a pull overlaps
+    // that listing too, the roster is unknown for this run.
+    const overlapped = () => state.noAnswer === null && pulledSinceListing(workspaceId, state);
+    if (overlapped()) await refresh(workspaceId);
     save(workspaceId, state);
     const entry = dependencies.findWorkspace(workspaceId);
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && stale(workspaceId, state)) {
+    if (entry.remote && !entry.shareView && (overlapped() || stale(workspaceId, state))) {
       const next = state.markFailed
         ? "Check that your disk has free space, then try again."
         : noAnswer?.next ?? "Try again in a moment.";

@@ -430,6 +430,32 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
   });
 
+  it("lists once more when a pull lands while the listing a run waits on is running", async () => {
+    const first = deferred<RosterAnswer>();
+    const { list, rosters: r } = rosters(() => first.promise);
+    r.open(WORKSPACE);
+    const run = r.forRun(WORKSPACE);
+    // A pull lands during that listing, and may bring a new editor's change.
+    r.pullStarting(WORKSPACE)();
+    list.mockImplementation(async () => answered({ grants: [ana] }));
+    first.resolve(answered({ grants: [] }));
+    expect(await run, "the run used a listing a pull overlapped").toEqual(cached);
+    expect(list).toHaveBeenCalledTimes(2);
+
+    // When a pull overlaps that listing too, this run gets no roster.
+    const third = deferred<RosterAnswer>();
+    const fourth = deferred<RosterAnswer>();
+    list.mockImplementationOnce(() => third.promise).mockImplementationOnce(() => fourth.promise);
+    now += SHARE_ROSTER_FRESH_MS;
+    const busy = r.forRun(WORKSPACE);
+    r.pullStarting(WORKSPACE)();
+    third.resolve(answered({ grants: [] }));
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(4));
+    r.pullStarting(WORKSPACE)();
+    fourth.resolve(answered({ grants: [] }));
+    expect(await busy).toEqual(unchecked("Try again in a moment."));
+  });
+
   it("lists again before a run when a pull followed the listing, and only while the relay answers", async () => {
     const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
     await r.forRun(WORKSPACE);
@@ -453,31 +479,29 @@ describe("keeping the roster current", () => {
 
   it("clears the mark when the next listing answers, unless a pull ran during it", async () => {
     seed();
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    const { list, saveRoster, rosters: r } = rosters(async () => answered({ grants: [ana] }));
     r.pullStarting(WORKSPACE)();
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
 
-    // A pull that is still running when a listing starts may fetch past it.
+    // A pull that is still running when a listing starts may fetch past it,
+    // and it runs through the run's second listing too.
     const ended = r.pullStarting(WORKSPACE);
     now += SHARE_ROSTER_FRESH_MS;
-    await r.forRun(WORKSPACE);
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked("Try again in a moment."));
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
     ended();
 
-    // So may a pull that starts while the listing waits for its answer.
+    // So may a pull that starts while the listing waits for its answer. The
+    // run lists once more, and that listing clears the mark.
     const answer = deferred<RosterAnswer>();
-    list.mockImplementation(() => answer.promise);
+    list.mockImplementationOnce(() => answer.promise);
     now += SHARE_ROSTER_FRESH_MS;
     const run = r.forRun(WORKSPACE);
     r.pullStarting(WORKSPACE)();
     answer.resolve(answered({ grants: [ana] }));
-    await run;
-    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
-
-    list.mockImplementation(async () => answered({ grants: [ana] }));
-    now += SHARE_ROSTER_FRESH_MS;
-    await r.forRun(WORKSPACE);
+    expect(await run).toEqual(cached);
+    expect(saveRoster.mock.calls.at(-2)?.[2], "the overlapped listing saved without its mark").toBe(true);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
   });
 
