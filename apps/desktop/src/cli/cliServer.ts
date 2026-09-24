@@ -49,7 +49,7 @@ import {
   type GranularChatMessageSearchResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -77,7 +77,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import { LiveDocumentEditUnsavedError, type LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
+import { LiveDocumentEditAppliedError, type LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -1678,7 +1678,8 @@ async function onceForRequestId(
   run: () => Promise<{ done: boolean; result: unknown }>,
 ): Promise<unknown> {
   const key = `${context.workspaceId}\u0000${requestId}`;
-  const inputKey = JSON.stringify(input);
+  // A digest, so a remembered edit does not keep its text in memory.
+  const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
   const remembered = rememberedRequests.get(key);
   if (remembered) {
     if (remembered.input !== inputKey) {
@@ -2090,9 +2091,9 @@ async function dispatch(
           return { done: true, result: { ok: true as const, ...outcome } };
         } catch (error) {
           return {
-            // An edit that reached the document but was not saved is
-            // remembered with its failure, so a retry does not apply it again.
-            done: error instanceof LiveDocumentEditUnsavedError,
+            // An edit that reached the document is remembered with its
+            // failure, so a retry does not apply it again.
+            done: error instanceof LiveDocumentEditAppliedError,
             result: mcpFailure(error, `failed to edit document: ${request.args.path}`),
           };
         }

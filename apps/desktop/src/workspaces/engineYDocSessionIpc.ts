@@ -135,10 +135,11 @@ interface EngineYDocIpcOwnedSession {
 }
 
 /**
- * The edit reached the document's session, but dohc could not save it to the
- * file yet. Sending it again could apply it twice.
+ * The edit reached the document, and the call still fails: dohc could not
+ * save it to the file yet, or someone removed the block it went into. Sending
+ * the same edit again could apply it twice.
  */
-export class LiveDocumentEditUnsavedError extends Error {}
+export class LiveDocumentEditAppliedError extends Error {}
 
 /** Who a main-side document edit is recorded under. */
 export interface LiveDocumentEditOrigin {
@@ -1121,7 +1122,7 @@ async function applyDocumentEdit(
     // The session's journal holds the edit and a later settle saves it.
     // Sending the edit again could apply it twice.
     const cause = error instanceof Error ? error.message : String(error);
-    throw new LiveDocumentEditUnsavedError(
+    throw new LiveDocumentEditAppliedError(
       `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
       { cause: error },
     );
@@ -1131,15 +1132,17 @@ async function applyDocumentEdit(
   // the edit's text with the block. That merge is correct for the document,
   // but the agent must not hear that its text is there.
   if (!editLanded(provider.doc, update)) {
-    throw new Error(
+    throw new LiveDocumentEditAppliedError(
       `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
     );
   }
   return true;
 }
 
-// Whether everything `update` inserted is still in `doc`: not deleted, and
-// not inside a block that was removed. Reads only the edit's own items.
+// Whether everything `update` inserted is still inside the document: no
+// block it went into was removed. Text someone deleted from the edit
+// afterwards still landed; that is an edit to it. Reads only the edit's own
+// items. An item whose block was removed and collected is no longer an Item.
 function editLanded(doc: Y.Doc, update: Uint8Array): boolean {
   for (const inserted of Y.decodeUpdate(update).structs) {
     if (!(inserted instanceof Y.Item) || !inserted.countable) continue;
@@ -1148,17 +1151,18 @@ function editLanded(doc: Y.Doc, update: Uint8Array): boolean {
     for (let clock = inserted.id.clock; clock < end;) {
       if (Y.getState(doc.store, client) <= clock) return false;
       const item: unknown = Y.getItem(doc.store, Y.createID(client, clock));
-      if (!(item instanceof Y.Item) || !attached(item)) return false;
+      if (!(item instanceof Y.Item) || !insideDocument(item)) return false;
       clock = item.id.clock + item.length;
     }
   }
   return true;
 }
 
-function attached(item: Y.Item): boolean {
-  for (let current: Y.Item | null = item; current !== null;) {
-    if (current.deleted) return false;
-    current = current.parent instanceof Y.AbstractType ? current.parent._item : null;
+function insideDocument(item: Y.Item): boolean {
+  let block = item.parent instanceof Y.AbstractType ? item.parent._item : null;
+  while (block !== null) {
+    if (block.deleted) return false;
+    block = block.parent instanceof Y.AbstractType ? block.parent._item : null;
   }
   return true;
 }

@@ -14,6 +14,7 @@ import {
 } from "./workspaceEngineCapture";
 import {
   createEngineYDocSessionIpc,
+  LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
@@ -1343,8 +1344,10 @@ describe("engine Y.Doc IPC adapter", () => {
         return { materialized: true } as SettleResult;
       });
 
-      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
-        .rejects.toThrow("some or all of its text is not in notes/a.md");
+      const lost = h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." }));
+      await expect(lost).rejects.toThrow("some or all of its text is not in notes/a.md");
+      // The edit reached the document, so a resent request must not apply it again.
+      await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.");
 
       // Typing elsewhere at the same moment leaves the edit's text in place.
@@ -1362,6 +1365,29 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(h.ipc.editDocument(edit({ find: "## Before.", replacement: "## Before noon." })))
         .resolves.toEqual({ path: "notes/a.md", changed: true });
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.");
+      await h.ipc.shutdown();
+    });
+
+    // The person backspaces over part of the agent's text as it lands. The
+    // edit landed and was then edited, so the agent hears it landed; being
+    // told to redo it would add the text a second time.
+    it("reports an edit the person then edited as landed", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        const backspace = documentEditUpdate(
+          Y.encodeStateAsUpdate(session.doc),
+          { find: "Before and after.", replacement: "Before and afte." },
+          { keepBlocks: true },
+        )!;
+        Y.applyUpdate(session.doc, backspace);
+        return { materialized: true } as SettleResult;
+      });
+
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
+        .resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore and afte.");
       await h.ipc.shutdown();
     });
 
