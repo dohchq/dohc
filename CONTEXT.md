@@ -40,6 +40,18 @@ _Avoid_: link (that is a body link), backlink
 A named way to render a Collection, such as a table, board, or calendar. Available views depend on the Collection; the current view is local state.
 _Avoid_: dashboard (see App), layout
 
+**Notice**:
+One item in a person's Notices: a problem or finished task on this computer, or something sent to that person, such as a mention or an automation's message. Items sent to a person reach all of their computers.
+_Avoid_: notification (for the item), inbox, alert
+
+**Automation**:
+A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of those people can reach.
+_Avoid_: workflow, zap, plugin automation
+
+**Personal step**:
+A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
+_Avoid_: private step, owner step
+
 ### Sharing
 
 **Share**:
