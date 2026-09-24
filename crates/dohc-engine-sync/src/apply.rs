@@ -1547,7 +1547,7 @@ fn apply_message(
         &payload.thread_id,
         &payload.message_id,
         &author_display_name,
-        payload.author_kind == "agent",
+        &payload.author_kind,
         &body,
     )
     .map_err(|error| map_chat_rule(error, "replicated chat search index maintenance failed"))?;

@@ -1700,9 +1700,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       lines.push("");
     }
     for (const message of threadMessages(state, thread.id)) {
-      const author = message.author.kind === "agent"
-        ? `${message.author.displayName} (agent)`
-        : message.author.displayName;
+      const author = message.author.kind === "human"
+        ? message.author.displayName
+        : `${message.author.displayName} (${message.author.kind})`;
       lines.push(`## ${author}`, "", message.body, "");
     }
     const text = `${lines.join("\n").trimEnd()}\n`;

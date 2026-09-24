@@ -1348,6 +1348,49 @@ fn another_computers_automation_message_applies_without_its_automation() {
         }),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &reaction, &NoFaults));
+
+    // An automation message that arrives before its thread is parked, then replays with its person.
+    let early = envelope(
+        "early-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "early-automation-message",
+            "threadId": "late-thread",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "authorOwnerDisplayName": "Ana",
+            "authorUserId": "ana",
+            "body": "Done",
+            "createdAtMs": 50
+        }),
+    );
+    apply_chat_envelope(&mut engine, &early, &NoFaults).expect("parked automation message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 40,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, author_owner_display_name FROM chat_messages                  WHERE message_id = 'early-automation-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed automation message");
+    assert_eq!(replayed, ("automation".to_owned(), "Ana".to_owned()));
 }
 
 #[test]

@@ -1282,13 +1282,14 @@ fn opening_message_body_snippet(body: &str) -> String {
     format!("{prefix}\u{2026}")
 }
 
-/// Indexed message text (`chatIndexText`): author, optional agent marker, body.
-pub fn chat_message_search_text(display_name: &str, is_agent: bool, body: &str) -> String {
+/// Indexed message text (`chatIndexText`): author, the author's kind for an
+/// agent or automation, body. `author_kind` is the stored kind.
+pub fn chat_message_search_text(display_name: &str, author_kind: &str, body: &str) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if !display_name.is_empty() {
         parts.push(display_name.to_owned());
-        if is_agent {
-            parts.push(format!("{display_name} (agent)"));
+        if matches!(author_kind, "agent" | "automation") {
+            parts.push(format!("{display_name} ({author_kind})"));
         }
     }
     if !body.is_empty() {
@@ -1328,7 +1329,7 @@ pub fn index_replicated_chat_message_search_rows(
     thread_id: &str,
     message_id: &str,
     author_display_name: &str,
-    is_agent: bool,
+    author_kind: &str,
     body: &str,
 ) -> Result<(), DomainError> {
     let (stored_title, first_message_id): (String, Option<String>) = conn
@@ -1352,7 +1353,7 @@ pub fn index_replicated_chat_message_search_rows(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    let message_search_text = chat_message_search_text(author_display_name, is_agent, body);
+    let message_search_text = chat_message_search_text(author_display_name, author_kind, body);
     upsert_chat_search_index_row(
         conn,
         workspace_id,
@@ -1622,10 +1623,20 @@ fn normalize_message_automation(
         (_, None) => return Ok(None),
     };
     let id = automation.automation_id.as_str();
+    // The path reaches the renderer, which opens files under it, so it must
+    // name a folder inside the workspace: relative, with no empty, `.`, or
+    // `..` segment and no backslash.
     let named = id
         .strip_prefix("collection:")
         .and_then(|rest| rest.rsplit_once('#'))
-        .is_some_and(|(path, local)| !path.is_empty() && !local.is_empty());
+        .is_some_and(|(path, local)| {
+            !local.is_empty()
+                && !path.contains('\\')
+                && !path.contains(':')
+                && path
+                    .split('/')
+                    .all(|segment| !matches!(segment, "" | "." | ".."))
+        });
     if !named
         || id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
         || id.trim() != id
@@ -2562,11 +2573,8 @@ impl<'a> LinkedChatStore<'a> {
                 display_title,
             )
             .map_err(DomainError::sql_persist)?;
-            let message_search_text = chat_message_search_text(
-                &display_c,
-                input.author_kind == ChatActorKind::Agent,
-                &body_c,
-            );
+            let message_search_text =
+                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
@@ -2826,11 +2834,8 @@ impl<'a> LinkedChatStore<'a> {
                     None,
                 )?;
             }
-            let message_search_text = chat_message_search_text(
-                &display_c,
-                input.author_kind == ChatActorKind::Agent,
-                &body_c,
-            );
+            let message_search_text =
+                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
@@ -5091,7 +5096,7 @@ WHERE m.workspace_id = ?1
   AND (
     EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
-      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' ELSE 'person' END
+      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' WHEN 'human' THEN 'person' END
       AND f.target_id = m.author_user_id)
     OR EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
@@ -5128,7 +5133,7 @@ WHERE m.workspace_id = ?1 AND m.message_id = ?3 AND m.created_at_ms = ?4
   AND (
     EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
-      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' ELSE 'person' END
+      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' WHEN 'human' THEN 'person' END
       AND f.target_id = m.author_user_id)
     OR EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
       AND f.owner_user_id = ?2 AND f.state = 'following'
