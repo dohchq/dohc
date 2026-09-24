@@ -25,7 +25,14 @@ const DEFAULT_HEALTHY_RESET_MS = 30_000;
 // attempt budget forever, so only this window can end it.
 const DEFAULT_RESTART_WINDOW_MS = 600_000;
 const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
-const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+// A lifecycle request (the startup smoke and read attaches) fails when the
+// engine goes silent, not when it is slow; see watchRequestLiveness. This cap
+// ends a live engine that never finishes. It matches the desktop's deadline
+// for opening a real workspace.
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+// Quiet time before a pending lifecycle request probes the engine. Most
+// requests finish sooner and never probe.
+const DEFAULT_REQUEST_PROBE_DELAY_MS = 5_000;
 // Wedge detection. The restart path starts at process exit, so a daemon that
 // is alive but not answering never reaches it. These probe for that silence.
 //
@@ -131,7 +138,10 @@ export interface EngineDaemonLifecycleOptions {
   maxRestartsPerWindow?: number;
   monotonicNowMs?: () => number;
   wallNowMs?: () => number;
+  // Cap on one lifecycle request, and its wire deadline.
   requestTimeoutMs?: number;
+  // Quiet time before a pending lifecycle request probes the engine.
+  requestProbeDelayMs?: number;
   pingIntervalMs?: number;
   pingExpiryMs?: number;
   maxPingExpiries?: number;
@@ -584,12 +594,76 @@ export class EngineDaemonLifecycle {
       }, timeoutMs);
       timeout.unref();
     });
+    const watch = this.watchRequestLiveness(client, method);
+    const silent = watch.silent.catch((error: unknown) => {
+      if (settled) return new Promise<never>(() => {});
+      void client.cancelRequest?.(request.id).catch(() => undefined);
+      if (method === "workspace.open") killForReplacement(client);
+      throw error;
+    });
     try {
-      return await Promise.race([client.sendRequest(boundedRequest), deadline]);
+      return await Promise.race([client.sendRequest(boundedRequest), deadline, silent]);
     } finally {
       settled = true;
+      watch.stop();
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  // A fixed 5s bound on the startup smoke killed healthy engines on busy
+  // machines, and three restarts later the engine stopped. Now a request fails
+  // on silence: after requestProbeDelayMs with no frame from the engine, this
+  // sends the wedge watch's probe, and rejects only when that probe expires
+  // with no frame of any kind since it was sent. The expiry is the longest a
+  // live engine takes to answer a probe (DEFAULT_PING_EXPIRY_MS).
+  private watchRequestLiveness(
+    client: EngineDaemonClient,
+    method: string,
+  ): { silent: Promise<never>; stop(): void } {
+    const probeDelayMs =
+      this.options.requestProbeDelayMs ?? DEFAULT_REQUEST_PROBE_DELAY_MS;
+    const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const quiet = () =>
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, probeDelayMs);
+        timer.unref();
+      });
+    // A host stall fires timers before it reads the frames that arrived during
+    // it. Read them first, so the stall does not look like engine silence.
+    const drained = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const silent = (async (): Promise<never> => {
+      let seen = client.inboundActivity?.();
+      for (;;) {
+        await quiet();
+        await drained();
+        if (stopped) return await new Promise<never>(() => {});
+        const beforeProbe = client.inboundActivity?.();
+        if (beforeProbe !== seen) {
+          seen = beforeProbe;
+          continue;
+        }
+        const answered = await this.sendPing(client);
+        await drained();
+        if (stopped) return await new Promise<never>(() => {});
+        const afterProbe = client.inboundActivity?.();
+        if (answered || afterProbe !== seen) {
+          seen = afterProbe;
+          continue;
+        }
+        throw new EngineDaemonUnavailableError(
+          `Rust engine ${method} got no answer: a probe expired after ${expiryMs}ms with no frame of any kind from the engine.`,
+        );
+      }
+    })();
+    return {
+      silent,
+      stop() {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      },
+    };
   }
 
   private assertBinaryPresent(): void {
