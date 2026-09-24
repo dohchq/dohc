@@ -15,6 +15,7 @@ import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { SectionLabel } from "../ui/controls";
 import {
+  chatPreviewForRow,
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
   moveSearchSelection,
@@ -48,7 +49,7 @@ function isBlankSearchQuery(value: string): boolean {
 // The mark is the OPAQUE --dohc-match blue (3:1+ vs panel and the selected
 // row in both themes; one hue means "your match" here and in the editor).
 function HighlightedPreview({ entry }: { entry: SearchResultsEventEntry }) {
-  const windowed = windowPreviewForRow(entry);
+  const windowed = windowPreviewForRow(chatPreviewForRow(entry));
   return (
     <span className="block truncate font-mono text-[12px] leading-5 text-muted">
       {windowed.leadTrimmed ? <span aria-hidden>…</span> : null}

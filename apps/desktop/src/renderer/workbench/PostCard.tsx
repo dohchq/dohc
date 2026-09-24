@@ -29,13 +29,22 @@ export interface PostData {
   viewerAuthorId: string;
 }
 
-// A derived title repeats the body's first line. The card shows the title
-// once, so the text starts after it.
-export function postExcerpt(title: string, body: string): string {
+// An untitled post takes its title from its first line: the engine collapses
+// whitespace and cuts a line over 80 characters to 79 plus "…"
+// (chat_thread_display_title). Such a title repeats the body.
+export function titleRepeatsFirstLine(title: string, firstLine: string): boolean {
+  const line = firstLine.trim().replace(/\s+/g, " ");
+  const shown = title.trim();
+  return shown === line || (shown.endsWith("…") && line.startsWith(shown.slice(0, -1)));
+}
+
+// The card shows a post's words once: a derived title gives way to the whole
+// first line it came from, and the text continues after that line.
+export function postText(title: string, body: string): { heading: string; excerpt: string } {
   const newline = body.indexOf("\n");
   const firstLine = (newline === -1 ? body : body.slice(0, newline)).trim();
-  if (firstLine !== title.trim()) return body;
-  return newline === -1 ? "" : body.slice(newline + 1).trim();
+  if (!titleRepeatsFirstLine(title, firstLine)) return { heading: title, excerpt: body };
+  return { heading: firstLine, excerpt: newline === -1 ? "" : body.slice(newline + 1).trim() };
 }
 
 
@@ -127,7 +136,9 @@ export function PostCard(props: {
   const isAgent = message?.authorKind === "agent";
   const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const excerpt = message ? postExcerpt(props.thread.title, message.bodySnippet) : "";
+  const { heading, excerpt } = message
+    ? postText(props.thread.title, message.bodySnippet)
+    : { heading: props.thread.title, excerpt: "" };
   const plain = message !== null && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
 
@@ -215,13 +226,13 @@ export function PostCard(props: {
         </div>
         <span
           data-testid="chats-post-title"
-          className={`mt-2.5 block whitespace-pre-wrap break-words text-ink ${
+          className={`mt-2.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
             plain
               ? "text-[15px] leading-relaxed"
               : "text-[16px] font-semibold leading-snug tracking-[-0.01em]"
           }`}
         >
-          {props.thread.title}
+          {heading}
         </span>
         {excerpt ? (
           <span
