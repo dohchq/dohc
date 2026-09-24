@@ -100,7 +100,7 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
   const worker = await open((command, send) => {
     send({ id: command.id, progress: "running the app operation" });
     // The worker's budget watch leaves its marker, then the process ends.
-    setTimeout(() => void writeFile(join(roots.at(-1)!, "app-cpu-budget-exceeded"), "5000").then(end), 10);
+    setTimeout(() => void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded"), "app 5000").then(end), 10);
   }, { silenceMs: 60_000, commandCapMs: 60_000 }, (exit) => { end = exit; });
   await expect(
     worker.prepare({

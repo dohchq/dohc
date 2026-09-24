@@ -11,8 +11,8 @@ import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
-import { APP_CPU_BUDGET_MARKER } from "./persistent-protocol.js";
-import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
+import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
+import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
@@ -56,32 +56,38 @@ function writeMarker(next:DatasetCursor):void {
 }
 
 // App code runs on this thread and can block it inside SQLite, where no timer
-// on this thread runs. A second thread watches the process's CPU time while app
-// code runs. Past the budget it leaves a marker for the host and ends the
-// worker, because node:sqlite cannot interrupt a statement. Waiting on the disk
-// uses no CPU, so a slow disk never counts against the budget. Only app code is
-// charged: the app's schema text and SQL, its operation, its migration, and a
-// journal replay that runs the app's indexes and generated columns. The
-// budget covers one command, so the events of a replay batch share it.
+// on this thread runs. A second thread watches the process's CPU time while a
+// budgeted step runs. Past the budget it leaves a marker for the host and ends
+// the worker, because node:sqlite cannot interrupt a statement. Waiting on the
+// disk uses no CPU, so a slow disk never counts against a budget.
 //
-// Shared with the watch thread: armed (0 or 1), generation, CPU charged to
-// this command before the current section, the section's start, and the budget,
-// all in microseconds. The watch re-reads the generation before it ends the
-// worker, so a section that ended while it measured is never charged.
+// The app's code (its schema text and SQL, an operation, a migration, and the
+// replay of one journal event, which runs the app's indexes and generated
+// columns) shares cpuBudgetMs across one command or one replayed event. A
+// dataset check (a host step over every row, whose cost per row the app's
+// schema sets) gets its own budget, scaled by the data it reads.
+//
+// Shared with the watch thread: generation, armed (0 or 1), the budget's kind,
+// the process CPU time at which the step's charge would be zero, and the
+// budget, in microseconds. The watch reads the generation first and again
+// before it ends the worker, so a step that ended or started while it measured
+// is never charged.
 const budgetState=new BigInt64Array(new SharedArrayBuffer(5*8));
-const [ARMED,GENERATION,CHARGED,SECTION_START,BUDGET]=[0,1,2,3,4];
+const [GENERATION,ARMED,KIND,ORIGIN,BUDGET]=[0,1,2,3,4];
+const [APP_CODE,DATASET_CHECK]=[1n,2n];
 const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
 const {writeFileSync}=require("node:fs");
 const state=new BigInt64Array(workerData.state);
 setInterval(()=>{
-  if(Atomics.load(state,${ARMED})!==1n) return;
   const generation=Atomics.load(state,${GENERATION});
+  if(Atomics.load(state,${ARMED})!==1n) return;
   const used=process.cpuUsage();
-  const charged=Atomics.load(state,${CHARGED})+BigInt(used.user+used.system)-Atomics.load(state,${SECTION_START});
-  if(charged<=Atomics.load(state,${BUDGET})) return;
+  if(BigInt(used.user+used.system)-Atomics.load(state,${ORIGIN})<=Atomics.load(state,${BUDGET})) return;
+  const kind=Atomics.load(state,${KIND})===${APP_CODE}n ? "app" : "checks";
+  const budgetMs=Number(Atomics.load(state,${BUDGET})/1000n);
   if(Atomics.load(state,${ARMED})!==1n || Atomics.load(state,${GENERATION})!==generation) return;
-  try {writeFileSync(workerData.marker,String(Number(Atomics.load(state,${BUDGET})/1000n)));} finally {process.kill(process.pid,"SIGKILL");}
+  try {writeFileSync(workerData.marker,kind+" "+budgetMs);} finally {process.kill(process.pid,"SIGKILL");}
 },50);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
@@ -89,23 +95,27 @@ process.on("exit",()=>{exiting=true;});
 const cpuMicros=()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);};
 function startBudgetWatch():void {
   if(budgetWatch) return;
-  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,marker:join(config.directory,APP_CPU_BUDGET_MARKER)}});
+  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,marker:join(config.directory,CPU_BUDGET_MARKER)}});
   budgetWatch.unref();
   // Without the watch, app code would run unbounded. End the worker instead.
   const lost=()=>{if(!exiting) process.exit(70);};
   budgetWatch.on("error",lost);
   budgetWatch.on("exit",lost);
 }
-function appCode<T>(run:()=>T):T {
+// CPU time the app's code used in this command or replayed event, in microseconds.
+let appCharged=0n;
+function budgeted<T>(kind:bigint, budget:bigint, run:()=>T):T {
   startBudgetWatch();
+  const start=cpuMicros();
   Atomics.add(budgetState,GENERATION,1n);
-  Atomics.store(budgetState,SECTION_START,cpuMicros());
-  Atomics.store(budgetState,BUDGET,BigInt(config.limits.cpuBudgetMs)*1000n);
+  Atomics.store(budgetState,KIND,kind);
+  Atomics.store(budgetState,ORIGIN,start-(kind===APP_CODE ? appCharged : 0n));
+  Atomics.store(budgetState,BUDGET,budget);
   Atomics.store(budgetState,ARMED,1n);
   const disarm=()=>{
     Atomics.store(budgetState,ARMED,0n);
     Atomics.add(budgetState,GENERATION,1n);
-    Atomics.add(budgetState,CHARGED,cpuMicros()-Atomics.load(budgetState,SECTION_START));
+    if(kind===APP_CODE) appCharged+=cpuMicros()-start;
   };
   let result:T;
   try {result=run();} catch(error) {disarm();throw error;}
@@ -113,6 +123,12 @@ function appCode<T>(run:()=>T):T {
   disarm();
   return result;
 }
+const budgets:CpuBudgets={
+  appCode:run=>budgeted(APP_CODE,BigInt(config.limits.cpuBudgetMs)*1000n,run),
+  datasetCheck:(bytes,run)=>budgeted(DATASET_CHECK,BigInt(config.limits.datasetCheckCpuMs+Math.ceil(config.limits.datasetCheckCpuMsPerMiB*bytes/2**20))*1000n,run),
+};
+const {appCode,datasetCheck}=budgets;
+const foreignKeysHold=(database:DatabaseSync)=>datasetCheck(databaseBytes(database),()=>database.prepare("PRAGMA foreign_key_check").iterate().next().done===true);
 
 function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
@@ -141,7 +157,7 @@ function initialize(input:OpenRequest):DatasetCursor {
     appCode(()=>db!.exec(config.schemaSql));db.setAuthorizer(null);
   }
   progress("checking the schema");
-  verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits,false,appCode);
+  verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits,false,budgets);
   progress("recording the dataset cursor");
   const existing=db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(marker);
   if (existing) {
@@ -180,6 +196,10 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     for(const event of command.input)if(!(event.changeset instanceof Uint8Array)||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES)reject("invalid_input","Invalid replay batch bytes.");
     // Each event retains the same validation and atomic rows/cursor commit as individual recovery.
     for(const [index,event] of command.input.entries()){progress(`replaying journal event ${index+1} of ${command.input.length}`);await handle({kind:"apply",input:event});}
+    // Only the batch's final state is ever served or copied, and a failed batch
+    // closes this disposable copy, so one foreign-key check covers every event.
+    progress("checking the replayed foreign keys");
+    if(!foreignKeysHold(db)) reject("invalid_changeset","The committed changesets violate a foreign-key constraint.");
     return {...cursor};
   }
   if (command.kind==="prepare") {
@@ -193,7 +213,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       db.setAuthorizer(null);changeset=session.changeset();
     } finally { session.close(); }
     if (!db.isTransaction) reject("invalid_changeset","The prepared operation transaction ended.");
-    if (!db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The prepared operation violates a foreign-key constraint.");
+    progress("checking the operation's foreign keys");
+    if (!foreignKeysHold(db)) reject("invalid_changeset","The prepared operation violates a foreign-key constraint.");
     if (changeset.byteLength>config.limits.databaseBytes) reject("resource_limit","The changeset exceeds the dataset storage reservation.");
     const changesetSha256=digest(changeset), proposalId=randomUUID();
     if (command.guest.readOnly) {
@@ -204,6 +225,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
   }
   if (command.kind==="apply") {
     if(!batching) progress("replaying the journal event");
+    // Each event passed the app's CPU budget when it was prepared, so each gets the whole budget again.
+    appCharged=0n;
     nextCursor(command.input);
     const {changeset,changesetSha256}=command.input;
     if (!(changeset instanceof Uint8Array) || changeset.byteLength>config.limits.databaseBytes || digest(changeset)!==changesetSha256) reject("invalid_input","Invalid committed changeset.");
@@ -220,14 +243,14 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
         filter:table=>{ const allowed=config.tables.includes(table); if (!allowed) forbidden=true;return allowed; },
         onConflict:kind=>{constraintConflict=kind===changesetConstraint;return constants.SQLITE_CHANGESET_ABORT;},
       }));
-      if (!applied || forbidden || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The committed changeset cannot be applied to this dataset.");
+      if (!applied || forbidden || (!batching && !foreignKeysHold(db))) reject("invalid_changeset","The committed changeset cannot be applied to this dataset.");
       for (const trigger of triggers) db.exec(String(trigger.sql));
       writeMarker(command.input);db.exec("COMMIT");transaction=false;
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     } catch (error) {
       rollback();
       if(!constraintConflict || forbidden) throw error;
-      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input),{progress,appCode});
+      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input),{progress,datasetCheck});
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     }
     finally { db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }
@@ -255,12 +278,14 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       appCode(()=>migrationCopy.exec(command.input.migrationSql));copy.setAuthorizer(null);
       if (copy.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(marker)) reject("invalid_checkpoint","Migration introduced internal metadata.");
       progress("checking the migrated schema");
-      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql,appCode);
+      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql,budgets);
       progress("saving the migrated copy");
       copy.exec("COMMIT");
       if(command.input.reportPath) progress("writing the migration preview");
-      const report=command.input.reportPath ? createMigrationPreviewReport({before:db,after:copy,beforeTables:config.tables,
-        afterTables:command.input.tables,path:command.input.reportPath,maxBytes:config.limits.databaseBytes}) : undefined;
+      // Reading every row computes the app's virtual generated columns.
+      const {reportPath}=command.input, before=db, after=copy;
+      const report=reportPath ? datasetCheck(databaseBytes(before)+databaseBytes(after),()=>createMigrationPreviewReport({before,after,beforeTables:config.tables,
+        afterTables:command.input.tables,path:reportPath,maxBytes:config.limits.databaseBytes})) : undefined;
       reportCreated=Boolean(report);
       progress("writing the migrated checkpoint");
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
@@ -293,9 +318,9 @@ function progress(step:string):void { if(activeId!==undefined) send({id:activeId
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }
   busy=true;activeId=message.id;batching=message.command.kind==="applyBatch";
-  // Each command gets the whole budget. Every section disarmed itself before
+  // Each command gets the whole budget. Every step disarmed itself before
   // this command replies, so the watch cannot end the worker after the reply.
-  Atomics.store(budgetState,CHARGED,0n);
+  appCharged=0n;
   try {
     const result=await handle(message.command);
     send({id:message.id,ok:true,result});

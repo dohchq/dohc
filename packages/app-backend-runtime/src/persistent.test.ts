@@ -435,6 +435,36 @@ describe("persistent dataset worker",()=>{
     });
   },60_000);
 
+  // Each row costs this index about 10 µs of CPU to compute.
+  const heavySchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.20000c',value)));";
+  const insertRows=(from:number,to:number)=>`globalThis.operations={run(ctx){
+    ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(${from}) UNION ALL SELECT x+1 FROM n WHERE x<${to}) SELECT x FROM n)");return 1}}`;
+
+  it("ends a dataset check at its own CPU budget and names it",async()=>{
+    await fixture(async({root,open})=>{
+      const writer=await open({schemaSql:heavySchema});
+      const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,20_000)})));
+      const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
+      // The integrity check at open computes the index for every row.
+      await expect(open({schemaSql:heavySchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
+        message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Reopen it from the journal\.$/)});
+      await expect(open({schemaSql:heavySchema,checkpointPath,cursor})).resolves.toBeDefined();
+    });
+  },60_000);
+
+  it("gives each replayed event of a batch the whole CPU budget",async()=>{
+    await fixture(async({open})=>{
+      // An event costs about a tenth of the budget below, and the batch's
+      // sixteen events together exceed it.
+      const writer=await open({schemaSql:heavySchema});
+      const events=[];let cursor=initial;
+      for(let index=0;index<16;index++) {
+        const committed=event(await writer.prepare({...operation(cursor),source:insertRows(index*10_000+1,(index+1)*10_000)}),cursor);cursor=await writer.finalize(committed);events.push(committed);
+      }
+      await expect((await open({schemaSql:heavySchema,limits:{cpuBudgetMs:1000}})).applyBatch(events)).resolves.toMatchObject({revision:16});
+    });
+  },60_000);
+
   it("does not charge the app for time its worker spends stopped inside app code",async()=>{
     await fixture(async({open})=>{
       let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;

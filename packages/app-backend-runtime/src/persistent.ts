@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { readFileSync, rmSync } from "node:fs";
 import { AppBackendRuntimeError, approvedTables, boundedText } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
-import { APP_CPU_BUDGET_MARKER, checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
+import { CPU_BUDGET_MARKER, checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
 import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentProgress, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
@@ -59,14 +59,16 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       });
     },silenceMs);
   }
-  const budgetMarker=()=>join(config.directory,APP_CPU_BUDGET_MARKER);
+  const budgetMarker=()=>join(config.directory,CPU_BUDGET_MARKER);
   // The worker's CPU budget watch leaves this marker as it ends the worker.
-  function exceededBudget():number|undefined {
-    let budgetMs:number;
-    try {budgetMs=Number(readFileSync(budgetMarker(),"utf8"));} catch {return undefined;}
+  function exceededBudget():string|undefined {
+    let marker:string;
+    try {marker=readFileSync(budgetMarker(),"utf8");} catch {return undefined;}
     // An antivirus scan can hold the file; the reason is already known.
     try {rmSync(budgetMarker(),{force:true});} catch {/* removed before the next launch */}
-    return budgetMs;
+    const [kind,budgetMs]=marker.split(" ");
+    const used=`more than ${duration(Number(budgetMs))} of CPU time${during(active)}`;
+    return kind==="checks" ? `The dataset's checks ran too long: they used ${used}.` : `The app's code ran too long: it used ${used}.`;
   }
   function fail(error:Error):void {
     stopped??=error;
@@ -119,8 +121,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         pump();
       },onError:fail,onExit(){
         exited=true;resolveExit();
-        const budgetMs=exceededBudget();
-        if(budgetMs!==undefined) fail(new PersistentRuntimeError("worker_budget",`The app's code ran too long: it used more than ${duration(budgetMs)} of CPU time${during(active)}. Reopen it from the journal.`));
+        const budget=exceededBudget();
+        if(budget!==undefined) fail(new PersistentRuntimeError("worker_budget",`${budget} Reopen it from the journal.`));
         else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Reopen it from the journal.`));
       },
     });

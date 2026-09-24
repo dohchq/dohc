@@ -5,6 +5,7 @@ import type { AppOperationFile, AppOperationRefusal, JsonValue, RuntimeLimits } 
 import type { GuestRequest } from "./guest.js";
 import type { WorkerOwnership } from "./worker-ownership.js";
 import type { MigrationPreviewTableSummary } from "./migration-preview-report.js";
+import type { DatabaseSync } from "node:sqlite";
 
 export interface DatasetScope { workspaceId: string; datasetId: string; hostEpoch: string; approvedRevisionHash: string }
 export interface DatasetCursor { revision: number; digest: string }
@@ -72,8 +73,19 @@ export type PersistentReply = {id:number;ok:true;result:PersistentResult}
 // slow work from a worker that stopped.
 export type PersistentProgress = {id:number;progress:string};
 // Written into the dataset directory by the worker's CPU budget watch just
-// before it ends the worker, so the host can say why the worker stopped.
-export const APP_CPU_BUDGET_MARKER="app-cpu-budget-exceeded";
+// before it ends the worker, so the host can say why the worker stopped. It
+// holds the budget that ran out and its size: "app 5000" or "checks 9000".
+export const CPU_BUDGET_MARKER="cpu-budget-exceeded";
+// Runs a step of the dataset worker under one of its CPU budgets: the app's
+// code, or a check over `bytes` of data.
+export interface CpuBudgets {
+  appCode<T>(run:()=>T):T;
+  datasetCheck<T>(bytes:number, run:()=>T):T;
+}
+export const unbudgeted:CpuBudgets={appCode:run=>run(),datasetCheck:(_bytes,run)=>run()};
+export function databaseBytes(db:DatabaseSync):number {
+  return Number(db.prepare("SELECT page_count*page_size AS bytes FROM pragma_page_count(),pragma_page_size()").get()!.bytes);
+}
 
 export class PersistentRuntimeError extends Error {
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }

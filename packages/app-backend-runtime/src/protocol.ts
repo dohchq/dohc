@@ -13,8 +13,14 @@ export interface RuntimeLimits {
   evaluationMs: number;
   deadlineMs: number;
   // CPU time a dataset worker lets the app's own code use in one step: an
-  // operation, a migration, or the schema at open. Disk waits use no CPU.
+  // operation, a migration, the schema at open, or one replayed journal event.
+  // Disk waits use no CPU.
   cpuBudgetMs: number;
+  // CPU time for one of the dataset worker's checks over the whole dataset,
+  // such as the integrity check: a base plus an allowance per MiB of data.
+  // The app's schema sets their cost per row, so they get their own budget.
+  datasetCheckCpuMs: number;
+  datasetCheckCpuMsPerMiB: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
@@ -34,6 +40,12 @@ export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   // 50 ms each. An operation's statements must start inside evaluationMs, so a
   // legitimate one stays near 1 s; this allows several times that.
   cpuBudgetMs: 5000,
+  // Measured on full 128 MiB datasets on a desktop CPU: the costliest check,
+  // rebuilding 1.4 million rows with six indexes on random keys, used 830 ms
+  // of CPU per MiB. The integrity check of a shop schema with nine indexes
+  // used 23 ms per MiB. The allowance leaves room for a slower machine.
+  datasetCheckCpuMs: 5000,
+  datasetCheckCpuMsPerMiB: 2000,
 });
 
 export interface EvaluateAppOperationInput {
