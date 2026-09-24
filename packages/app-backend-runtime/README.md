@@ -247,7 +247,7 @@ It removes `SharedArrayBuffer` before authored code runs, because its `grow` ret
 A worker thread is enough because evaluation runs only JavaScript and WebAssembly. The dataset guest uses a child process because it also runs SQLite.
 The worker compiles QuickJS once and gives each request a fresh instance with its own WebAssembly memory, so no request reads memory that another request used.
 That memory is capped at 24 MiB. QuickJS uses about 7 MiB of it, so one formula or code step can use about 17 MiB, less its scope.
-QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound. The worker adds about 15 MB to its process when idle and about 28 MB at the cap.
+QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound. The worker adds about 23 MB to its process when idle and about 38 MB at the cap.
 The worker exits after 30 seconds without work, which returns that memory. The next request starts a new one.
 Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten` dependency and pass that file as `entryPath`.
 
