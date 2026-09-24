@@ -48,5 +48,11 @@ export const ACTIVE_LINK_DEPENDENT_GRANT_LIMIT = 1_000;
 // Expired notices each post removes from every list, oldest first.
 export const NOTICE_SWEEP_BATCH = 100;
 // Rows one sender may hold in another person's notice list. Past it, that
-// sender's own oldest rows go first; a sender never removes anyone else's.
+// sender's own oldest rows go first.
 export const NOTICE_ROWS_PER_SENDER = 100;
+// A row removed to make room stays this long as a tombstone, and a list keeps
+// at most this many tombstones, so a computer that pulled within the window
+// drops the row through an ordinary pull. One further behind takes the whole
+// list again.
+export const NOTICE_REMOVED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const NOTICE_REMOVED_ROW_LIMIT = 1_000;

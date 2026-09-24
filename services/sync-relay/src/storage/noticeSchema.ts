@@ -5,24 +5,23 @@ export const NOTICES = "sync_relay_notices";
 const MARKER = "notices-v1";
 
 // One list per person. `change_seq` is the list's change counter and never
-// goes back, so a pull cursor stays valid after rows go. A cursor below
-// `floor_seq`, the newest change of any expired row swept away, missed that
-// row's last change. A cursor below `evicted_seq`, the change at which rows
-// last left to make room, may hold a row the relay no longer has. Either
-// takes the whole list again. The counters are per person so a cursor says
-// nothing about anyone else's notices. `reach_token` digests the person's
-// grants when their notices' access was last checked.
+// goes back, so a pull cursor stays valid after rows go. `floor_seq` is the
+// newest change of any row deleted from the list: a cursor below it missed
+// that change and takes the whole list again. The counters are per person so
+// a cursor says nothing about anyone else's notices. `reach_token` digests
+// the reads that decided the person's access when it was last checked.
 //
 // A notice row names the workspace the recipient may see (`workspace_id`)
 // or the share the recipient reads it through (`recipient_share_id`), never
 // both. `target_json` is null once the recipient lost access to the target.
+// A row removed to make room stays briefly as a tombstone (`removed_at_ms`)
+// with a new change, so each computer drops it through an ordinary pull.
 const NOTICE_SCHEMA = {
   [NOTICE_LISTS]: `CREATE TABLE sync_relay_notice_lists (
   recipient_user_id TEXT NOT NULL PRIMARY KEY
     CHECK (length(CAST(recipient_user_id AS BLOB)) BETWEEN 1 AND 1024),
   change_seq INTEGER NOT NULL CHECK (change_seq BETWEEN 1 AND 9007199254740991),
   floor_seq INTEGER NOT NULL CHECK (floor_seq BETWEEN 0 AND change_seq),
-  evicted_seq INTEGER NOT NULL CHECK (evicted_seq BETWEEN 0 AND change_seq),
   reach_token TEXT CHECK (reach_token IS NULL OR (length(reach_token) = 64 AND reach_token NOT GLOB '*[^0-9a-f]*'))
 ) STRICT`,
   [NOTICES]: `CREATE TABLE sync_relay_notices (
@@ -43,7 +42,9 @@ const NOTICE_SCHEMA = {
   read_at_ms INTEGER CHECK (read_at_ms IS NULL OR read_at_ms BETWEEN 0 AND 9007199254740991),
   dismissed_at_ms INTEGER CHECK (dismissed_at_ms IS NULL OR dismissed_at_ms BETWEEN 0 AND 9007199254740991),
   expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms BETWEEN 0 AND 9007199254740991),
+  removed_at_ms INTEGER CHECK (removed_at_ms IS NULL OR removed_at_ms BETWEEN 0 AND 9007199254740991),
   CHECK ((workspace_id IS NULL) <> (recipient_share_id IS NULL)),
+  CHECK (removed_at_ms IS NULL OR (body = '' AND target_json IS NULL)),
   PRIMARY KEY (recipient_user_id, notice_id),
   UNIQUE (recipient_user_id, change_seq)
 ) STRICT`,

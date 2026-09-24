@@ -11,10 +11,12 @@ import {
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
-import { NOTICE_ROWS_PER_SENDER } from "./storage/limits";
+import { NOTICE_REMOVED_RETENTION_MS, NOTICE_REMOVED_ROW_LIMIT, NOTICE_ROWS_PER_SENDER } from "./storage/limits";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import type { PostNoticeInput } from "./storage/notices";
+import { noticeReachReads, type PostNoticeInput } from "./storage/notices";
+import type { StorageContext } from "./storage/context";
+import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { authorizeShareGrantAction } from "./shareAuthorization";
 import {
   claimWorkspace,
@@ -23,6 +25,8 @@ import {
   countRows,
   countStorageCalls,
   createShare,
+  inspect,
+  inspectDatabase,
   json,
   jsonBody,
   reopenTestStorage,
@@ -35,12 +39,6 @@ import {
   testStorage,
   type HandlerOverrides,
 } from "./testing";
-
-// Counts access checks; every call still runs the real check.
-vi.mock("./shareAuthorization", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./shareAuthorization")>();
-  return { ...actual, authorizeShareGrantAction: vi.fn(actual.authorizeShareGrantAction) };
-});
 
 afterEach(closeTestStorages);
 
@@ -173,6 +171,7 @@ describe("notice list", () => {
         createdAtMs: 10_000,
         readAtMs: null,
         dismissedAtMs: null,
+        removed: false,
       }],
       nextCursor: "1",
       hasMore: false,
@@ -383,7 +382,7 @@ describe("limits on notices from other people", () => {
     expect((await post(h, "ana", notice({ workspaceId: undefined, shareId: "share-0", noticeId: "e" }))).status).toBe(200);
   });
 
-  it("keeps a sender to its share of another person's list, removing only its own rows", async () => {
+  it("keeps a sender to its share of another person's list, removing its own rows first", async () => {
     const { h, storage } = await sharedTrip({
       noticePostRateLimiter: new TokenBucketLimiter(1_000, 1, 10),
     });
@@ -392,8 +391,6 @@ describe("limits on notices from other people", () => {
       expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status).toBe(200);
     }
     await mark(h, "ana", [{ noticeId: "from:owner:n5", mark: "read" }]);
-    // A computer of Ana's holds every row, including n0 and n5.
-    const cursor = (await pull(h, "ana", undefined, 200)).nextCursor;
 
     expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status).toBe(200);
     expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n101" }))).status).toBe(200);
@@ -404,12 +401,56 @@ describe("limits on notices from other people", () => {
     // The read row goes first, then the oldest unread.
     expect(ids).not.toContain("from:owner:n5");
     expect(ids).not.toContain("from:owner:n0");
-    // That computer still holds rows the relay removed, so it takes the
-    // whole list again.
-    const next = await pull(h, "ana", cursor, 200);
-    expect(next.replace).toBe(true);
-    expect(next.notices.map((row) => row.noticeId)).not.toContain("from:owner:n0");
   });
+
+  it("sends a row removed to make room as an ordinary change", async () => {
+    const { h, storage } = await sharedTrip({
+      noticePostRateLimiter: new TokenBucketLimiter(1_000, 1, 10),
+    });
+    for (let index = 0; index < NOTICE_ROWS_PER_SENDER; index += 1) {
+      expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status).toBe(200);
+    }
+    const cursor = (await pull(h, "ana", undefined, 200)).nextCursor;
+
+    expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status).toBe(200);
+    const next = await pull(h, "ana", cursor);
+    expect(next.replace).toBe(false);
+    expect(next.notices.map((row) => [row.noticeId, row.removed, row.body, row.target])).toEqual([
+      ["from:owner:n0", true, "", null],
+      ["from:owner:n100", false, "Finished on is not a date field.", { path: "trip/tasks", automation: "finished-date" }],
+    ]);
+    // A tombstone takes no place in the list and cannot be marked.
+    await mark(h, "ana", [{ noticeId: "from:owner:n0", mark: "read" }]);
+    expect((await pull(h, "ana", next.nextCursor)).notices).toEqual([]);
+    expect((await pullAll(h, "ana")).map((row) => row.noticeId)).not.toContain("from:owner:n0");
+
+    // Once the tombstone expires, only a computer that pulled before it
+    // takes the whole list.
+    clock += NOTICE_REMOVED_RETENTION_MS;
+    stored(storage, "ana", "later");
+    expect((await pull(h, "ana", cursor)).replace).toBe(true);
+    expect((await pull(h, "ana", next.nextCursor)).replace).toBe(false);
+  });
+
+  it("keeps a bounded number of tombstones and starts over only for a cursor older than them", async () => {
+    const { h, storage } = await relay();
+    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "owner", `n${index}`, clock + index);
+    clock += NOTICE_LIST_ROW_LIMIT;
+    // 1,000 posts to a new list leave its head at 1,000.
+    const behind = String(NOTICE_LIST_ROW_LIMIT);
+    stored(storage, "owner", "extra-0");
+    const recent = (await pull(h, "owner", behind)).nextCursor;
+    for (let index = 1; index <= NOTICE_REMOVED_ROW_LIMIT; index += 1) stored(storage, "owner", `extra-${index}`);
+
+    const tombstones = inspect(storagePath(storage), (db) => Number(db.prepare(
+      "SELECT COUNT(*) AS count FROM sync_relay_notices WHERE removed_at_ms IS NOT NULL",
+    ).get()?.count));
+    expect(tombstones).toBe(NOTICE_REMOVED_ROW_LIMIT);
+    expect((await pull(h, "owner", behind)).replace).toBe(true);
+    const fromRecent = await pull(h, "owner", recent, 5);
+    expect(fromRecent.replace).toBe(false);
+    expect(fromRecent.notices[0]).toMatchObject({ removed: true });
+  }, 60_000);
 
   it("makes room in a list full of read rows for anyone who may send", async () => {
     const { h, storage } = await sharedTrip();
@@ -420,13 +461,11 @@ describe("limits on notices from other people", () => {
     clock += NOTICE_LIST_ROW_LIMIT;
 
     expect((await post(h, "owner", notice({ recipientUserId: "ana" }))).status).toBe(200);
-    // A tenth of the list goes at once, oldest first, so the next posts
-    // remove nothing.
     const ids = (await pullAll(h, "ana")).map((row) => row.noticeId);
-    expect(ids).toHaveLength(NOTICE_LIST_ROW_LIMIT - NOTICE_LIST_ROW_LIMIT / 10 + 1);
+    expect(ids).toHaveLength(NOTICE_LIST_ROW_LIMIT);
     expect(ids).toContain("from:owner:automation-failed:run-1");
-    expect(ids).not.toContain(`own-${NOTICE_LIST_ROW_LIMIT / 10 - 1}`);
-    expect(ids).toContain(`own-${NOTICE_LIST_ROW_LIMIT / 10}`);
+    expect(ids).not.toContain("own-0");
+    expect(ids).toContain("own-1");
   });
 
   it("refuses a sender when only other senders' unread rows could make room", async () => {
@@ -456,10 +495,10 @@ describe("limits on notices from other people", () => {
       await post(h, "owner", notice({ kind: "mention", noticeId: id }));
     }
 
-    // The first post takes both marked rows, which leaves room for the
-    // second. The third takes the oldest unread row.
-    expect(countRows(storagePath(storage), "sync_relay_notices")).toBe(NOTICE_LIST_ROW_LIMIT);
-    const ids = new Set((await pullAll(h, "owner")).map((row) => row.noticeId));
+    // Each post takes one row: the two marked rows, then the oldest unread.
+    const live = (await pullAll(h, "owner")).map((row) => row.noticeId);
+    expect(live).toHaveLength(NOTICE_LIST_ROW_LIMIT);
+    const ids = new Set(live);
     expect(["n500", "n700", "n0"].filter((id) => ids.has(id))).toEqual([]);
     expect(["n1", "newest", "newer still", "last"].every((id) => ids.has(id))).toBe(true);
   });
@@ -618,17 +657,17 @@ describe("notices after access ends", () => {
   });
 
   it("checks access again only when the recipient's grants change, once per share", async () => {
-    const { h, shareId } = await sharedTrip();
+    const { h, storage, shareId } = await sharedTrip();
     await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "tasks" }));
     await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "notes", target: { path: "trip/notes" } }));
-    const checks = vi.mocked(authorizeShareGrantAction);
+    const checks = vi.spyOn(storage, "listActiveShareGrantsForRecipient");
     const checksDuring = async (work: () => Promise<unknown>) => {
       const before = checks.mock.calls.length;
       await work();
       return checks.mock.calls.length - before;
     };
 
-    // Both rows come through one share with one grant: one check.
+    // Both rows come through one share: one check.
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
@@ -636,6 +675,79 @@ describe("notices after access ends", () => {
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect((await pull(h, "ana")).notices.map((row) => row.recipientShareId)).toEqual([shareId, shareId]);
+  });
+
+  it("checks each other share once when many notices lose access together", async () => {
+    const { h, storage, shareId } = await sharedTrip({
+      noticePostRateLimiter: new TokenBucketLimiter(1_000, 1, 10),
+    });
+    const tasksShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ana" });
+    for (let index = 0; index < 5; index += 1) {
+      await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}`, target: { path: `trip/tasks/${index}` } }));
+    }
+    const before = (await pull(h, "ana")).nextCursor;
+    expect(storage.revokeShare(shareId, clock)).toBe(true);
+    const checks = vi.spyOn(storage, "listActiveShareGrantsForRecipient");
+
+    const after = await pull(h, "ana", before);
+    // The lost share once, and the one that admits the paths once.
+    expect(checks.mock.calls.map(([share]) => share)).toEqual([shareId, tasksShare]);
+    expect(after.notices.map((row) => row.recipientShareId)).toEqual(Array(5).fill(tasksShare));
+  });
+
+  it("notices when a link grant's parent moves to another share", async () => {
+    const { h, storage, shareId } = await sharedTrip();
+    const benShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ben" });
+    seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret"), access: "view" });
+    expect(seedDependentGrant(storage, {
+      shareId, parentGrantId: "link-1", grantId: "from-link-lee", principalUserId: "lee", createdAtMs: clock,
+    }).ok).toBe(true);
+    expect((await post(h, "owner", notice({ recipientUserId: "lee" }))).status).toBe(200);
+    const before = await pull(h, "lee");
+    expect(before.notices[0]).toMatchObject({ recipientShareId: shareId, target: { path: "trip/tasks" } });
+
+    const db = inspectDatabase(storagePath(storage));
+    db.prepare("UPDATE sync_relay_share_grants SET share_id = ? WHERE grant_id = 'link-1'").run(benShare);
+    db.close();
+    const after = await pull(h, "lee", before.nextCursor);
+    expect(after.notices.map((row) => [row.noticeId, row.target])).toEqual([["from:owner:automation-failed:run-1", null]]);
+  });
+
+  it("digests every read the access check makes", async () => {
+    const { h, storage, shareId } = await sharedTrip();
+    await createShare(h, "owner", WORKSPACE, { paths: ["trip/tasks"], recipientUserId: "ana" });
+    seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret"), access: "view" });
+    seedDependentGrant(storage, {
+      shareId, parentGrantId: "link-1", grantId: "from-link-ana", principalUserId: "ana", createdAtMs: clock,
+    });
+    const context = storage as unknown as StorageContext;
+    const recorded = (run: (recording: StorageContext) => unknown): string[] => {
+      const reads: string[] = [];
+      run(new Proxy(context, {
+        get(target, property, receiver) {
+          const value: unknown = Reflect.get(target, property, receiver);
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            reads.push(JSON.stringify([String(property), args]));
+            return value.apply(target, args);
+          };
+        },
+      }));
+      return reads;
+    };
+
+    const digested = new Set(noticeReachReads(context, "ana").map((read) => JSON.stringify([read.method, read.args])));
+    const grants = storage.listSharesReceivedBy("ana").map(({ grant }) => grant.grantId);
+    expect(grants).toHaveLength(3);
+    for (const grantId of grants) {
+      const principal = { kind: "user" as const, userId: "ana" };
+      const checked = [
+        ...recorded((recording) => readCurrentShareGrant(recording, { grantId, principal })),
+        ...recorded((recording) => authorizeShareGrantAction({ storage: recording, grantId, action: "read", principal })),
+      ];
+      expect(checked.length).toBeGreaterThan(0);
+      expect(checked.filter((read) => !digested.has(read))).toEqual([]);
+    }
   });
 
   it("drops the target of a notice you sent yourself through a share you lost", async () => {

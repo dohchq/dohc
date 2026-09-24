@@ -499,6 +499,9 @@ export interface RelayNotice {
   createdAtMs: number;
   readAtMs: number | null;
   dismissedAtMs: number | null;
+  // The relay removed the row to make room in the list. Drop it; its body
+  // and target are gone.
+  removed: boolean;
 }
 
 export interface RelayNoticePage {
@@ -507,8 +510,8 @@ export interface RelayNoticePage {
   // cursor asks for the whole list.
   nextCursor: string;
   hasMore: boolean;
-  // The page starts the list over, because rows changed after the cursor
-  // were removed or the cursor came from another relay history. Drop every
+  // The page starts the list over, because the cursor is older than the
+  // relay keeps removed rows or came from another relay history. Drop every
   // cached row, keep your own waiting posts and marks, and take this page
   // and the pages after it as the whole list.
   replace: boolean;
