@@ -739,10 +739,11 @@ function validatePublicState(
   if (typeof metadata.dohcMarkdownSourceProjectionSha256 === 'string'
     && metadata.dohcMarkdownSourceProjectionSha256 === sha256Hex(utf8.encode(projectedMarkdown))) {
     if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
+    // A source that does not import as this document is dropped, as the
+    // engine drops it, and the projection stays the document's own.
     const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
     try {
-      if (yDocToMarkdown(source) !== projectedMarkdown) refuse('invalid-schema')
-      preservedSource = metadata.dohcMarkdownSource as string
+      if (yDocToMarkdown(source) === projectedMarkdown) preservedSource = metadata.dohcMarkdownSource as string
     }
     finally { source.destroy() }
   }

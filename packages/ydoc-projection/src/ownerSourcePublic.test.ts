@@ -31,35 +31,35 @@ it('registers the original lexical source moment and refuses a later moment with
   } finally { f.close() }
 })
 
-it('preserved source admits exact owners, ignores stale witnesses, and refuses forged active witnesses', () => {
-  const cases: [string, boolean, (doc: Y.Doc) => void][] = [
-    ['original', true, () => {}],
-    ['stale-after-edit', true, doc => {
+it('preserved source admits exact owners and drops stale and forged witnesses', () => {
+  // name, accepted, keeps the source, edit
+  const cases: [string, boolean, boolean, (doc: Y.Doc) => void][] = [
+    ['original', true, true, () => {}],
+    ['stale-after-edit', true, false, doc => {
       const heading = doc.getXmlFragment('body').get(0) as Y.XmlElement
       ;(heading.get(0) as Y.XmlText).insert(0, 'Edited ')
     }],
-    ['forged-active', false, doc => {
+    ['forged-active', true, false, doc => {
       doc.getMap('meta').set('dohcMarkdownSource', 'Foreign source')
       doc.getMap('meta').set('dohcMarkdownSourceSha256', hash('Foreign source'))
     }],
-    ['forged-stale', true, doc => {
+    ['forged-stale', true, false, doc => {
       doc.getMap('meta').set('dohcMarkdownSource', 'Foreign historical source')
       doc.getMap('meta').set('dohcMarkdownSourceSha256', hash('Foreign historical source'))
       doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', hash('different historical projection'))
     }],
-    ['wrong-source-hash', false, doc => doc.getMap('meta').set('dohcMarkdownSourceSha256', '0'.repeat(64))],
-    ['missing-source', false, doc => doc.getMap('meta').delete('dohcMarkdownSource')],
-    ['source-wrong-type', false, doc => doc.getMap('meta').set('dohcMarkdownSource', { text: 'source' })],
-    ['invalid-witness', false, doc => doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', 'not-a-digest')],
-    ['arbitrary-metadata', false, doc => doc.getMap('meta').set('otherMetadata', 'unexpected')],
+    ['wrong-source-hash', false, false, doc => doc.getMap('meta').set('dohcMarkdownSourceSha256', '0'.repeat(64))],
+    ['missing-source', false, false, doc => doc.getMap('meta').delete('dohcMarkdownSource')],
+    ['source-wrong-type', false, false, doc => doc.getMap('meta').set('dohcMarkdownSource', { text: 'source' })],
+    ['invalid-witness', false, false, doc => doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', 'not-a-digest')],
+    ['arbitrary-metadata', false, false, doc => doc.getMap('meta').set('otherMetadata', 'unexpected')],
   ]
-  const generated = cases.map(([name, accepted, edit]) => {
+  const generated = cases.map(([name, accepted, keepsSource, edit]) => {
     const doc = new Y.Doc({ gc: false })
     try {
       Y.applyUpdate(doc, Uint8Array.from(seed.bytes)); edit(doc)
       const canonical = yDocToMarkdown(doc)
-      const markdown = accepted && doc.getMap('meta').get('dohcMarkdownSourceProjectionSha256') === hash(canonical)
-        ? doc.getMap('meta').get('dohcMarkdownSource') as string : canonical
+      const markdown = keepsSource ? doc.getMap('meta').get('dohcMarkdownSource') as string : canonical
       return { name, accepted, bytes: Array.from(Y.encodeStateAsUpdate(doc)), markdown }
     } finally { doc.destroy() }
   })
@@ -72,7 +72,7 @@ it('preserved source admits exact owners, ignores stale witnesses, and refuses f
     expect(result.kind, row.name).toBe(row.accepted ? 'accepted' : 'refused')
     if (result.kind === 'accepted') expect(result.evidence.projectedMarkdown, row.name).toBe(row.markdown)
     if (row.name === 'stale-after-edit') expect(row.markdown).toContain('Edited Shared')
-    if (row.name === 'forged-stale') expect(row.markdown).toBe(seed.canonical)
+    if (row.name.startsWith('forged-')) expect(row.markdown).toBe(seed.canonical)
   }
 })
 

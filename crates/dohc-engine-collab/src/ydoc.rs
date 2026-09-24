@@ -584,13 +584,15 @@ impl Ydoc {
             return Err(invalid());
         }
         drop(txn);
+        // A well-formed source the engine cannot prove equivalent is not
+        // refused: every projection drops it, as it drops a stale one, so the
+        // engine never writes those bytes.
         if source_fields == 3 {
             let reference = self.markdown_source_reference().ok_or_else(invalid)?;
             let source = self.markdown_source(&reference).ok_or_else(invalid)?;
-            let canonical = self.project_richdoc()?;
-            if reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes())
-                && (source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
-                    || self.preserved_markdown_source(&canonical).is_none())
+            if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+                && reference.projection_sha256
+                    == crate::hex_sha256(self.project_richdoc()?.as_bytes())
             {
                 return Err(invalid());
             }
@@ -1796,8 +1798,9 @@ fn table_starts(lines: &[&str]) -> bool {
 
 /// A GFM table with the number of lines it took: a header row, a delimiter
 /// row with as many cells, then each following line that holds a pipe. A
-/// short row gains empty cells. A row with more cells than the header ends
-/// the table instead of losing its extra cells.
+/// short row gains empty cells, and empty cells past the header are dropped.
+/// A row whose cells past the header hold text ends the table instead of
+/// losing that text, as the desktop importer does.
 fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBlock, usize)> {
     let header = parse_table_row(lines.first()?)?;
     let alignments = parse_table_delimiter(lines.get(1)?)?;
@@ -1807,7 +1810,10 @@ fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBloc
     let mut rows = vec![header];
     let mut consumed = 2;
     while let Some(mut row) = lines.get(consumed).and_then(|line| parse_table_row(line)) {
-        if row.len() > alignments.len() {
+        if row[alignments.len().min(row.len())..]
+            .iter()
+            .any(|cell| !cell.is_empty())
+        {
             break;
         }
         row.resize(alignments.len(), String::new());
@@ -6166,6 +6172,7 @@ mod projection_tests {
         let canonical = doc.project_richdoc().expect("projection");
         let meta = doc.doc.get_or_insert_map(ROOT_META);
         let mut txn = doc.doc.transact_mut();
+        meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
         meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, source);
         meta.insert(
             &mut txn,
@@ -6204,11 +6211,13 @@ mod projection_tests {
                 None,
                 "{forged:?}"
             );
+            // The baseline stays usable; its projection is the document.
             assert!(
                 doc.validate_public_baseline(&doc.encode_full_state())
-                    .is_err(),
+                    .is_ok(),
                 "{forged:?}"
             );
+            assert_eq!(doc.project_richdoc().unwrap(), canonical, "{forged:?}");
         }
     }
 

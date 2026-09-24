@@ -1016,6 +1016,34 @@ mod tests {
             assert_eq!(receipt.local_head_sequence, 0);
         }
     }
+    /// The relay projects each baseline it admits, and the host writes the
+    /// bytes it bootstraps. For an exact, stale, or forged source witness the
+    /// two must be the same bytes, and a forged source is never among them.
+    #[test]
+    fn bootstrap_writes_the_bytes_the_relay_projected_for_each_source_witness() {
+        let rows: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/owner-source/owner-source-public.json"
+        ))
+        .unwrap();
+        for row in rows.into_iter().filter(|row| row["accepted"] == true) {
+            let vector = Vector {
+                name: row["name"].as_str().unwrap().into(),
+                bytes: serde_json::from_value(row["bytes"].clone()).unwrap(),
+                markdown: row["markdown"].as_str().unwrap().into(),
+                registration_accepted: true,
+            };
+            let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
+            let result = run(&mut store, &mut cache, &handle, &vector, &NoFaults);
+            assert!(
+                matches!(result, Ok(BootstrapResult::Bootstrapped(_))),
+                "{}: {result:?}",
+                vector.name
+            );
+            let text:String=store.read_with(|conn|conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='object'",[],|r|r.get(0))).unwrap();
+            assert_eq!(text, vector.markdown, "{}", vector.name);
+            assert!(!text.contains("Foreign"), "{}", vector.name);
+        }
+    }
     #[test]
     fn owner_source_bootstrap_preserves_valid_lexical_markdown() {
         let original: Value = serde_json::from_str(include_str!(
