@@ -967,8 +967,8 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     workspaceId: WORKSPACE_ID,
     path: PATH,
     origin,
-    change: async (state) =>
-      documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }),
+    change: async (state, options) =>
+      documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
   })).resolves.toEqual({ path: PATH, changed: true });
 
   // Now the editor sends its typing and takes the agent's edit.

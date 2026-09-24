@@ -140,6 +140,14 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     // Both edits landed while the renderer still held its batch.
     expect(Date.now()).toBeLessThan(heldUntil);
+    // Turning the paragraph the person is typing in into a heading would
+    // lose their typing, so the edit is refused with what to do instead.
+    await expect(agentCli(temp, "documentEdit", {
+      agent: "e2e-agent",
+      path: "notes/plan.md",
+      find: "The person wrote here.",
+      replacement: "# The person wrote here.",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("ask the person") });
 
     // The renderer resumes, sends its typing, and takes the agent's edits.
     // The person keeps typing where the cursor was.

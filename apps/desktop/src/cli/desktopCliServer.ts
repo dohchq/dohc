@@ -257,7 +257,8 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
-            change: (state) => documentProjection.run({ kind: "edit", state, edit }),
+            change: (state, { keepBlocks }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),

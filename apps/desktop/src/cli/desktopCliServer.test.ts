@@ -287,10 +287,10 @@ describe("desktop CLI workspace context", () => {
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
-    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current)))!);
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true }))!);
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
     // A refusal from the projection reaches the caller.
-    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan."))))
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
       .rejects.toThrow("not in the document");
   });
 

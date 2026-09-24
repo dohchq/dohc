@@ -1284,11 +1284,15 @@ describe("engine Y.Doc IPC adapter", () => {
       });
     }
 
+    const keepBlocksSeen: boolean[] = [];
     const edit = (documentEdit: DocumentEdit) => ({
       workspaceId: "workspace-1",
       path: "notes/a.md",
       origin: agentOrigin,
-      change: async (state: Uint8Array) => documentEditUpdate(state, documentEdit),
+      change: async (state: Uint8Array, { keepBlocks }: { keepBlocks: boolean }) => {
+        keepBlocksSeen.push(keepBlocks);
+        return documentEditUpdate(state, documentEdit, { keepBlocks });
+      },
     });
     const append = edit({ replacement: "After." });
 
@@ -1299,9 +1303,11 @@ describe("engine Y.Doc IPC adapter", () => {
       const opened = await h.ipc.open(sender, openPayload);
       const editor = new Y.Doc();
       Y.applyUpdate(editor, opened.initialUpdate!);
+      keepBlocksSeen.length = 0;
 
       await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true });
 
+      expect(keepBlocksSeen).toEqual([true]);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
       expect(session.applyLocalUpdate).toHaveBeenCalledWith(
         expect.any(Uint8Array),
@@ -1319,6 +1325,16 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
+    it("refuses an edit that would remove a block the person may be typing in", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." })))
+        .rejects.toThrow("Someone has this document open, and this edit would remove a block");
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
     it("applies nothing when the editor's session changes while the edit is computed", async () => {
       const session = editableSession();
       const h = harness(session);
@@ -1327,10 +1343,10 @@ describe("engine Y.Doc IPC adapter", () => {
       const release = deferred<void>();
       const editing = h.ipc.editDocument({
         ...append,
-        change: async (state) => {
+        change: async (state, options) => {
           computing.resolve();
           await release.promise;
-          return documentEditUpdate(state, { replacement: "After." });
+          return documentEditUpdate(state, { replacement: "After." }, options);
         },
       });
       await computing.promise;
@@ -1345,12 +1361,15 @@ describe("engine Y.Doc IPC adapter", () => {
       const trace: string[] = [];
       const session = editableSession(trace);
       const h = harness(session);
+      keepBlocksSeen.length = 0;
 
       await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." }))).resolves.toEqual({
         path: "notes/a.md",
         changed: true,
       });
 
+      // Nobody can type in it, so a block may change kind.
+      expect(keepBlocksSeen).toEqual([false]);
       expect(trace).toEqual(["apply", "settle", "close"]);
       expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.");

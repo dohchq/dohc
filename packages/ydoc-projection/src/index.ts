@@ -22,6 +22,7 @@ export { codeBlockFence } from "./markdown-fence.js";
 export {
   documentEditUpdate,
   settledDocumentMarkdown,
+  type DocumentEditOptions,
   documentMarkdown,
   type DocumentEdit,
 } from "./document-edit.js";

@@ -144,8 +144,12 @@ export interface LiveDocumentEdit {
   workspaceId: string;
   /** Validated and normalized; resolved again to the path sessions use. */
   path: string;
-  /** The update that makes the edit against `state`, the document's encoded current state, or null for no change. */
-  change(state: Uint8Array): Promise<Uint8Array | null>;
+  /**
+   * The update that makes the edit against `state`, the document's encoded
+   * current state, or null for no change. `keepBlocks` says someone may be
+   * typing in the document.
+   */
+  change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
   origin: LiveDocumentEditOrigin;
 }
 
@@ -719,9 +723,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   /**
    * Applies a main-side edit to a live document. The editor session that
-   * holds the document applies it and shows it to the person. With no editor
-   * open, a session opened for this edit alone applies and settles it, and an
-   * editor that opens meanwhile waits for that session to close.
+   * holds the document applies it and shows it to the person, and the edit
+   * may only change text inside blocks and add blocks, so what the person
+   * types meanwhile survives. With no editor open, a session opened for this
+   * edit alone applies and settles it, and an editor that opens meanwhile
+   * waits for that session to close.
    */
   async editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }> {
     const authority = this.#acquireWorkspace(input.workspaceId);
@@ -786,7 +792,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (owned.ownerHandoff) throw new Error(`dohc is handing ${path} to its live session, and nothing changed. Try again.`);
     };
     assertSame();
-    return await applyDocumentEdit(owned.provider, path, input, { assertSame, show: owned.show });
+    return await applyDocumentEdit(owned.provider, path, input, {
+      keepBlocks: true,
+      assertSame,
+      show: owned.show,
+    });
   }
 
   async #editUnheld(
@@ -812,6 +822,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         throw new Error(`${path} is not a Markdown document.`);
       }
       changed = await applyDocumentEdit(provider, path, input, {
+        keepBlocks: false,
         assertSame: () => undefined,
         show: () => undefined,
       });
@@ -1062,11 +1073,13 @@ async function applyDocumentEdit(
   provider: EngineYDocSessionProvider,
   path: string,
   input: LiveDocumentEdit,
-  session: { assertSame(): void; show(update: Uint8Array): void },
+  session: { keepBlocks: boolean; assertSame(): void; show(update: Uint8Array): void },
 ): Promise<boolean> {
   const settleNow = provider.settleNow;
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
-  const update = await input.change(Y.encodeStateAsUpdate(provider.doc));
+  const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
+    keepBlocks: session.keepBlocks,
+  });
   if (update === null) return false;
   session.assertSame();
   let armed = false;

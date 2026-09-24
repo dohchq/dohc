@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import * as Y from 'yjs'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
+  DOCUMENT_OPEN_REFUSAL,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
@@ -10,11 +11,14 @@ import {
 } from './document-edit.js'
 import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from './import-export.js'
 
+const open = { keepBlocks: true }
+const closed = { keepBlocks: false }
+
 const state = (doc: Y.Doc) => Y.encodeStateAsUpdate(doc)
 const markdownOf = (doc: Y.Doc) => documentMarkdown(state(doc))
 
-function edited(doc: Y.Doc, edit: DocumentEdit): Y.Doc {
-  const update = documentEditUpdate(state(doc), edit)
+function edited(doc: Y.Doc, edit: DocumentEdit, options = open): Y.Doc {
+  const update = documentEditUpdate(state(doc), edit, options)
   if (update) Y.applyUpdate(doc, update)
   return doc
 }
@@ -81,29 +85,24 @@ describe('documentEditUpdate', () => {
       .toBe('First line.\n\n')
   })
 
-  test('removes a block', () => {
-    const doc = edited(markdownToYDoc('Keep.\n\nDrop this.\n\nKeep too.'), { find: '\n\nDrop this.', replacement: '' })
-    expect(markdownOf(doc)).toBe('Keep.\n\nKeep too.')
-  })
-
   test('refuses text it cannot find once', () => {
     const doc = state(markdownToYDoc('Tea.\n\nTea.'))
-    expect(() => documentEditUpdate(doc, { find: 'Coffee', replacement: 'x' }))
+    expect(() => documentEditUpdate(doc, { find: 'Coffee', replacement: 'x' }, open))
       .toThrow('not in the document')
-    expect(() => documentEditUpdate(doc, { find: 'Tea', replacement: 'x' }))
+    expect(() => documentEditUpdate(doc, { find: 'Tea', replacement: 'x' }, open))
       .toThrow('occurs 2 times')
   })
 
   test('refuses an edit of the frontmatter', () => {
     const doc = state(markdownToYDoc('---\ntitle: Trip\n---\n\nBody.'))
-    expect(() => documentEditUpdate(doc, { find: 'title: Trip', replacement: 'title: Tour' }))
+    expect(() => documentEditUpdate(doc, { find: 'title: Trip', replacement: 'title: Tour' }, open))
       .toThrow('frontmatter')
   })
 
   test('answers null when nothing changes', () => {
     const doc = state(markdownToYDoc('Same.'))
-    expect(documentEditUpdate(doc, { find: 'Same', replacement: 'Same' })).toBeNull()
-    expect(documentEditUpdate(doc, { replacement: '  ' })).toBeNull()
+    expect(documentEditUpdate(doc, { find: 'Same', replacement: 'Same' }, open)).toBeNull()
+    expect(documentEditUpdate(doc, { replacement: '  ' }, open)).toBeNull()
   })
 
   // A block written by the engine's own Markdown projection can lack
@@ -154,7 +153,7 @@ describe('an edit merged with a person typing', () => {
   function merge(markdown: string, blockIndex: number, typed: string, edit: DocumentEdit): string {
     const { person, agent } = replicas(markdown)
     const typing = typeAtEnd(person, blockIndex, typed)
-    const update = documentEditUpdate(state(agent), edit)!
+    const update = documentEditUpdate(state(agent), edit, open)!
     Y.applyUpdate(person, update)
     Y.applyUpdate(agent, update)
     Y.applyUpdate(agent, typing)
@@ -186,7 +185,29 @@ describe('an edit merged with a person typing', () => {
       find: 'Budget: 400 dollars',
       replacement: 'Budget:\n\n400 dollars',
     })
-    expect(merged).toContain('PERSON')
-    expect(merged).toContain('400 dollars')
+    expect(merged).toBe('Budget: PERSON\n\n400 dollars')
+  })
+})
+
+describe('an edit while someone has the document open', () => {
+  test.each([
+    ['removes a block', 'Keep.\n\nDrop this.\n\nKeep too.', { find: '\n\nDrop this.', replacement: '' }, 'Keep.\n\nKeep too.'],
+    ["changes a block's kind", 'Budget: 400 dollars', { find: 'Budget: 400 dollars', replacement: '# Budget: 400 dollars' }, '# Budget: 400 dollars'],
+    ['joins two blocks', 'Budget:\n\n400 dollars', { find: 'Budget:\n\n400', replacement: 'Budget: 400' }, 'Budget: 400 dollars'],
+    ['removes a list item', '- one\n- two\n- three', { find: '- two\n', replacement: '' }, '- one\n- three'],
+  ])('refuses one that %s, and applies it when nobody has it open', (_case, markdown, edit, whenClosed) => {
+    expect(() => documentEditUpdate(state(markdownToYDoc(markdown)), edit, open)).toThrow(DOCUMENT_OPEN_REFUSAL)
+    expect(markdownOf(edited(markdownToYDoc(markdown), edit, closed))).toBe(whenClosed)
+  })
+
+  test('removes a leaf block, which nobody can type into', () => {
+    expect(markdownOf(edited(markdownToYDoc('Above.\n\n---\n\nBelow.'), { find: '\n\n---', replacement: '' })))
+      .toBe('Above.\n\nBelow.')
+  })
+
+  test('tells the agent what to do instead', () => {
+    expect(DOCUMENT_OPEN_REFUSAL).toContain('change only the text inside blocks and add new blocks')
+    expect(DOCUMENT_OPEN_REFUSAL).toContain('ask the person')
+    expect(DOCUMENT_OPEN_REFUSAL).toContain('retry after they close the document')
   })
 })

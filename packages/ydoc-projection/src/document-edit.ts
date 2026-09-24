@@ -27,10 +27,27 @@ import {
 
 const BLOCK_SEPARATOR = '\n\n'
 
+// What an agent can do when its edit would lose what a person types.
+export const DOCUMENT_OPEN_REFUSAL =
+  'Someone has this document open, and this edit would remove a block, join two blocks, ' +
+  'or change a block\'s kind, such as a paragraph into a heading. Anything they type into ' +
+  'that block meanwhile would be lost, so nothing changed. Instead, change only the text ' +
+  'inside blocks and add new blocks; ask the person to make this change; or retry after ' +
+  'they close the document.'
+
 export interface DocumentEdit {
   /** Markdown that occurs exactly once in the document. Omit it to add `replacement` at the end. */
   find?: string
   replacement: string
+}
+
+export interface DocumentEditOptions {
+  /**
+   * Someone may be typing in the document. Text typed into a block survives
+   * a change to the block's text, but not the block's removal or a change of
+   * its kind, so such an edit is refused.
+   */
+  keepBlocks: boolean
 }
 
 interface Layout {
@@ -64,7 +81,11 @@ export function settledDocumentMarkdown(markdown: string): string {
  * when the edit changes nothing. Throws when the edit cannot apply; the
  * message says what to do instead.
  */
-export function documentEditUpdate(state: Uint8Array, edit: DocumentEdit): Uint8Array | null {
+export function documentEditUpdate(
+  state: Uint8Array,
+  edit: DocumentEdit,
+  options: DocumentEditOptions,
+): Uint8Array | null {
   return withDoc(state, (doc) => {
     // Reading the document can delete elements the schema refuses. That
     // happens before the edit starts recording, so the update never carries it.
@@ -74,11 +95,18 @@ export function documentEditUpdate(state: Uint8Array, edit: DocumentEdit): Uint8
     const record = (next: Uint8Array): void => {
       update = update === null ? next : Y.mergeUpdates([update, next])
     }
+    let removesBlock = false
     doc.on('update', record)
     try {
-      doc.transact(() => change(doc))
+      doc.transact((transaction) => {
+        change(doc)
+        if (options.keepBlocks) removesBlock = removesTextBlock(transaction)
+      })
     } finally {
       doc.off('update', record)
+    }
+    if (removesBlock) {
+      throw new Error(DOCUMENT_OPEN_REFUSAL)
     }
     return update
   })
@@ -92,6 +120,21 @@ function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {
   } finally {
     doc.destroy()
   }
+}
+
+// Whether the transaction deleted a type that holds text or could: every
+// XmlText, and every element except a leaf such as an image or a line break.
+// Deleting characters inside a text keeps what others type around them.
+function removesTextBlock(transaction: Y.Transaction): boolean {
+  const schema = getDohcProseMirrorSchema()
+  let removes = false
+  Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
+    if (!(struct instanceof Y.Item) || !(struct.content instanceof Y.ContentType)) return
+    const type = struct.content.type
+    const leaf = type instanceof Y.XmlElement && schema.nodes[type.nodeName]?.isLeaf === true
+    if (!leaf) removes = true
+  })
+  return removes
 }
 
 function layoutOf(doc: Y.Doc): Layout {
