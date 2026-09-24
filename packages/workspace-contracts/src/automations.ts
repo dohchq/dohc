@@ -1,3 +1,4 @@
+import { tokenizer, tokTypes } from "acorn";
 import {
   CORE_SCHEMA,
   defineMappingTag,
@@ -46,9 +47,10 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //   it has no "=".
 // - Message text (`notify`, `post`, `direct-message`, `wake-agent`) is a
 //   template. `{expression}` inserts a value, and `{{` and `}}` write one
-//   brace. An expression ends at the first "}" outside its own braces,
-//   strings, template literals, regular expressions, and comments. To start
-//   a message with "=", write `{"="}`.
+//   brace. An expression ends at the first "}" that JavaScript's tokenizer
+//   reads outside the expression's own braces, so a "}" inside a string,
+//   template literal, regular expression, or comment does not end it. To
+//   start a message with "=", write `{"="}`.
 // - All other text, such as a name or a reference, cannot start with "=".
 //
 // The writer quotes every formula. Quote a formula you write by hand when it
@@ -179,8 +181,11 @@ type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
 
 const AUTOMATION_SCHEDULE_FREQUENCIES = ["hour", "day", "weekday", "week", "month"] as const;
 
-// A schedule runs in `timezone`, an IANA name such as "Europe/London".
-// `weekday` runs Monday to Friday there. `at` is "HH:MM" on a 24-hour clock,
+// A schedule runs in `timezone`, an IANA time zone name or alias in any
+// letter case, such as "Europe/London" or "Asia/Calcutta". The scheduler
+// resolves it through Intl.DateTimeFormat. A fixed offset such as "+08:00"
+// is refused because it ignores daylight saving time. `weekday` runs Monday
+// to Friday in the schedule's time zone. `at` is "HH:MM" on a 24-hour clock,
 // or ":MM" past each hour for an hourly schedule. `days` are in calendar
 // order. A monthly day past the end of a shorter month, such as 31 in April,
 // runs on that month's last day. Without `at` in the file, a schedule runs at
@@ -520,8 +525,15 @@ function readPath(value: unknown, path: string, issues: Issues): string | null {
   return text;
 }
 
+// A condition is kept as written. Leading spaces do not hide a "=" from the
+// check, because the expression would still start with one.
 function readCondition(value: unknown, path: string, issues: Issues): string | null {
-  return readText(value, path, MAX_EXPRESSION_LENGTH, issues);
+  const text = readText(value, path, MAX_EXPRESSION_LENGTH, issues);
+  if (text !== null && text.trimStart().startsWith("=")) {
+    issues.push({ code: "unexpected-formula-marker", path });
+    return null;
+  }
+  return text;
 }
 
 function readTemplate(value: unknown, path: string, issues: Issues): string | null {
@@ -664,15 +676,13 @@ function readFieldValues(
   return values;
 }
 
-// An IANA name, spelled as IANA spells it. A fixed offset such as "+08:00"
-// ignores daylight saving time, so it is refused. Intl may resolve a name to
-// an alias from its own data, such as Asia/Kolkata to Asia/Calcutta, so only
-// a difference in letter case counts as a misspelling.
+// A name or alias Intl knows, in any letter case. Every fixed offset, such
+// as "+08:00", starts with a sign.
 function isTimeZoneName(value: string): boolean {
-  if (!value.split("/").every((segment) => /^[A-Z]/.test(segment))) return false;
+  if (value.startsWith("+") || value.startsWith("-")) return false;
   try {
-    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
-    return resolved === value || resolved.toLowerCase() !== value.toLowerCase();
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
   } catch {
     return false;
   }
@@ -1058,108 +1068,28 @@ export function parseAutomationsFile(text: string): AutomationsFileParseResult {
   return loaded.status === "read" ? { status: "read", entries: readEntries(loaded.list) } : loaded;
 }
 
-// Words after which "/" starts a regular expression instead of dividing.
-const WORDS_BEFORE_REGEX = new Set([
-  "await",
-  "case",
-  "delete",
-  "do",
-  "else",
-  "in",
-  "instanceof",
-  "new",
-  "of",
-  "return",
-  "throw",
-  "typeof",
-  "void",
-  "yield",
-]);
-const WORD_CHARACTER = /[\p{ID_Continue}$‌‍]/u;
-
-function quotedEnd(source: string, start: number): number {
-  const quote = source[start];
-  for (let index = start + 1; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "\\") index += 1;
-    else if (char === quote) return index + 1;
-    else if (char === "\n") return -1;
-  }
-  return -1;
-}
-
-function templateLiteralEnd(source: string, start: number): number {
-  for (let index = start + 1; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "\\") {
-      index += 1;
-    } else if (char === "`") {
-      return index + 1;
-    } else if (char === "$" && source[index + 1] === "{") {
-      const end = expressionEnd(source, index + 2);
-      if (end === -1) return -1;
-      index = end;
-    }
-  }
-  return -1;
-}
-
-function regexEnd(source: string, start: number): number {
-  let inClass = false;
-  for (let index = start + 1; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "\\") {
-      index += 1;
-    } else if (char === "\n") {
-      return -1;
-    } else if (char === "[" || char === "]") {
-      inClass = char === "[";
-    } else if (char === "/" && !inClass) {
-      let end = index + 1;
-      while (end < source.length && WORD_CHARACTER.test(source[end]!)) end += 1;
-      return end;
-    }
-  }
-  return -1;
-}
-
 // The index of the "}" that ends a JavaScript expression starting at
-// `start`, or -1. Braces inside strings, template literals, regular
-// expressions, comments, and nested braces do not count.
+// `start`, or -1. acorn's tokenizer skips strings, template literals,
+// regular expressions, and comments, and tells a regular expression from a
+// division. It reads one token at a time, so text after the expression is
+// never scanned. acorn reads the word after "." as a property name but not
+// the word after "?.", so the scan reads each "?." as " .", which has the
+// same length. "?.5" is a conditional before a number and stays.
 function expressionEnd(source: string, start: number): number {
+  const scanned = source.slice(start).replace(/\?\.(?!\d)/gu, " .");
   let depth = 0;
-  let regexAllowed = true;
-  let index = start;
-  while (index !== -1 && index < source.length) {
-    const char = source[index]!;
-    const next = source[index + 1];
-    if (/\s/u.test(char)) {
-      index += 1;
-    } else if (char === "/" && next === "/") {
-      const newline = source.indexOf("\n", index);
-      index = newline === -1 ? -1 : newline;
-    } else if (char === "/" && next === "*") {
-      const close = source.indexOf("*/", index + 2);
-      index = close === -1 ? -1 : close + 2;
-    } else if (char === '"' || char === "'" || char === "`" || (char === "/" && regexAllowed)) {
-      index =
-        char === "`" ? templateLiteralEnd(source, index)
-        : char === "/" ? regexEnd(source, index)
-        : quotedEnd(source, index);
-      regexAllowed = false;
-    } else if (WORD_CHARACTER.test(char)) {
-      let end = index + 1;
-      while (end < source.length && WORD_CHARACTER.test(source[end]!)) end += 1;
-      regexAllowed = WORDS_BEFORE_REGEX.has(source.slice(index, end));
-      index = end;
-    } else if (char === "}" && depth === 0) {
-      return index;
-    } else {
-      if (char === "{") depth += 1;
-      if (char === "}") depth -= 1;
-      regexAllowed = char !== ")" && char !== "]" && char !== "}";
-      index += 1;
+  try {
+    for (const token of tokenizer(scanned, { ecmaVersion: "latest" })) {
+      if (token.type === tokTypes.braceL || token.type === tokTypes.dollarBraceL) {
+        depth += 1;
+      } else if (token.type === tokTypes.braceR) {
+        if (depth === 0) return start + token.start;
+        depth -= 1;
+      }
     }
+  } catch {
+    // An unterminated string, template literal, regular expression, or
+    // comment.
   }
   return -1;
 }
@@ -1351,7 +1281,8 @@ function sameData(left: unknown, right: unknown): boolean {
  * invalid entries with the data they were read with, and a blank line
  * between entries. Refuses text that does not read back as the same entries,
  * such as a file over MAX_AUTOMATIONS_FILE_BYTES or an automation the parser
- * would turn off.
+ * would turn off. An invalid entry with a key written twice is refused with
+ * its `duplicate-key` diagnostics, because YAML keeps only one of the values.
  */
 export function writeAutomationsFile(entries: readonly AutomationEntry[]): AutomationsFileWriteResult {
   const header = `version: ${AUTOMATIONS_FILE_VERSION}\nautomations:`;
@@ -1372,8 +1303,15 @@ export function writeAutomationsFile(entries: readonly AutomationEntry[]): Autom
   const reread = readEntries(loaded.list);
   const diagnostics = entries.flatMap((entry, index): AutomationDiagnostic[] => {
     const again = reread[index];
-    const changed = [{ code: "changed-on-reread" as const, path: pointer("/automations", index) }];
-    if (entry.status === "invalid") return sameData(loaded.list[index], entry.raw) ? [] : changed;
+    const path = pointer("/automations", index);
+    const changed = [{ code: "changed-on-reread" as const, path }];
+    if (entry.status === "invalid") {
+      if (sameData(loaded.list[index], entry.raw)) return [];
+      // Paths follow the entry's place in this write, not where it was read.
+      const repeated: Issues = [];
+      reportRepeatedKeys(entry.raw, path, repeated);
+      return repeated.length > 0 ? repeated : changed;
+    }
     if (again?.status === "invalid") return again.diagnostics;
     return again !== undefined && sameData(again.automation, entry.automation) ? [] : changed;
   });

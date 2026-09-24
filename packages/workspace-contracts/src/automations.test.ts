@@ -465,9 +465,15 @@ describe("the checked writer", () => {
     ).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
   });
 
-  it("refuses to write back an invalid automation whose repeated key it would drop", () => {
-    const parsed = entries(automationsFile("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1, X: 2}}]"));
-    expect(refusal(parsed)).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
+  it("refuses an invalid automation with a repeated key, naming the key where it is written", () => {
+    const parsed = entries(
+      automationsFile(
+        "id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]",
+        "id: b\nname: B\nwhen: record-added\ndo: [{set: {X: 1, X: 2}}]",
+      ),
+    );
+    expect(refusal(parsed)).toEqual([{ code: "duplicate-key", path: "/automations/1/do/0/set/X" }]);
+    expect(refusal(parsed.slice(1))).toEqual([{ code: "duplicate-key", path: "/automations/0/do/0/set/X" }]);
   });
 });
 
@@ -539,6 +545,13 @@ describe("values, conditions, and templates", () => {
     });
   });
 
+  it("keeps a condition exactly as written", () => {
+    const [automation] = validAutomations(
+      automationsFile("id: a\nname: A\nwhen: record-added\nif: '  record.Done '\ndo: [{set: {X: 1}}]"),
+    );
+    expect(automation?.if).toBe("  record.Done ");
+  });
+
   it("reads a formula in to: as the value to compare, not a condition", () => {
     const [automation] = validAutomations(
       automationsFile("id: a\nname: A\nwhen: {field-changed: Due, to: '=record.Due > today()'}\ndo: [{set: {X: 1}}]"),
@@ -601,6 +614,30 @@ describe("values, conditions, and templates", () => {
       { kind: "text", text: "Hi " },
       { kind: "expression", expression },
       { kind: "text", text: "!" },
+    ]);
+  });
+
+  it.each([
+    ["record.return / 2", "a keyword used as a property"],
+    ["record.in / 2", "the in keyword used as a property"],
+    ["record?.of / 2", "of after optional chaining"],
+    ["record?.return / 2", "a keyword after optional chaining"],
+    ["record.Done ?.5 : 1 / 2", "a conditional before a number"],
+    ["1. / 2", "a number that ends in a point"],
+    ["a++ / 2", "a postfix increment"],
+    ["a-- / 2", "a postfix decrement"],
+  ])("reads / after %s (%s) as a division", (expression) => {
+    expect(automationTextParts(`{${expression}} and {b / c}`)).toEqual([
+      { kind: "expression", expression },
+      { kind: "text", text: " and " },
+      { kind: "expression", expression: "b / c" },
+    ]);
+  });
+
+  it("ends each expression at its own brace", () => {
+    expect(automationTextParts("{x.of / 2}{y}")).toEqual([
+      { kind: "expression", expression: "x.of / 2" },
+      { kind: "expression", expression: "y" },
     ]);
   });
 
@@ -795,6 +832,21 @@ const AUTOMATION_CASES: AutomationCase[] = [
     name: "a condition written as a formula",
     item: "id: a\nname: A\nwhen: record-added\nif: =record.Done\ndo: [{set: {X: 1}}]",
     expected: [{ code: "unexpected-formula-marker", path: at("/if") }],
+  },
+  {
+    name: "a condition written as a formula after a space",
+    item: "id: a\nname: A\nwhen: record-added\nif: ' =record.Done'\ndo: [{set: {X: 1}}]",
+    expected: [{ code: "unexpected-formula-marker", path: at("/if") }],
+  },
+  {
+    name: "a find condition written as a formula after a space",
+    item: withStep("find: ' =record.Done'\nas: open"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/find") }],
+  },
+  {
+    name: "a starts-matching condition written as a formula after a space",
+    item: "id: a\nname: A\nwhen: {starts-matching: ' =record.Late'}\ndo: [{set: {X: 1}}]",
+    expected: [{ code: "unexpected-formula-marker", path: at("/when/starts-matching") }],
   },
   {
     name: "message text written as a formula",
@@ -1068,14 +1120,26 @@ describe("automations.yaml diagnostics", () => {
     ]);
   });
 
-  it.each(["UTC", "Etc/UTC", "Etc/GMT+8", "Europe/London", "Asia/Kolkata", "Asia/Calcutta", "Europe/Kyiv"])(
+  it.each([
+    "UTC",
+    "Etc/UTC",
+    "Etc/GMT+8",
+    "Europe/London",
+    "Asia/Kolkata",
+    "Asia/Calcutta",
+    "Europe/Kyiv",
+    "US/Pacific",
+    "ASIA/KOLKATA",
+    "europe/london",
+    "Utc",
+  ])(
     "accepts the time zone %s",
     (timezone) => {
       expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([]);
     },
   );
 
-  it.each(["+08:00", "-05:00", "europe/london", "EUROPE/LONDON", "Utc", "asia/kolkata"])(
+  it.each(["+08:00", "-05:00", "+0800", "UTC+8", "Mars/Olympus"])(
     "refuses the time zone %s",
     (timezone) => {
       expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([
