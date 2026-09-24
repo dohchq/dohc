@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./automations": "./src/automations.ts",
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./chat-mentions": "./src/chatMentions.ts",
