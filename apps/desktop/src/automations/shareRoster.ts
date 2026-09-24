@@ -6,15 +6,7 @@ import {
   SHARE_ACCESS_VALUES,
 } from "@dohc/security-contract/share-selector";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import {
-  shareImpactOf,
-  type ReachAutomation,
-  type ReachRoster,
-  type ReachShare,
-  type RosterGrant,
-  type RosterProblem,
-  type StoppedStep,
-} from "./automationReach";
+import type { ReachRoster, RosterGrant, RosterProblem } from "./automationReach";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
 // last listed them. Grants live only on the relay, and the reach check
@@ -534,13 +526,5 @@ export function createShareRosters(dependencies: {
       return known(workspaceId, stateFor(workspaceId), false);
     },
 
-    /** Which automation steps would stop if this share were created. */
-    async shareImpact(
-      workspaceId: string,
-      share: ReachShare,
-      automations: readonly ReachAutomation[],
-    ): Promise<StoppedStep[]> {
-      return shareImpactOf(await forRun(workspaceId), share, automations);
-    },
   };
 }

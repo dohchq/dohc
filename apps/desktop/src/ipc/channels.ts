@@ -284,6 +284,8 @@ export const CHANNELS = {
   listAutomationHolds: "desktop:list-automation-holds",
   resetAutomationHolds: "desktop:reset-automation-holds",
   revealAutomationHolds: "desktop:reveal-automation-holds",
+  dismissAutomationStops: "desktop:dismiss-automation-stops",
+  automationShareImpact: "desktop:automation-share-impact",
   automationHoldsChanged: "desktop:automation-holds-changed",
   listCollectionFieldMarks: "desktop:list-collection-field-marks",
   collectionAutomationsChanged: "desktop:collection-automations-changed",

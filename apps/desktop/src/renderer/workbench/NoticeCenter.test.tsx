@@ -80,6 +80,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
       {...(props.onResetAutomationHolds ? { onResetAutomationHolds: props.onResetAutomationHolds } : {})}
       {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
+      {...(props.automationStops ? { automationStops: props.automationStops } : {})}
+      {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
     />
   );
 }
@@ -174,6 +176,33 @@ describe("automation failure notices", () => {
     );
     await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
+  });
+
+  it("names every automation a share stopped in one notice, and dismisses them together", async () => {
+    const stop = (automation: string, name: string, target: string, action: "change" | "find") => ({
+      automationId: `collection:Projects/Trip#${automation}`, automationName: name, definitionHash: "0123456789abcdef",
+      step: 0, seq: 4, collection: "Trip", target, action, stoppedFor: "ana@dohc.test",
+    });
+    const onDismissAutomationStops = vi.fn();
+    const spend = stop("spend", "Spend", "Budget", "change");
+    const { unmount } = renderNotices({ automationStops: [spend], onDismissAutomationStops });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const one = await screen.findByTestId("notice-automation-stops");
+    expect(one.textContent).toContain('Automation "Spend" stopped');
+    expect(one.textContent).toContain("ana@dohc.test cannot edit Budget. Open Projects/Trip/automations.yaml to change the step.");
+    await userEvent.click(within(one).getByRole("button", { name: "Dismiss notice" }));
+    expect(onDismissAutomationStops).toHaveBeenCalledWith([spend]);
+    unmount();
+
+    const stops = [spend, stop("log", "Log", "Archive", "find")];
+    renderNotices({ automationStops: stops, onDismissAutomationStops });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const many = await screen.findByTestId("notice-automation-stops");
+    expect(many.textContent).toContain("2 automations stopped");
+    expect(many.textContent).toContain(
+      '"Spend" in Trip: ana@dohc.test cannot edit Budget. "Log" in Trip: ana@dohc.test cannot view Archive.',
+    );
+    expect(screen.getAllByTestId("notice-automation-stops")).toHaveLength(1);
   });
 });
 

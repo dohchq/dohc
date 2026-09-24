@@ -27,7 +27,13 @@ import {
   subscriptionFor,
   unsupportedReason,
 } from "./automationPlan";
-import { checkAutomationReach, type ReachCollection, type ReachRoster } from "./automationReach";
+import {
+  checkAutomationReach,
+  shareImpactOf,
+  type ReachCollection,
+  type ReachRoster,
+  type ReachShare,
+} from "./automationReach";
 import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
@@ -110,7 +116,10 @@ export interface CollectionAutomationsOptions {
   store: AutomationRunStore;
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
   onFailuresChanged(): void;
-  /** A step started or stopped waiting for a current editor: the hold notices re-read. */
+  /**
+   * A step started or stopped waiting for a current editor, or a share
+   * stopped a step or someone dismissed its notice: the reach notices re-read.
+   */
   onHoldsChanged(): void;
   /**
    * The automations dohc read from the workspace changed, or a step's reach
@@ -157,7 +166,10 @@ export interface CollectionFieldMark {
   automations: string[];
 }
 
-/** A step that waits for a current editor to allow it, for its notice. */
+/**
+ * A step whose reach changed, for its notice: one that waits for a current
+ * editor to allow it, or one a narrower share stopped.
+ */
 export interface CollectionAutomationHold {
   automationId: string;
   automationName: string;
@@ -168,19 +180,28 @@ export interface CollectionAutomationHold {
   collection: string;
   target: string;
   action: "change" | "find";
-  /** The editor whose reach stopped the step before. */
+  /** The editor whose reach stopped the step. */
   stoppedFor: string | null;
 }
 
-/** Steps waiting for a current editor, and whether dohc could read which steps were allowed. */
+/**
+ * Steps waiting for a current editor, steps a narrower share stopped, and
+ * whether dohc could read which steps were allowed.
+ */
 export interface CollectionAutomationHolds {
   holds: CollectionAutomationHold[];
+  stops: CollectionAutomationStop[];
   /** reach.json cannot be read, so every automation waits until someone resets the holds. */
   unreadable: boolean;
 }
 
 export const UNREADABLE_REACH =
   "dohc cannot read which automation steps were allowed, so every automation waits. Reset holds in Notices to allow each step again.";
+/** A switched-on step a share stopped: the same facts as a hold. */
+export type CollectionAutomationStop = CollectionAutomationHold;
+
+/** A step a share would stop, for the share dialog to say before the share is made. */
+export type CollectionAutomationShareStop = Pick<CollectionAutomationHold, "automationName" | "collection" | "target" | "action">;
 
 export interface CollectionAutomationRun {
   claimId: string;
@@ -257,7 +278,7 @@ export class CollectionAutomations {
    * waiting claim costs nothing but its release.
    */
   private readonly waitingFor = new Map<string, WaitReason>();
-  /** The held steps the notices last showed. */
+  /** The held and stopped steps the notices last showed. */
   private publishedHolds: string[] = [];
   /**
    * The saved verdicts could not be read. No step can be treated as seen
@@ -470,7 +491,7 @@ export class CollectionAutomations {
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
   holdState(): CollectionAutomationHolds {
-    return { holds: this.holds(), unreadable: this.verdictsUnreadable };
+    return { holds: this.holds(), stops: this.stops(), unreadable: this.verdictsUnreadable };
   }
 
   /**
@@ -508,21 +529,81 @@ export class CollectionAutomations {
 
   /** Every step that waits for a current editor to allow it, one per step. */
   holds(): CollectionAutomationHold[] {
-    const holds: CollectionAutomationHold[] = [];
+    return this.stepsWhere((verdict) => verdict.verdict === "held");
+  }
+
+  /** Every step a narrower share stopped whose notice nobody dismissed, one per step. */
+  stops(): CollectionAutomationStop[] {
+    return this.stepsWhere((verdict) => verdict.verdict === "stopped" && verdict.narrowed === true);
+  }
+
+  /**
+   * Someone dismissed the notice for these stopped steps. Each names the
+   * verdict they saw by `seq`, so a step that stopped again since keeps its
+   * notice.
+   */
+  async dismissStops(seen: ReadonlyArray<{ automationId: string; definitionHash: string; step: number; seq: number }>): Promise<void> {
+    await this.updateVerdicts(() => {
+      for (const { automationId, definitionHash: hash, step, seq } of seen) {
+        const key = reachVerdictKey(automationId, hash, step);
+        const stored = this.verdicts.get(key);
+        if (stored?.verdict !== "stopped" || stored.narrowed !== true || stored.seq !== seq) continue;
+        const { narrowed: _dismissed, ...kept } = stored;
+        this.verdicts.set(key, { ...kept, seq: ++this.verdictSeq });
+      }
+    });
+  }
+
+  /**
+   * The switched-on steps that can run now and would stop if this share
+   * were made, for the share dialog. Only the owner's computer makes
+   * shares, so any other roster stops nothing.
+   */
+  async shareImpact(share: ReachShare): Promise<CollectionAutomationShareStop[]> {
+    await this.ready();
+    const writable = this.writableCollections();
+    const automations: OwnedAutomation[] = [];
+    for (const owned of this.everyAutomation()) {
+      if (owned.automation.enabled && (await this.canRun(owned.automationId, owned.collectionPath, owned.automation, writable))) {
+        automations.push(owned);
+      }
+    }
+    const reach = automations.map(({ automationId, collectionPath, automation }) => {
+      const collection = collectionNamed(collectionPath);
+      return { id: automationId, collection, codeFiles: [], steps: reachStepsOf(automation, collection, collectionNamed) };
+    });
+    const stopped = shareImpactOf(await this.options.roster(), share, reach);
+    return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
+      const index = reach.findIndex((candidate) => candidate.id === automationId);
+      const owner = automations[index];
+      const target = reach[index]?.steps[step];
+      if (!owner || !target || !("collection" in target)) return [];
+      return [{
+        automationName: owner.automation.name,
+        collection: collectionNamed(owner.collectionPath).name,
+        target: target.collection.name,
+        action: target.kind === "find-records" ? "find" : "change",
+      }];
+    });
+  }
+
+  /** The steps whose stored verdict matches, with what their notice names. */
+  private stepsWhere(matches: (verdict: StoredReachVerdict) => boolean): CollectionAutomationHold[] {
+    const steps: CollectionAutomationHold[] = [];
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const hash = definitionHash(automation);
       const collection = collectionNamed(collectionPath);
       reachStepsOf(automation, collection, collectionNamed).forEach((reach, step) => {
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
-        if (stored?.verdict !== "held" || !("collection" in reach)) return;
-        holds.push({
+        if (!stored || !matches(stored) || !("collection" in reach)) return;
+        steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
           collection: collection.name, target: reach.collection.name,
           action: reach.kind === "find-records" ? "find" : "change", stoppedFor: stored.stoppedFor,
         });
       });
     }
-    return holds;
+    return steps;
   }
 
   /**
@@ -534,15 +615,8 @@ export class CollectionAutomations {
     if (this.opened === null) return [];
     await this.opened;
     // A mark says a run writes the field, so it passes the checks a run
-    // makes before it writes: every Collection a step names is a document
-    // Collection this index knows, and no step's reach verdict stopped it.
-    const datasets = new Map<string, Promise<boolean>>();
-    const isDataset = (path: string) => {
-      const known = datasets.get(path) ?? this.options.pathExists(`${path}/dataset.json`);
-      datasets.set(path, known);
-      return known;
-    };
-    const writable = async (path: string) => this.collections.has(path) && !(await isDataset(path));
+    // makes before it writes.
+    const writable = this.writableCollections();
     if (!(await writable(collectionPath))) return [];
     const marks = new Map<string, Map<string, string>>();
     for (const { automationId, collectionPath: home, automation } of this.everyAutomation()) {
@@ -723,6 +797,21 @@ export class CollectionAutomations {
   }
 
   /**
+   * Whether a run may write records in a Collection: this index knows it,
+   * and it keeps its records in documents, not a dataset. Each answer is
+   * kept for the one question it serves.
+   */
+  private writableCollections(): (path: string) => Promise<boolean> {
+    const datasets = new Map<string, Promise<boolean>>();
+    return async (path) => {
+      if (!this.collections.has(path)) return false;
+      const known = datasets.get(path) ?? this.options.pathExists(`${path}/dataset.json`);
+      datasets.set(path, known);
+      return !(await known);
+    };
+  }
+
+  /**
    * Whether a run would get past the checks it makes before its first write,
    * as far as this computer knows now: no step's saved reach verdict is
    * stopped or held, and `writable` accepts every Collection a step names.
@@ -801,13 +890,16 @@ export class CollectionAutomations {
     return next;
   }
 
-  /** Raises the hold notices when the held steps differ from what they last showed. */
+  /** Raises the reach notices when the held or stopped steps differ from what they last showed. */
   private publishHolds(): void {
-    const held = this.verdictsUnreadable
+    const shown = this.verdictsUnreadable
       ? ["unreadable"]
-      : this.holds().map((hold) => reachVerdictKey(hold.automationId, hold.definitionHash, hold.step)).sort();
-    if (isDeepStrictEqual(held, this.publishedHolds)) return;
-    this.publishedHolds = held;
+      : [
+          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step)} ${hold.seq}`),
+          ...this.stops().map((stop) => `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`),
+        ].sort();
+    if (isDeepStrictEqual(shown, this.publishedHolds)) return;
+    this.publishedHolds = shown;
     this.options.onHoldsChanged();
   }
 
@@ -836,9 +928,9 @@ export class CollectionAutomations {
         checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
-          const next = nextReachVerdict(previous, reach);
+          const next = nextReachVerdict(previous, reach, automation.enabled);
           if (next.verdict === "held") held = true;
-          if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor) return;
+          if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor && previous.narrowed === next.narrowed) return;
           this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
         });
       }

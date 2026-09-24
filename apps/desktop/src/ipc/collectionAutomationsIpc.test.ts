@@ -18,7 +18,13 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
   const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
-  const executor = { fieldMarks } as unknown as CollectionAutomations;
+  const stop = {
+    automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: 0, seq: 3,
+    collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "ana@dohc.test",
+  };
+  const dismissStops = vi.fn(async () => undefined);
+  const shareImpact = vi.fn(async () => [{ automationName: "Spend", collection: "Trip", target: "Budget", action: "change" as const }]);
+  const executor = { fieldMarks, holds: () => [], stops: () => [stop], dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -41,8 +47,33 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
-  return { write, call, marks, fieldMarks, createFile, writeText };
+  return { write, call, marks, stop, fieldMarks, dismissStops, shareImpact, createFile, writeText };
 }
+
+describe("steps a share stops", () => {
+  it("lists the stopped steps with the holds, and dismisses the verdicts the person saw", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationHolds, {})).resolves.toEqual({ holds: [], stops: [f.stop] });
+    const seen = { automationId: f.stop.automationId, definitionHash: f.stop.definitionHash, step: 0, seq: 3 };
+    await f.call(CHANNELS.dismissAutomationStops, { stops: [seen] });
+    expect(f.dismissStops).toHaveBeenCalledWith([seen]);
+  });
+
+  it("asks the executor what a share with Edit would stop, as a share of paths", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.automationShareImpact, { recipientEmail: "ana@dohc.test", paths: ["Trip"], access: "edit" }))
+      .resolves.toEqual({ stops: [{ automationName: "Spend", collection: "Trip", target: "Budget", action: "change" }] });
+    expect(f.shareImpact).toHaveBeenCalledWith({ paths: ["Trip"], versionId: null, access: "edit", recipientEmail: "ana@dohc.test" });
+  });
+
+  it("stops nothing and lists nothing in a shared view", async () => {
+    const f = fixture({ sharedView: true });
+    await expect(f.call(CHANNELS.listAutomationHolds, {})).resolves.toEqual({ holds: [], stops: [] });
+    await expect(f.call(CHANNELS.automationShareImpact, { recipientEmail: "ana@dohc.test", paths: ["Trip"], access: "edit" }))
+      .resolves.toEqual({ stops: [] });
+    expect(f.shareImpact).not.toHaveBeenCalled();
+  });
+});
 
 describe("field marks", () => {
   it("answers one Collection's marks from the executor, and none in a shared view", async () => {

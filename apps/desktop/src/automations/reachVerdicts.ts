@@ -7,8 +7,13 @@ import type { StepReach } from "./automationReach";
 // step that goes from stopped to allowed under the same definition is held
 // until a current editor confirms it.
 //
+// The other way, a share can narrow reach. A switched-on step that could
+// run and now cannot is marked narrowed, and a notice names it until someone
+// dismisses it or the step's reach comes back.
+//
 // Verdicts carry a sequence number from a counter that only rises, so a
-// confirmation applies only to the hold the person saw, whatever the clock.
+// confirmation or a dismissal applies only to the verdict the person saw,
+// whatever the clock.
 
 export type ReachVerdict = "allowed" | "stopped" | "held";
 
@@ -21,15 +26,24 @@ export interface StoredReachVerdict {
   verdict: ReachVerdict;
   /** The editor whose reach stopped the step, kept while it is held. */
   stoppedFor: string | null;
+  /** The step could run before reach narrowed, and nobody has dismissed its notice. */
+  narrowed?: true;
   seq: number;
 }
 
-/** The verdict to keep for one step, given its last one and what the roster says now. */
-export function nextReachVerdict(
-  previous: Pick<StoredReachVerdict, "verdict" | "stoppedFor"> | undefined,
-  reach: StepReach,
-): Pick<StoredReachVerdict, "verdict" | "stoppedFor"> {
-  if (!reach.allowed) return { verdict: "stopped", stoppedFor: reach.person ?? null };
+type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed">;
+
+/**
+ * The verdict to keep for one step, given its last one and what the roster
+ * says now. `switchedOn` says whether its automation runs, so a step that
+ * never ran is not announced as stopped.
+ */
+export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach, switchedOn: boolean): Verdict {
+  if (!reach.allowed) {
+    const narrowed = (previous?.verdict === "allowed" && switchedOn) ||
+      (previous?.verdict === "stopped" && previous.narrowed === true);
+    return { verdict: "stopped", stoppedFor: reach.person ?? null, ...(narrowed ? { narrowed: true } : {}) };
+  }
   if (previous?.verdict === "stopped" || previous?.verdict === "held") {
     return { verdict: "held", stoppedFor: previous.stoppedFor };
   }

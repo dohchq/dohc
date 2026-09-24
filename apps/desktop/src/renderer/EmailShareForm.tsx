@@ -1,6 +1,11 @@
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Zap } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
+import type {
+  AutomationShareImpactResult,
+  CreateRelaySharePayload,
+  CreateRelayShareResult,
+  ShareAccess,
+} from "../ipc/bridgeContract";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
@@ -24,6 +29,27 @@ const ACCESS_OPTIONS: ReadonlyArray<{
   },
 ];
 
+const OR = new Intl.ListFormat("en", { type: "disjunction" });
+
+/**
+ * The one sentence the dialog says when a share would stop automation
+ * steps, or null when it stops none. The recipient is the new editor whose
+ * reach the steps would exceed.
+ */
+export function automationShareWarning(
+  stops: AutomationShareImpactResult["stops"],
+  recipientEmail: string,
+): string | null {
+  if (stops.length === 0) return null;
+  const automations = new Map(stops.map((stop) => [JSON.stringify([stop.collection, stop.automationName]), stop]));
+  const reach = [...new Set(stops.map((stop) => `${stop.action === "find" ? "view" : "edit"} ${stop.target}`))];
+  const [only] = automations.values();
+  const what = automations.size === 1 && only
+    ? `the automation "${only.automationName}" in ${only.collection}`
+    : `${automations.size} automations`;
+  return `This share stops ${what}, because ${recipientEmail} cannot ${OR.format(reach)}.`;
+}
+
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
@@ -37,14 +63,39 @@ export function EmailShareForm(props: {
   const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [invitationCopied, setInvitationCopied] = useState(false);
+  // The warning for the email and access it was checked against. Creating
+  // the same share again confirms it.
+  const [warning, setWarning] = useState<{ key: string; sentence: string } | null>(null);
   // RelayShareDialog keys this form by the canonical target. Switching panes
   // keeps pending work; changing the target unmounts and invalidates it.
   const requests = useRequestSequence([props.workspaceId]);
   useEffect(() => {
-    setCreated(null); setBusy(false); setError(null); setCopied(false); setInvitationCopied(false);
+    setCreated(null); setBusy(false); setError(null); setCopied(false); setInvitationCopied(false); setWarning(null);
   }, [props.workspaceId]);
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
+  const shareKey = JSON.stringify([email.trim(), access]);
+  const shownWarning = warning?.key === shareKey ? warning.sentence : null;
+
+  // Edit on a Collection, or a folder holding one, can narrow what its
+  // automations reach. The first Create asks main which steps would stop;
+  // when some would, the form says so and waits for a second Create.
+  async function stopsAutomations(token: number, recipientEmail: string): Promise<boolean> {
+    if (access !== "edit" || props.target.kind !== "paths" || shownWarning !== null) return false;
+    let sentence: string | null = null;
+    try {
+      const impact = await bridge().automationShareImpact({
+        workspaceId: props.workspaceId, recipientEmail, paths: props.target.paths, access,
+      });
+      sentence = automationShareWarning(impact.stops, recipientEmail);
+    } catch {
+      // The warning is advice. After the share, the stopped steps' notice
+      // still names them.
+    }
+    if (sentence === null || !requests.isCurrent(token)) return false;
+    setWarning({ key: shareKey, sentence });
+    return true;
+  }
 
   async function createShare() {
     if (!canSubmit) return;
@@ -52,9 +103,12 @@ export function EmailShareForm(props: {
     setBusy(true);
     setError(null);
     try {
+      const recipientEmail = email.trim();
+      if (await stopsAutomations(token, recipientEmail)) return;
+      if (!requests.isCurrent(token)) return;
       const payload: CreateRelaySharePayload = {
         workspaceId: props.workspaceId,
-        recipientEmail: email.trim(),
+        recipientEmail,
         access,
         ...(props.target.kind === "version"
           ? { versionId: props.target.versionId }
@@ -150,13 +204,23 @@ export function EmailShareForm(props: {
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
           </label>
+          {shownWarning ? (
+            <p
+              data-testid="share-automation-warning"
+              role="status"
+              className="m-0 flex items-start gap-1.5 text-xs leading-relaxed text-warning"
+            >
+              <Zap size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
+              {shownWarning}
+            </p>
+          ) : null}
           <PrimaryButton
             type="button"
             data-testid="share-create"
             disabled={!canSubmit}
             onClick={() => void createShare()}
           >
-            {busy ? "Creating share…" : "Create share"}
+            {busy ? "Creating share…" : shownWarning ? "Create share anyway" : "Create share"}
           </PrimaryButton>
         </>
       ) : (

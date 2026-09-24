@@ -13,7 +13,7 @@ import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
-import type { AutomationHoldNotice } from "../shell/useAutomationHolds";
+import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -158,6 +158,37 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   };
 }
 
+// How many stopped automations the notice names before it counts the rest.
+const STOPPED_AUTOMATIONS_NAMED = 3;
+
+// The one notice for every step a narrower share stopped: which automations
+// stopped, who cannot reach what, and where to change the steps.
+function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
+  const automations = new Map<string, { name: string; collection: string; reasons: Set<string> }>();
+  for (const stop of stops) {
+    const entry = automations.get(stop.automationId) ??
+      { name: stop.automationName, collection: stop.collection, reasons: new Set<string>() };
+    const who = stop.stoppedFor ?? "Someone you shared with";
+    entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
+    automations.set(stop.automationId, entry);
+  }
+  const [only] = automations.values();
+  if (automations.size === 1 && only) {
+    const path = collectionAutomationOf(stops[0]!.automationId)?.collection ?? only.collection;
+    return {
+      title: `Automation "${only.name}" stopped`,
+      body: `${[...only.reasons].join(" ")} Open ${path}/automations.yaml to change the step.`,
+    };
+  }
+  const named = [...automations.values()].slice(0, STOPPED_AUTOMATIONS_NAMED)
+    .map((entry) => `"${entry.name}" in ${entry.collection}: ${[...entry.reasons].join(" ")}`);
+  const more = automations.size - named.length;
+  return {
+    title: `${automations.size} automations stopped`,
+    body: `${named.join(" ")}${more > 0 ? ` ${more} more stopped too.` : ""} Open each Collection's automations.yaml to change its steps.`,
+  };
+}
+
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
 // again, so it never offers Try again — resuming a document there would
@@ -287,6 +318,10 @@ export function NoticeCenter(props: {
   automationHoldsUnreadable?: boolean;
   onResetAutomationHolds?: () => void;
   onRevealAutomationHolds?: () => void;
+  // Automation steps a narrower share stopped, shown as one notice until
+  // someone dismisses it.
+  automationStops?: readonly AutomationStopNotice[];
+  onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -556,6 +591,18 @@ export function NoticeCenter(props: {
           : {}),
       });
     }
+    const stops = props.automationStops ?? [];
+    if (stops.length > 0) {
+      next.push({
+        id: "automation-stops",
+        tone: "warning",
+        ...automationStopsCopy(stops),
+        Icon: AlertTriangle,
+        ...(props.onDismissAutomationStops
+          ? { onDismiss: () => props.onDismissAutomationStops?.(stops) }
+          : {}),
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
@@ -781,6 +828,8 @@ export function NoticeCenter(props: {
     props.automationHoldsUnreadable,
     props.onResetAutomationHolds,
     props.onRevealAutomationHolds,
+    props.automationStops,
+    props.onDismissAutomationStops,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
