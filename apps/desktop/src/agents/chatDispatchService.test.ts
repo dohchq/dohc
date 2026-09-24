@@ -618,8 +618,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
+    // One notice per id, as the notice store keeps them.
     postNotice: async (input) => {
-      notices.push(input);
+      if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
     },
   });
 
@@ -1137,7 +1138,11 @@ describe("chatDispatchService", () => {
     expect(fixture.runActivity).toEqual({ acquires: 1, releases: 0 });
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(fixture.syncRequests).toEqual([]);
-    expect(fixture.notices).toEqual([]);
+    // The notice is recorded before the run's end is saved, so a crash
+    // between the two cannot lose it.
+    expect(fixture.notices.map((notice) => notice.noticeId)).toEqual([
+      `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
+    ]);
 
     if (fixture.completeFailureAtMs === null) {
       throw new Error("Expected a recorded completion failure.");
@@ -1224,6 +1229,9 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       failureReason: expect.stringContaining("runner failed to start"),
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Fail during runner setup while the daemon is unavailable.\" failed to start",
+    ]);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(
@@ -1837,6 +1845,28 @@ describe("chatDispatchService", () => {
     }]);
   });
 
+  it("reads the thread's title from its own channel, and names no thread when that read fails", async () => {
+    const fixture = await createFixture();
+    await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
+    await createAgentThread(fixture, { title: "Plan day 3", body: "Plan it.", authorUserId: "user_local" });
+    await activate(fixture);
+    const listThreads = vi.spyOn(fixture.chat, "listThreads");
+    vi.spyOn(fixture.chat, "listChannelThreads").mockRejectedValueOnce(new Error("engine busy"));
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    fixture.spawnCalls[1]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run produced no reply",
+      "Your agent's run in \"Plan day 3\" produced no reply",
+    ]);
+    expect(fixture.errors).toContainEqual(expect.objectContaining({ message: "engine busy" }));
+    // The runner's own context reads threads when it starts; the notice does not.
+    expect(listThreads.mock.calls.length).toBe(1);
+  });
+
   it("tells the person when a run fails, shortening a long thread name", async () => {
     const fixture = await createFixture();
     await createAgentThread(fixture, {
@@ -1851,7 +1881,7 @@ describe("chatDispatchService", () => {
 
     const [notice] = fixture.notices;
     expect(fixture.notices).toHaveLength(1);
-    expect(notice!.title).toMatch(/^Your agent's run failed in "Audit every file in the workspace .*…"$/u);
+    expect(notice!.title).toMatch(/^Your agent's run in "Audit every file in the workspace .*…" failed$/u);
     expect([...notice!.title]).toHaveLength(120);
   });
 
@@ -2094,6 +2124,9 @@ describe("chatDispatchService", () => {
       exitCode: 0,
       failureNotePosted: true,
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Run silently.\" produced no reply",
+    ]);
   });
 
   it("does not report no reply while CLI provenance recovery is pending", async () => {
@@ -2170,6 +2203,10 @@ describe("chatDispatchService", () => {
       attemptCount: 2,
     });
     expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
+      title: "Your agent's run in \"Resume this after restart.\" stopped when dohc restarted",
+    })]);
   });
 
   it("recovers a restart-failed row left behind before its requeue", async () => {
@@ -2516,6 +2553,9 @@ describe("chatDispatchService", () => {
       triggerMessageId: trigger.messageId,
       attemptCount: 2,
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Recover this clean-shutdown interruption.\" stopped when dohc quit",
+    ]);
   });
 
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
@@ -2553,6 +2593,7 @@ describe("chatDispatchService", () => {
       threadId: trigger.threadId,
     });
     expect(messages.some((message) => message.body.includes("app quit during run"))).toBe(false);
+    expect(fixture.notices).toEqual([]);
   });
 
   it("terminates an app-quit runner when persisting its failure rejects", async () => {
@@ -2622,7 +2663,7 @@ describe("chatDispatchService", () => {
     );
     expect(timeoutMessage?.authorUserId).toBe("user_local");
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Your agent's run failed in \"This harness will hang.\"",
+      "Your agent's run in \"This harness will hang.\" failed",
     ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
@@ -2729,6 +2770,9 @@ describe("chatDispatchService", () => {
     expect(stoppedMessages.some((message) => message.body.includes("failed (exit 143)"))).toBe(
       false,
     );
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Stop this run.\" stopped",
+    ]);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRunId: null,
     });

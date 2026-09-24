@@ -24,12 +24,32 @@ import {
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
 
-// "Your agent finished in "Plan day 2"", shortening the thread's name to fit.
-function runNoticeTitle(what: string, thread: string): string {
-  if (!thread) return what;
-  const room = NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length;
-  const name = [...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`;
-  return `${what} in "${name}"`;
+// How a run ended, as its notice says it. Each matches the note the run
+// leaves in its thread.
+type RunOutcome = "finished" | "no-reply" | "failed" | "not-started" | "restarted" | "quit" | "stopped";
+
+const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
+  "no-reply": "produced no reply",
+  failed: "failed",
+  "not-started": "failed to start",
+  restarted: "stopped when dohc restarted",
+  quit: "stopped when dohc quit",
+  stopped: "stopped",
+};
+
+// "Your agent finished in "Plan day 2"" or "Your agent's run in "Plan day
+// 2" failed", shortening the thread's name to fit. Without a name, the
+// sentence names no thread.
+function runNoticeTitle(outcome: RunOutcome, thread: string): string {
+  const sentence = (name: string | null) => {
+    const where = name === null ? "" : ` in "${name}"`;
+    return outcome === "finished"
+      ? `Your agent finished${where}`
+      : `Your agent's run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
+  };
+  if (!thread) return sentence(null);
+  const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
+  return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
 }
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -550,6 +570,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!intent) return false;
     const dispatch = options.dispatchStoreFor(live.workspace);
     if (!live.terminalDurable) {
+      let outcome: RunOutcome = intent.kind === "fail" ? "failed" : "finished";
       let linkedMessages: string[] | null = null;
       if (intent.kind === "complete") {
         try {
@@ -569,6 +590,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         }
         if (intent.exitCode !== 0) {
+          outcome = "failed";
           await postFailureNote(
             live.workspace,
             live.claim.run,
@@ -587,6 +609,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             );
             scheduleRecoveryScan(live.workspace);
           } else {
+            outcome = "no-reply";
             await postFailureNote(
               live.workspace,
               live.claim.run,
@@ -595,6 +618,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         }
       }
+      await noticeRun(live.workspace, live.claim.run, outcome).catch(reportError);
       try {
         if (intent.kind === "complete") {
           await dispatch.completeRun({
@@ -617,7 +641,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         scheduleRecoveryScan(live.workspace);
         return false;
       }
-      await noticeRunEnded(live).catch(reportError);
     }
     if (!live.child.hasExited()) return false;
     await clearLiveAttribution(live);
@@ -644,6 +667,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
+    await noticeRun(live.workspace, live.claim.run, "failed").catch(reportError);
     try {
       await dispatch.failRun({
         runId: live.claim.run.runId,
@@ -655,30 +679,46 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       reportError(error);
       scheduleRecoveryScan(live.workspace);
-      return;
     }
-    await noticeRunEnded(live).catch(reportError);
   }
 
-  // Tells this computer's person that a run ended, once its end is durable,
-  // naming the thread it ran in. The thread explains a failure.
-  async function noticeRunEnded(live: LiveRun): Promise<void> {
-    const intent = live.terminalIntent;
-    if (!options.postNotice || !intent) return;
-    const { workspaceId } = live.workspace;
-    const { runId, threadId } = live.claim.run;
-    const threads = await options.chatStoreFor(live.workspace).listThreads({ workspaceId });
-    const thread = threads.find((candidate) => candidate.id === threadId)?.title.replace(/\s+/gu, " ").trim() ?? "";
-    const failed = intent.kind === "fail" || intent.exitCode !== 0;
+  // Tells this computer's person how a run ended. Called before the run's
+  // end is saved: the notice store keeps the notice durably and ignores a
+  // second post of the same id, so a crash between the two cannot lose it,
+  // and a retried end posts nothing new.
+  async function noticeRun(
+    workspace: ChatDispatchWorkspace,
+    run: AgentRunRecord,
+    outcome: RunOutcome,
+  ): Promise<void> {
+    if (!options.postNotice) return;
+    const { workspaceId } = workspace;
     await options.postNotice({
       workspaceId,
-      noticeId: `agent-run:${workspaceId}:${runId}`,
+      noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(failed ? "Your agent's run failed" : "Your agent finished", thread),
+      title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
       body: "",
-      target: { thread: threadId, run: runId },
+      target: { thread: run.threadId, run: run.runId },
     });
   }
+
+  // The thread's title, read from its own channel's threads. An empty title
+  // when that read fails or the thread has no channel: the notice still goes.
+  async function threadTitle(workspace: ChatDispatchWorkspace, threadId: string): Promise<string> {
+    try {
+      const store = options.chatStoreFor(workspace);
+      const { workspaceId } = workspace;
+      const channelId = await store.findThreadChannelId({ workspaceId, threadId });
+      if (!channelId) return "";
+      const threads = await store.listChannelThreads({ workspaceId, channelId });
+      return threads.find((summary) => summary.thread.id === threadId)?.thread.title.replace(/\s+/gu, " ").trim() ?? "";
+    } catch (error) {
+      reportError(error);
+      return "";
+    }
+  }
+
 
   async function failClaimBeforeRun(
     workspace: ChatDispatchWorkspace,
@@ -703,6 +743,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       claim.run,
       "⚠ Agent run failed to start. Open the run chip for details.",
     ).catch(reportError);
+    await noticeRun(workspace, claim.run, "not-started").catch(reportError);
     await options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
       reason,
@@ -714,6 +755,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     recovery: PendingPreRunFailure,
   ): Promise<boolean> {
     try {
+      await noticeRun(recovery.workspace, recovery.claim.run, "not-started").catch(reportError);
       await options.dispatchStoreFor(recovery.workspace).failRun({
         runId: recovery.claim.run.runId,
         reason: recovery.reason,
@@ -1099,6 +1141,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
         ).catch(reportError);
       }
+      await noticeRun(workspace, claim.run, "restarted").catch(reportError);
       await dispatch.failRun({
         runId: claim.run.runId,
         reason: "app restart during run",
@@ -1122,6 +1165,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const recoveries =
       (await options.listAppQuitRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
+      await noticeRun(
+        workspace,
+        recovery.run,
+        recovery.run.failureReason === "app restart during run" ? "restarted" : "quit",
+      ).catch(reportError);
       const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         recovery.run.runId,
@@ -1330,6 +1378,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         live.killEscalation,
       );
       const dispatch = options.dispatchStoreFor(live.workspace);
+      await noticeRun(live.workspace, live.claim.run, "stopped").catch(reportError);
       await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: APP_QUIT_EXIT_CODE,
