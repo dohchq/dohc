@@ -1,6 +1,5 @@
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { utilityProcess } from "electron";
-import { pluginHostEnvFor, resolveDohcMcpCommand } from "../agents/dohcMcpCommand";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { OwnedWorkspaceSdkReadPort } from "../workspaces/ownedWorkspaceSdkReadPort";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -34,12 +33,9 @@ type PluginRuntimeSdkRequest = Pick<PluginSdkHostContext,
 > & { workspaceId: string; method: string; params?: unknown };
 
 export interface DesktopPluginRuntimeDependencies {
-  app: { readonly isPackaged: boolean };
-  process: { readonly resourcesPath: string; readonly env: NodeJS.ProcessEnv };
   utilityProcess: Pick<typeof utilityProcess, "fork">;
   pluginHostEntry: string;
   pnpmRunnerEntry: string;
-  readonly linuxStableCliBinDir: string | undefined;
   stateDir(): string;
   pluginResourcesBasePath(): string;
   requireWorkspaceAuthority(workspaceId: string): PluginRuntimeAuthorityLease;
@@ -65,7 +61,7 @@ export function createDesktopPluginRuntime(dependencies: DesktopPluginRuntimeDep
   hooks: { onPipelineStatus(event: PluginPipelineStatusEvent): void },
 ) => PluginWorkspaceRuntimeParts {
   const {
-    app, process, utilityProcess, stateDir, pluginResourcesBasePath,
+    utilityProcess, stateDir, pluginResourcesBasePath,
     requireWorkspaceAuthority, withWorkspaceAttachment, withEngineAdapter,
     findWorkspace, ownedWorkspaceReadsFor,
     sharedViewOf, notifyAutomationFailuresChanged,
@@ -189,12 +185,6 @@ export function createDesktopPluginRuntime(dependencies: DesktopPluginRuntimeDep
       stateDir: stateDir(),
       workspaceRoot: workspace.rootPath,
       spawnTransport: (callbacks) => {
-        const dohcMcpCommand = resolveDohcMcpCommand({
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-          linuxStableCliBinDir: dependencies.linuxStableCliBinDir,
-        });
-        const pluginHostEnv = pluginHostEnvFor(dohcMcpCommand, process.env);
         const child = utilityProcess.fork(
           dependencies.pluginHostEntry,
           [],
@@ -202,12 +192,6 @@ export function createDesktopPluginRuntime(dependencies: DesktopPluginRuntimeDep
             cwd: callbacks.pluginRoot,
             serviceName: "dohc-plugin-host",
             stdio: ["ignore", "ignore", "pipe"],
-            // The driver plugins' chat session configs read this seam for the
-            // dohc-mcp command they hand the user's AI tool. Only main knows
-            // whether this install is packaged and where its stable launcher
-            // lives. If that launcher is unavailable, the host gets an explicit
-            // marker and no command it could leak into a spawned process.
-            env: pluginHostEnv,
           },
         );
         return createPluginUtilityTransport(child, callbacks);

@@ -147,8 +147,6 @@ async function fixture() {
     },
     settleAutomationClaim: async (input) => { settlements.push(input); return {}; },
   };
-  let launcher: string | undefined;
-  const launcherReads: Array<string | undefined> = [];
   let authorityReads = 0;
   let activityReads = 0;
   let sdkRouteReads = 0;
@@ -166,8 +164,6 @@ async function fixture() {
     }, input.method, input.params);
   };
   const dependencies: DesktopPluginRuntimeDependencies = {
-    app: { isPackaged: false },
-    process: { resourcesPath: resources, env: { RUNTIME_MARKER: "kept" } },
     utilityProcess: {
       fork: (path, args = [], options) => {
         const child = new NativeUtilityProcess();
@@ -177,7 +173,6 @@ async function fixture() {
     },
     pluginHostEntry: join(scratch, "original-main", "plugin-host.js"),
     pnpmRunnerEntry: join(scratch, "original-main", "pnpm-runner.js"),
-    get linuxStableCliBinDir() { launcherReads.push(launcher); return launcher; },
     stateDir: () => stateDir,
     pluginResourcesBasePath: () => resources,
     requireWorkspaceAuthority: (id) => authorities.acquire(id),
@@ -210,9 +205,8 @@ async function fixture() {
   return {
     workspace, stateDir, pluginRoot, manifest, resources, authorities, state, binding,
     dependencies, createParts, forks, sdkRequests, engineWorkspaces, claims, settlements,
-    claimFailed, engineDrained, launcherReads, statuses,
+    claimFailed, engineDrained, statuses,
     lateReads: () => ({ authorityReads, activityReads }),
-    setLauncher: (value: string) => { launcher = value; },
     setShared: (value: boolean) => { shared = value; },
     sdkRoute: () => sdkRoute,
     sdkRouteReads: () => sdkRouteReads,
@@ -234,26 +228,21 @@ describe("desktop plugin runtime composition", () => {
       .toThrow("Plugin runtime creation received a stale workspace root.");
     await f.authorities.invalidate(f.workspace.workspaceId);
     expect(f.forks).toEqual([]);
-    expect(f.launcherReads).toEqual([]);
   });
 
-  it("keeps late owners lazy and reads the launcher when each native host spawns", async () => {
+  it("keeps late owners lazy and forks a native host with the app's own env on each start", async () => {
     const f = await fixture();
     const parts = f.createParts();
     expect(f.lateReads()).toEqual({ authorityReads: 0, activityReads: 0 });
-    expect(f.launcherReads).toEqual([]);
-    f.setLauncher(join(f.resources, "first-launcher"));
     const first = await start(f, parts);
-    expect(f.forks[0]).toMatchObject({
-      path: f.dependencies.pluginHostEntry, args: [],
-      options: { cwd: f.pluginRoot, serviceName: "dohc-plugin-host", stdio: ["ignore", "ignore", "pipe"], env: { RUNTIME_MARKER: "kept" } },
+    expect(f.forks[0]).toMatchObject({ path: f.dependencies.pluginHostEntry, args: [] });
+    expect(f.forks[0]!.options).toEqual({
+      cwd: f.pluginRoot, serviceName: "dohc-plugin-host", stdio: ["ignore", "ignore", "pipe"],
     });
     expect((await first.activation.promise).settings).toEqual({ greeting: "Hello" });
     await parts.pipeline.host.stop("plugin");
-    f.setLauncher(join(f.resources, "second-launcher"));
     await parts.pipeline.host.start(f.pluginRoot, "plugin-source", f.manifest);
     await parts.pipeline.host.activationOf("plugin");
-    expect(f.launcherReads).toEqual([join(f.resources, "first-launcher"), join(f.resources, "second-launcher")]);
     expect(f.forks.map((fork) => fork.path)).toEqual([f.dependencies.pluginHostEntry, f.dependencies.pluginHostEntry]);
   });
 

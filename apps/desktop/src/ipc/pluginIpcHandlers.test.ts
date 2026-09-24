@@ -237,7 +237,6 @@ function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
       value: { ok: true, plugin: pluginStatus },
     })),
     getPluginSettings: vi.fn(async () => ({})),
-    handleWatcherEvents: vi.fn(async () => undefined),
     host,
     hostOwnership: {
       runCommand: vi.fn(async (_pluginId: string, operation: (authority: unknown) => Promise<unknown>) => ({

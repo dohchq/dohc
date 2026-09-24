@@ -603,13 +603,12 @@ const {
 let linuxStableCliBinDir: string | undefined;
 
 const createPluginWorkspaceRuntimeParts = createDesktopPluginRuntime({
-  app, process, utilityProcess, stateDir, pluginResourcesBasePath,
+  utilityProcess, stateDir, pluginResourcesBasePath,
   requireWorkspaceAuthority, withWorkspaceAttachment, withEngineAdapter,
   findWorkspace, ownedWorkspaceReadsFor,
   sharedViewOf, notifyAutomationFailuresChanged,
   pluginHostEntry: join(import.meta.dirname, "plugin-host.js"),
   pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
-  get linuxStableCliBinDir() { return linuxStableCliBinDir; },
   get workspaceAuthorities(): DesktopPluginRuntimeDependencies["workspaceAuthorities"] {
     return workspaceAuthorities;
   },
