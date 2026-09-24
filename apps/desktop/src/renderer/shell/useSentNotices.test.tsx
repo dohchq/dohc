@@ -191,6 +191,20 @@ describe("sent notices in a window", () => {
     });
   });
 
+  it("does not bring a toast back when the first account signs in again", async () => {
+    const { result } = renderHook(() => useSentNotices(true));
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    await arrive([notice("a")]);
+    expect(result.current.toast?.noticeId).toBe("a");
+    expect(result.current.account).toBe(ANA);
+
+    await arrive([notice("c")], BEN);
+    expect(result.current.toast).toBeNull();
+    await arrive([notice("a")], ANA);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([["a", null]]);
+    expect(result.current.toast).toBeNull();
+  });
+
   it("is unsettled until the first list answers, and reports a failed list until one answers", async () => {
     const first = deferred<{ account: string | null; notices: NoticeRow[] }>();
     bridge.listNotices.mockImplementationOnce(() => first.promise);

@@ -53,6 +53,7 @@ const live = () => new AbortController().signal;
 
 function sentNoticesOf(notices: NoticeRow[], extra: Partial<SentNotices> = {}): SentNotices {
   return {
+    account: null,
     notices,
     settled: true,
     listFailure: null,

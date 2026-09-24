@@ -55,6 +55,8 @@ function without(held: HeldMarks, keys: readonly string[]): HeldMarks {
 }
 
 export interface SentNotices {
+  // The signed-in account the notices belong to.
+  account: string | null;
   // Newest first, as main lists them.
   notices: readonly NoticeRow[];
   // The first list has answered, with rows or with an error.
@@ -116,7 +118,10 @@ export function useSentNotices(enabled: boolean): SentNotices {
     setSettled(true);
     setListFailure(null);
     setHeld((current) => unconfirmed(current, list));
+    // A list for another account ends the toast, so coming back to the
+    // first account does not bring it back.
     if (arrived) setToastKey(noticeKey(list.account, arrived));
+    else if (seen === null) setToastKey(null);
   }, [requests]);
   const relist = useCallback(() => void refresh(), [refresh]);
 
@@ -208,7 +213,7 @@ export function useSentNotices(enabled: boolean): SentNotices {
   const hideToast = useCallback(() => setToastKey(null), []);
 
   return useMemo(
-    () => ({ notices, settled, listFailure, relist, toast, hideToast, read, dismiss }),
-    [notices, settled, listFailure, relist, toast, hideToast, read, dismiss],
+    () => ({ account, notices, settled, listFailure, relist, toast, hideToast, read, dismiss }),
+    [account, notices, settled, listFailure, relist, toast, hideToast, read, dismiss],
   );
 }

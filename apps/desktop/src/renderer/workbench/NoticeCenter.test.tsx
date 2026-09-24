@@ -80,6 +80,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onHideSentNoticeToast ? { onHideSentNoticeToast: props.onHideSentNoticeToast } : {})}
       {...(props.onOpenSentNotice ? { onOpenSentNotice: props.onOpenSentNotice } : {})}
       {...(props.sentNoticesLoading ? { sentNoticesLoading: props.sentNoticesLoading } : {})}
+      {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
       {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
     />
@@ -1535,10 +1536,10 @@ describe("notices sent to you", () => {
       await userEvent.click(open);
       expect(onOpenSentNotice).toHaveBeenCalledOnce();
 
-      await act(async () => answers[0]?.resolve("dohc could not open this share. Try again."));
+      await act(async () => answers[0]?.resolve("dohc could not open this share."));
       expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
       expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent)
-        .toBe("dohc could not open this share. Try again.");
+        .toBe("dohc could not open this share.");
       expect(screen.getByTestId("notice-center")).toBeTruthy();
     });
 
@@ -1552,6 +1553,26 @@ describe("notices sent to you", () => {
 
       await act(async () => answers[0]?.resolve("Your access to this ended."));
       expect(screen.queryByTestId("notice-center")).toBeNull();
+    });
+
+    it("stops when another account signs in, and leaves that account's notice free to open", async () => {
+      const { answers, signals, onOpenSentNotice } = waitingOpen();
+      const { rerender } = renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, sentNoticesAccount: "ana" });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Opening…");
+
+      // Ben's list has a notice with the same id.
+      rerender(noticeElement({ sentNotices: [sentRow("a", { title: "Ben's notice" })], onOpenSentNotice, sentNoticesAccount: "ben" }));
+      expect(signals[0]?.aborted).toBe(true);
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      expect(onOpenSentNotice).toHaveBeenCalledTimes(2);
+      expect(signals[1]?.aborted).toBe(false);
+
+      // Ana's late answer puts nothing on Ben's row.
+      await act(async () => answers[0]?.resolve("Your access to this ended."));
+      expect(within(screen.getByTestId("sent-notice-a")).queryByRole("status")).toBeNull();
     });
 
     it("stops when its notice is dismissed or another Open starts", async () => {

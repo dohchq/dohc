@@ -115,7 +115,10 @@ function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
   );
 }
 
-const sentKey = ({ store, noticeId }: NoticeRow): string => `${store}:${noticeId}`;
+// A sent notice as one account's list showed it. Another account's notice
+// with the same id has another key.
+const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string =>
+  JSON.stringify([account, store, noticeId]);
 
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
@@ -330,6 +333,8 @@ export function NoticeCenter(props: {
   onHideSentNoticeToast?: () => void;
   // The first list has not answered yet: the panel shows no "All clear".
   sentNoticesLoading?: boolean;
+  // The signed-in account the sent notices belong to.
+  sentNoticesAccount?: string | null;
   // Marks the notice read and opens it. Resolves to null once it opened, or
   // to a sentence that says why it could not. Opens nothing once `signal`
   // aborts.
@@ -376,11 +381,17 @@ export function NoticeCenter(props: {
     setSentShown(SENT_NOTICE_PAGE);
     setSentNotes(new Map());
   }, [cancelOpen, open]);
+  // Another account's list: its Open and its row sentences go with it.
+  const sentAccount = props.sentNoticesAccount ?? null;
+  useEffect(() => {
+    cancelOpen();
+    setSentNotes(new Map());
+  }, [cancelOpen, sentAccount]);
   const { onOpenSentNotice } = props;
   const openSentNotice = useCallback(
     async (notice: NoticeRow) => {
       if (!onOpenSentNotice) return;
-      const key = sentKey(notice);
+      const key = sentKey(sentAccount, notice);
       // A second Open of the same notice waits for the first.
       if (opening.current?.key === key) return;
       cancelOpen();
@@ -411,7 +422,7 @@ export function NoticeCenter(props: {
       setOpen(true);
       setSentNotes((current) => new Map(current).set(key, note));
     },
-    [cancelOpen, onOpenSentNotice],
+    [cancelOpen, onOpenSentNotice, sentAccount],
   );
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
@@ -914,7 +925,7 @@ export function NoticeCenter(props: {
     return () => clearTimeout(timer);
   }, [errorToast?.id, errorToast?.tone, props.onHideWorkspaceError]);
   const sentToast = props.sentNoticeToast ?? null;
-  const sentToastKey = sentToast ? sentKey(sentToast.notice) : null;
+  const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
   useEffect(() => {
     if (sentToastKey === null || !onHideSentNoticeToast) return;
@@ -1345,7 +1356,7 @@ export function NoticeCenter(props: {
                   </SectionLabel>
                   <ul className="m-0 list-none p-0">
                     {sentShownRows.map(({ notice, folder, openable }) => {
-                      const key = sentKey(notice);
+                      const key = sentKey(sentAccount, notice);
                       const unread = notice.readAtMs === null;
                       const note = sentNotes.get(key);
                       const busy = openingKey === key;

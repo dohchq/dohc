@@ -11,7 +11,8 @@ export const ACCESS_ENDED_NOTE =
   "Your access to this ended. Ask the person who shared it to share it again.";
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
-export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share. Try again.";
+// Open beside it is the way to try again.
+export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
 
 // A share a notice named, for the Open a share surface, and the notice's
 // file, to open once the share is added.
@@ -149,6 +150,7 @@ export function useSentNoticeProps(input: {
   );
 
   return {
+    sentNoticesAccount: sentNotices?.account ?? null,
     sentNotices: rows,
     sentNoticesLoading: sentNotices ? !sentNotices.settled : false,
     sentNoticeToast: toast,

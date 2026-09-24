@@ -9369,6 +9369,7 @@ describe("automation failure notices", () => {
 describe("notices sent to you", () => {
   function sentNotices(notices: NoticeRow[]): SentNotices {
     return {
+      account: null,
       notices,
       settled: true,
       listFailure: null,
