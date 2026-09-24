@@ -853,13 +853,16 @@ describe("ChatsView direct messages", () => {
         const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
         const participant = dm({ role: "participant", shareId: "share-dm-1" });
         const revoked = { ...participant, connected: false };
+        const connected = {
+          available: true,
+          dms: [participant],
+          pending: [],
+          declined: [],
+        };
+        // The list and the sync that opening the DM runs both see the grant.
         bridgeMock.syncDms
-          .mockResolvedValueOnce({
-            available: true,
-            dms: [participant],
-            pending: [],
-            declined: [],
-          })
+          .mockResolvedValueOnce(connected)
+          .mockResolvedValueOnce(connected)
           .mockResolvedValue({
             available: true,
             dms: [revoked],
@@ -1290,6 +1293,37 @@ describe("ChatsView DM polling", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(bridgeMock.declineDm).toHaveBeenCalledWith({ shareId: request.shareId });
       expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("syncs a conversation once when a person opens it during a hold, not again when its fields update", async () => {
+    vi.useFakeTimers();
+    try {
+      const open = dm();
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [open], failed: true });
+      bridgeMock.listChatMessages.mockResolvedValue({
+        messages: [message({ id: "m-local", threadId: open.threadId!, body: "Already here" })],
+      });
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const listed = bridgeMock.syncDms.mock.calls.length;
+
+      // Opening paints the local conversation first, then syncs it although
+      // the failed list sync holds the polls. The sync brings new fields for
+      // the same DM, which changes nav but is not another opening.
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [{ ...open, unreadCount: 3 }], failed: true });
+      fireEvent.click(screen.getByTestId("chats-dm-item"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("Already here")).toBeTruthy();
+      expect(bridgeMock.syncDms.mock.calls.slice(listed)).toEqual([[
+        { workspaceId: "workspace-a", openChannelId: open.channelId, poll: true },
+      ]]);
+
+      // The ticks at 4 s and 8 s fall inside the renewed hold.
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(listed + 1);
     } finally {
       vi.useRealTimers();
     }

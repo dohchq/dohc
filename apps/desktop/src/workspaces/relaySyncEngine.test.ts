@@ -73,7 +73,7 @@ function capture(): WorkspaceEngineCapture {
 function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
-  syncSharedChannels?: () => Promise<void>;
+  syncSharedChannels?: () => Promise<boolean>;
   afterSuccessfulPull?: () => Promise<void>;
   operations?: RelaySyncOperations;
 }) {
@@ -223,7 +223,7 @@ describe("relaySyncEngine", () => {
     // The callback rejecting must not fail the workspace pass: shared-channel
     // refresh is best-effort (a revoked share can't wedge file sync).
     const syncSharedChannels = vi
-      .fn<() => Promise<void>>()
+      .fn<() => Promise<boolean>>()
       .mockRejectedValue(new Error("shared channel relay down"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sync = engine({ capture: cap, syncSharedChannels });
@@ -604,7 +604,8 @@ describe("relaySyncEngine", () => {
   it("queuePull announces its pass only when it applied ops or changed what the snapshot shows", async () => {
     const onChange = vi.fn();
     const cap = capture();
-    const sync = engine({ capture: cap, onChange });
+    const syncSharedChannels = vi.fn<() => Promise<boolean>>(async () => false);
+    const sync = engine({ capture: cap, onChange, syncSharedChannels });
     sync.queuePull();
     await vi.advanceTimersByTimeAsync(0);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
@@ -614,6 +615,18 @@ describe("relaySyncEngine", () => {
     sync.queuePull();
     await vi.advanceTimersByTimeAsync(0);
     expect(onChange).toHaveBeenCalledOnce();
+
+    // The shared-channel pass told the renderer itself, and the renderer read
+    // "Syncing". The end is announced, so the status does not stay there.
+    onChange.mockClear();
+    syncSharedChannels.mockImplementationOnce(async () => {
+      expect(sync.snapshot().syncing).toBe(true);
+      return true;
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncing).toBe(false);
 
     // A write mid-pass announced `syncing`, so the end is announced too.
     onChange.mockClear();

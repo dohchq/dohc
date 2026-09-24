@@ -2340,12 +2340,16 @@ export function ChatsView(props: {
         }
         props.onError(ipcErrorMessage(error, "Could not load this conversation."));
       } finally {
-        if (token === liveToken.current && request === dmRefreshSeq.current) {
-          setMessagesLoading(false);
+        if (token === liveToken.current) {
+          if (request === dmRefreshSeq.current) setMessagesLoading(false);
+          // A person opened this conversation, so its first sync runs during
+          // a hold. It starts after the local paint, because it would
+          // otherwise supersede that paint and wait on the relay.
+          void refreshOpenDm(dm, token, "open");
         }
       }
     },
-    [loadDmConversation, props.onError],
+    [loadDmConversation, props.onError, refreshOpenDm],
   );
 
   const openFeed = useCallback(() => {
@@ -2494,15 +2498,14 @@ export function ChatsView(props: {
   ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers'),
-  // then reload only when its content revision changed. Pending DMs also sync
-  // immediately so they can acquire their relay-created thread while the outer
-  // list poll is paused. Token and request guards prevent an older pass from
-  // repainting a newer snapshot or a local send.
+  // then reload only when its content revision changed. openDm runs the first
+  // sync, once per opening; a refresh that updates this DM's fields changes
+  // nav but is not an opening. Token and request guards prevent an older pass
+  // from repainting a newer snapshot or a local send.
   useEffect(() => {
     if (props.suspendPolling || nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
-    if (!dm.threadId) void refreshOpenDm(dm, token, "open");
     const interval = setInterval(
       () => void refreshOpenDm(dm, token, "tick"),
       4_000,

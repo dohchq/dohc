@@ -86,18 +86,24 @@ export function createDesktopSharedChannelSync<
     console.info(message),
   );
 
+  function runWorkspaceSharedChannelPass(
+    workspaceId: string,
+    priorityChannelWireId?: string,
+  ): Promise<SharedChannelPassOutcome> {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      runInWorkspaceAuthorityLane(lease, "shared-channels", () =>
+        runSharedChannelSyncPass(lease, priorityChannelWireId),
+      ),
+    );
+  }
+
   // Resolves to the live rows this pass did not reach, so an awaited caller can
   // say so in its own response.
   async function syncWorkspaceSharedChannels(
     workspaceId: string,
     priorityChannelWireId?: string,
   ): Promise<number> {
-    const outcome = await workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      runInWorkspaceAuthorityLane(lease, "shared-channels", () =>
-        runSharedChannelSyncPass(lease, priorityChannelWireId),
-      ),
-    );
-    return outcome.unrefreshed;
+    return (await runWorkspaceSharedChannelPass(workspaceId, priorityChannelWireId)).unrefreshed;
   }
 
   function runRendererSharedChannelPass(
@@ -357,6 +363,7 @@ export function createDesktopSharedChannelSync<
   }
 
   return {
+    runWorkspaceSharedChannelPass,
     syncWorkspaceSharedChannels,
     syncRendererWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget,

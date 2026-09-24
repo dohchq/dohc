@@ -8,6 +8,7 @@ import { createChatScopeCapability } from "./chatScope";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { createLastKnownDmRequestLanesCache } from "../workspaces/dmRequests";
+import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
 import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { readDeclinedDms } from "../workspaces/dmRequestStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -18,6 +19,7 @@ import type { JoinedSharedChannel, RegistryEntry } from "../workspaces/registryS
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { ChannelThreadSummary, ChatChannelSummary, ChatMessage } from "@dohc/workspace-contracts/engine";
+import type { PullWorkspaceFromRelayResult } from "@dohc/workspace-contracts/relay";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -265,14 +267,56 @@ describe("registered direct message boundaries", () => {
     const h = await harness();
     h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 0, changed: true, failed: false }; });
     await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true });
-    expect(h.events).toEqual(["list-grants", "sync", "cloud"]);
+    // A poll asks for its pull too, because only the pull has a deadline that
+    // local writes cannot push back.
+    expect(h.events).toEqual(["list-grants", "sync", "cloud", "pull"]);
     // The cloud engine's change events refresh Chats without the poll flag.
     // Those passes apply nothing, so they must not queue again.
     await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
     await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
     expect(h.sync).toHaveBeenCalledTimes(3);
     expect(h.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
-    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
+    expect(h.activity.queueCloudPull).toHaveBeenCalledExactlyOnceWith("workspace");
+  });
+
+  it("pulls the owner's log on every poll while joined channels keep changing and local writes keep arriving", async () => {
+    const h = await harness();
+    const workspacePull = vi.fn(async (): Promise<PullWorkspaceFromRelayResult> => ({
+      fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0,
+      sharingDeclined: [], fastForwardedPaths: [], nextCursor: 0,
+    }));
+    const engine = createRelaySyncEngine({
+      rootDir: "/workspace", relay: { baseUrl: credentials.relayUrl!, token: credentials.token },
+      capture: {
+        runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) =>
+          await task(async () => undefined),
+      } as unknown as WorkspaceEngineCapture,
+      onChange: () => undefined,
+      operations: {
+        push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
+        pull: workspacePull,
+        recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
+      },
+      debounceMs: 1_500,
+    });
+    h.activity.queueCloudSync.mockImplementation(() => engine.queueSync());
+    h.activity.queueCloudPull.mockImplementation(() => engine.queuePull());
+    h.sync.mockImplementation(async () => ({ unrefreshed: 0, changed: true, failed: false }));
+    vi.useFakeTimers();
+    try {
+      for (let poll = 1; poll <= 3; poll += 1) {
+        await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true });
+        // A local write every second keeps the 1.5 s debounce from firing.
+        for (let second = 0; second < 5; second += 1) {
+          engine.queueSync();
+          await vi.advanceTimersByTimeAsync(1_000);
+        }
+        expect(workspacePull).toHaveBeenCalledTimes(poll);
+      }
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("pulls the workspace's own relay log for a poll, which is how an owner DM with no joined channel receives replies", async () => {

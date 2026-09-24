@@ -47,8 +47,9 @@ export interface CloudSyncEngineOptions {
   // every sync pass (push member ops, pull peers'). Best-effort — the
   // callback owns its own error handling (revocation marking, logging); a
   // throw here is logged and never fails the workspace's own pass, so a
-  // revoked share can't wedge file sync into permanent backoff.
-  syncSharedChannels?: () => Promise<void>;
+  // revoked share can't wedge file sync into permanent backoff. Resolves true
+  // when it applied ops, so a quiet pass announces its end.
+  syncSharedChannels?: () => Promise<boolean>;
   // Runs after the workspace pull has fully succeeded through the capture
   // gate (including materialization and cursor commit). Follow-up projection
   // work such as live chat bookmarks must be prompt, but is ancillary: a
@@ -166,7 +167,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     scheduleBackoff();
   }
 
-  // Resolves true when the pull applied ops.
+  // Resolves true when the workspace pull or the shared-channel pass applied
+  // ops. The shared-channel pass tells the renderer itself, and the renderer
+  // then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
@@ -223,9 +226,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // Shared channels ride the same cadence but never gate the pass: chat
     // replay touches no workspace files, so it runs outside runRelaySync's
     // capture gate, and its failures are contained here.
+    let sharedChannelsApplied = false;
     if (options.syncSharedChannels) {
       try {
-        await options.syncSharedChannels();
+        sharedChannelsApplied = await options.syncSharedChannels();
       } catch (error) {
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
@@ -257,7 +261,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         void runPass(false);
       }, 0);
     }
-    return pullResult.applied > 0;
+    return pullResult.applied > 0 || sharedChannelsApplied;
   }
 
   // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
