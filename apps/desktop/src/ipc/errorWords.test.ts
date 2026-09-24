@@ -95,9 +95,12 @@ describe("error words", () => {
       mapped: false,
       cause: "YDocRemovalInProgressError: dohc could not open notes.md. It is being moved.",
     });
-    for (const raw of ["invalid-input", "EPIPE", "ENOENT: no such file or directory, open 'a.md'"]) {
+    for (const raw of ["invalid-input", "EPIPE", "EPIPE: broken pipe, write"]) {
       expect(readError(acrossIpc(new Error(raw))).words, raw).toBeNull();
     }
+    // A file-system error that lost its code still leads with it.
+    expect(readError(acrossIpc(new Error("ENOENT: no such file or directory, open 'a.md'"))).words)
+      .toBe("The file or folder is not there anymore.");
     const denied = Object.assign(new Error("EACCES: permission denied, open 'a.md'"), { code: "EACCES" });
     expect(readError(acrossIpc(denied))).toEqual({
       words: "dohc does not have permission to use this file or folder.",
@@ -129,6 +132,19 @@ describe("error words", () => {
     ] as const) {
       expect(readError(acrossIpc(new Error(message), channel)).words, message).toBe(message);
     }
+  });
+
+  it("tells a person what to do for each way the engine can be unavailable", () => {
+    const unavailable = (message: string) =>
+      readError(acrossIpc(Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" }))).words;
+    expect(unavailable("Rust engine daemon is not available.")).toBe("Try again in a moment.");
+    expect(unavailable("Rust engine workspace.open timed out after 30000ms.")).toBe("Try again in a moment.");
+    expect(unavailable("Rust engine exited during its startup handshake.")).toBe("Try again in a moment.");
+    expect(unavailable("Rust engine lifecycle is already stopping.")).toBeNull();
+    expect(unavailable("Rust engine binary not found: C:\\dohc\\dohc-workspace-engine.exe"))
+      .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
+    expect(unavailable("Electron resources path is unavailable for the packaged Rust engine."))
+      .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
   });
 
   it("puts the caller's sentence before the words the map adds", () => {

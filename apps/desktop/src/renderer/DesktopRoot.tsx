@@ -11,11 +11,15 @@ import { bridge } from "./bridge";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
-import { ipcErrorMessage } from "./ipcError";
+import { ChevronRight } from "lucide-react";
+import { readError } from "../ipc/errorWords";
+import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 
 export function DesktopRoot() {
   const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // What the registry read said, and the error as it arrived for the details.
+  const [loadError, setLoadError] = useState<{ message: string; cause: string | null } | null>(null);
+  const [loadDetailsOpen, setLoadDetailsOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const isManagerWindow = bridge().windowRole === "manager";
@@ -134,7 +138,11 @@ export function DesktopRoot() {
       // never a permanently blank window.
       .catch((cause) => {
         if (request < committedRegistryRequest.current) return;
-        setLoadError(ipcErrorMessage(cause));
+        const { words, cause: arrived } = readError(cause);
+        setLoadError({
+          message: words ?? "dohc could not read the file that lists your workspaces.",
+          cause: arrived,
+        });
         setLoaded(true);
       });
   }, []);
@@ -184,18 +192,52 @@ export function DesktopRoot() {
 
   if (!loaded) return null;
   if (loadError) {
+    const loadDetailsText = errorDetails([
+      ["Error", "dohc couldn't read its workspace registry"],
+      ["Detail", loadError.message],
+      ["Cause", loadError.cause],
+      ["Platform", bridge().platform],
+    ]);
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
         <span className="text-sm font-semibold text-ink">
           dohc couldn't read its workspace registry
         </span>
         <span className="max-w-lg text-xs leading-relaxed text-muted">
-          {loadError}
+          {loadError.message}
         </span>
         <span className="max-w-lg text-xs text-subtle">
-          Your files are untouched. Fix or move the registry file named above,
-          then relaunch dohc.
+          Your files are untouched. Fix or move the registry file named in the
+          technical details, then relaunch dohc.
         </span>
+        <button
+          type="button"
+          aria-expanded={loadDetailsOpen}
+          onClick={() => setLoadDetailsOpen((open) => !open)}
+          className="mt-1 flex items-center gap-1 rounded text-[12px] text-subtle transition-colors hover:text-ink"
+        >
+          <ChevronRight
+            size={12}
+            strokeWidth={1.9}
+            aria-hidden
+            className={`transition-transform duration-100 ${loadDetailsOpen ? "rotate-90" : ""}`}
+          />
+          {loadDetailsOpen ? "Hide technical details" : "Show technical details"}
+        </button>
+        {loadDetailsOpen ? (
+          <section
+            aria-label="Technical details"
+            className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <span className="dohc-section-label">Technical details</span>
+              <CopyDetailsButton label="Copy" iconOnly details={() => loadDetailsText} />
+            </div>
+            <pre className="m-0 select-text cursor-text whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-snug text-ink">
+              {loadDetailsText}
+            </pre>
+          </section>
+        ) : null}
       </div>
     );
   }

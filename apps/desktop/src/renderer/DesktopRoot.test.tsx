@@ -378,6 +378,39 @@ describe("startup selection", () => {
   });
 });
 
+describe("registry read failure", () => {
+  it("names the file in technical details a person can copy", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      platform: "win32",
+      getWorkspaceRegistry: vi.fn(async () => {
+        throw new Error(
+          "Error invoking remote method 'desktop:get-workspace-registry': Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\dohc-workspaces.json'",
+        );
+      }),
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+
+    expect(await screen.findByText("dohc does not have permission to use this file or folder.")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("EACCES");
+    fireEvent.click(screen.getByRole("button", { name: "Show technical details" }));
+    const details = screen.getByRole("region", { name: "Technical details" });
+    expect(details.textContent).toContain("Cause: Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\dohc-workspaces.json'");
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0]![0]).toContain("dohc-workspaces.json");
+  });
+});
+
 describe("registry grows under an idle first-run window", () => {
   it("lists a workspace registered mid-join without leaving the first-run screen", async () => {
     let registry: { workspaces: Workspace[] } = { workspaces: [] };

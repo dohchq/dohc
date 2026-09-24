@@ -14,6 +14,7 @@ const TOO_LARGE = "It is too large.";
 const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try again later.";
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
+const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
@@ -59,7 +60,8 @@ const ENGINE_CODE_WORDS = {
 
 // The one map from an error's class, then its message or code, to words. A
 // class listed here writes its messages for developers, so none of them
-// reaches a person. Keys are tried in order: the message, the code, then "*".
+// reaches a person. Keys are tried in order: the message, the message before
+// its first ": " (where it names a path or a detail), the code, then "*".
 export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>>>> = {
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
@@ -71,7 +73,14 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "*": null,
   },
-  EngineDaemonUnavailableError: { "*": "Restart dohc to try again." },
+  // dohc restarts its engine by itself, except while quitting or when this
+  // copy of dohc has no engine to start.
+  EngineDaemonUnavailableError: {
+    "Rust engine lifecycle is already stopping.": null,
+    "Rust engine binary not found": REINSTALL,
+    "Electron resources path is unavailable for the packaged Rust engine.": REINSTALL,
+    "*": "Try again in a moment.",
+  },
   EngineRequestDeadlineError: { "*": ENGINE_CODE_WORDS.DEADLINE_EXCEEDED },
   EngineWorkspaceRetryDeadlineError: { "*": "dohc could not reach this workspace in time. Try again." },
   EngineWorkspaceRebuildingError: { "*": "dohc is rebuilding this workspace's data store. Try again in a moment." },
@@ -189,7 +198,8 @@ export function readError(error: unknown): ReadError {
   const { channel, text, name, code, message } = parse(error);
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
-  const key = entry && [message, code, "*"].find(
+  const lead = message.split(": ")[0];
+  const key = entry && [message, lead, code, "*"].find(
     (candidate) => candidate !== undefined && Object.hasOwn(entry, candidate),
   );
   if (entry && key !== undefined) {

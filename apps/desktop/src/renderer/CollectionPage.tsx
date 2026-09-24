@@ -34,7 +34,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
-import { ipcErrorMessage } from "./ipcError";
+import { withErrorWords } from "../ipc/errorWords";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -107,7 +107,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(ipcErrorMessage(error));
+      setLoadError(withErrorWords("dohc could not load this collection.", error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {
@@ -363,7 +363,7 @@ export function CollectionPage({
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
       >
         <span className="text-sm text-muted">
-          dohc could not load this collection. {loadError}
+          {loadError}
         </span>
         <SecondaryButton
           type="button"
