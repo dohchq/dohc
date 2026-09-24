@@ -58,3 +58,20 @@ it("restores accepted CHECK decisions without reevaluating them and reenables ch
     }finally{session.close();}
   }finally{source.close();target.close();rmSync(directory,{recursive:true,force:true});}
 });
+
+it("reports its step while it copies and rebuilds rows, so the host sees progress",()=>{
+  const directory=mkdtempSync(join(tmpdir(),"dohc-replay-heartbeat-"));
+  const source=new DatabaseSync(":memory:"),target=new DatabaseSync(":memory:");
+  try {
+    const schema="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT UNIQUE); INSERT INTO items SELECT x,'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n);";
+    source.exec(schema);target.exec(schema);
+    const session=source.createSession(),steps:string[]=[];
+    try {
+      source.exec("UPDATE items SET value='temp' WHERE id=1; UPDATE items SET value='v1' WHERE id=2; UPDATE items SET value='v2' WHERE id=1;");
+      replayThroughShadow(target,{directory,tables:["items"],changeset:session.changeset(),databaseBytes:16*1024*1024},()=>{},{progress:step=>steps.push(step),datasetCheck:(_bytes,run)=>run()});
+    }finally{session.close();}
+    // 2,500 rows report each phase again after rows 1,000 and 2,000.
+    expect(steps.filter(step=>step==="copying the dataset for the replay")).toHaveLength(3);
+    expect(steps.filter(step=>step==="rebuilding the dataset from the replay copy")).toHaveLength(3);
+  }finally{source.close();target.close();rmSync(directory,{recursive:true,force:true});}
+});

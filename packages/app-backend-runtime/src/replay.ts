@@ -2,13 +2,13 @@ import { closeSync, openSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, constants } from "node:sqlite";
-import { databaseBytes, reject, unbudgeted } from "./persistent-protocol.js";
+import { databaseBytes, HEARTBEAT_ROWS, reject, unbudgeted } from "./persistent-protocol.js";
 import type { CpuBudgets } from "./persistent-protocol.js";
 
 const quote=(value:string)=>`"${value.replaceAll('"','""')}"`;
 type Columns=ReturnType<ReturnType<DatabaseSync["prepare"]>["all"]>;
 
-function stageTable(source:DatabaseSync, shadow:DatabaseSync, table:string):string[] {
+function stageTable(source:DatabaseSync, shadow:DatabaseSync, table:string, heartbeat:()=>void):string[] {
   const columns=source.prepare(`PRAGMA table_xinfo(${quote(table)})`).all().filter(column=>Number(column.hidden)===0);
   const primary=columns.filter(column=>Number(column.pk)>0).sort((a,b)=>Number(a.pk)-Number(b.pk));
   const index=source.prepare(`PRAGMA index_list(${quote(table)})`).all().find(index=>index.origin==="pk");
@@ -29,15 +29,19 @@ function stageTable(source:DatabaseSync, shadow:DatabaseSync, table:string):stri
   const suffix=[withoutRowid ? "WITHOUT ROWID" : "",strict ? "STRICT" : ""].filter(Boolean).join(", ");
   shadow.exec(`CREATE TABLE ${quote(table)} (${definitions.join(",")})${suffix ? " "+suffix : ""}`);
   const names=columns.map(column=>String(column.name));
-  copyRows(source,shadow,table,names);
+  copyRows(source,shadow,table,names,heartbeat);
   return names;
 }
 
-function copyRows(source:DatabaseSync, target:DatabaseSync, table:string, columns:string[]):void {
+function copyRows(source:DatabaseSync, target:DatabaseSync, table:string, columns:string[], heartbeat:()=>void):void {
   const select=source.prepare(`SELECT ${columns.map(quote).join(",")} FROM ${quote(table)}`);
   select.setReadBigInts(true);
   const insert=target.prepare(`INSERT INTO ${quote(table)} (${columns.map(quote).join(",")}) VALUES (${columns.map(()=>"?").join(",")})`);
-  for(const row of select.iterate()) insert.run(...columns.map(column=>row[column]));
+  let rows=0;
+  for(const row of select.iterate()) {
+    insert.run(...columns.map(column=>row[column]));
+    if(++rows%HEARTBEAT_ROWS===0) heartbeat();
+  }
 }
 
 /** Called only after the fast replay transaction rolls back a secondary-constraint conflict. */
@@ -50,12 +54,13 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
   let shadow:DatabaseSync | undefined;
   // The replayed dataset holds at most the current rows and the changeset's.
   const bytes=databaseBytes(database)+input.changeset.byteLength;
+  const staging="copying the dataset for the replay", rebuilding="rebuilding the dataset from the replay copy";
   try {
-    steps.progress("copying the dataset for the replay");
+    steps.progress(staging);
     shadow=new DatabaseSync(path,{allowExtension:false,enableForeignKeyConstraints:false,enableDoubleQuotedStringLiterals:false});
     shadow.exec(`PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE; PRAGMA temp_store=MEMORY; PRAGMA max_page_count=${Math.floor(input.databaseBytes/4096)}; BEGIN IMMEDIATE;`);
     const tables=steps.datasetCheck(bytes,()=>{
-      const staged=input.tables.map(name=>({name,columns:stageTable(database,shadow!,name)}));
+      const staged=input.tables.map(name=>({name,columns:stageTable(database,shadow!,name,()=>steps.progress(staging))}));
       let forbidden=false;
       const applied=shadow!.applyChangeset(input.changeset,{
         filter:name=>{const allowed=input.tables.includes(name);if(!allowed) forbidden=true;return allowed;},
@@ -71,11 +76,11 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
     const triggers=database.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
     database.exec("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; BEGIN IMMEDIATE");
     try {
-      steps.progress("rebuilding the dataset from the replay copy");
+      steps.progress(rebuilding);
       for(const trigger of triggers) database.exec(`DROP TRIGGER ${quote(String(trigger.name))}`);
       const intact=steps.datasetCheck(bytes,()=>{
         for(const table of tables) database.exec(`DELETE FROM ${quote(table.name)}`);
-        for(const table of tables) copyRows(shadow!,database,table.name,table.columns);
+        for(const table of tables) copyRows(shadow!,database,table.name,table.columns,()=>steps.progress(rebuilding));
         return database.prepare("PRAGMA foreign_key_check").iterate().next().done;
       });
       if(!intact) reject("invalid_changeset","The committed changeset violates a foreign-key constraint.");

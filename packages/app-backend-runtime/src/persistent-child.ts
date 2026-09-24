@@ -281,11 +281,12 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql,budgets);
       progress("saving the migrated copy");
       copy.exec("COMMIT");
-      if(command.input.reportPath) progress("writing the migration preview");
+      const previewing="writing the migration preview";
+      if(command.input.reportPath) progress(previewing);
       // Reading every row computes the app's virtual generated columns.
       const {reportPath}=command.input, before=db, after=copy;
       const report=reportPath ? datasetCheck(databaseBytes(before)+databaseBytes(after),()=>createMigrationPreviewReport({before,after,beforeTables:config.tables,
-        afterTables:command.input.tables,path:reportPath,maxBytes:config.limits.databaseBytes})) : undefined;
+        afterTables:command.input.tables,path:reportPath,maxBytes:config.limits.databaseBytes,heartbeat:()=>progress(previewing)})) : undefined;
       reportCreated=Boolean(report);
       progress("writing the migrated checkpoint");
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;

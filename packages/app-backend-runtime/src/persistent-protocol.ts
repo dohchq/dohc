@@ -83,9 +83,13 @@ export interface CpuBudgets {
   datasetCheck<T>(bytes:number, run:()=>T):T;
 }
 export const unbudgeted:CpuBudgets={appCode:run=>run(),datasetCheck:(_bytes,run)=>run()};
+// Free pages are left out, so deleting rows cannot raise a check's allowance.
 export function databaseBytes(db:DatabaseSync):number {
-  return Number(db.prepare("SELECT page_count*page_size AS bytes FROM pragma_page_count(),pragma_page_size()").get()!.bytes);
+  return Number(db.prepare("SELECT (page_count-freelist_count)*page_size AS bytes FROM pragma_page_count(),pragma_freelist_count(),pragma_page_size()").get()!.bytes);
 }
+// A whole-dataset loop reports its step again after this many rows, so the
+// host's silence limit sees progress and the CPU budget decides how long it runs.
+export const HEARTBEAT_ROWS=1000;
 
 export class PersistentRuntimeError extends Error {
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }
