@@ -52,7 +52,7 @@ pub enum IngestOutcome {
     /// ownership change (policy widened, content became ownable) re-ingests
     /// on the next scan instead of reading as already-captured.
     NotOwned,
-    /// A live document session holds the path, and its own settle records
+    /// A live document session holds a new file, and its own settle records
     /// the content. The op is neither acknowledged nor failed: the manifest
     /// keeps its prior entry, so a later scan offers the path again, and the
     /// run stays clean. The capture driver asks for that scan once a session

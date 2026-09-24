@@ -19,8 +19,7 @@
 //! [`LeaseRegistry::acquire`] fails closed (no lease is granted) rather than
 //! risk double-granting.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::error::CollabError;
@@ -45,10 +44,10 @@ pub struct LeaseRegistry {
     /// [`Self::scoped`] view sharing the same held-set.
     scope: String,
     held: Arc<Mutex<HashSet<(String, String)>>>,
-    /// How many leases this registry has released, across every scoped view.
-    /// Capture defers a path a live session holds and offers it again once
-    /// this count moves.
-    released: Arc<AtomicU64>,
+    /// How many leases each scoped workspace has released. Capture defers a
+    /// new file a live session holds and offers it again once its
+    /// workspace's count moves.
+    released: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl LeaseRegistry {
@@ -69,11 +68,15 @@ impl LeaseRegistry {
     }
 
     fn object_scope(&self, key: &DocKey) -> (String, String) {
-        // NUL never appears in a path or workspace id — an unambiguous join.
         (
-            format!("{}{}{}", self.scope, char::from(0), key.workspace_id),
+            self.workspace_scope(&key.workspace_id),
             key.object_id.clone(),
         )
+    }
+
+    fn workspace_scope(&self, workspace_id: &str) -> String {
+        // NUL never appears in a path or workspace id — an unambiguous join.
+        format!("{}{}{}", self.scope, char::from(0), workspace_id)
     }
 
     /// Acquire an exclusive lease for `key`. Fails with [`CollabError::LeaseHeld`]
@@ -101,16 +104,21 @@ impl LeaseRegistry {
             .unwrap_or(false)
     }
 
-    /// A count that moves every time any lease in this registry is released.
-    pub fn release_generation(&self) -> u64 {
-        self.released.load(Ordering::Acquire)
+    /// A count that moves every time a lease on `workspace_id` under this
+    /// view's root is released.
+    pub fn release_generation(&self, workspace_id: &str) -> u64 {
+        self.released
+            .lock()
+            .ok()
+            .and_then(|released| released.get(&self.workspace_scope(workspace_id)).copied())
+            .unwrap_or(0)
     }
 }
 
 /// An RAII lease guard. Dropping it releases the lease deterministically.
 pub struct Lease {
     held: Arc<Mutex<HashSet<(String, String)>>>,
-    releases: Arc<AtomicU64>,
+    releases: Arc<Mutex<HashMap<String, u64>>>,
     key: (String, String),
     released: bool,
 }
@@ -134,7 +142,10 @@ impl Lease {
         if let Ok(mut held) = self.held.lock() {
             held.remove(&self.key);
         }
-        self.releases.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut releases) = self.releases.lock() {
+            let count = releases.entry(self.key.0.clone()).or_default();
+            *count = count.wrapping_add(1);
+        }
     }
 }
 

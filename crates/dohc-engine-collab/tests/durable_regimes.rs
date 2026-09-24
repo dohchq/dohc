@@ -3426,24 +3426,48 @@ fn a_lease_is_exclusive_and_releases_on_drop() {
 }
 
 #[test]
-fn every_release_moves_the_release_generation_for_all_scoped_views() {
+fn a_release_moves_the_release_generation_of_its_own_workspace_only() {
     let registry = LeaseRegistry::new();
-    let scoped = registry.scoped(std::path::Path::new("root-a"));
-    let before = registry.release_generation();
+    let root_a = registry.scoped(std::path::Path::new("root-a"));
+    let root_a_again = registry.scoped(std::path::Path::new("root-a"));
+    let root_b = registry.scoped(std::path::Path::new("root-b"));
+    let key = test_key();
+    let workspace = key.workspace_id.clone();
+    let other_workspace = DocKey::new("other-workspace", "main", "object").expect("other key");
 
-    let lease = scoped.acquire(&test_key()).expect("scoped lease");
+    let lease = root_a.acquire(&key).expect("scoped lease");
     assert_eq!(
-        registry.release_generation(),
-        before,
+        root_a.release_generation(&workspace),
+        0,
         "acquiring releases nothing"
     );
     lease.release();
-    assert_eq!(registry.release_generation(), before + 1);
-    assert_eq!(scoped.release_generation(), before + 1);
+    assert_eq!(root_a.release_generation(&workspace), 1);
+    assert_eq!(
+        root_a_again.release_generation(&workspace),
+        1,
+        "views of one root share the count"
+    );
+    assert_eq!(
+        root_b.release_generation(&workspace),
+        0,
+        "another root keeps its own count"
+    );
+    assert_eq!(
+        registry.release_generation(&workspace),
+        0,
+        "the unscoped view is its own root"
+    );
 
-    // Drop releases too.
-    drop(registry.acquire(&test_key()).expect("unscoped lease"));
-    assert_eq!(scoped.release_generation(), before + 2);
+    // Drop releases too, and another workspace under the same root moves
+    // only its own count.
+    drop(
+        root_a
+            .acquire(&other_workspace)
+            .expect("other workspace lease"),
+    );
+    assert_eq!(root_a.release_generation("other-workspace"), 1);
+    assert_eq!(root_a.release_generation(&workspace), 1);
 }
 
 #[test]

@@ -943,8 +943,8 @@ impl CaptureDriver {
             let mut env = RealEnv {
                 root,
                 actor,
+                lease_releases_seen: leases.release_generation(&workspace_id),
                 workspace_id,
-                lease_releases_seen: leases.release_generation(),
                 leases,
                 status: Arc::clone(&drive_status),
                 author_json: drive_author_json,
@@ -2067,7 +2067,13 @@ impl DriverEnv for RealEnv {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_deferred_after_release(&self.leases, &mut self.lease_releases_seen, &files).await;
+        offer_deferred_after_release(
+            &self.leases,
+            &self.workspace_id,
+            &mut self.lease_releases_seen,
+            &files,
+        )
+        .await;
         let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
@@ -2221,14 +2227,20 @@ pub(crate) async fn reconcile_full_for_switch(
                 events,
                 apply_probe: None,
             };
-            if apply_bound_run_with_handle(
+            let applied = apply_bound_run_with_handle(
                 context,
                 &handle,
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await
-            {
+            .await;
+            // A new file an editor still holds is not recorded yet, so the
+            // switch would leave it behind.
+            let deferred = match handle.stats().await {
+                Ok(stats) => stats.deferred > 0,
+                Err(_) => true,
+            };
+            if applied && !deferred {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2820,14 +2832,16 @@ async fn materialize_ydoc_recoveries(
 /// A path deferred to a live document session is not in the manifest yet, so
 /// the next full scan offers it again. That scan must happen once the session
 /// lets go, even when nothing on disk changes: a new file closed without an
-/// edit is otherwise never captured. Asks for it when any lease was released
-/// since the last check and the last run deferred something.
+/// edit is otherwise never captured. Asks for it when a lease on this
+/// workspace was released since the last check and the last run deferred
+/// something.
 async fn offer_deferred_after_release(
     leases: &LeaseRegistry,
+    workspace_id: &str,
     releases_seen: &mut u64,
     files: &FilesHandle,
 ) {
-    let releases = leases.release_generation();
+    let releases = leases.release_generation(workspace_id);
     if releases == *releases_seen {
         return;
     }

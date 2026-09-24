@@ -612,7 +612,9 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
-            Err(error) if held_by_live_session(&error) => Ok(DomainIngest::HeldByLiveSession),
+            Err(error) if !claim_foreign_head && held_as_new_file(&error) => {
+                Ok(DomainIngest::HeldAsNewFile)
+            }
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -650,7 +652,9 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
-            Err(error) if held_by_live_session(&error) => Ok(DomainIngest::HeldByLiveSession),
+            Err(error) if !claim_foreign_head && held_as_new_file(&error) => {
+                Ok(DomainIngest::HeldAsNewFile)
+            }
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -866,20 +870,22 @@ enum DomainIngest {
     /// The head belongs to another writer and this observation was not a
     /// disk transition capture witnessed, so nothing was written.
     ForeignHead,
-    /// A live document session holds the path; its settle records it.
-    HeldByLiveSession,
+    /// A live session holds a file capture has not seen before and the store
+    /// has no head for; the session's settle records it.
+    HeldAsNewFile,
 }
 
-/// The store refuses to capture a path whose document a live session holds
-/// (`ensure_capture_target_not_leased`). That is not a failure: the session
-/// owns the content and settles it, so capture waits for the lease instead of
-/// degrading the layer for as long as someone has the document open.
-fn held_by_live_session(error: &RuntimeError) -> bool {
+/// The store refuses to capture a path whose document a live session holds.
+/// For a file capture sees for the first time and the store has no head for,
+/// that is not a failure: the session owns the content and its settle creates
+/// the head, so capture waits for the lease instead of degrading the layer
+/// while someone has the new file open. Every other refusal stays a failure,
+/// so disk text nothing records keeps the layer unsettled.
+fn held_as_new_file(error: &RuntimeError) -> bool {
     matches!(
         error,
-        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
-        })
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
+            if *reason == dohc_engine_runtime::CAPTURE_NEW_FILE_LIVE
     )
 }
 
@@ -1129,7 +1135,7 @@ impl StoreCaptureSink {
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                             Ok(IngestOutcome::NotOwned)
                         }
-                        Err(error) if held_by_live_session(&error) => Ok(IngestOutcome::Deferred),
+                        Err(error) if held_as_new_file(&error) => Ok(IngestOutcome::Deferred),
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1309,7 +1315,7 @@ impl CaptureSink for StoreCaptureSink {
                     // Foreign head left intact: track the disk identity so the
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
-                    DomainIngest::HeldByLiveSession => Ok(IngestOutcome::Deferred),
+                    DomainIngest::HeldAsNewFile => Ok(IngestOutcome::Deferred),
                 }
             }
             CurrentContent::Absent => {
@@ -1371,7 +1377,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
-                    DomainIngest::HeldByLiveSession => Ok(IngestOutcome::Deferred),
+                    DomainIngest::HeldAsNewFile => Ok(IngestOutcome::Deferred),
                 }
             }
         }
