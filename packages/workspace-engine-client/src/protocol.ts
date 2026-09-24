@@ -25,12 +25,14 @@ export type JsonValue =
   | { [key in string]?: JsonValue }
   | null;
 
-export type Request = Omit<WireRequest, "params"> & { params: JsonValue };
+// A caller asks for progress by passing `onProgress` to `sendRequest`; the
+// client sets the wire's `progress` flag itself, so a request never carries one.
+export type Request = Omit<WireRequest, "params" | "progress"> & { params: JsonValue };
 export type Response = Omit<WireResponse, "result"> & { result: JsonValue };
 export type Event = Omit<WireEvent, "payload"> & { payload: JsonValue };
 export type Envelope =
   | Exclude<WireEnvelope, { type: "request" | "response" | "event" | "batch" }>
-  | ({ type: "request" } & Request)
+  | ({ type: "request" } & Request & Pick<WireRequest, "progress">)
   | ({ type: "response" } & Response)
   | ({ type: "event" } & Event)
   | { type: "batch"; envelopes: Envelope[] };

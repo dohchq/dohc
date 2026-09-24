@@ -9,6 +9,8 @@ use crate::schema::{open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
 /// non-empty). Used to guard the one place a table name is interpolated rather
@@ -65,7 +67,18 @@ impl EngineStore {
     /// writer primitive — the single-writer-per-file contract is enforced by
     /// `dohc-engine-runtime`'s supervisor, which is the intended entry point.
     pub fn open(path: &Path, now_ms: i64) -> Result<Self, StorageError> {
-        let opened = open_engine_db(path, now_ms)?;
+        Self::open_counting(path, now_ms, None)
+    }
+
+    /// [`Self::open`], counting its SQLite work into `work` while it runs. A
+    /// migration or the integrity check on a large store can take long; the
+    /// count lets a caller tell that from a stuck open.
+    pub fn open_counting(
+        path: &Path,
+        now_ms: i64,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = open_engine_db(path, now_ms, work)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
@@ -77,7 +90,15 @@ impl EngineStore {
     /// this never creates the database, changes persistent pragmas, or runs the
     /// migration ledger.
     pub fn open_read_only(path: &Path) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path)?;
+        Self::open_read_only_counting(path, None)
+    }
+
+    /// [`Self::open_read_only`], counting its SQLite work into `work`.
+    pub fn open_read_only_counting(
+        path: &Path,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = open_engine_db_read_only(path, work)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: false,

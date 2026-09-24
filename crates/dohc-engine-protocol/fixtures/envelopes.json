@@ -90,6 +90,31 @@
       "name": "workspaceScopedRequest"
     },
     {
+      "canonicalJson": "{\"deadlineMs\":120000,\"id\":44,\"idempotencyKey\":null,\"method\":\"workspace.open\",\"params\":{\"rootDir\":\"/tmp/ws\",\"workspaceId\":\"ws_01HZX3\"},\"progress\":true,\"type\":\"request\",\"workspace\":null}",
+      "envelope": {
+        "deadlineMs": 120000,
+        "id": 44,
+        "idempotencyKey": null,
+        "method": "workspace.open",
+        "params": {
+          "rootDir": "/tmp/ws",
+          "workspaceId": "ws_01HZX3"
+        },
+        "progress": true,
+        "type": "request",
+        "workspace": null
+      },
+      "name": "progressRequest"
+    },
+    {
+      "canonicalJson": "{\"id\":44,\"type\":\"progress\"}",
+      "envelope": {
+        "id": 44,
+        "type": "progress"
+      },
+      "name": "progress"
+    },
+    {
       "canonicalJson": "{\"error\":{\"code\":\"OVERLOADED\",\"message\":\"request queue is full\",\"retry\":\"afterBackoff\"},\"id\":43,\"type\":\"error\"}",
       "envelope": {
         "error": {

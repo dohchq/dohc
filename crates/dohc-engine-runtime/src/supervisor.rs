@@ -18,7 +18,8 @@ use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 type Registry = HashMap<EngineDbIdentity, Slot>;
 
@@ -135,13 +136,36 @@ impl WorkspaceSupervisor {
     /// without opening a second connection. A dead actor (its worker panicked)
     /// is evicted and re-opened.
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite)
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None)
+    }
+
+    /// [`Self::open`], counting into `work`, when given, the SQLite work of
+    /// the store open (migrations and the integrity check) and then each
+    /// command the new actor serves. An open that attaches to a live actor
+    /// counts nothing.
+    pub fn open_counting(
+        &self,
+        db_path: &Path,
+        now_ms: i64,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<SupervisorOpen, RuntimeError> {
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, work)
     }
 
     /// Open an existing workspace through a read-only store connection. This
     /// path never creates the parent, the database, or migration state.
     pub fn open_read_only(&self, db_path: &Path) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly)
+        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, None)
+    }
+
+    /// [`Self::open_read_only`], counting into `work` like
+    /// [`Self::open_counting`].
+    pub fn open_read_only_counting(
+        &self,
+        db_path: &Path,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<SupervisorOpen, RuntimeError> {
+        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, work)
     }
 
     fn open_with_mode(
@@ -149,6 +173,7 @@ impl WorkspaceSupervisor {
         db_path: &Path,
         now_ms: i64,
         mode: ActorOpenMode,
+        work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
         if matches!(mode, ActorOpenMode::ReadWrite) {
             ensure_parent_dir(db_path)?;
@@ -207,10 +232,10 @@ impl WorkspaceSupervisor {
 
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
-                WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms)
+                WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
             }
             ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1)
+                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
             }
         };
         let store_freshly_created = spawned
@@ -257,6 +282,7 @@ impl WorkspaceSupervisor {
             identity.clone(),
             next_generation,
             now_ms,
+            None,
         );
         self.finalize_reservation(identity, spawned)
     }
@@ -453,6 +479,28 @@ mod tests {
         first.close(&db).unwrap();
         assert!(second.open(&db, 0).unwrap().created_actor);
         second.close(&db).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_counted_open_counts_the_store_open_then_each_command() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let work = Arc::new(AtomicU64::new(0));
+        let opened = supervisor
+            .open_counting(&db, 1, Some(Arc::clone(&work)))
+            .expect("counted open");
+        let after_open = work.load(Ordering::Relaxed);
+        assert!(after_open > 0, "the store open's migrations count");
+        opened
+            .actor
+            .ydoc_cache_stats_for_test()
+            .await
+            .expect("one command");
+        assert_eq!(work.load(Ordering::Relaxed), after_open + 1);
+        supervisor.close(&db).expect("close");
     }
 
     #[test]

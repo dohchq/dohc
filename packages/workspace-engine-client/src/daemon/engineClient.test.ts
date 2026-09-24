@@ -1206,6 +1206,113 @@ describe("request cancellation", () => {
   });
 });
 
+describe("request progress", () => {
+  async function session(clientCapabilities: string[], ackCapabilities: string[]) {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { capabilities: clientCapabilities });
+    peer.send(helloAck(LIMITS, ackCapabilities));
+    await transport.ready();
+    const requests: Extract<Envelope, { type: "request" }>[] = [];
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") requests.push(envelope);
+    };
+    return { peer, transport, requests };
+  }
+
+  it.each([
+    { clientAsks: true, engineAgrees: true, callerAsks: true, flagged: true },
+    { clientAsks: true, engineAgrees: false, callerAsks: true, flagged: false },
+    { clientAsks: false, engineAgrees: true, callerAsks: true, flagged: false },
+    { clientAsks: true, engineAgrees: true, callerAsks: false, flagged: false },
+  ])("flags a request only when the caller asks on a negotiated session: %o", async (row) => {
+    const { peer, transport, requests } = await session(
+      row.clientAsks ? ["core", "progress"] : ["core"],
+      row.engineAgrees ? ["core", "progress"] : ["core"],
+    );
+    try {
+      const sent = transport.sendRequest(request(1, "workspace.open"), undefined, row.callerAsks ? () => undefined : undefined);
+      await nextImmediate();
+      expect(transport.reportsProgress()).toBe(row.clientAsks && row.engineAgrees);
+      const [wire] = requests;
+      // Absent, not false: a request that does not ask is unchanged on the wire.
+      expect("progress" in wire!).toBe(row.flagged);
+      if (row.flagged) expect(wire!.progress).toBe(true);
+      peer.send({ type: "response", id: wire!.id, result: null });
+      await expect(sent).resolves.toMatchObject({ id: 1 });
+    } finally { transport.close(); }
+  });
+
+  it("hands each report to the request that asked, until its response", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const reports: number[] = [];
+      let count = 0;
+      const sent = transport.sendRequest(request(4, "workspace.open"), undefined, () => {
+        reports.push(++count);
+      });
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      const framesBefore = transport.inboundActivity();
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "progress", id: wireId });
+      expect(reports).toEqual([1, 2]);
+      expect(transport.inboundActivity()).toBe(framesBefore + 2);
+      peer.send({ type: "response", id: wireId, result: { workspace: "ws-1" } });
+      await expect(sent).resolves.toEqual({ id: 4, result: { workspace: "ws-1" } });
+    } finally { transport.close(); }
+  });
+
+  it("ignores progress for a request the caller stopped waiting for", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const controller = new AbortController();
+      const stopped = new Error("stopped waiting");
+      const onProgress = vi.fn();
+      const sent = transport.sendRequest(request(5, "workspace.open"), controller.signal, onProgress);
+      const rejected = expect(sent).rejects.toBe(stopped);
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      controller.abort(stopped);
+      await rejected;
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "response", id: wireId, result: null });
+      expect(onProgress).not.toHaveBeenCalled();
+      peer.onEnvelope = (envelope) => {
+        if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+      };
+      await expect(transport.sendRequest(request(6, "engine.ping"))).resolves.toMatchObject({ result: { ok: true } });
+    } finally { transport.close(); }
+  });
+
+  it("keeps the request when a progress observer throws", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const sent = transport.sendRequest(request(7, "workspace.open"), undefined, () => {
+        throw new Error("observer failed");
+      });
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "response", id: wireId, result: null });
+      await expect(sent).resolves.toMatchObject({ id: 7 });
+    } finally { transport.close(); }
+  });
+
+  it.each(["a request that did not ask", "an unknown request"])(
+    "treats progress for %s as a protocol error",
+    async (target) => {
+      const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+      try {
+        const sent = transport.sendRequest(request(8, "workspace.open"));
+        await nextImmediate();
+        const wireId = requests[0]!.id;
+        peer.send({ type: "progress", id: target === "an unknown request" ? wireId + 100 : wireId });
+        await expect(sent).rejects.toMatchObject({ code: "protocol-error" });
+      } finally { transport.close(); }
+    },
+  );
+});
+
 describe("private application range ordering", () => {
   it.each([
     ["separated ranges from one client", [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 7, startClock: 5, endClock: 10 }], true],
