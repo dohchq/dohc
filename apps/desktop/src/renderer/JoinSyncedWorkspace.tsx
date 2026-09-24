@@ -102,7 +102,7 @@ export function JoinSyncedWorkspace(props: {
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
-      const message = ipcErrorMessage(cause).trim() || "Couldn't join the workspace.";
+      const message = ipcErrorMessage(cause, "Couldn't join the workspace.");
       if (/passphrase required to unlock synced secrets/i.test(message)) {
         setNeedsPassphrase(true);
         setError(

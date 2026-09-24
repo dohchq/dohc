@@ -70,7 +70,7 @@ export interface ReactionToggleContext {
   reactionSeq: MutableRefObject<Map<string, number>>;
   setReactions: Dispatch<SetStateAction<ChatReactionRecord[]>>;
   setViewerAuthorId: Dispatch<SetStateAction<string>>;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
 }
 
 export function runReactionToggle(
@@ -140,7 +140,7 @@ export function runReactionToggle(
       // so a superseded failure never clobbers a newer toggle's state.
       if (isCurrent()) ctx.setReactions((current) => setCell(current, !present));
       if (token === ctx.liveToken.current) {
-        ctx.onError(ipcErrorMessage(error, "Could not update that reaction."));
+        ctx.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
       }
     });
 }

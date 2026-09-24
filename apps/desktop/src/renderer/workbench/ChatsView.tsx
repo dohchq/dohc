@@ -387,7 +387,7 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, cause?: unknown) => void;
   // @-mention roster for this workspace (the user + available agents). When
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
@@ -1332,6 +1332,7 @@ export function ChatsView(props: {
         if (mutationIsCurrent()) {
           props.onError(
             ipcErrorMessage(error, "Could not update this bookmark."),
+            error,
           );
         }
       } finally {
@@ -1453,7 +1454,7 @@ export function ChatsView(props: {
         applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this channel."));
+        props.onError(ipcErrorMessage(error, "Could not load this channel."), error);
       } finally {
         if (
           token === liveToken.current &&
@@ -1731,7 +1732,7 @@ export function ChatsView(props: {
         applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this chat."));
+        props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
       } finally {
         if (
           token === liveToken.current &&
@@ -1914,7 +1915,7 @@ export function ChatsView(props: {
       setChannelThreads((current) => [result.thread, ...current]);
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that chat."));
+      props.onError(ipcErrorMessage(error, "Could not start that chat."), error);
     } finally {
       startingThreadRef.current = false;
       setStartingThread(false);
@@ -2042,9 +2043,10 @@ export function ChatsView(props: {
         clearMatchingComposer();
         props.onError(
           ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
+          error,
         );
       } else {
-        props.onError(ipcErrorMessage(error, "Could not send that message."));
+        props.onError(ipcErrorMessage(error, "Could not send that message."), error);
       }
     } finally {
       const ownsContext =
@@ -2126,7 +2128,7 @@ export function ChatsView(props: {
         })
         .catch((error) => {
           if (!isCurrent()) return;
-          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
+          props.onError(ipcErrorMessage(error, "Could not update that reaction."), error);
         });
     },
     [nav.level, props.onError, setMessageReactions, workspaceId],
@@ -2216,7 +2218,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current || request !== dmRefreshSeq.current) {
           return;
         }
-        props.onError(ipcErrorMessage(error, "Could not load this conversation."));
+        props.onError(ipcErrorMessage(error, "Could not load this conversation."), error);
       } finally {
         if (token === liveToken.current && request === dmRefreshSeq.current) {
           setMessagesLoading(false);
@@ -2453,7 +2455,7 @@ export function ChatsView(props: {
       flatChatListRef.current?.scrollToEnd();
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."));
+      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
     } finally {
       const ownsContext =
         inFlightSendByContext.current.get(sendContextKey) === request;
@@ -2502,7 +2504,7 @@ export function ChatsView(props: {
       }
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that conversation."));
+      props.onError(ipcErrorMessage(error, "Could not start that conversation."), error);
     } finally {
       startingDmRef.current = false;
       setStartingDm(false);
@@ -2541,6 +2543,7 @@ export function ChatsView(props: {
             error,
             "dohc could not add that conversation to a workspace.",
           ),
+          error,
         );
       }
     },
@@ -2568,6 +2571,7 @@ export function ChatsView(props: {
               ? "dohc could not decline that message request."
               : "dohc could not move that message request back to requests.",
           ),
+          error,
         );
       } finally {
         if (token === liveToken.current) setDmRequestBusy(null);
@@ -2957,7 +2961,7 @@ export function ChatsView(props: {
       await refreshShares();
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not share that channel."));
+      props.onError(ipcErrorMessage(error, "Could not share that channel."), error);
     } finally {
       setShareBusy(false);
     }
@@ -3010,7 +3014,7 @@ export function ChatsView(props: {
         await refreshShares();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not remove that person."));
+        props.onError(ipcErrorMessage(error, "Could not remove that person."), error);
       }
     },
     [claimLanes, props.onError, refreshShares, takeCommitTicket],
@@ -3027,7 +3031,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not join that channel."));
+        props.onError(ipcErrorMessage(error, "Could not join that channel."), error);
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
         // refreshOverview bumps liveToken itself, so a token-equality check
@@ -3053,7 +3057,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that channel."));
+        props.onError(ipcErrorMessage(error, "Could not leave that channel."), error);
       }
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
@@ -3093,7 +3097,7 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not create that channel."));
+        props.onError(ipcErrorMessage(error, "Could not create that channel."), error);
       }
     },
     [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
@@ -3176,6 +3180,7 @@ export function ChatsView(props: {
         presence.restart();
         props.onError(
           ipcErrorMessage(error, "dohc could not leave that conversation. Try again."),
+          error,
         );
       }
     },
@@ -3331,7 +3336,7 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not stop this agent run."));
+      props.onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
@@ -3365,7 +3370,7 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not resume dispatch."));
+      props.onError(ipcErrorMessage(error, "Could not resume dispatch."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }

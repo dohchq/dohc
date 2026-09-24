@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readError, UNKNOWN_ERROR_WORDS } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
 type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
@@ -15,6 +16,8 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
+  // The error as it arrived, for Copy details. A person reads `message`.
+  cause?: string;
   retry: (() => void) | null;
   kind?: ShellErrorKind;
   atMs: number;
@@ -100,12 +103,13 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: "workspace-search",
     ) => {
-      const detail = error instanceof Error ? error.message.trim() : "";
+      const { words, cause } = readError(error);
       push({
         message:
-          detail && detail !== fallback && !detail.startsWith(`${fallback} `)
-            ? `${fallback} ${detail}`
-            : detail || fallback,
+          words && words !== fallback && !words.startsWith(`${fallback} `)
+            ? `${fallback} ${words}`
+            : words || fallback,
+        ...(cause ? { cause } : {}),
         retry,
         ...(kind ? { kind } : {}),
       });
@@ -135,14 +139,20 @@ export function useShellError(workspaceId: string) {
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
-      const cause = error instanceof Error ? error.message : null;
-      push({ message: cause ? `${lane} ${cause}` : lane, retry });
+      const { words, cause } = readError(error);
+      push({ message: words ? `${lane} ${words}` : lane, ...(cause ? { cause } : {}), retry });
     },
     [push],
   );
 
+  // A surface that already chose its words passes the error that caused them,
+  // so Copy keeps it. Text that arrives raw is read the same way.
   const showShellError = useCallback(
-    (message: string) => push({ message, retry: null }),
+    (message: string, error?: unknown) => {
+      const shown = readError(message);
+      const cause = error === undefined ? shown.cause : readError(error).cause;
+      push({ message: shown.words ?? UNKNOWN_ERROR_WORDS, ...(cause ? { cause } : {}), retry: null });
+    },
     [push],
   );
   const showSuccessNotice = useCallback(

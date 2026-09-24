@@ -58,4 +58,47 @@ describe("useShellError", () => {
     rerender({ id: "ws-b" });
     expect(result.current.shellErrors).toEqual([]);
   });
+
+  it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const refused = new Error(
+      "Error invoking remote method 'desktop:list-collections': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    );
+    act(() => result.current.reportShellError("Could not read Collections.", refused));
+    act(() => result.current.reportLaneFailure("dohc could not refresh sync status.", refused, () => {}));
+    act(() => result.current.showShellError(
+      "Error invoking remote method 'desktop:dataset': PersistentRuntimeError [worker_stopped]: The dataset worker stopped. Reopen it from the journal.",
+    ));
+    act(() => result.current.showShellError("Version controls are unavailable right now.", refused));
+    expect(result.current.shellErrors.map(({ message, cause }) => ({ message, cause }))).toEqual([
+      {
+        message: "Could not read Collections. dohc is still reading this workspace's files. Try again when it finishes.",
+        cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+      },
+      {
+        message: "dohc could not refresh sync status. dohc is still reading this workspace's files. Try again when it finishes.",
+        cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+      },
+      {
+        message: "It stopped before it finished. Try again.",
+        cause: "PersistentRuntimeError [worker_stopped]: The dataset worker stopped. Reopen it from the journal.",
+      },
+      {
+        message: "Version controls are unavailable right now.",
+        cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+      },
+    ]);
+  });
+
+  it("says what failed without the internal text of a Collection error", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellError(
+      "Could not open this Collection.",
+      new Error("Error invoking remote method 'desktop:dataset': Error: Dataset operation expired while waiting for a worker."),
+    ));
+    expect(result.current.shellErrors[0]).toMatchObject({
+      message: "Could not open this Collection.",
+      cause: "Dataset operation expired while waiting for a worker.",
+    });
+  });
 });

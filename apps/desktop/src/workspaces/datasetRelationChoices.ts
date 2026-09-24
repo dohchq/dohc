@@ -6,7 +6,7 @@ import { parseDatasetDefinition, parseDatasetRevision, type DatasetRevision } fr
 export function generateDatasetRelationChoices(input: { revision: DatasetRevision; schemaSql: string; operationSource: string; tableId: string; fieldId: string; labelFieldId: string }) {
   const revision = parseDatasetRevision(input.revision), definition = structuredClone(revision.definition);
   const field = definition.tables.find(table => table.tableId === input.tableId)?.fields.find(field => field.fieldId === input.fieldId);
-  if (!field?.relation) throw Error("Choose a related-record field in this dataset.");
+  if (!field?.relation) throw Error("Choose a related-record field in this Collection.");
   const relation = field.relation;
   const target = definition.tables.find(table => table.tableId === relation.tableId)!;
   const key = target.fields.find(field => field.fieldId === relation.fieldId)!;

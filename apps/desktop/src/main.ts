@@ -7,6 +7,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
+import { ipcWireError } from "./ipc/errorWords";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -3838,6 +3839,18 @@ function isTrustedFrame(frameUrl: string): boolean {
   return decideNavigation(frameUrl, policy()).action === "allow";
 }
 
+// Every invoke handler registers here. Electron sends a rejected handler's
+// error to the renderer as one string, so this keeps its code in that string.
+function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await listener(event, ...args);
+    } catch (error) {
+      throw ipcWireError(error);
+    }
+  });
+}
+
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const frameUrl = event.senderFrame?.url ?? "";
   if (!isTrustedFrame(frameUrl)) {
@@ -3849,7 +3862,7 @@ const operationBoundary: OperationBoundary<
   IpcMainInvokeEvent,
   DesktopRendererWorkspaceOperation
 > = {
-  handle: (channel, listener) => ipcMain.handle(channel, listener),
+  handle: handleIpc,
   assertTrustedSender,
   withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
     withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
@@ -3936,7 +3949,7 @@ const quitGuard = createQuitGuard({
 
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
     rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, exitRounds,
@@ -3946,7 +3959,7 @@ function registerIpcHandlers(): void {
 
   const { usableRoot } = workspaceRootApproval;
   registerWorkspaceRegistryIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
@@ -3971,7 +3984,7 @@ function registerIpcHandlers(): void {
 
   registerDevToolsIpcHandlers<IpcMainInvokeEvent>({
     enabled: devToolsGranted,
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     listWorkspaces,
     forgetWorkspace,
@@ -3985,7 +3998,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
@@ -4012,7 +4025,7 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceAuthorityState,
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
@@ -4031,7 +4044,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     app,
     exactRendererWorkspaceReferences,
@@ -4051,7 +4064,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     workspaceFileListings,
@@ -4066,13 +4079,13 @@ function registerIpcHandlers(): void {
   windowIpc.registerExternalUrl();
 
   registerShareHandoffIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     shareHandoffRedemption,
   });
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
@@ -4095,7 +4108,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     remoteForWorkspace,
@@ -4110,7 +4123,7 @@ function registerIpcHandlers(): void {
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     flushCapture: async workspace => {
@@ -4301,7 +4314,7 @@ function registerIpcHandlers(): void {
     },
     withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
   });
-  ipcMain.handle(CHANNELS.dataset, async (event, raw: unknown) => {
+  handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
     assertTrustedSender(event);
     return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
   });
@@ -4356,7 +4369,7 @@ function registerIpcHandlers(): void {
   });
   ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
   const ownerResponseDependencies={
-    registerHandler:(channel,handler)=>ipcMain.handle(channel,handler),assertTrustedSender,withRendererWorkspaceOperation,
+    registerHandler:handleIpc,assertTrustedSender,withRendererWorkspaceOperation,
     remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
     undoAcceptedResponse:async(workspace,input)=>{
       await openWorkspaceActivity(workspace);
@@ -4378,7 +4391,7 @@ function registerIpcHandlers(): void {
     WebContents, IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     requireEngineCapture,
@@ -4411,7 +4424,7 @@ function registerIpcHandlers(): void {
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
     detectAgentTools,
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
     acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
@@ -4424,7 +4437,7 @@ function registerIpcHandlers(): void {
   agentRunsIpc.registerAutomationFailures();
 
   registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
@@ -4435,7 +4448,7 @@ function registerIpcHandlers(): void {
   });
 
   registerSharedViewsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation, DesktopWorkspaceAuthorityLease>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     engineDaemonStartup: () => desktopEngine.startup,
@@ -4455,7 +4468,7 @@ function registerIpcHandlers(): void {
   // host's history or its synced copy.
 
   registerShareMountIpcHandlers({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withWorkspaceOperation: (event, workspaceId, work) =>
       withRendererWorkspaceOperation(
@@ -4473,7 +4486,7 @@ function registerIpcHandlers(): void {
     IpcMainInvokeEvent,
     DesktopWorkspaceOperation["workspace"]
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, assertWritableWorkspace,
     shareViewFiles, workerDatabaseReader, editWorkspaceDatabaseInWorker,
   });
@@ -4482,11 +4495,11 @@ function registerIpcHandlers(): void {
     authority: senderWorkspaceAuthority,
     catalog: ownedSiteCatalog,
   });
-  ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
-  ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
+  handleIpc(CHANNELS.listSites, siteIpcHandlers.listSites);
+  handleIpc(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
   registerAppPreviewIpcHandlers<WebContents, IpcMainInvokeEvent, CreatedWorkspace, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, senderWorkspaceAuthority, withRendererWorkspaceOperation,
     appCatalog: ownedSiteCatalog, appPreviews: sitePreviews,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
@@ -4500,9 +4513,7 @@ function registerIpcHandlers(): void {
     WebContentsView
   >({
     registrar: {
-      handle: (channel, handler) => {
-        ipcMain.handle(channel, handler);
-      },
+      handle: handleIpc,
     },
     assertTrustedSender,
     workspaces: {
@@ -4540,7 +4551,7 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceOperation["workspace"],
     DesktopWorkspaceOperation
   >({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender,
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
@@ -4587,7 +4598,7 @@ function registerIpcHandlers(): void {
   workspaceEngineIpc.registerHistory();
 
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
@@ -4602,7 +4613,7 @@ function registerIpcHandlers(): void {
   agentRunsIpc.registerChatRunRecords();
 
   registerDirectMessagesIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     assertWritableWorkspace, linkedChatStoreFor, warmCredentialCache,
     currentCredentials: () => cachedCredentials,
@@ -4614,7 +4625,7 @@ function registerIpcHandlers(): void {
   });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, rendererWorkspaceSessions,
   });
 
@@ -4623,7 +4634,7 @@ function registerIpcHandlers(): void {
   agentRunsIpc.registerAgentRuns();
 
   const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, stateDir, enqueueUserSettingsWrite,
     setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
@@ -4675,7 +4686,7 @@ function registerIpcHandlers(): void {
   workspaceEngineIpc.registerYDoc();
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    registerHandler: handleIpc,
     assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return autoUpdateController; },
   });

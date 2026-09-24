@@ -4256,8 +4256,8 @@ export function DesktopWorkspaceShell(props: {
   // Stable per-field identities (D2#5): ChatsView keys real work off these —
   // its refresh callbacks depend on onError, so a fresh arrow per shell render
   // tore down and re-armed its polls and activity subscription every render.
-  const onChatsError = useCallback((message: string) => {
-    showShellError(message);
+  const onChatsError = useCallback((message: string, cause?: unknown) => {
+    showShellError(message, cause);
   }, [showShellError]);
   const openAgentSettings = useCallback(
     () => openSettings("agents"),
@@ -4379,7 +4379,11 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
+        details: errorDetails([
+          [error.tone === "success" ? "Notice" : "Error", error.message],
+          ["Cause", error.cause],
+          ...reportFacts(),
+        ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,
@@ -4909,7 +4913,7 @@ export function DesktopWorkspaceShell(props: {
                   beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => showShellError(message)}
+                  onError={showShellError}
                   {...(shareView
                     ? {}
                     : {

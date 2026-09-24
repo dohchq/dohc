@@ -7551,18 +7551,27 @@ describe("engine store recovery", () => {
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => {
-      throw new Error("EACCES: permission denied");
+      throw new Error(
+        "Error invoking remote method 'desktop:rebuild-engine-store': Error [EACCES]: EACCES: permission denied",
+      );
     });
     const { user, dialog } = await openRebuildDialog(bridge);
 
     await user.click(
       within(dialog).getByRole("button", { name: "Move and rebuild" }),
     );
-    expect(
-      (await screen.findByTestId("workspace-shell-error")).textContent,
-    ).toContain(
-      "dohc could not move this workspace's data store. EACCES: permission denied",
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
     );
+    expect(toast.textContent).not.toContain("EACCES");
+    // Copy keeps the error as it arrived, on its own line.
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied.split("\n").slice(0, 2)).toEqual([
+      "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
+      "Cause: Error [EACCES]: EACCES: permission denied",
+    ]);
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
