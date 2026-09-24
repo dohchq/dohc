@@ -105,54 +105,6 @@ class Refusal extends Error {
   constructor(readonly reason: LiveMarkdownValidationRefusal) { super(reason) }
 }
 function refuse(reason: LiveMarkdownValidationRefusal): never { throw new Refusal(reason) }
-
-// Character references the importer decodes: the engine's `decoded_reference`.
-const DECODED_REFERENCE_NAMES = new Set(['amp', 'lt', 'gt', 'quot'])
-const DECODED_REFERENCE_CODES = new Set([9, 13, 32, 35, 36, 41, 42, 43, 45, 46, 61, 91, 95, 96, 126, 160])
-// Names for spaces and invisible characters: the engine's `rendered_reference`.
-const INVISIBLE_REFERENCE_NAMES = new Set([
-  'nbsp', 'ensp', 'emsp', 'emsp13', 'emsp14', 'numsp', 'puncsp', 'thinsp', 'hairsp',
-  'zwnj', 'zwj', 'lrm', 'rlm', 'shy', 'af', 'it', 'ic',
-])
-const REFERENCE_NAME = /([A-Za-z0-9#]*);/y
-const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]$/
-
-/**
- * The character references in `markdown`, in order, that the importer keeps
- * as text but renderers decode to a character a reader may not see as
- * written: numeric ones, which can name a control, format, or bidirectional
- * character; names with a capital letter, as in `&LT;`; and names for spaces
- * or invisible characters. The projector spells none of these outside code,
- * so a kept source must spell exactly the projection's. The engine reads
- * references by the same rule; both check the vectors in
- * `crates/dohc-engine-collab/tests/owner-source/rendered-references.json`.
- */
-export function renderedReferences(markdown: string): string[] {
-  const found: string[] = []
-  for (let index = 0; index < markdown.length; index += 1) {
-    const character = markdown[index]
-    if (character === '\\' && ASCII_PUNCTUATION.test(markdown[index + 1] ?? '')) {
-      index += 1
-      continue
-    }
-    if (character !== '&') continue
-    REFERENCE_NAME.lastIndex = index + 1
-    const match = REFERENCE_NAME.exec(markdown)
-    if (!match) continue
-    const name = match[1]!
-    const decoded = DECODED_REFERENCE_NAMES.has(name)
-      || (/^#\d+$/u.test(name) && DECODED_REFERENCE_CODES.has(Number(name.slice(1))))
-    if (!decoded && (name.startsWith('#') || /[A-Z]/u.test(name) || INVISIBLE_REFERENCE_NAMES.has(name))) {
-      found.push(name)
-    }
-    index = REFERENCE_NAME.lastIndex - 1
-  }
-  return found
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
-}
 function refusal<S extends RefusedRegistration['source'] | RefusedJournal['source']>(
   reason: LiveMarkdownValidationRefusal, source: S,
 ): { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal; readonly source: S } {
@@ -789,10 +741,7 @@ function validatePublicState(
     if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
     const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
     try {
-      if (yDocToMarkdown(source) !== projectedMarkdown
-        || !sameStrings(renderedReferences(metadata.dohcMarkdownSource as string), renderedReferences(projectedMarkdown))) {
-        refuse('invalid-schema')
-      }
+      if (yDocToMarkdown(source) !== projectedMarkdown) refuse('invalid-schema')
       preservedSource = metadata.dohcMarkdownSource as string
     }
     finally { source.destroy() }

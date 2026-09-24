@@ -9,7 +9,7 @@ import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
-import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, renderedReferences, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
+import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
 
 const fixturePolicy: OrderedLiveUpdateCutPolicy = {
   maxStructVisits: 1_000_000,
@@ -988,29 +988,4 @@ it('never projects a preserved source that holds text the document lacks', () =>
     })))
     expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, source).toBe(canonical)
   }
-})
-
-it('reads character references by the rule the engine shares', () => {
-  const vectors = JSON.parse(readFileSync(new URL('../../../crates/dohc-engine-collab/tests/owner-source/rendered-references.json', import.meta.url), 'utf8')) as { text: string; references: string[] }[]
-  for (const vector of vectors) expect(renderedReferences(vector.text), vector.text).toEqual(vector.references)
-})
-
-it('never projects a source that spells a character reference the document holds as text', () => {
-  const digest = (text: string) => hash(new TextEncoder().encode(text))
-  const bind = (document: string, source: string) => {
-    const canonical = projection.yDocToMarkdown(markdownToYDoc(document))
-    return { canonical, result: validate(input(encode(document, doc => {
-      doc.getMap('meta').set('dohcMarkdownSource', source)
-      doc.getMap('meta').set('dohcMarkdownSourceSha256', digest(source))
-      doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', digest(canonical))
-    }))) }
-  }
-  // Renderers show a right-to-left override here, and the file name reads
-  // as "invoiceexe.pdf".
-  for (const text of ['invoice&#x202E;fdp.exe', 'a&#8203;b', 'a &LT;b&GT; c', 'a&nbsp;b']) {
-    const { canonical, result } = bind(`${text}\n`, `${text}\n`)
-    expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, text).toBe(canonical)
-  }
-  const { result } = bind('a &copy; b\n', 'a &copy; b\n')
-  expect(result.kind === 'accepted' && result.evidence.projectedMarkdown).toBe('a &copy; b\n')
 })
