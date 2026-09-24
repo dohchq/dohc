@@ -5,15 +5,16 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetDefinition, DatasetField } from "@dohc/security-contract/dataset";
+import { spawn } from "node:child_process";
 import {
-  changesetTables,
   datasetChangeFacts,
   decodeChangeset,
   DatasetChangeFactsError,
   type ChangesetRow,
   type ChangesetValue,
 } from "./dataset-change-facts.ts";
-import { openPersistentAppBackend } from "./persistent.ts";
+import { openPersistentAppBackend, PersistentRuntimeError } from "./persistent.ts";
+import type { AppRuntimeLauncher } from "./protocol.ts";
 
 // A small, seeded generator, so a failing case names its seed and repeats.
 function random(seed: number): () => number {
@@ -44,6 +45,8 @@ interface FuzzTable {
   name: string;
   columns: string[];
   primaryKey: boolean[];
+  /** Only a trigger writes this table, so a session marks its changes indirect. */
+  indirect?: boolean;
 }
 
 // Every row of a table, keyed by primary key, with SQLite's own storage types.
@@ -62,7 +65,7 @@ function snapshot(db: DatabaseSync, table: FuzzTable): Map<string, Stored[]> {
 // kept, the primary key and the old and new values of each changed column.
 function expectedRows(table: FuzzTable, before: Map<string, Stored[]>, after: Map<string, Stored[]>): Map<string, ChangesetRow> {
   const rows = new Map<string, ChangesetRow>();
-  const base = { table: table.name, indirect: false, primaryKey: table.primaryKey };
+  const base = { table: table.name, indirect: table.indirect === true, primaryKey: table.primaryKey };
   for (const [id, values] of after) {
     const old = before.get(id);
     if (!old) {
@@ -84,7 +87,8 @@ function expectedRows(table: FuzzTable, before: Map<string, Stored[]>, after: Ma
   return rows;
 }
 
-function randomValue(next: () => number): Stored {
+function randomValue(next: () => number, numeric = false): Stored {
+  if (numeric) return [null, BigInt(Math.floor(next() * 200) - 100), (next() - 0.5) * 1000][Math.floor(next() * 3)]!;
   switch (Math.floor(next() * 8)) {
     case 0:
       return null;
@@ -109,11 +113,20 @@ function bind(value: Stored): Stored {
   return value;
 }
 
-function fuzzTables(next: () => number): Array<FuzzTable & { sql: string; integerKey: boolean }> {
-  return Array.from({ length: 1 + Math.floor(next() * 3) }, (_, tableIndex) => {
+type ShapedTable = FuzzTable & { sql: string; integerKey: boolean; numeric?: boolean };
+
+function fuzzTables(next: () => number): ShapedTable[] {
+  return Array.from({ length: 1 + Math.floor(next() * 3) }, (_, tableIndex): ShapedTable => {
     const extra = Array.from({ length: 1 + Math.floor(next() * 5) }, (_, index) => `c${index}`);
-    const shape = Math.floor(next() * 4);
+    const shape = Math.floor(next() * 6);
     const name = `t${tableIndex}`;
+    if (shape === 4 || shape === 5) {
+      // STRICT keeps each value's type in ANY columns, and stores an integer
+      // written to a REAL column as a real.
+      const type = shape === 4 ? "ANY" : "REAL";
+      return { name, columns: ["id", ...extra], primaryKey: [true, ...extra.map(() => false)], integerKey: false, numeric: shape === 5,
+        sql: `CREATE TABLE "${name}"(id TEXT PRIMARY KEY NOT NULL, ${extra.map((column) => `"${column}" ${type}`).join(", ")}) STRICT` };
+    }
     if (shape === 0) {
       return { name, columns: ["id", ...extra], primaryKey: [true, ...extra.map(() => false)], integerKey: true,
         sql: `CREATE TABLE "${name}"(id INTEGER PRIMARY KEY, ${extra.map((column) => `"${column}"`).join(", ")})` };
@@ -129,13 +142,13 @@ function fuzzTables(next: () => number): Array<FuzzTable & { sql: string; intege
   });
 }
 
-function randomKey(table: FuzzTable & { integerKey: boolean }, next: () => number): Stored[] {
+function randomKey(table: ShapedTable, next: () => number): Stored[] {
   const id = Math.floor(next() * 12);
   if (table.columns[0] === "id") return [table.integerKey ? BigInt(id) : `r${id}`];
   return [BigInt(id % 4), `k${Math.floor(id / 4)}`];
 }
 
-function randomChanges(db: DatabaseSync, table: FuzzTable & { integerKey: boolean }, next: () => number, count: number): void {
+function randomChanges(db: DatabaseSync, table: ShapedTable, next: () => number, count: number): void {
   const extras = table.columns.filter((_, index) => !table.primaryKey[index]);
   const keyColumns = table.columns.filter((_, index) => table.primaryKey[index]);
   const where = keyColumns.map((column) => `"${column}"=?`).join(" AND ");
@@ -143,12 +156,12 @@ function randomChanges(db: DatabaseSync, table: FuzzTable & { integerKey: boolea
     const keyValues = randomKey(table, next);
     const choice = next();
     if (choice < 0.4) {
-      const values = table.columns.map((column) => (table.primaryKey[table.columns.indexOf(column)] ? keyValues[keyColumns.indexOf(column)]! : randomValue(next)));
+      const values = table.columns.map((column) => (table.primaryKey[table.columns.indexOf(column)] ? keyValues[keyColumns.indexOf(column)]! : randomValue(next, table.numeric)));
       db.prepare(`INSERT OR IGNORE INTO "${table.name}"(${table.columns.map((column) => `"${column}"`).join(",")}) VALUES(${table.columns.map(() => "?").join(",")})`)
         .run(...values.map(bind));
     } else if (choice < 0.75) {
       const column = extras[Math.floor(next() * extras.length)]!;
-      db.prepare(`UPDATE "${table.name}" SET "${column}"=? WHERE ${where}`).run(bind(randomValue(next)), ...keyValues);
+      db.prepare(`UPDATE "${table.name}" SET "${column}"=? WHERE ${where}`).run(bind(randomValue(next, table.numeric)), ...keyValues);
     } else if (choice < 0.85) {
       // A change of primary key, which a session records as a delete and an insert.
       const moved = randomKey(table, next);
@@ -171,8 +184,12 @@ describe("changeset decoder", () => {
     try {
       const tables = fuzzTables(next);
       for (const table of tables) db.exec(table.sql);
+      // A trigger's writes are indirect changes.
+      const audit: FuzzTable = { name: "audit", columns: ["n", "note"], primaryKey: [true, false], indirect: true };
+      db.exec(`CREATE TABLE audit(n INTEGER PRIMARY KEY, note TEXT);
+        CREATE TRIGGER audit_t0 AFTER INSERT ON t0 BEGIN INSERT INTO audit(note) VALUES('added'); END;`);
       for (const table of tables) randomChanges(db, table, next, 20);
-      const before = new Map(tables.map((table) => [table.name, snapshot(db, table)]));
+      const before = new Map([...tables, audit].map((table) => [table.name, snapshot(db, table)]));
       const session = db.createSession();
       for (let round = 0; round < 3; round += 1) {
         for (const table of tables) randomChanges(db, table, next, 10);
@@ -181,23 +198,23 @@ describe("changeset decoder", () => {
       session.close();
 
       const expected = new Map<string, ChangesetRow>();
-      for (const table of tables) {
+      for (const table of [...tables, audit]) {
         for (const [id, row] of expectedRows(table, before.get(table.name)!, snapshot(db, table))) expected.set(id, row);
       }
       const decoded = [...decodeChangeset(changeset)];
-      const actual = new Map(decoded.map((row) => [rowKey(row), { ...row, indirect: false }]));
+      const actual = new Map(decoded.map((row) => [rowKey(row), row]));
       expect(actual.size, "a row appeared twice").toBe(decoded.length);
       expect([...actual.keys()].sort()).toEqual([...expected.keys()].sort());
       for (const [id, row] of expected) {
         const found = actual.get(id)!;
         expect(found.operation, id).toBe(row.operation);
+        expect(found.indirect, id).toBe(row.indirect);
         expect(found.primaryKey, id).toEqual(row.primaryKey);
         for (const side of ["old", "new"] as const) {
           expect(found[side].length, `${id} ${side}`).toBe(row[side].length);
           found[side].forEach((value, index) => expect(sameValue(value, row[side][index]), `${id} ${side}[${index}]`).toBe(true));
         }
       }
-      expect(changesetTables(changeset).sort()).toEqual([...new Set(decoded.map((row) => row.table))].sort());
     } finally {
       db.close();
     }
@@ -205,7 +222,6 @@ describe("changeset decoder", () => {
 
   it("reads an empty changeset as no changes", () => {
     expect([...decodeChangeset(new Uint8Array())]).toEqual([]);
-    expect(changesetTables(new Uint8Array())).toEqual([]);
   });
 
   it("refuses bytes it cannot read exactly, and a patchset", () => {
@@ -243,6 +259,22 @@ describe("changeset decoder", () => {
     expect(refused(Uint8Array.of(0x54, 0x01, 0x00, 0x74, 0x00))).toThrow("without a primary key");
     expect(refused(Uint8Array.of(0x41))).toThrow("lacks a table header");
   });
+
+  it("keeps text exactly, a leading U+FEFF included, and refuses text that is not UTF-8", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE t(id TEXT PRIMARY KEY NOT NULL, a)");
+    const record = (sql: string) => {
+      const session = db.createSession();
+      db.exec(sql);
+      const bytes = session.changeset();
+      session.close();
+      return bytes;
+    };
+    const [bom] = [...decodeChangeset(record("INSERT INTO t VALUES(char(65279) || 'r1', char(65279) || 'x')"))];
+    expect(bom?.new).toEqual(["\uFEFFr1", "\uFEFFx"]);
+    expect(() => [...decodeChangeset(record("INSERT INTO t VALUES('r2', CAST(x'fffe41' AS TEXT))"))]).toThrow("text that is not UTF-8");
+    db.close();
+  });
 });
 
 const DATASET_ID = "0a1b2c3d-0000-4000-8000-000000000001";
@@ -272,7 +304,7 @@ function commit(db: DatabaseSync, sql: string): { changeset: Uint8Array; columns
   db.exec(sql);
   const changeset = session.changeset();
   session.close();
-  const columns = Object.fromEntries(changesetTables(changeset).map((table) => [table, db.prepare(`PRAGMA table_info("${table}")`).all().map((row) => String(row.name))]));
+  const columns = { tasks: db.prepare('PRAGMA table_info("tasks")').all().map((row) => String(row.name)) };
   return { changeset, columns };
 }
 
@@ -328,6 +360,39 @@ describe("dataset change facts", () => {
     expect(changed.map(({ kind, recordId }) => [kind, recordId]).sort()).toEqual([["added", "t2"], ["removed", "t1"]]);
   });
 
+  it("reads a list's numbers only when they read back exactly", () => {
+    const db = tasks();
+    const [exact] = facts(db, `INSERT INTO tasks(id,tags) VALUES('t1','[1, 0.1, -2.5e3, "a", [true, null]]')`);
+    expect(exact?.fields.find(({ fieldId }) => fieldId === TAGS.fieldId)?.next).toEqual([1, 0.1, -2500, "a", [true, null]]);
+    for (const list of ["[9007199254740993]", "[1e400]", "[0.10000000000000000555]", "[1e-400]"]) {
+      expect(() => facts(tasks(), `INSERT INTO tasks(id,tags) VALUES('t1','${list}')`), list).toThrow("cannot hold exactly");
+    }
+    const [notList] = facts(tasks(), `INSERT INTO tasks(id,tags) VALUES('t1','9007199254740993')`);
+    expect(notList?.fields.find(({ fieldId }) => fieldId === TAGS.fieldId)?.next, "text that is not a list stays text").toBe("9007199254740993");
+  });
+
+  it("refuses a table the changeset keys by another column, or by several", () => {
+    const refusal = "The changeset keys tasks by other columns than its approved primary key, id.";
+    const byName = new DatabaseSync(":memory:");
+    byName.exec("CREATE TABLE tasks(id TEXT NOT NULL, name TEXT PRIMARY KEY NOT NULL, done, tags, estimate)");
+    expect(() => facts(byName, "INSERT INTO tasks VALUES('t1','Plan',0,NULL,NULL)")).toThrow(refusal);
+    byName.exec("INSERT INTO tasks VALUES('t2','Ship',0,NULL,NULL)");
+    expect(() => facts(byName, "UPDATE tasks SET done=1 WHERE name='Ship'")).toThrow(refusal);
+    const composite = new DatabaseSync(":memory:");
+    composite.exec("CREATE TABLE tasks(id TEXT NOT NULL, name TEXT NOT NULL, done, tags, estimate, PRIMARY KEY(id, name))");
+    expect(() => facts(composite, "INSERT INTO tasks VALUES('t1','Plan',0,NULL,NULL); INSERT INTO tasks VALUES('t1','Ship',0,NULL,NULL)")).toThrow(refusal);
+  });
+
+  it("reads an integer a STRICT table stored as a real as that number", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, name TEXT, done INTEGER, tags TEXT, estimate REAL) STRICT");
+    const [added] = facts(db, "INSERT INTO tasks VALUES('t1','Plan',1,NULL,3)");
+    expect(added?.fields.find(({ fieldId }) => fieldId === ESTIMATE.fieldId)?.next).toBe(3);
+    expect(facts(db, "UPDATE tasks SET estimate=4 WHERE id='t1'")).toEqual([expect.objectContaining({
+      kind: "changed", fields: [{ fieldId: ESTIMATE.fieldId, previous: 3, next: 4 }],
+    })]);
+  });
+
   it("keeps stored text that is not an array as text, and a checkbox outside 0 and 1 as stored", () => {
     const db = new DatabaseSync(":memory:");
     db.exec("CREATE TABLE tasks(id TEXT PRIMARY KEY NOT NULL, name, done, tags, estimate)");
@@ -358,7 +423,7 @@ describe("dataset worker prepare result", () => {
   vi.setConfig({ testTimeout: 30_000 });
   const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
-  it("names each changed table's columns in database order", async () => {
+  it("names each approved table's columns in database order", async () => {
     const directory = await mkdtemp(join(tmpdir(), "dohc-change-facts-"));
     const worker = await openPersistentAppBackend({
       directory, schemaSql: `${TASKS_SQL};`, tables: ["tasks"], cursor: { revision: 0, digest: hash("initial") },
@@ -378,9 +443,51 @@ describe("dataset worker prepare result", () => {
         expected: { revision: 0, digest: hash("initial") }, operation: "list", input: {}, caller: { kind: "owner" }, nowMs: 1, requestId: "read", readOnly: true,
         source: "globalThis.operations={list(ctx){return ctx.db.query('SELECT id FROM tasks')}}",
       });
-      expect(read.columns).toEqual({});
+      expect(read.columns, "a read names the columns too").toEqual(prepared.columns);
     } finally {
       await worker.close();
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+    }
+  });
+
+  it.each([
+    ["no columns", undefined],
+    ["a list", [["id"]]],
+    ["another table", { tasks: ["id"], other: ["id"] }],
+    ["a table left out", {}],
+    ["an empty list", { tasks: [] }],
+    ["a name that is not text", { tasks: ["id", 7] }],
+    ["an empty name", { tasks: ["id", ""] }],
+  ])("refuses a prepare result with %s as a protocol error", async (_case, columns) => {
+    const directory = await mkdtemp(join(tmpdir(), "dohc-change-facts-"));
+    // The real worker, with its prepare reply's columns replaced.
+    const launch: AppRuntimeLauncher = (options) => {
+      const child = spawn(process.execPath, [options.entryPath], { cwd: options.cwd, env: options.env, stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true });
+      child.on("message", (message) => {
+        const reply = message as { ok: boolean; result?: Record<string, unknown> };
+        if (reply.ok && reply.result && "proposalId" in reply.result) {
+          if (columns === undefined) delete reply.result.columns;
+          else reply.result.columns = columns;
+        }
+        options.onMessage(reply);
+      });
+      child.on("error", options.onError);
+      child.on("close", options.onExit);
+      return { postMessage(message) { child.send(message as object, (error) => { if (error) options.onError(error); }); }, kill() { child.kill("SIGKILL"); } };
+    };
+    const worker = await openPersistentAppBackend({
+      directory, schemaSql: `${TASKS_SQL};`, tables: ["tasks"], cursor: { revision: 0, digest: hash("initial") },
+      scope: { workspaceId: "workspace", datasetId: "dataset", hostEpoch: "epoch-1", approvedRevisionHash: hash("approved") },
+    }, { launch });
+    try {
+      const prepared = worker.prepare({
+        expected: { revision: 0, digest: hash("initial") }, operation: "list", input: {}, caller: { kind: "owner" }, nowMs: 1, requestId: "read", readOnly: true,
+        source: "globalThis.operations={list(ctx){return null}}",
+      });
+      await expect(prepared).rejects.toBeInstanceOf(PersistentRuntimeError);
+      await expect(prepared).rejects.toMatchObject({ code: "worker_protocol" });
+    } finally {
+      await worker.close().catch(() => undefined);
       await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
     }
   });

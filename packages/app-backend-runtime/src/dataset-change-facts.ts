@@ -1,5 +1,6 @@
-import type { AppBackendJson } from "@dohc/security-contract/app-backend";
+import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetDefinition, DatasetField, DatasetTable } from "@dohc/security-contract/dataset";
+import { losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 
 // What one dataset commit changed, record by record, for automation triggers.
 //
@@ -69,8 +70,8 @@ const OPERATIONS = new Map<number, ChangesetRow["operation"]>([[18, "insert"], [
 // SQLite's own ceiling on columns in a table (SQLITE_MAX_COLUMN).
 const MAX_COLUMNS = 32_767;
 const VERSION_COLUMN = "_record_version";
-const tableNames = new TextDecoder("utf-8", { fatal: true });
-const texts = new TextDecoder("utf-8");
+// Exact text: invalid UTF-8 is an error, and a leading U+FEFF stays part of it.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function fail(message: string): never {
   throw new DatasetChangeFactsError(message);
@@ -111,6 +112,14 @@ class Reader {
   }
 }
 
+function text(bytes: Uint8Array, what: string): string {
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    return fail(`The changeset holds ${what} that is not UTF-8.`);
+  }
+}
+
 function safe(value: bigint): number {
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) fail("The changeset holds a length it cannot have.");
   return Number(value);
@@ -128,7 +137,7 @@ function readValue(reader: Reader): ChangesetValue | undefined {
       return type === 1 ? view.getBigInt64(0) : view.getFloat64(0);
     }
     case 3:
-      return texts.decode(reader.take(reader.varint()));
+      return text(reader.take(reader.varint()), "text");
     case 4:
       return reader.take(reader.varint()).slice();
     case 5:
@@ -161,12 +170,7 @@ export function* decodeChangeset(bytes: Uint8Array): Generator<ChangesetRow> {
     if (!primaryKey.includes(true)) fail("The changeset names a table without a primary key.");
     const end = reader.bytes.indexOf(0, reader.offset);
     if (end < 0) fail("The changeset ends early.");
-    let table: string;
-    try {
-      table = tableNames.decode(reader.take(end - reader.offset));
-    } catch {
-      return fail("The changeset names a table that is not UTF-8.");
-    }
+    const table = text(reader.take(end - reader.offset), "a table name");
     reader.byte();
     if (table.length === 0) fail("The changeset names a table without a name.");
     // A session never writes a table without a change to it.
@@ -200,13 +204,6 @@ function checkUpdate(
   });
 }
 
-/** The names of the tables a changeset changes, in order. */
-export function changesetTables(bytes: Uint8Array): string[] {
-  const tables = new Set<string>();
-  for (const row of decodeChangeset(bytes)) tables.add(row.table);
-  return [...tables];
-}
-
 interface TableMap {
   table: DatasetTable;
   primaryKey: number;
@@ -221,11 +218,16 @@ function columnIndex(columns: readonly string[], name: string): number {
 
 // Maps a changed table's columns, in the order the worker reported them, to
 // the approved definition's fields. The worker reads the order from the
-// database, because a migration can reorder columns.
-function tableMap(definition: DatasetDefinition, table: string, columns: readonly string[] | undefined, count: number): TableMap {
+// database, because a migration can reorder columns. A record's id is its
+// approved primary key, so the changeset must key the table by that column
+// alone: another key would name other records, and a composite key could
+// fold several records into one id.
+function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: readonly string[] | undefined): TableMap {
+  const { table } = row;
   const approved = definition.tables.find((candidate) => candidate.sqlName.toLowerCase() === table.toLowerCase());
   if (!approved) fail(`The changeset changes ${table}, which the approved dataset does not have.`);
-  if (!Array.isArray(columns) || columns.length !== count || columns.some((column) => typeof column !== "string" || column.length === 0) ||
+  if (!Array.isArray(columns) || columns.length !== row.primaryKey.length ||
+    columns.some((column) => typeof column !== "string" || column.length === 0) ||
     new Set(columns.map((column) => column.toLowerCase())).size !== columns.length) {
     fail(`The columns reported for ${table} do not match its changes.`);
   }
@@ -233,7 +235,41 @@ function tableMap(definition: DatasetDefinition, table: string, columns: readonl
   const fields = approved.fields.map((field) => ({ field, column: columnIndex(columns, field.sqlColumn) }));
   if (primaryKey < 0 || fields.some(({ column }) => column < 0)) fail(`The columns reported for ${table} lack an approved field.`);
   const version = columnIndex(columns, VERSION_COLUMN);
-  return { table: approved, primaryKey, version: version < 0 ? null : version, fields };
+  const map = { table: approved, primaryKey, version: version < 0 ? null : version, fields };
+  checkKey(map, row);
+  return map;
+}
+
+function checkKey(map: TableMap, row: ChangesetRow): void {
+  if (!row.primaryKey.every((key, column) => key === (column === map.primaryKey))) {
+    fail(`The changeset keys ${row.table} by other columns than its approved primary key, ${map.table.primaryKey}.`);
+  }
+}
+
+// Array text from a multi-select or a to-many relation. Text that is not a
+// JSON array stays text. A number in it must read back exactly, as a number
+// field's text must when a migration converts it.
+function jsonArray(value: string, name: string): AppBackendJson[] | null {
+  let inexact = false;
+  type Reviver = (key: string, parsed: unknown, context?: { source?: string }) => unknown;
+  const reviver: Reviver = (_key, parsed, context) => {
+    if (typeof parsed === "number" && (context?.source === undefined || losslessDatasetNumber(context.source) === null)) inexact = true;
+    return parsed;
+  };
+  let parsed: unknown;
+  try {
+    // Node's JSON.parse passes each primitive's source text to the reviver.
+    parsed = (JSON.parse as (text: string, reviver: Reviver) => unknown)(value, reviver);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  if (inexact) fail(`${name} holds a number JSON cannot hold exactly.`);
+  try {
+    return parseAppBackendJson(parsed) as AppBackendJson[];
+  } catch {
+    return fail(`${name} holds a list dohc cannot read.`);
+  }
 }
 
 // A stored value as the field's type reads it, the way generated operations
@@ -246,12 +282,7 @@ function fieldValue(field: DatasetField, value: ChangesetValue): AppBackendJson 
   if (typeof number === "number" && !Number.isFinite(number)) fail(`${field.name} holds a number JSON cannot hold.`);
   if (field.type === "checkbox" && (number === 0 || number === 1)) return number === 1;
   if ((field.type === "multi-select" || field.relation?.many) && typeof number === "string") {
-    try {
-      const parsed: unknown = JSON.parse(number);
-      if (Array.isArray(parsed)) return parsed as AppBackendJson[];
-    } catch {
-      // Stored text that is not an array stays text.
-    }
+    return jsonArray(number, field.name) ?? number;
   }
   return number;
 }
@@ -281,7 +312,7 @@ function version(map: TableMap, value: ChangesetValue | undefined): number | nul
 
 /**
  * What a committed changeset did to each record, as change facts. `columns`
- * names each changed table's columns in database order, from the worker's
+ * names each approved table's columns in database order, from the worker's
  * prepare result. A changed record whose change touched no approved field,
  * such as one that only raised its version, yields nothing.
  */
@@ -294,9 +325,10 @@ export function* datasetChangeFacts(input: {
   for (const row of decodeChangeset(input.changeset)) {
     let map = maps.get(row.table);
     if (!map) {
-      map = tableMap(input.definition, row.table, Object.hasOwn(input.columns, row.table) ? input.columns[row.table] : undefined,
-        row.primaryKey.length);
+      map = tableMap(input.definition, row, Object.hasOwn(input.columns, row.table) ? input.columns[row.table] : undefined);
       maps.set(row.table, map);
+    } else {
+      checkKey(map, row);
     }
     const base = { datasetId: input.definition.datasetId, tableId: map.table.tableId };
     if (row.operation === "insert" || row.operation === "delete") {

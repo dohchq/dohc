@@ -9,13 +9,14 @@ import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, 
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
-import { changesetTables } from "./dataset-change-facts.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
 let cursor:DatasetCursor;
+// Each approved table's columns in the order a changeset records them. The schema is fixed while the worker is open.
+let columns:Record<string,string[]>;
 let pending:{id:string;changesetSha256:string} | undefined;
 let transaction=false;
 let busy=false;
@@ -87,6 +88,10 @@ function initialize(input:OpenRequest):DatasetCursor {
     db.exec(markerSchema);
     db.prepare(`INSERT INTO ${marker} VALUES(1,?,?,?)`).run(JSON.stringify(config.scope),config.cursor.revision,config.cursor.digest);
   }
+  // table_info leaves out generated columns, as sessions do.
+  const opened=db;
+  columns=Object.fromEntries(config.tables.map(table=>[table,
+    opened.prepare(`PRAGMA table_info("${table.replaceAll('"','""')}")`).all().map(column=>String(column.name))]));
   cursor={...config.cursor};
   return cursor;
 }
@@ -128,9 +133,6 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     if (!db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The prepared operation violates a foreign-key constraint.");
     if (changeset.byteLength>config.limits.databaseBytes) reject("resource_limit","The changeset exceeds the dataset storage reservation.");
     const changesetSha256=digest(changeset), proposalId=randomUUID();
-    // The changeset records columns in table_info order, which leaves out generated columns as sessions do.
-    const columns=Object.fromEntries(changesetTables(changeset).map(table=>[table,
-      db!.prepare(`PRAGMA table_info("${table.replaceAll('"','""')}")`).all().map(column=>String(column.name))]));
     if (command.guest.readOnly) {
       if (changeset.byteLength || attachedFileIds.length) reject("invalid_state","A read operation changed the dataset.");
       rollback();

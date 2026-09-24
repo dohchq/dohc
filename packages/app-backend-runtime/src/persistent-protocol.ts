@@ -41,7 +41,7 @@ export interface PreparedOperation {
   changesetSha256: string;
   attachedFileIds: string[];
   /**
-   * Each changed table's column names, in the order its changeset records
+   * Each approved table's column names, in the order a changeset records
    * them. A migration can reorder columns, so reading a changeset needs
    * these; the reader checks them against the approved definition.
    */

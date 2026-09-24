@@ -12,6 +12,15 @@ export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string }
+// SQLite's ceiling on columns in a table (SQLITE_MAX_COLUMN).
+const MAX_TABLE_COLUMNS=32_767;
+// A plain object naming every approved table's columns, and nothing else.
+function tableColumns(value:unknown,tables:readonly string[]):boolean {
+  if(value===null || typeof value!=="object" || Array.isArray(value) || Object.getPrototypeOf(value)!==Object.prototype) return false;
+  const entries=Object.entries(value);
+  return entries.length===tables.length && entries.every(([table,names])=>tables.includes(table) && Array.isArray(names) &&
+    names.length>0 && names.length<=MAX_TABLE_COLUMNS && names.every(name=>typeof name==="string" && name.length>0));
+}
 const nodeLauncher:AppRuntimeLauncher=options=>{
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
   const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning","--max-old-space-size=96",options.entryPath],{
@@ -108,7 +117,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         if(!result || typeof result.proposalId!=="string" || !/^[a-f0-9-]{36}$/.test(result.proposalId) || result.readOnly!==readOnly ||
           !(result.changeset instanceof Uint8Array) || result.changeset.byteLength>config.limits.databaseBytes || digest(result.changeset)!==result.changesetSha256 ||
           !Array.isArray(result.attachedFileIds) || result.attachedFileIds.length>32 || new Set(result.attachedFileIds).size!==result.attachedFileIds.length ||
-          result.attachedFileIds.some(id=>typeof id!=="string" || !files.some(file=>file.fileId===id)) ||
+          result.attachedFileIds.some(id=>typeof id!=="string" || !files.some(file=>file.fileId===id)) || !tableColumns(result.columns,config.tables) ||
           (result.readOnly && (result.changeset.byteLength || result.attachedFileIds.length))) throw Error("Invalid prepared operation.");
         boundedText(JSON.stringify(result.result),config.limits.resultBytes,"Operation result");
       } catch {
