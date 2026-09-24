@@ -747,6 +747,26 @@ impl Ydoc {
         })
     }
 
+    /// The file an owner device settles for a plaintext or rich document: the
+    /// canonical projection, or a rich document's exact source when
+    /// [`Ydoc::preserved_markdown_source`] proves the two equivalent. It reads
+    /// no store. A scene also needs its images from the workspace store, so
+    /// it is refused here.
+    pub fn project_settled(&self, content_kind: ContentKind) -> Result<Projection, CollabError> {
+        if content_kind == ContentKind::Scene {
+            return Err(CollabError::UnsupportedContentKind {
+                kind: content_kind.as_str().to_owned(),
+            });
+        }
+        let mut projection = self.project(content_kind)?;
+        if content_kind == ContentKind::Richdoc {
+            if let Some(source) = self.preserved_markdown_source(&projection.content) {
+                projection.content = source;
+            }
+        }
+        Ok(projection)
+    }
+
     /// Fold the format-owned scene maps without serializing the portable
     /// artifact. The runtime can use the validated assets from this value when
     /// it hydrates native `BinaryFileData`.

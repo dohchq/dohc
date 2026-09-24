@@ -8,9 +8,16 @@ use base64::engine::general_purpose::STANDARD;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::wire::WorkspaceHandle;
-use dohc_engine_sync::{SyncError, project_ydoc_updates};
+use dohc_engine_sync::{UpdateProjectionError, project_ydoc_updates};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
+
+/// Projections the engine runs at once, across every caller.
+const MAX_CONCURRENT_PROJECTIONS: usize = 2;
+static PROJECTIONS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PROJECTIONS)));
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,6 +28,35 @@ struct ProjectParams {
 
 fn invalid(message: &'static str) -> WireError {
     WireError::new(ErrorCode::InvalidParams, message)
+}
+
+fn failed() -> WireError {
+    WireError::new(ErrorCode::Internal, "ydoc projection failed")
+}
+
+/// Run `work` on its own thread while it holds one of `slots`. A caller that
+/// stops waiting, on a cancel or a deadline, leaves the permit with the work,
+/// so an abandoned projection counts against the bound until it ends. A plain
+/// thread, unlike `spawn_blocking`, does not hold the process open at
+/// shutdown, so the engine still exits when its host closes stdin. A panic
+/// ends only this thread.
+async fn run_bounded<T: Send + 'static>(
+    slots: &Arc<Semaphore>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, WireError> {
+    let permit = Arc::clone(slots)
+        .acquire_owned()
+        .await
+        .map_err(|_| failed())?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("ydoc-project".to_owned())
+        .spawn(move || {
+            let _permit = permit;
+            let _ = sender.send(work());
+        })
+        .map_err(|_| failed())?;
+    receiver.await.map_err(|_| failed())
 }
 
 pub(super) async fn project(
@@ -39,21 +75,14 @@ pub(super) async fn project(
         .map(|update| STANDARD.decode(update))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| invalid("a ydoc update is not base64"))?;
-    // Applying and projecting is CPU work, kept off the request threads. A
-    // panic ends only this task.
-    let projection = tokio::task::spawn_blocking(move || {
+    let projection = run_bounded(&PROJECTIONS, move || {
         project_ydoc_updates(updates.iter().map(Vec::as_slice), content_kind)
     })
-    .await
-    .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc projection failed"))?
+    .await?
     .map_err(|error| match error {
-        SyncError::InvalidInput { reason } => invalid(reason),
-        SyncError::ProjectionTooLarge { .. } => {
-            WireError::new(ErrorCode::PayloadTooLarge, error.to_string())
-        }
-        other => {
-            eprintln!("engine: ydoc projection failed: {other}");
-            WireError::new(ErrorCode::Internal, "ydoc projection failed")
+        UpdateProjectionError::Invalid(reason) => invalid(reason),
+        UpdateProjectionError::TooLarge(message) => {
+            WireError::new(ErrorCode::PayloadTooLarge, message)
         }
     })?;
     // Base64 keeps the reply within one frame: JSON escapes a control
@@ -169,5 +198,36 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    #[tokio::test]
+    async fn abandoned_work_keeps_its_slot_until_it_ends() {
+        let slots = Arc::new(Semaphore::new(1));
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (finish, finished) = std::sync::mpsc::channel::<()>();
+        let caller = tokio::spawn({
+            let slots = Arc::clone(&slots);
+            async move {
+                run_bounded(&slots, move || {
+                    let _ = started.send(());
+                    finished.recv().ok();
+                })
+                .await
+            }
+        });
+        running.await.expect("work started");
+        // The caller gives up, as a cancel or a deadline does.
+        caller.abort();
+        assert!(caller.await.expect_err("aborted").is_cancelled());
+        assert_eq!(
+            slots.available_permits(),
+            0,
+            "the work still holds its slot"
+        );
+        finish.send(()).expect("finish");
+        let _slot = slots
+            .acquire()
+            .await
+            .expect("the slot returns when the work ends");
     }
 }
