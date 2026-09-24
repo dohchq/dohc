@@ -324,9 +324,10 @@ export class EngineDaemonLifecycle {
   // open, but they never hold it for long, so they are not what a stuck
   // attach waits behind.
   private readonly readRequests = new WeakSet<Request>();
-  // The desktop's own opens and closes, and the startup smoke's, hold the
-  // engine's one open lock for as long as they run: an open through capture
-  // adoption, a close through capture drain and shutdown.
+  // The desktop's own opens and closes, and the startup smoke's, keep a CLI
+  // read's open waiting for as long as they run: an open holds the engine's
+  // one open lock through capture adoption, and a close leaves the workspace
+  // closing, which a reopen waits on, until capture drain and shutdown end.
   private readonly holdsOpenLock = (request: Request) =>
     (request.method === "workspace.open" || request.method === "workspace.close") &&
     !this.readRequests.has(request);
