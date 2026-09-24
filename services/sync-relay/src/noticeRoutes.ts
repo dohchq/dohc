@@ -43,6 +43,7 @@ export function createNoticeRoutes(
   nowMs: () => number,
   lookupUserDisplayName: ((userId: string) => Promise<string | null> | string | null) | undefined,
   claimPendingShares: (userId: string, signal?: AbortSignal) => Promise<void>,
+  deliverPendingShareNotices: (userId: string) => Promise<void>,
   postRateLimiter: TokenBucketLimiter,
 ) {
   return async function respondToNotices(
@@ -51,9 +52,7 @@ export function createNoticeRoutes(
     userId: string,
   ): Promise<Response> {
     if (route.route === "notices" && request.method === "GET") {
-      // A share sent to the caller's email becomes theirs, and its notice
-      // arrives, on the first pull after they verify the address.
-      await claimPendingShares(userId, request.signal);
+      await deliverPendingShareNotices(userId);
       const url = new URL(request.url);
       const page = storage.readNoticeChanges({
         recipientUserId: userId,

@@ -300,17 +300,21 @@ export function createSyncRelayHandler({
     return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
   };
 
-  // Tells the person a share reached that it arrived. Best effort: the grant
-  // is already durable, so a failed notice never fails the share.
-  const noticeShareReceived = async (grantId: string): Promise<void> => {
+  // Delivers one waiting share notice. A failure leaves the delivery waiting
+  // for the recipient's next pull.
+  const deliverShareNotice = async (grantId: string, granterUserId: string): Promise<void> => {
     try {
-      const grant = storage.getShareGrant(grantId);
-      const share = grant ? storage.getShare(grant.shareId) : null;
-      if (!share) return;
-      const senderLabel = await shareSenderLabel(share.granterUserId);
+      const senderLabel = await shareSenderLabel(granterUserId);
       storage.noticeShareReceived({ grantId, senderLabel, nowMs: nowMs() });
     } catch (error) {
       console.error("[sync-relay] share notice failed", error);
+    }
+  };
+
+  // Every share notice waiting for this person, delivered before a pull.
+  const deliverPendingShareNotices = async (userId: string): Promise<void> => {
+    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+      await deliverShareNotice(grantId, granterUserId);
     }
   };
 
@@ -320,10 +324,7 @@ export function createSyncRelayHandler({
     if (!lookupVerifiedUserEmail) return;
     const email = await lookupVerifiedUserEmail(userId);
     signal?.throwIfAborted();
-    if (!email) return;
-    for (const grantId of storage.claimPendingSharesForEmail(email, userId)) {
-      await noticeShareReceived(grantId);
-    }
+    if (email) storage.claimPendingSharesForEmail(email, userId);
   };
 
   function requireShareAction(
@@ -398,6 +399,7 @@ export function createSyncRelayHandler({
     nowMs,
     lookupUserDisplayName,
     claimPendingShares,
+    deliverPendingShareNotices,
     noticePostRateLimiter,
   );
 
@@ -465,7 +467,7 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
-    noticeShareReceived,
+    (grantId, granterUserId) => void deliverShareNotice(grantId, granterUserId),
     publicEditRelease,
   );
 

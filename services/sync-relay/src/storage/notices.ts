@@ -137,26 +137,58 @@ export interface NoticeShareReceivedInput {
   nowMs: number;
 }
 
+// The share notices waiting for `recipientUserId`, with each granter. A
+// grant writes its waiting row in the transaction that makes it, so a share
+// is never activated without one.
+export function pendingShareNotices(
+  storage: StorageContext,
+  recipientUserId: string,
+): { grantId: string; granterUserId: string }[] {
+  return storage.db.prepare(
+    `SELECT d.grant_id, s.granter_user_id FROM sync_relay_share_notice_deliveries AS d
+     JOIN sync_relay_share_grants AS g ON g.grant_id = d.grant_id
+     JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+     WHERE g.principal_kind = 'user' AND g.principal_user_id = ?
+     ORDER BY d.created_at_ms, d.grant_id`,
+  ).all(recipientUserId).map((row) => ({ grantId: String(row.grant_id), granterUserId: String(row.granter_user_id) }));
+}
+
 /**
- * Tells a person that a share reached them: one notice per grant, from the
- * granter, placed through the share. Only a current named grant that a user
- * holds gets one; a grant opened from a public link does not, because its
- * holder opened the link. A list with no room for it gets none, and the
- * share is unaffected.
+ * Delivers one waiting share notice: one notice per grant, from the granter,
+ * placed through the share. Each attempt rechecks the grant. A grant that
+ * ended, or a list with no room, settles the delivery without a notice. A
+ * grant still addressed to an email, or a channel the owner's log does not
+ * name yet, leaves it waiting for a later attempt.
  */
 export function noticeShareReceived(storage: StorageContext, input: NoticeShareReceivedInput): void {
+  const settle = () => storage.db
+    .prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
+    .run(input.grantId);
   try {
     storage.tx(() => {
+      const waiting = storage.db
+        .prepare("SELECT 1 FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
+        .get(input.grantId);
+      if (!waiting) return;
       const current = readCurrentShareGrant(storage, { grantId: input.grantId });
-      if (!current || current.grant.principalKind !== "user" || current.grant.parentGrantId !== null) return;
+      if (!current || current.grant.parentGrantId !== null) return void settle();
+      if (current.grant.principalKind !== "user") return;
       const { share, grant } = current;
       const recipientUserId = grant.principalUserId!;
+      const readable = authorizeShareGrantAction({
+        storage,
+        grantId: grant.grantId,
+        action: "read",
+        principal: { kind: "user", userId: recipientUserId },
+      }).ok;
+      const title = readable ? shareReceivedTitle(storage, share, input.senderLabel) : null;
+      if (title === null) return;
       const noticeId = noticeIdFrom(share.granterUserId, `share-received:${grant.grantId}`);
       const existing = storage.db
         .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
         .get(recipientUserId, noticeId);
-      const title = shareReceivedTitle(storage, share, input.senderLabel);
-      if (existing || title === null) return;
+      settle();
+      if (existing) return;
       sweepExpiredNotices(storage, recipientUserId, input.nowMs);
       makeRoom(storage, recipientUserId, share.granterUserId, input.nowMs);
       insertNotice(storage, {
@@ -174,8 +206,8 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
       });
     });
   } catch (error) {
-    if (error instanceof RelayError && error.code === "notice_list_full") return;
-    throw error;
+    if (!(error instanceof RelayError) || error.code !== "notice_list_full") throw error;
+    storage.tx(settle);
   }
 }
 
@@ -468,26 +500,30 @@ function reachToken(storage: StorageContext, userId: string): string {
 // its target there moves to another share that admits its path, or loses
 // its target.
 function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs: number): void {
-  const stale = storage.readTx(() => {
-    // Nothing to check without a live, unexpired row placed through a share.
-    const throughShare = storage.db.prepare(
+  const live = `recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
+    AND removed_at_ms IS NULL AND expires_at_ms > ?`;
+  const plan = storage.readTx((): "none" | "digest" | "shares" => {
+    // A row whose target names a path needs the digest of everything that
+    // decides what the recipient reads.
+    const withPath = storage.db.prepare(
       `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
-         WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-           AND removed_at_ms IS NULL AND expires_at_ms > ?) AS present`,
+         WHERE ${live} AND json_extract(target_json, '$.path') IS NOT NULL) AS present`,
     ).get(recipientUserId, nowMs);
-    if (Number(throughShare?.present) !== 1) return false;
-    const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
-      .get(recipientUserId);
-    return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId);
+    if (Number(withPath?.present) === 1) {
+      const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+        .get(recipientUserId);
+      return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId) ? "digest" : "none";
+    }
+    // A row that points only at a share needs only a current grant on it.
+    const reach = shareReach(storage, recipientUserId);
+    const shares = storage.db.prepare(`SELECT DISTINCT recipient_share_id FROM sync_relay_notices WHERE ${live}`)
+      .all(recipientUserId, nowMs);
+    return shares.some((row) => reach.sidesOn(String(row.recipient_share_id)) === null) ? "shares" : "none";
   });
-  if (!stale) return;
+  if (plan === "none") return;
   storage.tx(() => {
-    const rows = storage.db.prepare(
-      `SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
-       WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-         AND removed_at_ms IS NULL AND expires_at_ms > ?
-       ORDER BY change_seq`,
-    ).all(recipientUserId, nowMs);
+    const rows = storage.db.prepare(`SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
+       WHERE ${live} ORDER BY change_seq`).all(recipientUserId, nowMs);
     const reach = shareReach(storage, recipientUserId);
     const move = storage.db.prepare(
       `UPDATE sync_relay_notices
@@ -505,8 +541,10 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
       const movedTo = path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
       move.run(movedTo, movedTo, nextChangeSeq(storage, recipientUserId), recipientUserId, String(row.notice_id));
     }
-    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
-      .run(reachToken(storage, recipientUserId), recipientUserId);
+    if (plan === "digest") {
+      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
+        .run(reachToken(storage, recipientUserId), recipientUserId);
+    }
   });
 }
 

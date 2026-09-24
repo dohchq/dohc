@@ -74,6 +74,16 @@ function assertNoticeSchema(db: SqliteDb): void {
   }
 }
 
+// Share notices waiting to be delivered, one per named grant, written with
+// the grant and removed once delivered or settled.
+export function initializeShareNoticeDeliverySchema(db: SqliteDb): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_share_notice_deliveries (
+    grant_id TEXT NOT NULL PRIMARY KEY
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991)
+  ) STRICT`);
+}
+
 export function initializeNoticeSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER);
   if (marked) {

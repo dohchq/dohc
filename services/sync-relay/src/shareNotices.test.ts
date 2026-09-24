@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NOTICE_LIST_ROW_LIMIT,
   type RelayNotice,
@@ -8,6 +8,10 @@ import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
   appendLog,
+  closeTestStorage,
+  countStorageCalls,
+  reopenTestStorage,
+  storagePath,
   chatChannelCreate,
   claimWorkspace,
   closeTestStorages,
@@ -97,7 +101,9 @@ describe("a notice when a share reaches a person", () => {
     await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientEmail: "newbie@elsewhere.test" });
     expect(await titles(h, "ana")).toEqual([]);
 
-    // The first pull after the address is verified claims the share.
+    // A pull does not claim the share, and listing shares does.
+    expect(await titles(h, "newbie")).toEqual([]);
+    expect((await h(request("newbie", "/sync/shares"))).status).toBe(200);
     expect(await titles(h, "newbie")).toEqual(["Name owner shared trip with you"]);
     expect(await titles(h, "newbie")).toEqual(["Name owner shared trip with you"]);
   });
@@ -186,4 +192,93 @@ describe("a notice when a share reaches a person", () => {
     expect(response.status).toBe(400);
     expect(await json(response)).toMatchObject({ code: "bad_request" });
   });
+
+  it("answers the share before the notice is written, so the answer does not depend on the recipient", async () => {
+    let finish = (_name: string | null) => {};
+    const name = new Promise<string | null>((resolve) => { finish = resolve; });
+    const { h, storage } = await relay({ lookupUserDisplayName: () => name });
+    await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    expect(storage.pendingShareNotices("ana")).toHaveLength(1);
+    finish("Owner");
+    // The title names the granter, or past the name lookup's deadline, the
+    // email the recipient already sees.
+    expect(await titles(h, "ana")).toEqual([expect.stringMatching(/ shared trip with you$/u)]);
+    expect(storage.pendingShareNotices("ana")).toEqual([]);
+  });
+
+  it("delivers a notice the relay stopped before writing, on the recipient's next pull", async () => {
+    const { storage } = await relay();
+    made(storage, { paths: ["trip"] }, "ana");
+    // The relay restarts before any delivery runs.
+    const path = storagePath(storage);
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(path);
+    const h = testHandler(reopened, { nowMs: () => CLOCK, lookupUserDisplayName: (userId) => `Name ${userId}` });
+    expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you"]);
+    expect(reopened.pendingShareNotices("ana")).toEqual([]);
+  });
+
+  it("settles the delivery without a notice when the grant ends first", async () => {
+    const { h, storage } = await relay();
+    const shareId = made(storage, { paths: ["trip"] }, "ana");
+    expect(storage.revokeShare(shareId, CLOCK)).toBe(true);
+    expect(await notices(h, "ana")).toEqual([]);
+    expect(storage.pendingShareNotices("ana")).toEqual([]);
+  });
+
+  it("waits to deliver a channel share until the owner's log names the channel", async () => {
+    const { h, storage } = await relay();
+    made(storage, { kind: "chat-channel", channelWireId: "wire-later" }, "ana", "read-write");
+    expect(await notices(h, "ana")).toEqual([]);
+    expect(storage.pendingShareNotices("ana")).toHaveLength(1);
+
+    await appendLog(h, "owner", WORKSPACE, [channel("wire-later", "ana-dm", "dm")]);
+    expect(await titles(h, "ana")).toEqual(["Name owner sent you a message request"]);
+    expect(storage.pendingShareNotices("ana")).toEqual([]);
+  });
+
+  it("does not claim email invites on a pull", async () => {
+    const setup = await relay();
+    const counted = countStorageCalls(setup.storage, "claimPendingSharesForEmail");
+    const h = testHandler(counted.storage, { nowMs: () => CLOCK });
+    await notices(h, "ana");
+    expect(counted.calls).toEqual([]);
+  });
+
+  it("checks only the grant behind notices that point at a share, without the access digest", async () => {
+    const { h, storage } = await relay();
+    const shareId = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    await notices(h, "ana");
+    const digests = vi.spyOn(storage, "listSharesReceivedBy");
+    await notices(h, "ana");
+    expect(storage.revokeShare(shareId, CLOCK)).toBe(true);
+    expect((await notices(h, "ana"))[0]?.target).toBeNull();
+    expect(digests).not.toHaveBeenCalled();
+  });
 });
+
+let made_ = 0;
+// A named share made in storage: the grant and its waiting delivery commit
+// together, and nothing delivers it until a pull.
+function made(
+  storage: SyncRelayStorage,
+  selector: Record<string, unknown>,
+  recipientUserId: string,
+  access = "view",
+): string {
+  made_ += 1;
+  const shareId = `stored-share-${made_}`;
+  storage.createShare({
+    share: {
+      shareId, workspaceId: WORKSPACE, granterUserId: "owner",
+      selectorJson: JSON.stringify("kind" in selector ? selector : { versionId: null, ...selector }),
+      createdAtMs: CLOCK,
+    },
+    grant: {
+      grantId: `stored-grant-${made_}`, shareId, principalKind: "user", principalUserId: recipientUserId,
+      principalEmail: null, access, generation: 1, status: "active", createdAtMs: CLOCK,
+      revokedAtMs: null, parentGrantId: null,
+    },
+  });
+  return shareId;
+}

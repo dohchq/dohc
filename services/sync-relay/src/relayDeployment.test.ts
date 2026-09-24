@@ -268,12 +268,12 @@ it("includes a claimed email grant in the independent mutation record", () => {
     });
     const side = join(f.continuityDirectory, "continuity.sqlite");
     const before = Number(read(side, "continuity").expected_stamp);
-    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toHaveLength(1);
+    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(1);
     expect(storage.getShareGrant("g")?.principalUserId).toBe("reader");
     const after = read(side, "continuity");
     expect(Number(after.expected_stamp)).toBeGreaterThan(before);
     expect(read(f.relayPath, "sync_relay_continuity").stamp).toBe(after.expected_stamp);
-    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toEqual([]);
+    expect(storage.claimPendingSharesForEmail("reader@example.test", "reader")).toBe(0);
     expect(read(side, "continuity")).toEqual(after);
   } finally { storage.close(); }
 });

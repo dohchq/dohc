@@ -47,9 +47,9 @@ let clock = 10_000;
 let current: SyncRelayStorage;
 let shares = 0;
 
-// A named share made in storage. The share route also sends the person a
-// notice that the share arrived (shareNotices.test.ts); these tests make
-// their shares here so each sees only the notices it posts.
+// A named share made in storage. A named share also sends its person a
+// notice that it arrived (shareNotices.test.ts); these tests settle that
+// delivery at once, so each sees only the notices it posts.
 function grant(input: { paths: string[]; recipientUserId: string; versionId?: string }): string {
   const shareId = `share-${shares}`;
   const grantId = `grant-${shares}`;
@@ -67,6 +67,9 @@ function grant(input: { paths: string[]; recipientUserId: string; versionId?: st
       access: "view", generation: 1, status: "active", createdAtMs: clock, revokedAtMs: null, parentGrantId: null,
     },
   });
+  const db = inspectDatabase(storagePath(current));
+  db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?").run(grantId);
+  db.close();
   return shareId;
 }
 

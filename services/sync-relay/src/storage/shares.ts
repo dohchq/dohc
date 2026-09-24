@@ -55,6 +55,12 @@ export function createShare(storage: StorageContext, input: {
     storage.tx(() => {
       insertShare(storage, input.share);
       insertShareGrant(storage, input.grant);
+      // A named grant tells its person the share arrived. The waiting row
+      // commits with the grant, so a crash cannot lose the notice, and an
+      // email grant waits until an account claims it.
+      storage.db.prepare(
+        "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
+      ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
     });
   }
 
@@ -651,19 +657,19 @@ export function incrementActiveDependentGenerations(storage: StorageContext, par
       .run(parentGrantId);
   }
 
-// Returns the ids of the grants it claimed.
-export function claimPendingSharesForEmail(storage: StorageContext, email: string, userId: string): string[] {
+export function claimPendingSharesForEmail(storage: StorageContext, email: string, userId: string): number {
     const normalized = email.trim().toLowerCase();
-    if (!normalized) return [];
-    return storage.tx(() => storage.db
-      .prepare(
-        `UPDATE sync_relay_share_grants
-         SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
-         WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'
-         RETURNING grant_id`,
-      )
-      .all(userId, normalized)
-      .map((row) => String(row.grant_id)));
+    if (!normalized) return 0;
+    return storage.tx(() => {
+      const result = storage.db
+        .prepare(
+          `UPDATE sync_relay_share_grants
+           SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
+           WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
+        )
+        .run(userId, normalized);
+      return Number(result.changes ?? 0);
+    });
   }
 
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {
