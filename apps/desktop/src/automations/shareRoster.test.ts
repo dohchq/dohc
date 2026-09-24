@@ -350,11 +350,23 @@ describe("keeping the roster current", () => {
     expect(list, "a run waited on a relay that already failed").toHaveBeenCalledTimes(1);
   });
 
-  it("makes the roster unknown once sync reaches the relay while listings still fail", async () => {
+  it("keeps the cache offline when sync passes apply nothing", async () => {
+    seed();
+    const { rosters: r } = rosters(async () => failing);
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    for (let minute = 1; minute <= 3; minute += 1) {
+      now += SHARE_ROSTER_FRESH_MS;
+      await r.pulled(WORKSPACE, false);
+      expect(await r.forRun(WORKSPACE), `minute ${minute}`).toEqual(cached);
+    }
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+  });
+
+  it("makes the roster unknown once a pass applies changes while listings still fail", async () => {
     seed();
     const { list, rosters: r } = rosters(async () => failing);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
-    await r.pulled(WORKSPACE, false);
+    r.applied(WORKSPACE);
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
     for (let minute = 1; minute <= 5; minute += 1) {
       now += SHARE_ROSTER_FRESH_MS;
@@ -368,12 +380,12 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
   });
 
-  it("makes the roster unknown when a pass ended after the cached listing, even before the failing listing", async () => {
+  it("makes the roster unknown when a pass applied changes after the cached listing, before the failing listing", async () => {
     const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
-    // t=100: a pass brings changes the listing did not see. The listing is not due yet.
+    // t=100: a pass applies changes the listing did not see. The listing is not due yet.
     now += SHARE_ROSTER_FRESH_MS - 1;
-    await r.pulled(WORKSPACE, false);
+    r.applied(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(1);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
     // t=101: the due listing fails.
@@ -383,9 +395,9 @@ describe("keeping the roster current", () => {
     expect(list).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the cache when the last pass ended before the cached listing started", async () => {
+  it("keeps the cache when the last changes were applied before the cached listing started", async () => {
     const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
-    await r.pulled(WORKSPACE, false);
+    r.applied(WORKSPACE);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
     list.mockImplementation(async () => failing);
@@ -393,11 +405,11 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
   });
 
-  it("remembers across a restart that a pass ended after the cached listing", async () => {
+  it("remembers across a restart that a pass applied changes after the cached listing", async () => {
     const before = rosters(async () => answered({ grants: [ana] }));
     await before.rosters.forRun(WORKSPACE);
     now += 1;
-    await before.rosters.pulled(WORKSPACE, false);
+    before.rosters.applied(WORKSPACE);
     restart();
     now += 1_000;
     // A claim from before the restart runs before any pass or listing answers.
@@ -405,16 +417,18 @@ describe("keeping the roster current", () => {
     expect(await after.forRun(WORKSPACE)).toEqual(unchecked(offline.next));
   });
 
-  it("uses the cache after a restart when no pass ended after it was listed", async () => {
+  it("uses the cache after a restart when no pass applied changes after it was listed", async () => {
     const before = rosters(async () => answered({ grants: [ana] }));
     await before.rosters.forRun(WORKSPACE);
+    now += 1;
+    await before.rosters.pulled(WORKSPACE, false);
     restart();
     now += 1_000;
     const { rosters: after } = rosters(async () => offline);
     expect(await after.forRun(WORKSPACE)).toEqual(cached);
   });
 
-  it("counts any pass this session for a copy saved without its listing time", async () => {
+  it("counts any change applied this session for a copy saved without its listing time", async () => {
     seed();
     const file = JSON.parse(readFileSync(store.registryFile, "utf8")) as { workspaces: Array<{ shareRoster?: { listedAtMs?: number } }> };
     delete file.workspaces[0]!.shareRoster!.listedAtMs;
@@ -423,7 +437,7 @@ describe("keeping the roster current", () => {
     const { rosters: r } = rosters(async () => failing);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     now -= 60 * 60_000;
-    await r.pulled(WORKSPACE, false);
+    r.applied(WORKSPACE);
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
   });
 

@@ -445,15 +445,16 @@ describe("EngineRelayClient", () => {
     expect(pulled.fastForwardedPaths).toEqual([
       expect.objectContaining({ path: "notes/page-2.md" }),
     ]);
+    // Each page reports what the engine applied from it.
     expect(materializePage).toHaveBeenNthCalledWith(1, [
       expect.objectContaining({ path: "notes/page-1.md" }),
-    ]);
+    ], 1);
     expect(materializePage).toHaveBeenNthCalledWith(2, [
       expect.objectContaining({ path: "notes/page-2.md" }),
-    ]);
+    ], 1);
     expect(materializePage).toHaveBeenNthCalledWith(3, [
       expect.objectContaining({ path: "notes/page-2.md" }),
-    ]);
+    ], 1);
     await sessions.closeAll();
   });
 

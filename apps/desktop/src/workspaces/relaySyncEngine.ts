@@ -56,6 +56,9 @@ export interface CloudSyncEngineOptions {
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
   afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs as soon as a pull page applies at least one op from the relay, even
+  // when the pass fails after it: the engine keeps what the page applied.
+  onRemoteChangesApplied?: () => void;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -162,7 +165,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
-      async (materializePage) => {
+      async (materializeCapturedPage) => {
+        const materializePage: MaterializeRelayPullPage = async (paths, applied) => {
+          if (applied > 0) options.onRemoteChangesApplied?.();
+          await materializeCapturedPage(paths, applied);
+        };
         // A join-bootstrap engine is pull-only until its first pull succeeds:
         // a fresh join must never append ops before it has the remote state.
         if (!bootstrapPass) {

@@ -23,8 +23,8 @@ import {
 //
 // The copy is never broader than the relay's last answer. A relay that
 // answers nothing leaves the copy in place, and it stands in until a sync
-// pass succeeds. A relay that answers with anything dohc cannot read replaces
-// it with a problem, and the reach check stops every step.
+// pass applies changes. A relay that answers with anything dohc cannot read
+// replaces it with a problem, and the reach check stops every step.
 
 export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
@@ -83,7 +83,7 @@ export type RosterListing =
 /**
  * The registry's copy. `version` rises when the listing changes.
  * `listedAtMs` is when the last listing with this answer started, and
- * `pulledAfter` records that a relay sync pass succeeded after it. Copies
+ * `pulledAfter` records that a relay sync pass applied changes after it. Copies
  * saved before `listedAtMs` existed lack it.
  */
 export type ShareRoster = RosterListing & { version: number; listedAtMs?: number; pulledAfter?: true };
@@ -273,8 +273,8 @@ export function reachRosterFor(input: {
 interface RosterState {
   timer: ReturnType<typeof setInterval> | null;
   lastAttemptMs: number | null;
-  // When a relay sync pass last succeeded in this session.
-  lastPullMs: number | null;
+  // When a relay sync pass last applied changes in this session.
+  lastAppliedMs: number | null;
   // Set while listings get no answer, and cleared only when one answers.
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
@@ -290,15 +290,19 @@ interface RosterState {
  * executor asks `forRun` before a run.
  *
  * While listings get no answer, the cached roster stands in only if no relay
- * sync pass has succeeded since that roster was listed. A pass can bring an
- * automation from someone whose grant the cached roster does not show, so
- * after one the roster is unknown until a listing answers. The registry
- * records that a pass came, so a restart does not forget it.
+ * sync pass has applied changes since that roster was listed. Such a pass can
+ * bring an automation from someone whose grant the cached roster does not
+ * show, so after one the roster is unknown until a listing answers. A pass
+ * that applied nothing brought nobody's changes, so a person whose passes
+ * bring nothing new keeps their automations offline. The pull does not say
+ * who wrote what it applied, so a person's own changes from another computer
+ * count too. The registry records the pass, so a restart does not forget it.
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
   saveRoster(workspaceId: string, listing: RosterListing, listedAtMs: number): void;
-  // Records that a sync pass succeeded after the listing that started at `listedAtMs`.
+  // Records that a sync pass applied changes after the listing that started
+  // at `listedAtMs`.
   markRosterPulled(workspaceId: string, listedAtMs: number): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
   localUserId(): Promise<string | null>;
@@ -312,7 +316,7 @@ export function createShareRosters(dependencies: {
     let state = states.get(workspaceId);
     if (!state) {
       state = {
-        timer: null, lastAttemptMs: null, lastPullMs: null, noAnswer: null,
+        timer: null, lastAttemptMs: null, lastAppliedMs: null, noAnswer: null,
         unsaved: null, running: null, again: false,
       };
       states.set(workspaceId, state);
@@ -331,12 +335,12 @@ export function createShareRosters(dependencies: {
     }
   }
 
-  // A pass this session ended after the listing started, so it may carry
-  // changes newer than what the listing saw. A pass that ended before the
-  // listing started carries only changes the relay already had when the
-  // listing read it. A copy with no time counts every pass this session.
+  // A pass this session applied changes after the listing started, so they
+  // may be newer than what the listing saw. Changes applied before the
+  // listing started were already on the relay when the listing read it. A copy
+  // with no time counts every change applied this session.
   function pulledSince(state: RosterState, listedAtMs: number | undefined): boolean {
-    return state.lastPullMs !== null && (listedAtMs === undefined || state.lastPullMs > listedAtMs);
+    return state.lastAppliedMs !== null && (listedAtMs === undefined || state.lastAppliedMs > listedAtMs);
   }
 
   function markPulled(workspaceId: string, state: RosterState): void {
@@ -452,16 +456,21 @@ export function createShareRosters(dependencies: {
     },
 
     /**
-     * A relay sync pass succeeded. `recovered` is true when the pass before
-     * it failed. The roster lists again then, and after a listing that got no
-     * answer, at most once a minute either way. Resolves when that listing
-     * ends.
+     * A relay sync pass succeeded, so the relay answers. `recovered` is true
+     * when the pass before it failed. The roster lists again then, and after a
+     * listing that got no answer, at most once a minute either way. Resolves
+     * when that listing ends.
      */
     pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
-      state.lastPullMs = nowMs();
-      markPulled(workspaceId, state);
       return (recovered || state.noAnswer !== null) && due(state) ? refresh(workspaceId) : Promise.resolve();
+    },
+
+    /** A relay sync pass applied changes, even if the pass then failed. */
+    applied(workspaceId: string): void {
+      const state = stateFor(workspaceId);
+      state.lastAppliedMs = nowMs();
+      markPulled(workspaceId, state);
     },
 
     forRun,

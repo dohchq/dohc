@@ -180,7 +180,7 @@ describe("relaySyncEngine", () => {
     const calls: string[] = [];
     const cap = capture();
     pullMock.mockImplementation(async (materializePage) => {
-      await materializePage([]);
+      await materializePage([], 0);
       calls.push("commit");
       return pullResult();
     });
@@ -213,6 +213,31 @@ describe("relaySyncEngine", () => {
 
     await expect(sync.start()).rejects.toThrow("relay unavailable");
     expect(afterSuccessfulPull).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("reports a page that applied changes at once, even when the pass fails after it", async () => {
+    const onRemoteChangesApplied = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pullMock.mockImplementationOnce(async (materializePage) => {
+      await materializePage([], 0);
+      expect(onRemoteChangesApplied, "a page that applied nothing").not.toHaveBeenCalled();
+      await materializePage([], 2);
+      throw new Error("relay unavailable");
+    });
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      onRemoteChangesApplied,
+      operations: mockOperations(),
+    });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    expect(onRemoteChangesApplied).toHaveBeenCalledOnce();
 
     errorSpy.mockRestore();
     await sync.stop();
@@ -256,7 +281,7 @@ describe("relaySyncEngine", () => {
     const cap = capture();
     const commit = vi.fn(async () => {});
     pullMock.mockImplementation(async (materializePage) => {
-      await materializePage([]);
+      await materializePage([], 0);
       await commit();
       return pullResult({ conflictsOpened: 2 });
     });
