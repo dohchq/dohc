@@ -33,7 +33,7 @@ async function fixture(reject = false) {
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
   const relayUrl = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
-  const open = createNamedLiveRelayRoute({relayUrl, publicOrigin: origin, exchangeKey: "x".repeat(32), handshakeTimeoutMs: 1000});
+  const open = createNamedLiveRelayRoute({relayUrl, publicOrigin: origin, exchangeKey: "x".repeat(32), handshakeTimeoutMs: 10_000});
   return {open, input: () => input, sockets};
 }
 

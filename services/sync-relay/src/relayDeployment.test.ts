@@ -71,7 +71,8 @@ describe("relay deployment continuity", () => {
       expect(second.history.namespace).toBe(first.history.namespace);
       expect(second.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("owned");
     } finally { second.storage.close(); }
-  });
+    // Two 20 s child runs in sequence need more than the 30 s package bound.
+  }, 60_000);
 
   it("refuses a permission-only rollback with no new journal event", async () => {
     const f = fixture(), current = openRelayDeployment(f.configPath);

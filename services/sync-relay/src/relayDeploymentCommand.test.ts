@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { build } from "esbuild";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { openRelayDeployment } from "./relayDeployment.js";
+
+// Each command run may take up to its 30 s bound, so a test that runs several
+// needs more than the package's 30 s. Beside 32 CPU burners one test's three
+// runs took 52 s.
+vi.setConfig({ testTimeout: 90_000 });
 
 const exec = promisify(execFile);
 let root: string, command: string;
@@ -20,7 +25,8 @@ beforeAll(async () => {
     outfile: command, bundle: true, platform: "node", format: "esm", target: "node24",
     external: ["better-auth", "better-auth/*", "pg"], logLevel: "silent",
   });
-});
+  // Beside 32 CPU burners this bundle overran the 10 s hook default.
+}, 30_000);
 
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 

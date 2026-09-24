@@ -5,9 +5,14 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { parseDeviceHostCredential } from "./deviceHostCredential.js";
+
+// On Windows each command starts Windows PowerShell for ACL checks. Tests took
+// 16-25 s on a busy host; beside 32 CPU burners one command overran a 30 s run
+// bound. Each run gets 60 s and each test 120 s.
+vi.setConfig({ testTimeout: 120_000 });
 
 const exec = promisify(execFile);
 let root: string, command: string;
@@ -18,7 +23,7 @@ beforeAll(async () => {
   command = join(root, "device-host-credential.mjs");
   await build({ entryPoints: [fileURLToPath(new URL("./deviceHostCredentialCommand.ts", import.meta.url))], outfile: command,
     bundle: true, platform: "node", format: "esm", target: "node24", external: ["better-auth", "better-auth/*", "pg"], logLevel: "silent" });
-});
+}, 30_000);
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
 function deployment(name: string): string {
@@ -37,7 +42,7 @@ async function run(args: string[], umask?: number, platform?: "darwin", preload?
     const invocation = umask === undefined && platform === undefined ? [command, ...args] : ["--input-type=module", "--eval",
       `if (${umask !== undefined}) process.umask(${umask}); if (${platform !== undefined}) Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} }); process.argv = [process.execPath, ${JSON.stringify(command)}, ...${JSON.stringify(args)}]; await import(${JSON.stringify(pathToFileURL(command).href)});`];
     if (preload) invocation.unshift("--import", pathToFileURL(preload).href);
-    const result = await exec(process.execPath, invocation, { windowsHide: true, timeout: 30_000, env: { ...process.env, NODE_OPTIONS: "" } });
+    const result = await exec(process.execPath, invocation, { windowsHide: true, timeout: 60_000, env: { ...process.env, NODE_OPTIONS: "" } });
     return { code: 0, ...result };
   } catch (error) {
     const result = error as Error & { code: number; stdout: string; stderr: string };
@@ -126,7 +131,7 @@ it.skipIf(process.platform === "darwin")("runs the actual provision/replay/revok
     expect(reopened.getLiveHostControl()).toMatchObject({ admissionState: "closed", registeredInstanceId: credential.instanceId });
     expect(reopened.registerDeviceHost({ credential, connectionId: "after-revoke", updatedAtMs: Date.now() }).ok).toBe(false);
   } finally { reopened.close(); }
-}, 60_000);
+});
 
 it.skipIf(process.platform === "darwin")("refuses linked output and duplicate arguments and leaves existing files unchanged", async () => {
   const config = deployment("other"), directory = join(root, "other-credential");
@@ -170,7 +175,7 @@ it.skipIf(process.platform === "darwin")("retries after preparation left a priva
   const storage = openRelayDeployment(config).storage;
   try { expect(storage.registerDeviceHost({ credential, connectionId: "recovered", updatedAtMs: Date.now() }).ok).toBe(true); }
   finally { storage.close(); }
-}, 60_000);
+});
 
 it.skipIf(process.platform === "darwin")("does not overwrite a malformed existing credential or reuse a credential from another host", async () => {
   const directory = join(root, "refused-credential"), config = deployment("refused");
@@ -257,4 +262,4 @@ const open = fs.open; fs.open = async (...args) => {
   const storage = openRelayDeployment(config).storage;
   try { expect(storage.registerDeviceHost({ credential: parseDeviceHostCredential(JSON.parse(bytes.toString())), connectionId: "after-barrier", updatedAtMs: Date.now() }).ok).toBe(true); }
   finally { storage.close(); }
-}, 60_000);
+});

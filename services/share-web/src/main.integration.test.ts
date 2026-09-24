@@ -23,7 +23,13 @@ const RELAY_EXCHANGE_KEY = "share-web-discussion-integration-key";
 const BLOB_SHA = "a".repeat(64);
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
 const WITHIN_SHUTDOWN_GRACE_MS = 100;
-const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+// Waits for a response or exit that must happen, not for a deadline: a loaded
+// gate host can take seconds to pass bytes between these processes.
+const CHILD_RESPONSE_WAIT_MS = 10_000;
+const FORCED_SHUTDOWN_TIMEOUT_MS = CHILD_RESPONSE_WAIT_MS;
+// Outlasts any wait, so an exit within CHILD_RESPONSE_WAIT_MS shows shutdown
+// did not wait out its grace period.
+const QUIET_SHUTDOWN_GRACE_PERIOD_MS = 60_000;
 const STOP_SHARE_WEB_DEADLINE_MS = 13_000;
 const SIGKILL_EXIT_TIMEOUT_MS = 1_000;
 const CLEANUP_HOOK_TIMEOUT_MS =
@@ -212,13 +218,13 @@ describe("share-web Node request adapter", () => {
   });
 
   it("shuts down promptly when no responses are active", async () => {
-    const server = await startShareWeb();
+    const server = await startShareWeb({ shutdownGracePeriodMs: QUIET_SHUTDOWN_GRACE_PERIOD_MS });
     const exited = waitForExit(server.child);
 
     sendTerminationSignal(server.child);
 
     expect(
-      await settleWithin(exited, 1_000),
+      await settleWithin(exited, CHILD_RESPONSE_WAIT_MS),
       `quiet share-web did not exit promptly\n${server.stderr()}`,
     ).toEqual({
       kind: "settled",
@@ -234,10 +240,10 @@ describe("share-web Node request adapter", () => {
     );
 
     try {
-      const beforeEnd = await settleWithin(upload.response, 1_000);
+      const beforeEnd = await settleWithin(upload.response, CHILD_RESPONSE_WAIT_MS);
       if (beforeEnd.kind === "timeout") {
         upload.finishBody();
-        const afterEnd = await settleWithin(upload.response, 1_000);
+        const afterEnd = await settleWithin(upload.response, CHILD_RESPONSE_WAIT_MS);
         const afterEndResult =
           afterEnd.kind === "settled"
             ? `${afterEnd.value.kind}${
@@ -247,7 +253,7 @@ describe("share-web Node request adapter", () => {
               }`
             : "timeout";
         throw new Error(
-          "oversized upload received no response within 1000 ms before request end; " +
+          `oversized upload received no response within ${String(CHILD_RESPONSE_WAIT_MS)} ms before request end; ` +
             `after sending end: ${afterEndResult}\n${server.stderr()}`,
         );
       }
@@ -304,10 +310,10 @@ describe("share-web Node request adapter", () => {
             response,
           })),
         ]),
-        1_000,
+        CHILD_RESPONSE_WAIT_MS,
       );
       if (admission.kind === "timeout") {
-        throw new Error("exact-cap request neither reached the relay nor responded within 1000 ms");
+        throw new Error(`exact-cap request neither reached the relay nor responded within ${String(CHILD_RESPONSE_WAIT_MS)} ms`);
       }
       if (admission.value.kind === "response") {
         const status = admission.value.response.statusCode;
@@ -606,7 +612,7 @@ describe("share-web Node request adapter", () => {
         expect(response.statusCode).toBe(200);
         return await readFirstChunk(response);
       });
-      const observed = await settleWithin(firstChunk, 1_000);
+      const observed = await settleWithin(firstChunk, CHILD_RESPONSE_WAIT_MS);
 
       expect(observed.kind).toBe("settled");
       if (observed.kind !== "settled") return;
@@ -643,7 +649,7 @@ describe("share-web Node request adapter", () => {
             firstChunk: await readFirstChunk(response),
           };
         });
-        const observed = await settleWithin(firstChunk, 1_000);
+        const observed = await settleWithin(firstChunk, CHILD_RESPONSE_WAIT_MS);
 
         expect(observed.kind).toBe("settled");
         if (observed.kind !== "settled") return;

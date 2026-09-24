@@ -17,7 +17,8 @@ for (const nodeEnv of [undefined, "production", "staging"]) {
         },
         encoding: "utf8",
         windowsHide: true,
-        timeout: 30_000,
+        // Inside the 30 s test bound; beside 32 CPU burners a run took up to 10 s.
+        timeout: 20_000,
       });
       assert.equal(result.error, undefined);
       assert.equal(result.status, 1);
