@@ -11,21 +11,20 @@ import type { StoredReachVerdict } from "./reachVerdicts";
 // This computer's record of each Collection automation run, under
 // <workspace>/.dohc/automations. Claims are local to the computer that ran
 // them, so their runs are too. A run's plan is saved before its first write,
-// and each step's writes are saved when the step lands and before the next
-// step starts. A run that stops part way, from a crash or a failed write,
-// resumes from here instead of evaluating again, so no step takes effect
-// twice. Undo and run history read the writes.
+// and each effect is saved as it lands, before the next one starts. A run
+// that stops part way, from a crash or a failed write, resumes from here
+// instead of evaluating again, so no effect lands twice. Undo and run
+// history read the same records.
 //
 // Every file is written to a temporary name, flushed to disk, and renamed
 // over the old one, so a crash leaves the old record or the new one.
 
-// A run of 25 steps over 50 found records, with values near the claim's
-// value bound, stays under this.
-const MAX_RUN_FILE_BYTES = 4 * 1024 * 1024;
-// Kept per automation: every run that failed or has not finished, and the
-// newest finished ones for run history.
+// A run of 200 field writes with values near the claim's value bound stays
+// under this. The executor refuses a larger plan before it writes anything.
+export const MAX_RUN_FILE_BYTES = 4 * 1024 * 1024;
+// Run history keeps this many finished runs per automation. A run a claim
+// may still resume is never dropped.
 const KEEP_FINISHED_RUNS = 20;
-const KEEP_UNFINISHED_RUNS = 100;
 // Pruning reads every run of the automation, so it waits for this many.
 const PRUNE_AFTER_FILES = KEEP_FINISHED_RUNS * 2;
 
@@ -33,7 +32,7 @@ const PRUNE_AFTER_FILES = KEEP_FINISHED_RUNS * 2;
 // the write seam checks each one again before it writes.
 const JsonValueSchema = z.custom<JsonValue>((value) => value !== undefined);
 const TargetSchema = z.union([
-  z.object({ recordId: z.string(), path: z.string() }),
+  z.object({ recordId: z.string(), collectionPath: z.string(), path: z.string() }),
   z.object({ addedBy: z.number().int().nonnegative() }),
 ]);
 const EffectSchema = z.union([
@@ -60,6 +59,15 @@ const WriteSchema = z.union([
     after: JsonValueSchema,
   }),
   z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }),
+  z.object({
+    kind: z.literal("kept"),
+    recordId: z.string(),
+    path: z.string(),
+    field: z.string(),
+    planned: JsonValueSchema,
+    current: JsonValueSchema,
+  }),
+  z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }),
 ]);
 const StoredRunSchema = z.object({
   version: z.literal(1),
@@ -69,16 +77,20 @@ const StoredRunSchema = z.object({
   startedAtMs: z.number(),
   updatedAtMs: z.number(),
   plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
-  done: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
+  applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   superseded: z.boolean(),
+  settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
-    z.object({ state: z.literal("skipped") }),
     z.object({ state: z.literal("failed"), error: z.string() }),
   ]).nullable(),
 });
 
-/** One change a run made: a field it set, or a record it added. */
+/**
+ * What one effect did: a field the automation wrote, a record it added, a
+ * field someone else had changed since the plan (kept as they left it), or a
+ * record it could no longer find.
+ */
 export type RunWrite = z.infer<typeof WriteSchema>;
 
 /** One run of one claim under one definition of its automation. */
@@ -95,11 +107,13 @@ export interface StoredRun {
    * dropped when the run is done. Its writes stay.
    */
   plan: PlannedStep[] | null;
-  /** What each finished step wrote, in plan order. */
-  done: Array<{ ordinal: number; writes: RunWrite[] }>;
+  /** What each effect that landed did, in plan order, one entry per effect. */
+  applied: Array<{ ordinal: number; writes: RunWrite[] }>;
   /** A person chose to run the claim again from the start under a newer definition. */
   superseded: boolean;
-  outcome: { state: "done" } | { state: "skipped" } | { state: "failed"; error: string } | null;
+  /** The engine accepted this run's claim as done, so nothing will resume it. */
+  settled: boolean;
+  outcome: { state: "done" } | { state: "failed"; error: string } | null;
 }
 
 const SubscriptionsSchema = z.object({
@@ -122,6 +136,11 @@ const ReachVerdictsSchema = z.object({
     stoppedFor: z.string().nullable(),
     seq: z.number().int().nonnegative(),
   })),
+});
+
+const TimeoutsSchema = z.object({
+  version: z.literal(1),
+  timeouts: z.array(z.object({ automationId: z.string().min(1), count: z.number().int().nonnegative() })),
 });
 
 export interface StoredSubscription {
@@ -165,9 +184,12 @@ async function writeDurably(path: string, value: unknown): Promise<void> {
   }
 }
 
+// A file's JSON, undefined when it does not exist, or null when it cannot be
+// read as JSON within the size bound.
 async function readJson(path: string): Promise<unknown> {
-  const stats = await lstat(path).catch(() => null);
-  if (!stats || stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined) return undefined;
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_RUN_FILE_BYTES) return null;
   try {
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
@@ -176,18 +198,23 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 export interface AutomationRunStore {
-  /** Every run of one claim, one per definition it ran under. */
-  runsOf(automationId: string, claimId: string): Promise<StoredRun[]>;
+  /**
+   * Every run of one claim, one per definition it ran under. `unreadable`
+   * is true when a saved run exists that cannot be read: the claim must not
+   * start over as if it had none.
+   */
+  runsOf(automationId: string, claimId: string): Promise<{ runs: StoredRun[]; unreadable: boolean }>;
   /** Saves a run before the executor goes on. */
   save(run: StoredRun): Promise<void>;
-  /** The automation's runs, newest first. */
-  list(automationId: string, limit: number): Promise<StoredRun[]>;
-  /** Drops the oldest finished runs past the bound. */
+  /** Drops the oldest settled or superseded runs past the history bound. */
   prune(automationId: string): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   readReachVerdicts(): Promise<StoredReachVerdict[]>;
   saveReachVerdicts(verdicts: readonly StoredReachVerdict[]): Promise<void>;
+  /** Consecutive timed-out runs per automation, for the circuit breaker. */
+  readTimeouts(): Promise<Map<string, number>>;
+  saveTimeouts(timeouts: ReadonlyMap<string, number>): Promise<void>;
 }
 
 export function createAutomationRunStore(rootPath: string): AutomationRunStore {
@@ -203,31 +230,24 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runFile = (folder: string, claimId: string, hash: string) =>
     join(folder, `${hashName(claimId)}-${hash.replace(/[^a-f0-9]/g, "")}.json`);
-
-  async function readRuns(automationId: string): Promise<StoredRun[]> {
-    const folder = await runsFolder(automationId);
-    const names = (await readdir(folder)).filter((name) => name.endsWith(".json"));
-    const runs: StoredRun[] = [];
-    for (const name of names) {
-      const parsed = StoredRunSchema.safeParse(await readJson(join(folder, name)));
-      if (parsed.success && parsed.data.automationId === automationId) runs.push(parsed.data);
-    }
-    return runs.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-  }
+  const readRun = async (path: string, automationId: string): Promise<StoredRun | null> => {
+    const parsed = StoredRunSchema.safeParse(await readJson(path));
+    return parsed.success && parsed.data.automationId === automationId ? parsed.data : null;
+  };
 
   return {
     async runsOf(automationId, claimId) {
       const folder = await runsFolder(automationId);
       const prefix = `${hashName(claimId)}-`;
       const runs: StoredRun[] = [];
+      let unreadable = false;
       for (const name of await readdir(folder)) {
         if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
-        const parsed = StoredRunSchema.safeParse(await readJson(join(folder, name)));
-        if (parsed.success && parsed.data.claimId === claimId && parsed.data.automationId === automationId) {
-          runs.push(parsed.data);
-        }
+        const run = await readRun(join(folder, name), automationId);
+        if (run?.claimId === claimId) runs.push(run);
+        else unreadable = true;
       }
-      return runs;
+      return { runs, unreadable };
     },
     save(run) {
       return serial(async () => {
@@ -235,18 +255,20 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
         await writeDurably(runFile(folder, run.claimId, run.definitionHash), run);
       });
     },
-    async list(automationId, limit) {
-      return (await readRuns(automationId)).slice(0, limit);
-    },
     prune(automationId) {
       return serial(async () => {
         const folder = await runsFolder(automationId);
-        if ((await readdir(folder)).length < PRUNE_AFTER_FILES) return;
-        const runs = await readRuns(automationId);
-        const finished = runs.filter((run) => run.outcome !== null && run.outcome.state !== "failed");
-        const unfinished = runs.filter((run) => run.outcome === null || run.outcome.state === "failed");
-        const dropped = [...finished.slice(KEEP_FINISHED_RUNS), ...unfinished.slice(KEEP_UNFINISHED_RUNS)];
-        for (const run of dropped) {
+        const names = (await readdir(folder)).filter((name) => name.endsWith(".json"));
+        if (names.length < PRUNE_AFTER_FILES) return;
+        const history: StoredRun[] = [];
+        for (const name of names) {
+          const run = await readRun(join(folder, name), automationId);
+          // Only a run nothing can resume leaves: its claim settled done, or
+          // a person chose to start it over.
+          if (run && ((run.settled && run.outcome?.state === "done") || run.superseded)) history.push(run);
+        }
+        history.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+        for (const run of history.slice(KEEP_FINISHED_RUNS)) {
           await rm(runFile(folder, run.claimId, run.definitionHash), { force: true });
         }
       });
@@ -267,6 +289,16 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     saveReachVerdicts(verdicts) {
       return serial(async () => {
         await writeDurably(join(await base(), "reach.json"), { version: 1, verdicts });
+      });
+    },
+    async readTimeouts() {
+      const parsed = TimeoutsSchema.safeParse(await readJson(join(await base(), "timeouts.json")));
+      return new Map(parsed.success ? parsed.data.timeouts.map((entry) => [entry.automationId, entry.count]) : []);
+    },
+    saveTimeouts(timeouts) {
+      return serial(async () => {
+        const entries = [...timeouts].map(([automationId, count]) => ({ automationId, count }));
+        await writeDurably(join(await base(), "timeouts.json"), { version: 1, timeouts: entries });
       });
     },
   };

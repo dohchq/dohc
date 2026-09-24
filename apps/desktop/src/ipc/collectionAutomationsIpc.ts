@@ -8,11 +8,13 @@ import {
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
   ConfirmCollectionAutomationStepPayload,
+  ListAutomationHoldsPayload,
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
   RetryCollectionAutomationPayload,
   WriteCollectionAutomationsPayload,
   type ConfirmCollectionAutomationStepResult,
+  type ListAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
@@ -82,6 +84,13 @@ export function registerCollectionAutomationsIpc<
     const input = RetryCollectionAutomationPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<RetryCollectionAutomationResult> =>
       await operation.state.collectionAutomations.retry(input));
+  });
+
+  registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationHoldsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationHoldsResult> =>
+      ({ holds: dependencies.sharedViewOf(input.workspaceId) ? [] : operation.state.collectionAutomations.holds() }));
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {

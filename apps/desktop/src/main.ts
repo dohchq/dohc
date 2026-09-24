@@ -571,6 +571,15 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
   }
 }
 
+// A Collection automation step started or stopped waiting for a current
+// editor: the windows on that workspace re-list the hold notices.
+function notifyAutomationHoldsChanged(workspaceId: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
+    win.webContents.send(CHANNELS.automationHoldsChanged, { workspaceId });
+  }
+}
+
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
   if (!payload.success) {
@@ -3204,6 +3213,7 @@ function createCollectionAutomationsFor(
     evaluator: automationEvaluator,
     store: createAutomationRunStore(rootPath),
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
+    onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
   });

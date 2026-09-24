@@ -154,7 +154,7 @@ describe("plans", () => {
         ordinal: 0,
         effects: [{
           kind: "set",
-          target: { recordId: "rec_task", path: "Tasks/one.md" },
+          target: { recordId: "rec_task", collectionPath: "Tasks", path: "Tasks/one.md" },
           fields: [
             { field: "Finished on", before: null, after: "2026-09-25" },
             { field: "Note", before: null, after: "literal" },
@@ -221,6 +221,39 @@ describe("plans", () => {
     ] }] });
     expect(planRun(run, request, [{ ok: true, value: [2] }], key)).toEqual({
       kind: "failed", error: expect.stringContaining("did not give one value for each record"), timedOut: false,
+    });
+  });
+
+  it("expects each field to hold what the step before it wrote, on every record the run touches", () => {
+    const definition = automation([
+      "id: count", "name: Count", "when: record-added",
+      "do:",
+      "  - set: {Count: 1}",
+      "  - set: {Count: 2}",
+      "  - add-record: {Title: first}",
+      "    as: log",
+      "  - set: {Title: second}",
+      "    records: log",
+    ].join("\n"));
+    const run = inputs(definition, { record: { ...task, values: { Count: 0 } } });
+    const planned = planRun(run, evaluationRequest(run, 0), [], key);
+    expect(planned).toMatchObject({ kind: "plan", steps: [
+      { effects: [{ fields: [{ field: "Count", before: 0, after: 1 }] }] },
+      { effects: [{ fields: [{ field: "Count", before: 1, after: 2 }] }] },
+      { effects: [{ kind: "add", fields: [{ field: "Title", value: "first" }] }] },
+      { effects: [{ target: { addedBy: 2 }, fields: [{ field: "Title", before: "first", after: "second" }] }] },
+    ] });
+  });
+
+  it("refuses a run that would change more fields than one run may save", () => {
+    const fields = Array.from({ length: 5 }, (_, index) => `F${index}: 1`).join(", ");
+    const definition = automation(`id: wide\nname: Wide\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {${fields}}, records: all}]`);
+    const found = Array.from({ length: 50 }, (_, index) => ({ id: `rec_${index}`, path: `Tasks/${index}.md`, values: {} }));
+    const run = inputs(definition, { found: new Map([[0, found]]) });
+    expect(planRun(run, evaluationRequest(run, 0), [], key)).toEqual({
+      kind: "failed",
+      error: "This run would change more than 200 fields. Narrow its Find steps, or split it into smaller automations.",
+      timedOut: false,
     });
   });
 
