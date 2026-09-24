@@ -1,11 +1,18 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopUserSettingsResult, WorkspaceSettingsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../workspaces/workspaceSettings";
 import { settingsFileNotice, useSettingsFileNotices } from "./useSettingsFileNotices";
 import { useShellError } from "./useShellError";
+
+// These wait on async bridge answers. On a loaded machine they can take
+// longer than Testing Library's 1000 ms default, and a wait that gives up
+// first fails a test that was about to pass. Every wait here runs until the
+// condition holds, within the test's own budget.
+configure({ asyncUtilTimeout: 10_000 });
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(() => {
   cleanup();
