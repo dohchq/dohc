@@ -26,7 +26,7 @@ import {
   type ShareSelector,
 } from "../shareFilter";
 import type { StorageContext } from "./context";
-import { readCurrentShareGrant } from "./currentShareGrant";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import type { SyncRelayShareRow } from "./types";
 import {
   NOTICE_REMOVED_RETENTION_MS,
@@ -137,20 +137,59 @@ export interface NoticeShareReceivedInput {
   nowMs: number;
 }
 
-// The share notices waiting for `recipientUserId`, with each granter. A
-// grant writes its waiting row in the transaction that makes it, so a share
-// is never activated without one.
+// What a waiting share notice needs now: the notice, if the grant is a
+// current named grant the recipient reads and its title can name what was
+// shared; nothing yet, if the grant is still addressed to an email or names
+// a channel the owner's log does not hold yet; or settling, if the grant
+// ended.
+type ShareNoticeState =
+  | { state: "deliver"; share: SyncRelayShareRow; recipientUserId: string; title: (senderLabel: string) => string }
+  | { state: "wait" }
+  | { state: "ended" };
+
+function shareNoticeState(storage: StorageContext, grantId: string): ShareNoticeState {
+  const current = readCurrentShareGrant(storage, { grantId });
+  if (!current || current.grant.parentGrantId !== null) return { state: "ended" };
+  if (current.grant.principalKind !== "user") return { state: "wait" };
+  const { share, grant } = current;
+  const recipientUserId = grant.principalUserId!;
+  const readable = authorizeShareGrantAction({
+    storage,
+    grantId,
+    action: "read",
+    principal: { kind: "user", userId: recipientUserId },
+  }).ok;
+  const title = readable ? shareReceivedTitle(storage, share) : null;
+  return title === null ? { state: "wait" } : { state: "deliver", share, recipientUserId, title };
+}
+
+/**
+ * The share notices `recipientUserId` can receive now, with each granter.
+ * Only these need the granter's name. Waiting rows whose grant ended are
+ * settled here; the rest stay for a later pull. A grant writes its waiting
+ * row in the transaction that makes it, and revoking it removes the row.
+ */
 export function pendingShareNotices(
   storage: StorageContext,
   recipientUserId: string,
 ): { grantId: string; granterUserId: string }[] {
-  return storage.db.prepare(
-    `SELECT d.grant_id, s.granter_user_id FROM sync_relay_share_notice_deliveries AS d
+  const waiting = () => storage.db.prepare(
+    `SELECT d.grant_id FROM sync_relay_share_notice_deliveries AS d
      JOIN sync_relay_share_grants AS g ON g.grant_id = d.grant_id
-     JOIN sync_relay_shares AS s ON s.share_id = g.share_id
      WHERE g.principal_kind = 'user' AND g.principal_user_id = ?
      ORDER BY d.created_at_ms, d.grant_id`,
-  ).all(recipientUserId).map((row) => ({ grantId: String(row.grant_id), granterUserId: String(row.granter_user_id) }));
+  ).all(recipientUserId).map((row) => String(row.grant_id));
+  const states = () => waiting().map((grantId) => ({ grantId, ...shareNoticeState(storage, grantId) }));
+  const now = storage.readTx(states);
+  const ended = now.some((row) => row.state === "ended");
+  return (ended ? storage.tx(() => {
+    const again = states();
+    const settle = storage.db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?");
+    for (const row of again) if (row.state === "ended") settle.run(row.grantId);
+    return again;
+  }) : now).flatMap((row) => row.state === "deliver"
+    ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId }]
+    : []);
 }
 
 /**
@@ -170,20 +209,12 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
         .prepare("SELECT 1 FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
         .get(input.grantId);
       if (!waiting) return;
-      const current = readCurrentShareGrant(storage, { grantId: input.grantId });
-      if (!current || current.grant.parentGrantId !== null) return void settle();
-      if (current.grant.principalKind !== "user") return;
-      const { share, grant } = current;
-      const recipientUserId = grant.principalUserId!;
-      const readable = authorizeShareGrantAction({
-        storage,
-        grantId: grant.grantId,
-        action: "read",
-        principal: { kind: "user", userId: recipientUserId },
-      }).ok;
-      const title = readable ? shareReceivedTitle(storage, share, input.senderLabel) : null;
-      if (title === null) return;
-      const noticeId = noticeIdFrom(share.granterUserId, `share-received:${grant.grantId}`);
+      const found = shareNoticeState(storage, input.grantId);
+      if (found.state === "ended") return void settle();
+      if (found.state === "wait") return;
+      const { share, recipientUserId } = found;
+      const title = found.title(input.senderLabel);
+      const noticeId = noticeIdFrom(share.granterUserId, `share-received:${input.grantId}`);
       const existing = storage.db
         .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
         .get(recipientUserId, noticeId);
@@ -212,22 +243,25 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
 }
 
 // "Ana shared Trip with you", naming what the share holds and shortening the
-// name to fit. A direct message arrives as a message request.
-function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow, senderLabel: string): string | null {
+// name to fit. A direct message arrives as a message request. Null while
+// the share names a channel the owner's log does not hold yet.
+function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): ((senderLabel: string) => string) | null {
   const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!selector) return null;
   if (!("paths" in selector)) {
     const channelKind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
-    if (channelKind === "dm") return `${senderLabel} sent you a message request`;
-    return channelKind === "channel" ? `${senderLabel} shared a channel with you` : null;
+    if (channelKind === "dm") return (senderLabel) => `${senderLabel} sent you a message request`;
+    return channelKind === "channel" ? (senderLabel) => `${senderLabel} shared a channel with you` : null;
   }
   const { paths } = selector;
   const what = paths.length === 0 ? "a version"
     : paths.length === 1 ? paths[0]!.split("/").at(-1)!
     : `${paths.length} items`;
-  const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
-  const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;
-  return `${senderLabel} shared ${name} with you`;
+  return (senderLabel) => {
+    const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
+    const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;
+    return `${senderLabel} shared ${name} with you`;
+  };
 }
 
 interface NoticeRowInput {
@@ -427,6 +461,20 @@ function fileSidesOn(
   return held ? sides : null;
 }
 
+// Whether the user named by the next parameter holds a current named or
+// link-opened grant on the share in `shareColumn`: one statement, the same
+// rule as readCurrentShareGrant.
+function holdsShareSql(shareColumn: string): string {
+  return `EXISTS (SELECT 1 FROM sync_relay_share_grants AS held_grant
+    JOIN sync_relay_shares AS held_share ON held_share.share_id = held_grant.share_id
+    WHERE held_grant.share_id = ${shareColumn} AND held_grant.principal_kind = 'user'
+      AND held_grant.principal_user_id = ? AND ${currentShareGrantSql("held_grant", "held_share")})`;
+}
+
+function holdsShare(storage: StorageContext, userId: string, shareId: string): boolean {
+  return Number(storage.db.prepare(`SELECT ${holdsShareSql("?")} AS held`).get(shareId, userId)?.held) === 1;
+}
+
 function admits(sides: ShareSelector[] | null, path: string): boolean {
   return sides?.some((files) => visibleSharePath(files, path) === path) ?? false;
 }
@@ -515,10 +563,11 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
       return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId) ? "digest" : "none";
     }
     // A row that points only at a share needs only a current grant on it.
-    const reach = shareReach(storage, recipientUserId);
-    const shares = storage.db.prepare(`SELECT DISTINCT recipient_share_id FROM sync_relay_notices WHERE ${live}`)
-      .all(recipientUserId, nowMs);
-    return shares.some((row) => reach.sidesOn(String(row.recipient_share_id)) === null) ? "shares" : "none";
+    const lost = storage.db.prepare(
+      `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+         WHERE ${live} AND NOT ${holdsShareSql("sync_relay_notices.recipient_share_id")}) AS lost`,
+    ).get(recipientUserId, nowMs, recipientUserId);
+    return Number(lost?.lost) === 1 ? "shares" : "none";
   });
   if (plan === "none") return;
   storage.tx(() => {
@@ -535,8 +584,7 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
     for (const row of rows) {
       const shareId = String(row.recipient_share_id);
       const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
-      const current = reach.sidesOn(shareId);
-      if (path === undefined ? current !== null : admits(current, path)) continue;
+      if (path === undefined ? holdsShare(storage, recipientUserId, shareId) : admits(reach.sidesOn(shareId), path)) continue;
       const workspaceId = storage.getShare(shareId)?.workspaceId;
       const movedTo = path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
       move.run(movedTo, movedTo, nextChangeSeq(storage, recipientUserId), recipientUserId, String(row.notice_id));

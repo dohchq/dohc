@@ -300,21 +300,24 @@ export function createSyncRelayHandler({
     return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
   };
 
-  // Delivers one waiting share notice. A failure leaves the delivery waiting
-  // for the recipient's next pull.
-  const deliverShareNotice = async (grantId: string, granterUserId: string): Promise<void> => {
-    try {
-      const senderLabel = await shareSenderLabel(granterUserId);
-      storage.noticeShareReceived({ grantId, senderLabel, nowMs: nowMs() });
-    } catch (error) {
-      console.error("[sync-relay] share notice failed", error);
-    }
-  };
-
-  // Every share notice waiting for this person, delivered before a pull.
+  // Delivers the share notices this person can receive now, before their
+  // pull; only those look up a granter's name, once per granter. A failure
+  // leaves a delivery waiting for the next pull. The share routes do no
+  // delivery work, so sharing takes the same time whether or not the
+  // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
+    const labels = new Map<string, Promise<string>>();
     for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
-      await deliverShareNotice(grantId, granterUserId);
+      try {
+        let label = labels.get(granterUserId);
+        if (label === undefined) {
+          label = shareSenderLabel(granterUserId);
+          labels.set(granterUserId, label);
+        }
+        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+      } catch (error) {
+        console.error("[sync-relay] share notice failed", error);
+      }
     }
   };
 
@@ -467,7 +470,6 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
-    (grantId, granterUserId) => void deliverShareNotice(grantId, granterUserId),
     publicEditRelease,
   );
 

@@ -74,9 +74,6 @@ export function createShareGrantRoutes(
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
   namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
-  // Starts delivering the waiting notice for a named grant, after the
-  // response. The recipient's next pull delivers it if this does not.
-  sendShareNotice: (grantId: string, granterUserId: string) => void,
   publicEditRelease?: PublicEditRelease,
 ) {
   const requireEditableSelector = (access: string, selectorJson: string) => {
@@ -630,7 +627,6 @@ export function createShareGrantRoutes(
             parentGrantId: null,
           },
         });
-        sendShareNotice(grantId, actor.userId);
         return jsonResponse({
           ok: true,
           shareId,
@@ -687,10 +683,6 @@ export function createShareGrantRoutes(
           parentGrantId: null,
         },
       });
-      // Delivery runs after the response, so the response does not depend
-      // on the recipient. An address with no account keeps its notice
-      // waiting until an account claims the share.
-      sendShareNotice(grantId, actor.userId);
       return jsonResponse({
         ok: true,
         shareId,

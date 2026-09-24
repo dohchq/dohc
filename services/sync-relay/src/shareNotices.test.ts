@@ -10,6 +10,7 @@ import {
   appendLog,
   closeTestStorage,
   countStorageCalls,
+  inspectDatabase,
   reopenTestStorage,
   storagePath,
   chatChannelCreate,
@@ -193,17 +194,21 @@ describe("a notice when a share reaches a person", () => {
     expect(await json(response)).toMatchObject({ code: "bad_request" });
   });
 
-  it("answers the share before the notice is written, so the answer does not depend on the recipient", async () => {
-    let finish = (_name: string | null) => {};
-    const name = new Promise<string | null>((resolve) => { finish = resolve; });
-    const { h, storage } = await relay({ lookupUserDisplayName: () => name });
+  it("does no delivery work when sharing, so the answer does not depend on the recipient", async () => {
+    const names = vi.fn((userId: string) => `Name ${userId}`);
+    const { h, storage } = await relay({ lookupUserDisplayName: names });
+    const delivered = vi.spyOn(storage, "noticeShareReceived");
     await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
-    expect(storage.pendingShareNotices("ana")).toHaveLength(1);
-    finish("Owner");
-    // The title names the granter, or past the name lookup's deadline, the
-    // email the recipient already sees.
-    expect(await titles(h, "ana")).toEqual([expect.stringMatching(/ shared trip with you$/u)]);
-    expect(storage.pendingShareNotices("ana")).toEqual([]);
+    await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientEmail: "ana@dohc.test" });
+    await createShare(h, "owner", WORKSPACE, { paths: ["notes"], recipientEmail: "nobody@elsewhere.test" });
+    expect(names).not.toHaveBeenCalled();
+    expect(delivered).not.toHaveBeenCalled();
+    expect(waiting(storage)).toHaveLength(3);
+
+    // The recipient's pull delivers both of theirs, naming the granter once.
+    expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you", "Name owner shared budget with you"]);
+    expect(names.mock.calls).toEqual([["owner"]]);
+    expect(waiting(storage)).toHaveLength(1);
   });
 
   it("delivers a notice the relay stopped before writing, on the recipient's next pull", async () => {
@@ -215,26 +220,59 @@ describe("a notice when a share reaches a person", () => {
     const reopened = reopenTestStorage(path);
     const h = testHandler(reopened, { nowMs: () => CLOCK, lookupUserDisplayName: (userId) => `Name ${userId}` });
     expect(await titles(h, "ana")).toEqual(["Name owner shared trip with you"]);
-    expect(reopened.pendingShareNotices("ana")).toEqual([]);
+    expect(waiting(reopened)).toEqual([]);
   });
 
   it("settles the delivery without a notice when the grant ends first", async () => {
     const { h, storage } = await relay();
     const shareId = made(storage, { paths: ["trip"] }, "ana");
     expect(storage.revokeShare(shareId, CLOCK)).toBe(true);
+    expect(waiting(storage)).toEqual([]);
     expect(await notices(h, "ana")).toEqual([]);
-    expect(storage.pendingShareNotices("ana")).toEqual([]);
+  });
+
+  it("settles on a pull a delivery whose granter no longer owns the workspace", async () => {
+    const { h, storage } = await relay();
+    made(storage, { paths: ["trip"] }, "ana");
+    const db = inspectDatabase(storagePath(storage));
+    db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'someone-else' WHERE workspace_id = ?").run(WORKSPACE);
+    db.close();
+    expect(await notices(h, "ana")).toEqual([]);
+    expect(waiting(storage)).toEqual([]);
+  });
+
+  it("leaves no waiting row for an invite revoked before an account claims it", async () => {
+    const { storage } = await relay();
+    const one = invited(storage, "nobody@elsewhere.test");
+    const all = invited(storage, "nobody@elsewhere.test");
+    expect(waiting(storage)).toEqual([one.grantId, all.grantId]);
+    expect(storage.revokeShareGrant({ shareId: one.shareId, grantId: one.grantId, revokedAtMs: CLOCK }).ok).toBe(true);
+    expect(waiting(storage)).toEqual([all.grantId]);
+    expect(storage.revokeShare(all.shareId, CLOCK)).toBe(true);
+    expect(waiting(storage)).toEqual([]);
+  });
+
+  it("costs no name lookup for a channel share its channel has not reached yet", async () => {
+    const names = vi.fn((userId: string) => `Name ${userId}`);
+    const { h, storage } = await relay({ lookupUserDisplayName: names });
+    made(storage, { kind: "chat-channel", channelWireId: "wire-later" }, "ana", "read-write");
+    const delivered = vi.spyOn(storage, "noticeShareReceived");
+    await notices(h, "ana");
+    await notices(h, "ana");
+    expect(names).not.toHaveBeenCalled();
+    expect(delivered).not.toHaveBeenCalled();
+    expect(waiting(storage)).toHaveLength(1);
   });
 
   it("waits to deliver a channel share until the owner's log names the channel", async () => {
     const { h, storage } = await relay();
     made(storage, { kind: "chat-channel", channelWireId: "wire-later" }, "ana", "read-write");
     expect(await notices(h, "ana")).toEqual([]);
-    expect(storage.pendingShareNotices("ana")).toHaveLength(1);
+    expect(waiting(storage)).toHaveLength(1);
 
     await appendLog(h, "owner", WORKSPACE, [channel("wire-later", "ana-dm", "dm")]);
     expect(await titles(h, "ana")).toEqual(["Name owner sent you a message request"]);
-    expect(storage.pendingShareNotices("ana")).toEqual([]);
+    expect(waiting(storage)).toEqual([]);
   });
 
   it("does not claim email invites on a pull", async () => {
@@ -250,10 +288,12 @@ describe("a notice when a share reaches a person", () => {
     const shareId = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
     await notices(h, "ana");
     const digests = vi.spyOn(storage, "listSharesReceivedBy");
+    const grantLists = vi.spyOn(storage, "listActiveShareGrantsForRecipient");
     await notices(h, "ana");
     expect(storage.revokeShare(shareId, CLOCK)).toBe(true);
     expect((await notices(h, "ana"))[0]?.target).toBeNull();
     expect(digests).not.toHaveBeenCalled();
+    expect(grantLists).not.toHaveBeenCalled();
   });
 });
 
@@ -281,4 +321,33 @@ function made(
     },
   });
   return shareId;
+}
+
+// An email invite made in storage, with its waiting delivery.
+function invited(storage: SyncRelayStorage, email: string): { shareId: string; grantId: string } {
+  made_ += 1;
+  const shareId = `stored-share-${made_}`;
+  const grantId = `stored-grant-${made_}`;
+  storage.createShare({
+    share: {
+      shareId, workspaceId: WORKSPACE, granterUserId: "owner",
+      selectorJson: JSON.stringify({ versionId: null, paths: ["trip"] }), createdAtMs: CLOCK,
+    },
+    grant: {
+      grantId, shareId, principalKind: "email", principalUserId: null, principalEmail: email,
+      access: "view", generation: 1, status: "active", createdAtMs: CLOCK, revokedAtMs: null, parentGrantId: null,
+    },
+  });
+  return { shareId, grantId };
+}
+
+// Every waiting share notice delivery, by grant.
+function waiting(storage: SyncRelayStorage): string[] {
+  const db = inspectDatabase(storagePath(storage), { readOnly: true });
+  try {
+    return db.prepare("SELECT grant_id FROM sync_relay_share_notice_deliveries ORDER BY created_at_ms, grant_id")
+      .all().map((row) => String(row.grant_id));
+  } finally {
+    db.close();
+  }
 }
