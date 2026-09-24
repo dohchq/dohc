@@ -245,9 +245,10 @@ describe("watchWorkspaceEvents", () => {
       await mkdir(join(root, ".dohc", "history"), { recursive: true });
       await writeFile(join(root, ".dohc", "history", "1.json"), "{}");
       await writeFile(join(root, "notes.md"), "hi");
-      // The barrier takes the same path as the .dohc writes, a new directory
-      // with a nested file, and is written after them. A broken ignore rule
-      // would report .dohc/history/1.json no later than notes/history/1.md.
+      // The barrier takes the same steps as the .dohc writes (a new directory,
+      // its scan, then a nested file) and starts after them. A broken ignore
+      // rule's .dohc/history/1.json event therefore has no step the barrier
+      // skips, though the watcher does not guarantee their order.
       await mkdir(join(root, "notes", "history"), { recursive: true });
       await writeFile(join(root, "notes", "history", "1.md"), "{}");
       await vi.waitFor(
@@ -328,6 +329,8 @@ describe("settle max-window cap", () => {
       // start a new window.
       const deadline = Date.now() + 10_000;
       let lastWrite: number | undefined;
+      // The pause before the first write after a drop falls inside the next
+      // window, so a drop keeps lastWrite and resets only widestGap.
       let widestGap = 0;
       for (;;) {
         expect(Date.now(), "no batch flushed while writes stayed under settleMs apart").toBeLessThan(deadline);
@@ -339,7 +342,6 @@ describe("settle max-window cap", () => {
         if (batches.length === 0) continue;
         if (Math.max(widestGap, performance.now() - lastWrite) < settleMs) break;
         batches.length = 0;
-        lastWrite = undefined;
         widestGap = 0;
       }
       expect(batches[0]).toContain("busy.md");
