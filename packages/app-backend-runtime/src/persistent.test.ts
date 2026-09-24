@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { describe, expect, it, vi } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
@@ -466,39 +467,50 @@ describe("persistent dataset worker",()=>{
   },60_000);
 
   it("does not charge the app for time its worker spends stopped inside app code",async()=>{
-    await fixture(async({open})=>{
-      let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
-      const signal=async(verb:"Suspend"|"Resume")=>{
-        if(process.platform!=="win32"){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
-        const script=`Add-Type -Namespace W -Name ${verb} -MemberDefinition '[DllImport("ntdll.dll")] public static extern int Nt${verb}Process(IntPtr h);'; [void][W.${verb}]::Nt${verb}Process((Get-Process -Id ${pid}).Handle)`;
-        await new Promise<void>((resolve,rejectRun)=>spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",script],{windowsHide:true}).on("exit",code=>code===0?resolve():rejectRun(new Error(`powershell ${code}`))));
-      };
-      const launch:AppRuntimeLauncher=options=>{
-        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-        pid=child.pid!;
-        child.on("message",message=>{
-          const reply=message as {progress?:string;ok?:boolean};
-          // The app code section starts right after this report: stop the worker inside it.
-          if(reply.progress==="running the app operation" && !stall) stall=(async()=>{
-            await signal("Suspend");suspendedAt=performance.now();
-            await new Promise(resolve=>setTimeout(resolve,6_000));
-            resumedAt=performance.now();await signal("Resume");
-          })();
-          if(typeof reply.ok==="boolean") repliedAt=performance.now();
-          options.onMessage(message);
-        });
-        child.on("error",options.onError);child.on("close",options.onExit);
-        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
-      };
-      const worker=await open({limits:{cpuBudgetMs:5_000}},launch);
-      // About two seconds of CPU, so the stop lands inside the app's section.
-      const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000000) SELECT sum(x) AS total FROM n')}}"});
-      await stall;
-      expect(prepared.result).toEqual([{total:450000015000000}]);
-      // Stopped for 6 s inside a 5 s budget, and not charged for it.
-      expect(suspendedAt).toBeGreaterThan(0);
-      expect(repliedAt).toBeGreaterThan(resumedAt);
-    });
+    // Windows has no stop signal. PowerShell compiles its calls before the
+    // operation starts, so each later request lands in milliseconds.
+    const suspender=process.platform==="win32" ? spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",
+      `Add-Type -Namespace W -Name P -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);';
+      [Console]::Out.WriteLine('ready'); while(($line=[Console]::In.ReadLine()) -ne $null){ $verb,$id=$line.Split(' '); $handle=(Get-Process -Id $id).Handle;
+      if($verb -eq 'Suspend'){[void][W.P]::NtSuspendProcess($handle)}else{[void][W.P]::NtResumeProcess($handle)}; [Console]::Out.WriteLine('done') }`],
+    {windowsHide:true,stdio:["pipe","pipe","ignore"]}) : undefined;
+    const lines=suspender ? createInterface({input:suspender.stdout!})[Symbol.asyncIterator]() : undefined;
+    const answer=async(expected:string)=>{const line=await lines!.next();if(line.value!==expected) throw new Error(`The suspender said ${String(line.value)}.`);};
+    try {
+      if(suspender) await answer("ready");
+      await fixture(async({open})=>{
+        let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
+        const signal=async(verb:"Suspend"|"Resume")=>{
+          if(!suspender){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
+          suspender.stdin!.write(`${verb} ${pid}\n`);await answer("done");
+        };
+        const launch:AppRuntimeLauncher=options=>{
+          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+          pid=child.pid!;
+          child.on("message",message=>{
+            const reply=message as {progress?:string;ok?:boolean};
+            // The app code section starts right after this report: stop the worker inside it.
+            if(reply.progress==="running the app operation" && !stall) stall=(async()=>{
+              await signal("Suspend");suspendedAt=performance.now();
+              await new Promise(resolve=>setTimeout(resolve,6_000));
+              resumedAt=performance.now();await signal("Resume");
+            })();
+            if(typeof reply.ok==="boolean") repliedAt=performance.now();
+            options.onMessage(message);
+          });
+          child.on("error",options.onError);child.on("close",options.onExit);
+          return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+        };
+        const worker=await open({limits:{cpuBudgetMs:5_000}},launch);
+        // About two seconds of CPU, so the stop lands inside the app's section.
+        const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000000) SELECT sum(x) AS total FROM n')}}"});
+        await stall;
+        expect(prepared.result).toEqual([{total:450000015000000}]);
+        // Stopped for 6 s inside a 5 s budget, and not charged for it.
+        expect(suspendedAt).toBeGreaterThan(0);
+        expect(repliedAt).toBeGreaterThan(resumedAt);
+      });
+    } finally {suspender?.stdin!.end();}
   },60_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{

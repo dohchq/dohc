@@ -272,7 +272,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       const pageSize=Number(copy.prepare("PRAGMA page_size").get()!.page_size);
       copy.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
       progress("running the migration");
-      copy.exec(`DROP TABLE ${marker}; BEGIN IMMEDIATE`);
+      copy.exec(`BEGIN IMMEDIATE; DROP TABLE ${marker}`);
       authorizeMigration(copy,[...new Set([...config.tables,...command.input.tables])]);
       const migrationCopy=copy;
       appCode(()=>migrationCopy.exec(command.input.migrationSql));copy.setAuthorizer(null);
