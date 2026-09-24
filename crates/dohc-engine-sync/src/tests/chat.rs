@@ -1304,10 +1304,39 @@ fn another_computers_automation_message_applies_without_its_automation() {
             "authorOwnerDisplayName": "Ana",
             "authorUserId": "ana",
             "body": "Done @ice",
-            "createdAtMs": 30
+            "createdAtMs": 30,
+            "chainDepth": 2
         }),
     );
     apply_chat_envelope(&mut engine, &message, &NoFaults).expect("automation message");
+    // Only an automation message carries a chain depth, within the depth
+    // bound.
+    for (seq, author_kind, owner, depth) in [
+        (10, "human", None, json!(1)),
+        (11, "automation", Some("Ana"), json!(0)),
+        (12, "automation", Some("Ana"), json!(65)),
+        (13, "automation", Some("Ana"), json!("2")),
+    ] {
+        let mut payload = json!({
+            "messageId": format!("bad-depth-{seq}"),
+            "threadId": "thread-imported",
+            "authorKind": author_kind,
+            "authorDisplayName": "Ana",
+            "body": "Hi",
+            "createdAtMs": 31,
+            "chainDepth": depth,
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        let refused = envelope(
+            &format!("bad-depth-peer-{seq}"),
+            0,
+            "chat.message.append",
+            payload,
+        );
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+    }
     let stored: (String, String, Option<String>, Option<i64>, String) = engine
         .read_with(|conn| {
             conn.query_row(

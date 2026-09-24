@@ -1128,7 +1128,8 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         "Stamp the finish date\nStamp the finish date (automation)\nDone @ana"
     );
 
-    // Other computers get the author kind and the person, never the automation.
+    // Other computers get the author kind, the person, and the chain depth,
+    // never the automation.
     let payloads: Vec<serde_json::Value> = store
         .read_with(|conn| {
             let mut stmt = conn
@@ -1148,15 +1149,20 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         .iter()
         .map(|payload| serde_json::from_str(payload).expect("json"))
         .collect();
-    assert_eq!(payloads.len(), 3);
+    assert_eq!(
+        payloads
+            .iter()
+            .map(|payload| payload["chainDepth"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(2), json!(1)],
+        "the depth travels so a chain of automations stops across computers"
+    );
     for payload in payloads {
         assert_eq!(payload["authorKind"], "automation");
         assert_eq!(payload["authorOwnerDisplayName"], "Ice");
         assert_eq!(payload["authorUserId"], "user-ada");
         assert!(
-            payload.get("automation").is_none()
-                && payload.get("automationId").is_none()
-                && payload.get("chainDepth").is_none(),
+            payload.get("automation").is_none() && payload.get("automationId").is_none(),
             "{payload}"
         );
     }

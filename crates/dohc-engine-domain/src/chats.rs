@@ -2600,6 +2600,11 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(owner_name) = &owner_name {
                 message_payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
             }
+            // The depth travels so a chain of automations stops at the cap
+            // across computers. The automation and its Collection stay here.
+            if let Some(automation) = &automation {
+                message_payload.insert("chainDepth".to_owned(), serde_json::json!(automation.chain_depth));
+            }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
@@ -2860,6 +2865,9 @@ impl<'a> LinkedChatStore<'a> {
                 .expect("message payload is an object");
             if let Some(owner_name) = &owner_name {
                 payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
+            }
+            if let Some(automation) = &automation {
+                payload.insert("chainDepth".to_owned(), serde_json::json!(automation.chain_depth));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
