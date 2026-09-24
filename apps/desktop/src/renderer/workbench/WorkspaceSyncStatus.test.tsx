@@ -58,6 +58,8 @@ describe("sync status surface", () => {
       syncStatus: syncState("sync-failed", {
         cause: "server-unreachable",
         detail: "RelayUnreachableError: dohc could not reach the server.",
+        sinceMs: 1,
+        attempts: 1,
       }),
     });
     const status = screen.getByTestId("sync-status");
@@ -65,7 +67,7 @@ describe("sync status surface", () => {
     expect(status.textContent).toBe("Server unreachable");
     rerender(
       <WorkspaceSyncStatus
-        syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused" })}
+        syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused", sinceMs: 1, attempts: 1 })}
       />,
     );
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");

@@ -259,6 +259,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
+        retrying: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -293,6 +294,38 @@ describe("workspaceActivity cloud sync nudge", () => {
 
   // Failed-join rollback (0P-C gate fix): close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
+  // A pass someone asked for reads as syncing, not as the failure it may
+  // clear; an automatic pass does not hide the failure.
+  it("shows a failed sync as syncing only while a retry someone asked for runs", async () => {
+    let retrying = false;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      retryNow: async () => undefined,
+      snapshot: () => ({
+        syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
+        retrying,
+        syncing: true,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 1,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").state).toBe("sync-failed");
+    retrying = true;
+    expect(activity.getStatus("activity-test").state).toBe("syncing");
+    expect(activity.getStatus("activity-test").syncFailure?.attempts).toBe(2);
+    await activity.stopAll();
+  });
+
   it("close stops and forgets a single workspace", async () => {
     let stopped = 0;
     const engine = {
@@ -301,6 +334,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
+        retrying: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -352,6 +386,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
+            retrying: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -409,6 +444,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
+            retrying: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -577,6 +613,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         retryNow: async () => undefined,
         snapshot: () => ({
           syncFailure: null,
+          retrying: false,
           syncing: false,
           lastSyncedAtMs: null,
           pendingChangeCount: 0,

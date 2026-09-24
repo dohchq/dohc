@@ -163,7 +163,8 @@ export function createWorkspaceActivity(
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: conflictCount > 0,
-      syncFailed: (snap?.syncFailure ?? null) !== null,
+      // A retry someone asked for shows as syncing until it ends.
+      syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and

@@ -421,11 +421,16 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().syncFailure).toEqual({
       cause: "server-unreachable",
       detail: "RelayUnreachableError: dohc could not reach the server.",
+      sinceMs: 12345,
+      attempts: 1,
     });
     await vi.advanceTimersByTimeAsync(500);
+    // The same failure, one attempt older, with the newest cause.
     expect(sync.snapshot().syncFailure).toEqual({
       cause: "unknown",
       detail: "Error: relay said no",
+      sinceMs: 12345,
+      attempts: 2,
     });
     const changesAtFailure = changes.mock.calls.length;
     await vi.advanceTimersByTimeAsync(1000);
@@ -456,6 +461,99 @@ describe("relaySyncEngine", () => {
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("starts a new failure after every success, however often they alternate", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let pass = 0;
+    pullMock.mockImplementation(async () => {
+      pass += 1;
+      if (pass % 2 === 1) throw new RelayUnreachableError();
+      return pullResult();
+    });
+    const sync = engine({ capture: capture() });
+    const seen: Array<number | null> = [];
+    for (let round = 0; round < 3; round += 1) {
+      await sync.retryNow();
+      seen.push(sync.snapshot().syncFailure?.attempts ?? null);
+      await sync.retryNow();
+      seen.push(sync.snapshot().syncFailure?.attempts ?? null);
+    }
+    expect(seen).toEqual([1, null, 1, null, 1, null]);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("does not push the next automatic pass out when a retry someone asked for fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pullMock.mockRejectedValue(new RelayUnreachableError());
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    // Automatic backoff: 500, then 1000.
+    await sync.retryNow();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    // The failed retry keeps 1000 for the next automatic pass...
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    // ...and that automatic failure is the one that doubles it.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("leaves no backoff behind when Try again queues behind a pass that fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let failRunning!: () => void;
+    pullMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            failRunning = () => reject(new RelayUnreachableError());
+          }),
+      )
+      .mockImplementation(async () => pullResult());
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+
+    // Try again while the first pass is still out, then that pass fails.
+    const retried = sync.retryNow();
+    expect(sync.snapshot().retrying).toBe(false);
+    failRunning();
+    await retried;
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("says a pass someone asked for is running", async () => {
+    let finish!: () => void;
+    pullMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve(pullResult());
+        }),
+    );
+    const sync = engine({ capture: capture() });
+    const retried = sync.retryNow();
+    await vi.waitFor(() => expect(sync.snapshot().retrying).toBe(true));
+    finish();
+    await retried;
+    expect(sync.snapshot().retrying).toBe(false);
     await sync.stop();
   });
 

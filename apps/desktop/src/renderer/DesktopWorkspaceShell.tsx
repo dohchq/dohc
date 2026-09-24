@@ -72,6 +72,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
+import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useShellNotice } from "./shell/useShellNotice";
@@ -4475,40 +4476,27 @@ export function DesktopWorkspaceShell(props: {
       });
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
-  // A failed sync pass is one failure until a pass succeeds. It is reported
-  // when it starts and when its cause changes, and withdrawn when sync
-  // recovers. Try again runs a pass now; when that pass fails too, the answer
-  // reports it again, because the status alone would not change.
-  const syncFailure = syncStatus?.syncFailure ?? null;
-  const syncFailureRef = useRef(syncFailure);
-  syncFailureRef.current = syncFailure;
-  const retryCloudSyncRef = useRef<() => void>(() => undefined);
-  const retryCloudSync = useCallback(() => {
-    const askedFor = workspaceIdRef.current;
-    const retry = () => retryCloudSyncRef.current();
-    void bridge()
-      .retryCloudSync({ workspaceId: askedFor })
-      .then(
-        (status) => {
-          if (workspaceIdRef.current !== askedFor || !status.syncFailure) return;
-          reportSyncFailure(status.syncFailure, retry);
-        },
-        (error: unknown) => {
-          if (workspaceIdRef.current !== askedFor) return;
-          reportShellError("dohc could not retry sync for this workspace.", error, retry);
-        },
-      );
-  }, [reportShellError, reportSyncFailure]);
-  retryCloudSyncRef.current = retryCloudSync;
-  const syncFailureCause = syncFailure?.cause ?? null;
-  useEffect(() => {
-    const failure = syncFailureRef.current;
-    if (syncFailureCause === null || failure === null) {
-      clearSyncFailure();
-      return;
-    }
-    reportSyncFailure(failure, () => retryCloudSyncRef.current());
-  }, [clearSyncFailure, reportSyncFailure, syncFailureCause]);
+  const retryCloudSyncCommand = useCallback(
+    (askedFor: string) => bridge().retryCloudSync({ workspaceId: askedFor }),
+    [],
+  );
+  const syncFailureNotice = useSyncFailureNotice({
+    workspaceId,
+    failure: syncStatus?.syncFailure ?? null,
+    retryCloudSync: retryCloudSyncCommand,
+    report: reportSyncFailure,
+    clear: clearSyncFailure,
+  });
+  // A dismissed sync failure stays dismissed until it ends, across remounts.
+  const dismissWorkspaceError = useCallback(
+    (id: string) => {
+      if (shellErrors.find((error) => error.id === id)?.kind === "cloud-sync") {
+        syncFailureNotice.noteDismissed();
+      }
+      dismissShellError(id);
+    },
+    [dismissShellError, shellErrors, syncFailureNotice],
+  );
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <div
@@ -4785,7 +4773,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
               onHideWorkspaceError={hideShellError}
-              onDismissWorkspaceError={dismissShellError}
+              onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
               {...(isShareView
                 ? {}

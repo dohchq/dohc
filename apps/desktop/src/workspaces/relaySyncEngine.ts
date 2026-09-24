@@ -63,19 +63,14 @@ export interface CloudSyncEngineOptions {
 
 // Why the last pass failed, as far as dohc knows. "server-unreachable" means
 // no connection reached the server; every other failure is "unknown", and its
-// detail is the only account of it. Cleared by the next pass that succeeds.
+// detail is the only account of it. One failure runs from the first failed
+// pass (`sinceMs`) until a pass succeeds, and `attempts` counts its failed
+// passes, so a surface can tell a blip from an outage.
 export interface CloudSyncFailure {
   cause: "server-unreachable" | "unknown";
   detail: string;
-}
-
-function syncFailureOf(error: unknown): CloudSyncFailure {
-  const detail =
-    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  return {
-    cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
-    detail,
-  };
+  sinceMs: number;
+  attempts: number;
 }
 
 export interface CloudSyncSnapshot {
@@ -87,6 +82,8 @@ export interface CloudSyncSnapshot {
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
   syncFailure: CloudSyncFailure | null;
+  // A pass someone asked for with retryNow is running.
+  retrying: boolean;
 }
 
 export interface CloudSyncEngine {
@@ -114,6 +111,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let bootstrapPullPending = options.joinBootstrap === true;
   let authExpired = false;
   let syncFailure: CloudSyncFailure | null = null;
+  let retrying = false;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
@@ -124,12 +122,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let chain: Promise<void> = Promise.resolve();
 
   function setSyncFailure(value: CloudSyncFailure | null): void {
-    if (
-      syncFailure?.cause === value?.cause &&
-      syncFailure?.detail === value?.detail
-    ) {
-      return;
-    }
+    if (syncFailure === value) return;
     syncFailure = value;
     options.onChange();
   }
@@ -145,10 +138,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  function scheduleBackoff(): void {
+  // `grow` is false after a pass someone asked for: their retry says nothing
+  // new about the outage, so it must not push the next automatic pass out.
+  function scheduleBackoff(grow = true): void {
     if (stopped || authExpired || backoffTimer !== undefined) return;
     const delay = nextBackoffMs;
-    nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
+    if (grow) nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
     retryQueued = true;
     backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
@@ -158,7 +153,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  function handleFailure(error: unknown): void {
+  function handleFailure(error: unknown, manual: boolean): void {
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
@@ -168,9 +163,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       options.onChange();
       return;
     }
-    setSyncFailure(syncFailureOf(error));
+    setSyncFailure({
+      cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
+      detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      sinceMs: syncFailure?.sinceMs ?? nowMs(),
+      attempts: (syncFailure?.attempts ?? 0) + 1,
+    });
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
-    scheduleBackoff();
+    scheduleBackoff(!manual);
   }
 
   async function doPass(): Promise<void> {
@@ -264,18 +264,26 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  function runPass(rethrow: boolean): Promise<void> {
+  function runPass(rethrow: boolean, manual = false): Promise<void> {
     const result = chain.then(async () => {
       if (stopped) return;
+      // This pass carries everything queued so far, so any timer waiting to
+      // start another is now stale. Its own outcome sets the next one. Done
+      // here, in the serialized lifecycle, so a pass that ends before this
+      // one starts cannot leave its backoff behind.
+      clearTimers();
+      retryQueued = false;
       syncing = true;
+      retrying = manual;
       options.onChange();
       try {
         await doPass();
       } catch (error) {
-        handleFailure(error);
+        handleFailure(error, manual);
         if (rethrow) throw error;
       } finally {
         syncing = false;
+        retrying = false;
         options.onChange();
       }
     });
@@ -305,9 +313,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
     retryNow() {
       if (authExpired || stopped) return Promise.resolve();
-      clearTimers();
-      retryQueued = false;
-      return runPass(false);
+      return runPass(false, true);
     },
 
     snapshot() {
@@ -320,6 +326,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         syncFailure: syncFailure ? { ...syncFailure } : null,
+        retrying,
       };
     },
 

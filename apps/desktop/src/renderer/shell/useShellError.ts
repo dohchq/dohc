@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SyncStatusResult } from "../../ipc/bridgeContract";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
 type ShellErrorKind =
@@ -7,16 +6,6 @@ type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync";
-
-type CloudSyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
-
-// What a failed sync pass says. Only the cause dohc knows gets a why; either
-// way the person's work is on this machine, and Try again runs a pass now.
-const CLOUD_SYNC_FAILURE_MESSAGE: Record<CloudSyncFailure["cause"], string> = {
-  "server-unreachable":
-    "dohc could not reach the server. Your changes are saved on this machine.",
-  unknown: "dohc could not sync this workspace. Your changes are saved on this machine.",
-};
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -47,8 +36,9 @@ export function useShellError(workspaceId: string) {
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
+  // `seen` files the row without a toast.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen = false) => {
       nextId.current += 1;
       const next: ShellError = {
         ...error,
@@ -58,7 +48,7 @@ export function useShellError(workspaceId: string) {
             : error.message,
         id: `shell-error-${nextId.current}`,
         atMs: Date.now(),
-        seen: false,
+        seen,
       };
       setShellErrors((current) => [
         ...current.filter(
@@ -143,15 +133,17 @@ export function useShellError(workspaceId: string) {
     [reportShellError],
   );
   const clearSearchError = useCallback(() => clearKind("workspace-search"), [clearKind]);
-  // One failure until a pass succeeds: a new report replaces the last one.
+  // One sync failure at a time: a new report replaces the last one, and
+  // `toast` decides whether it interrupts or only files its row.
   const reportSyncFailure = useCallback(
-    (failure: CloudSyncFailure, retry: () => void) =>
-      push({
-        message: CLOUD_SYNC_FAILURE_MESSAGE[failure.cause],
-        detail: failure.detail,
-        retry,
-        kind: "cloud-sync",
-      }),
+    (
+      notice: { message: string; detail: string; toast: boolean },
+      retry: () => void,
+    ) =>
+      push(
+        { message: notice.message, detail: notice.detail, retry, kind: "cloud-sync" },
+        !notice.toast,
+      ),
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);

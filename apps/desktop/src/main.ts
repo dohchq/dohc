@@ -75,6 +75,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   protocol,
   safeStorage,
   session,
@@ -1886,6 +1887,22 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity),
     ),
+  retryFailingCloudSyncs: (): void => {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      // Started inside the promise, so a workspace closing under the loop
+      // fails its own retry and not the others.
+      void Promise.resolve()
+        .then(() => {
+          const failing = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+            workspaceActivity.getStatus(workspace, lease.state.activity).syncFailure,
+          );
+          return failing ? activity.retryCloudSync(workspaceId) : undefined;
+        })
+        .catch((error: unknown) => {
+          console.error(`[desktop] sync retry after wake failed for ${workspaceId}:`, error);
+        });
+    }
+  },
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.setAgentRun(
@@ -3702,6 +3719,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     registerHandlers: () => {
       nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
+      // A backoff can outlast a sleep. On wake, try each failing sync now.
+      powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       registerIpcHandlers();
       // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
       // Registered before the window so the first load can already fetch.

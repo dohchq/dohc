@@ -1225,6 +1225,9 @@ const SYNC_STATUS_BASE_FIELDS = {
     .object({
       cause: z.enum(["server-unreachable", "unknown"]),
       detail: z.string(),
+      // When this failure began, and how many passes have failed since.
+      sinceMs: z.number(),
+      attempts: z.number().int().positive(),
     })
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.

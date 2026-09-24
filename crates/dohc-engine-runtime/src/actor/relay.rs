@@ -135,6 +135,10 @@ pub enum RelayOperation {
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
+// A relay worker task ended without an answer: it panicked, or its runtime
+// dropped it. That is a failure on this machine, not a network one, so it must
+// not read as an unreachable server.
+const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RelayIoRequest {
@@ -1107,6 +1111,10 @@ fn build_http_transport(
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
 const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
 
+fn relay_io_aborted() -> RelayError {
+    RelayError::Local(RELAY_IO_ABORTED.to_owned())
+}
+
 fn relay_io_cancelled() -> RelayError {
     RelayError::Local(RELAY_IO_CANCELLED.to_owned())
 }
@@ -1127,7 +1135,7 @@ async fn execute_http_request(
 
     tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
         .await
-        .map_err(|_| RelayError::Partitioned)?
+        .map_err(|_| relay_io_aborted())?
 }
 
 /// Fan one deterministic bridge request into bounded blocking GETs. At the
@@ -1200,7 +1208,7 @@ where
         };
         let (index, result) = joined
             .ok_or(RelayError::InvalidResponse)?
-            .map_err(|_| RelayError::Partitioned)?;
+            .map_err(|_| relay_io_aborted())?;
         results[index] = Some(result);
     }
     if token.is_cancelled() {

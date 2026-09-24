@@ -15564,25 +15564,30 @@ describe("owner live documents", () => {
 
   // edges-05, share-09: a relay outage read "Saving…" for its whole length,
   // and the row that came three failures later named no cause and offered
-  // nothing to do.
-  it("reports a failed sync with its cause, Try again and copy, and clears it on recovery", async () => {
+  // nothing to do. #1233 review: a single failed pass must not interrupt.
+  it("files a failed sync at once, toasts only when it persists, and clears it on recovery", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    const failing: SyncStatusResult = {
+    const failing = (attempts: number): SyncStatusResult => ({
       ...SYNC_STATUS,
       state: "sync-failed",
       pendingChangeCount: 1,
       syncFailure: {
         cause: "server-unreachable",
-        detail: "RelayUnreachableError: dohc could not reach the server.",
+        detail: `RelayUnreachableError: attempt ${attempts}`,
+        sinceMs: 1000,
+        attempts,
       },
-    };
-    let status = failing;
+    });
+    let status = failing(1);
     bridge.openWorkspace = vi.fn(async () => status);
     bridge.getSyncStatus = vi.fn(async () => status);
     // The first Try again meets the same outage; the second gets through.
     bridge.retryCloudSync = vi
-      .fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => failing)
-      .mockImplementationOnce(async () => failing)
+      .fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => failing(3))
+      .mockImplementationOnce(async () => {
+        status = failing(3);
+        return status;
+      })
       .mockImplementationOnce(async () => {
         status = SYNC_STATUS;
         return SYNC_STATUS;
@@ -15590,16 +15595,32 @@ describe("owner live documents", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
+    // One failed pass: the title bar and a Notices row, no toast.
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("notice-center").textContent).toContain(
+        "dohc could not reach the server.",
+      ),
+    );
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // The automatic retry failed too: now it interrupts, once.
+    status = failing(2);
+    act(() => bridge.emitWorkspaceActivity());
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
       "dohc could not reach the server. Your changes are saved on this machine.",
     );
-    expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable");
     expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
 
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(1));
-    // Still failing: the answer puts the failure back, with its Try again.
+    // Still failing: the person asked, so the answer interrupts again.
     expect(
       (await screen.findByTestId("workspace-shell-error")).textContent,
     ).toContain("dohc could not reach the server.");
