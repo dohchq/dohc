@@ -1369,6 +1369,40 @@ describe("workspaceEngineCapture batch capture", () => {
 
   const EDITOR_TEXT = "typed in dohc\n";
 
+  // The open says "settling" before its settle runs. A settle refused before
+  // it starts reports nothing of its own, so the open closes that report.
+  it("replaces the open-time Saving… when the settle is refused before it starts", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async () =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            throw new Error("refused before the settle started");
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toEqual(["settling", "error"]));
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const outside = "written outside dohc\n";

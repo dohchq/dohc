@@ -686,8 +686,11 @@ where
                 // settle write, never a false claim that the file already
                 // holds the doc.
                 if let Some(seed_source) = seed_source_sha256.filter(|_| outcome.seq == 1) {
+                    // The file holds what the seed imported, so the lineage
+                    // is not ahead of it until another update lands.
                     tx.execute(
-                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4 \
+                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4, \
+                         settled_update_seq = head_update_seq \
                          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                         rusqlite::params![
                             key.workspace_id,

@@ -598,7 +598,11 @@ export class YdocLoopbackEngine implements EngineTransport {
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
     const entry = this.journalSessionState(session);
-    if (seed) entry.seedSourceSha = session.openHeadSha;
+    if (seed) {
+      entry.seedSourceSha = session.openHeadSha;
+      // The file holds what the seed imported, as the daemon records it.
+      entry.settledUpdates = entry.journaledUpdates;
+    }
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
     return { seq: session.updateSeq, lineageClaimId: null };

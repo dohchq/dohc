@@ -622,6 +622,9 @@ export interface WorkspaceEngineCaptureOptions {
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
   createId?: () => string;
+  // How long an edit waits before its settle. Omitted uses the provider's
+  // default; only the desktop's test seam sets it.
+  settleDebounceMs?: number;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
@@ -1920,6 +1923,9 @@ export function createWorkspaceEngineCapture(
             versionId: input.versionId,
             path: input.path,
             seedAbsentLineage,
+            ...(options.settleDebounceMs !== undefined
+              ? { settleDebounceMs: options.settleDebounceMs }
+              : {}),
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -4399,8 +4405,12 @@ export function createWorkspaceEngineCapture(
         // first frame until the file has the text.
         const settleOnOpen = (): void => {
           reportSaveState("settling", 0);
-          // Its outcome reports through the settle channel like any other.
-          void session.settleNow().catch(() => undefined);
+          // A settle that runs reports its own outcome. One refused before it
+          // starts (a removal under way, a closed session, a failed revive)
+          // reports nothing, so close the "settling" said above here.
+          void session.settleNow().catch((error: unknown) => {
+            reportSaveState(settleFailureSaveState(error), 0);
+          });
         };
         if (head === "present") {
           const openingUpdates = updatesSeen;

@@ -925,13 +925,15 @@ it("settles nothing when a document whose edits reached its file reopens", async
   expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
 });
 
-it("settles once, without writing, a reopened document that holds only its seed", async () => {
+it("settles nothing when a reopened document holds only its seed", async () => {
   await retainLineage(null);
-  const {opened, states, saved} = await openRecordingStates();
-  await saved;
-  expect(states.at(-1)).toBe("saved");
-  expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
+  const settlesBeforeOpen = methodCount("ydoc.settle");
+  const {opened, states} = await openRecordingStates();
   expect(opened.doc.getXmlFragment("body").toString()).toContain("Start here.");
+  await releaseWithoutSettling(opened);
+  expect(states).toEqual([]);
+  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
+  expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
 });
 
 // edges-04: the document showed the retained edit as Saved while its file
@@ -949,6 +951,9 @@ it("writes a retained edit when its document reopens, and says Saving… before 
   expect(await readFile(join(root, PATH), "utf8")).toContain("Typed before the crash.");
 });
 
+// Only the open is under test here. Startup capture reaching the empty file
+// first, and folding it over the draft, is the capture-fold loss owned by
+// #1232; nothing below covers it.
 describe("a crash-kept draft of a file capture never recorded", () => {
   const DRAFT = "notes/draft.md";
   beforeEach(async () => {

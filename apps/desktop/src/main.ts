@@ -1692,6 +1692,15 @@ function testSyncTimingOverrides(): {
   };
 }
 
+// Test-only settle timing seam: the crash spec holds an edit unsettled until
+// it kills the app, instead of racing the kill against the debounce. Ignored
+// outside DOHC_DESKTOP_TEST like every other DOHC_TEST_* seam.
+function testSettleDebounceMs(): number | undefined {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return undefined;
+  const debounce = Number(process.env.DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS);
+  return Number.isFinite(debounce) && debounce > 0 ? debounce : undefined;
+}
+
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
@@ -1785,6 +1794,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
+      testSettleDebounceMs(),
     ),
   // One settled batch, two readers: the approval pipeline, and the plugins
   // that subscribed to a prefix of it. Neither changes the batch.

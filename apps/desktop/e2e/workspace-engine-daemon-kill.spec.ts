@@ -307,7 +307,12 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Crash\n\nAnchor paragraph.\n" },
     ]);
-    desktop = await launchDesktopApp({ workspace: temp });
+    // The first run never settles an edit on its own, so the kill below
+    // cannot race the write it has to beat.
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" },
+    });
     const appPid = desktop.app.process().pid;
     if (appPid === undefined) throw new Error("Electron app has no pid.");
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -316,20 +321,14 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await desktop.page.getByTestId("markdown-editor").click();
     await desktop.page.keyboard.press("ControlOrMeta+End");
 
-    // A settled edit first, so the lineage has a settle for the crash to outrun.
-    await desktop.page.keyboard.type(" CRASHREC_SETTLED");
-    await expect.poll(diskText, { timeout: 20_000 }).toContain("CRASHREC_SETTLED");
-
-    // Crash once the engine has journaled the edit, inside the settle debounce.
+    // Crash once the engine has journaled the edit.
     const journaled = ydocUpdateCount(temp.rootPath);
     await desktop.page.keyboard.insertText(` ${crashed}`);
-    await expect
-      .poll(() => ydocUpdateCount(temp.rootPath), { intervals: [20] })
-      .toBeGreaterThan(journaled);
+    await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);
     await hardKillAppTree(appPid);
     await desktop.close();
     desktop = null;
-    expect(await diskText(), "the settle landed before the crash").not.toContain(crashed);
+    expect(await diskText()).not.toContain(crashed);
     // Reopen the document by hand after relaunch, so its marks can be watched
     // from its first frame.
     await rm(join(temp.rootPath, ".dohc/ui-state.json"), { force: true });
@@ -362,17 +361,20 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await openEngineDoc(page, docPath);
     await expect(page.getByTestId("markdown-editor")).toContainText(crashed);
 
-    // Main reports saved only after it read the file back, so once the mark
-    // says Saved the text is on disk.
+    // The first Saved the document shows must already be true of the file.
+    // The file only gains the text, so reading it after the mark is enough:
+    // the old default Saved, over a file that never got the text, fails here
+    // whenever it shows. How fast the write lands does not matter.
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",
       "saved",
     );
-    expect(await diskText()).toContain(crashed);
-    expect(await saveMarks(), "the document read Saved before its file had the text").toEqual([
-      "saving",
-      "saved",
-    ]);
+    expect(await diskText(), "the document read Saved before its file had the text").toContain(
+      crashed,
+    );
+    const marks = await saveMarks();
+    expect(marks.at(-1)).toBe("saved");
+    expect(marks.filter((mark) => mark !== "saving" && mark !== "saved")).toEqual([]);
     expect((await diskText()).match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

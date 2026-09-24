@@ -1904,8 +1904,11 @@ fn settle_ydoc_marker_to_text(
     text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
+    // The lineage at its current head projects to `text`, the head it settles
+    // to here, so it covers every update up to that head.
     tx.execute(
-        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6 \
+        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6, \
+         settled_update_seq=head_update_seq \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![
             key.workspace_id,
@@ -2238,7 +2241,9 @@ pub fn project_and_write_in_tx(
         .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
         tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6, \
+             settled_update_seq = head_update_seq \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
                 key.version_id,
@@ -2296,7 +2301,9 @@ pub fn project_and_write_in_tx(
     // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
-        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, path = ?7          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, \
+         path = ?7, settled_update_seq = head_update_seq \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![
             key.workspace_id,
             key.version_id,

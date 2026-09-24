@@ -1289,6 +1289,16 @@ fn seed_scene_from_artifact_on_store(
         now_ms,
         |tx, _, _update_sha| {
             created_moment_ids.clear();
+            // The drawing's file is the artifact this seed imported, so the
+            // lineage is not ahead of it until another update lands.
+            tx.execute(
+                "UPDATE ydoc_docs SET settled_update_seq = head_update_seq \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(|error| CollabError::Corrupt {
+                reason: format!("scene seed settle record failed: {error}"),
+            })?;
             let version_is_active: bool = tx
                 .query_row(
                     "SELECT ?2 = COALESCE( \
@@ -1926,8 +1936,12 @@ pub struct YdocAppend {
 
 /// Whether the workspace file holds every update in this lineage, so an open
 /// can leave it alone. Every condition must hold, and any doubt answers no:
-/// a settle recorded the current head, the version head is what that settle
-/// (or the seed it imported) produced, and no write of that head is pending.
+/// - a settle, a seed, or a write that put the head on disk recorded the
+///   current update sequence;
+/// - the version head is what that write produced, or, for a drawing, the
+///   artifact its only update imported at open;
+/// - no write to the path is pending, and the newest one did not fail over
+///   this head's bytes.
 fn ydoc_file_holds_head(
     store: &EngineStore,
     key: &DocKey,
@@ -1936,34 +1950,35 @@ fn ydoc_file_holds_head(
     let Some(head) = head else {
         return Ok(false);
     };
-    let settled: Option<bool> = store.read_with(|conn| {
+    let holds: Option<bool> = store.read_with(|conn| {
         conn.query_row(
-            "SELECT settled_update_seq IS head_update_seq \
-                    AND COALESCE(last_settled_sha, seed_source_sha256) IS ?4 \
-             FROM ydoc_docs WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            "SELECT d.settled_update_seq IS d.head_update_seq \
+               AND (COALESCE(d.last_settled_sha, d.seed_source_sha256) IS ?4 \
+                    OR (d.content_kind = 'scene' AND d.last_settled_sha IS NULL \
+                        AND d.seed_source_sha256 IS NULL \
+                        AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0)) \
+               AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                     WHERE j.workspace_id IN (?1, '') AND j.target_path = ?5 \
+                       AND j.status = 'pending') \
+               AND COALESCE((SELECT j.status = 'conflict' AND j.content_sha256 = ?4 \
+                     FROM materialization_jobs j \
+                     WHERE j.workspace_id IN (?1, '') AND j.target_path = ?5 \
+                     ORDER BY j.created_at_ms DESC, j.rowid DESC LIMIT 1), 0) = 0 \
+             FROM ydoc_docs d \
+             WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3",
             params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
-                head.blob_sha256
+                head.blob_sha256,
+                head.path
             ],
             |row| row.get(0),
         )
         .optional()
         .map_err(StorageError::persist_public)
     })?;
-    if settled != Some(true) {
-        return Ok(false);
-    }
-    for prefix in ["ydoc-mat_", "resolve-mat_"] {
-        let pending = store
-            .load_materialization_job(&format!("{prefix}{}", head.latest_moment_id))?
-            .is_some_and(|job| job.status == JobStatus::Pending);
-        if pending {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(holds == Some(true))
 }
 
 /// Record that the workspace file holds this lineage up to its current head,
