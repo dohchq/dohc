@@ -2,26 +2,22 @@ import { spawn } from "node:child_process";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
-import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
+import { dirname, join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
+import { AppBackendRuntimeError, approvedTables, boundedText } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
-import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
+import { APP_CPU_BUDGET_MARKER, checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
 import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentProgress, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
-// Work that is slow because of I/O fails only when it stops making progress. The
-// worker reports each step as it starts; a step may block on one fsync, which
-// took up to 8.4 s on a slow Windows disk, so 30 s of silence means it stopped.
-// The cap per command is far beyond healthy work and catches a worker that
-// keeps reporting without finishing.
-//
-// Commands that run app code keep the configured deadline: prepare runs the
-// operation, migrateCheckpoint the migration, and open the app's schema.
-// node:sqlite cannot interrupt a running statement, so until app SQL has a
-// budget measured in work, wall time is the only bound on a runaway query.
-const APP_CODE_COMMANDS:ReadonlySet<PersistentCommand["kind"]>=new Set(["open","prepare","migrateCheckpoint"]);
+// A worker command fails only when it stops making progress. The worker reports
+// each step as it starts; a step may block on one fsync, which took up to 8.4 s
+// on a slow Windows disk, so 30 s of silence means it stopped. The cap per
+// command is far beyond healthy work and catches a worker that keeps reporting
+// without finishing. The app's own code is bounded by CPU time inside the
+// worker (RuntimeLimits.cpuBudgetMs), so a slow disk never counts against it.
 export const WORKER_SILENCE_MS=30_000;
 export const WORKER_COMMAND_CAP_MS=600_000;
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string; silenceMs?:number; commandCapMs?:number }
@@ -61,6 +57,12 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       });
     },silenceMs);
   }
+  const budgetMarker=()=>join(config.directory,APP_CPU_BUDGET_MARKER);
+  // The worker's CPU budget watch leaves this marker as it ends the worker.
+  function exceededBudget():number|undefined {
+    try {const budgetMs=Number(readFileSync(budgetMarker(),"utf8"));rmSync(budgetMarker(),{force:true});return budgetMs;}
+    catch {return undefined;}
+  }
   function fail(error:Error):void {
     stopped??=error;
     if(active){settle(active);retainedBytes-=active.bytes;active.reject(stopped);active=undefined;}
@@ -72,13 +74,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     const entry=queue.shift();
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
-    if(APP_CODE_COMMANDS.has(entry.command.kind)) {
-      const deadlineMs=entry.command.kind==="open" ? DEFAULT_LIMITS.deadlineMs : config.limits.deadlineMs;
-      entry.timer=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker exceeded its deadline${during(entry)}. Reopen it from the journal.`)),deadlineMs);
-    } else {
-      watchSilence(entry);
-      entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Reopen it from the journal.`)),commandCapMs);
-    }
+    watchSilence(entry);
+    entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Reopen it from the journal.`)),commandCapMs);
     try {child.postMessage({id:entry.id,command:entry.command});}catch(error){fail(error instanceof Error ? error : new Error(String(error)));}
   }
   function send(command:PersistentCommand):Promise<PersistentResult> {
@@ -98,6 +95,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       queue.push(entry);pump();
     });
   }
+  rmSync(budgetMarker(),{force:true});
   try {
     // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
     child=(options.launch ?? nodeLauncher)({entryPath,cwd:dirname(entryPath),env:{},
@@ -105,7 +103,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         const progress=message as PersistentProgress;
         if(active && progress && progress.id===active.id && typeof progress.progress==="string" && progress.progress.length<=128) {
           active.step=progress.progress;active.progress++;
-          if(!APP_CODE_COMMANDS.has(active.command.kind)) watchSilence(active);
+          watchSilence(active);
           return;
         }
         const reply=message as PersistentReply;
@@ -116,7 +114,9 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         pump();
       },onError:fail,onExit(){
         exited=true;resolveExit();
-        if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Reopen it from the journal.`));
+        const budgetMs=exceededBudget();
+        if(budgetMs!==undefined) fail(new PersistentRuntimeError("worker_budget",`The app's code ran too long: it used more than ${duration(budgetMs)} of CPU time${during(active)}. Reopen it from the journal.`));
+        else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Reopen it from the journal.`));
       },
     });
     if(stopped) child.kill();

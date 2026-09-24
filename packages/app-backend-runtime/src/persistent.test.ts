@@ -380,12 +380,12 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("kills a migration that exceeds its native SQL deadline without changing the live database",async()=>{
+  it("ends a migration whose native SQL exceeds its CPU budget without changing the live database",async()=>{
     await fixture(async({root,open})=>{
-      const worker=await open({limits:{deadlineMs:1000}});
+      const worker=await open({limits:{cpuBudgetMs:1000}});
       await expect(worker.migrateCheckpoint({path:join(root,"timeout.sqlite"),schemaSql,tables:["items"],
         migrationSql:"INSERT INTO items VALUES(1,'copy only'); WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count;"}))
-        .rejects.toMatchObject({code:"worker_deadline"});
+        .rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const live=new DatabaseSync(join(root,"1","app.sqlite"));
       try {
@@ -396,12 +396,13 @@ describe("persistent dataset worker",()=>{
     });
   },15_000);
 
-  it("kills native SQL at its deadline and requires journal recovery instead of silently restarting",async()=>{
+  it("ends native SQL at its CPU budget and requires journal recovery instead of silently restarting",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000,evaluationMs:100}});
+      const worker=await open({limits:{cpuBudgetMs:1000,evaluationMs:100}});
       const expensive={...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`};
-      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_deadline"});
-      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_deadline"});
+      await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 s of CPU time while running the app operation. Reopen it from the journal."});
+      await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const recovered=await open();
       expect((await recovered.prepare({...operation(),readOnly:true})).result).toEqual([]);
@@ -410,14 +411,14 @@ describe("persistent dataset worker",()=>{
 
   it("bounds queued work and expires queued operations without consuming their execution budget",async()=>{
     await fixture(async({open})=>{
-      const worker=await open({limits:{deadlineMs:1000},queueDeadlineMs:40});
+      const worker=await open({limits:{cpuBudgetMs:1000},queueDeadlineMs:40});
       for(let index=0;index<70;index++) await expect(worker.prepare(operation(initial,{value:"x".repeat(70_000)}))).rejects.toThrow();
       const active=worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`}).catch(error=>error);
       const queued=Array.from({length:64},()=>worker.prepare({...operation(),readOnly:true}).catch(error=>error));
       const results=await Promise.all(queued);
       expect(results.filter(result=>result.code==="queue_full")).toHaveLength(1);
       expect(results.filter(result=>result.code==="queue_deadline")).toHaveLength(63);
-      expect(await active).toMatchObject({code:"worker_deadline"});
+      expect(await active).toMatchObject({code:"worker_budget"});
     });
   });
 

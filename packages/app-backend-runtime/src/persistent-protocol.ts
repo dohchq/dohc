@@ -71,6 +71,9 @@ export type PersistentReply = {id:number;ok:true;result:PersistentResult}
 // Sent by the worker as each step of a command starts, so the host can tell
 // slow work from a worker that stopped.
 export type PersistentProgress = {id:number;progress:string};
+// Written into the dataset directory by the worker's CPU budget watch just
+// before it ends the worker, so the host can say why the worker stopped.
+export const APP_CPU_BUDGET_MARKER="app-cpu-budget-exceeded";
 
 export class PersistentRuntimeError extends Error {
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }

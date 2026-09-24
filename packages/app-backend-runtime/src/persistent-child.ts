@@ -10,6 +10,8 @@ import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from 
 import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
+import { Worker } from "node:worker_threads";
+import { APP_CPU_BUDGET_MARKER } from "./persistent-protocol.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -53,6 +55,31 @@ function writeMarker(next:DatasetCursor):void {
   db!.prepare(`UPDATE ${marker} SET revision=?,digest=? WHERE id=1`).run(next.revision,next.digest);
 }
 
+// App code runs on this thread and can block it inside SQLite, where no timer
+// on this thread runs. A second thread watches the process's CPU time while app
+// code runs. Past the budget it leaves a marker for the host and ends the
+// worker, because node:sqlite cannot interrupt a statement. Waiting on the disk
+// uses no CPU, so a slow disk never counts against the budget.
+const budgetWatchSource=`
+const {parentPort}=require("node:worker_threads");
+const {writeFileSync}=require("node:fs");
+const {join}=require("node:path");
+let armed;
+parentPort.on("message",message=>{armed=message.budgetMs ? message : undefined;});
+setInterval(()=>{
+  if(!armed) return;
+  const used=process.cpuUsage();
+  if(used.user+used.system-armed.startCpuMicros<=armed.budgetMs*1000) return;
+  try {writeFileSync(join(armed.directory,${JSON.stringify(APP_CPU_BUDGET_MARKER)}),String(armed.budgetMs));} finally {process.kill(process.pid,"SIGKILL");}
+},50);`;
+let budgetWatch:Worker|undefined;
+function armAppCode():()=>void {
+  if(!budgetWatch) {budgetWatch=new Worker(budgetWatchSource,{eval:true});budgetWatch.unref();}
+  const used=process.cpuUsage();
+  budgetWatch.postMessage({directory:config.directory,budgetMs:config.limits.cpuBudgetMs,startCpuMicros:used.user+used.system});
+  return ()=>budgetWatch?.postMessage({});
+}
+
 function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
   config=openRequest({...input,databaseBytes:input.limits.databaseBytes,limits:Object.fromEntries(Object.entries(input.limits).filter(([key])=>key!=="databaseBytes"))});
@@ -74,13 +101,16 @@ function initialize(input:OpenRequest):DatasetCursor {
   db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
   const pageSize=Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
-  if (!config.checkpointPath) {
-    progress("creating the schema");
-    authorize(db,{tables:config.tables},{initializing:true});
-    db.exec(config.schemaSql);db.setAuthorizer(null);
-  }
-  progress("checking the schema");
-  verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits);
+  const disarm=armAppCode();
+  try {
+    if (!config.checkpointPath) {
+      progress("creating the schema");
+      authorize(db,{tables:config.tables},{initializing:true});
+      db.exec(config.schemaSql);db.setAuthorizer(null);
+    }
+    progress("checking the schema");
+    verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits);
+  } finally { disarm(); }
   progress("recording the dataset cursor");
   const existing=db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(marker);
   if (existing) {
@@ -225,6 +255,7 @@ function progress(step:string):void { if(activeId!==undefined) send({id:activeId
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }
   busy=true;activeId=message.id;batching=message.command.kind==="applyBatch";
+  const disarm=db && (message.command.kind==="prepare" || message.command.kind==="migrateCheckpoint") ? armAppCode() : undefined;
   try {
     const result=await handle(message.command);
     send({id:message.id,ok:true,result});
@@ -235,7 +266,7 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
     send({id:message.id,ok:false,error:error instanceof Error ? error.message.slice(0,1024) : "Dataset operation failed.",
       code:error instanceof PersistentRuntimeError ? error.code : "operation_failed",
       ...(error instanceof AppBackendRuntimeError ? {refusal:error.refusal} : {})});
-  } finally { busy=false;activeId=undefined;batching=false; }
+  } finally { disarm?.();busy=false;activeId=undefined;batching=false; }
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
 else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }

@@ -12,6 +12,9 @@ export interface RuntimeLimits {
   stackBytes: number;
   evaluationMs: number;
   deadlineMs: number;
+  // CPU time a dataset worker lets the app's own code use in one step: an
+  // operation, a migration, or the schema at open. Disk waits use no CPU.
+  cpuBudgetMs: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
@@ -26,6 +29,11 @@ export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   stackBytes: 256 * 1024,
   evaluationMs: 1000,
   deadlineMs: 8000,
+  // The slowest legitimate operation measured in the tests and examples used
+  // 78 ms of CPU, and heavy statements over a full 16 MiB dataset used under
+  // 50 ms each. An operation's statements must start inside evaluationMs, so a
+  // legitimate one stays near 1 s; this allows several times that.
+  cpuBudgetMs: 5000,
 });
 
 export interface EvaluateAppOperationInput {

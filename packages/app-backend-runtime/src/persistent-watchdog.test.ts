@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -14,11 +14,12 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
-async function open(script: Script, timing: { silenceMs: number; commandCapMs: number }, deadlineMs?: number) {
+async function open(script: Script, timing: { silenceMs: number; commandCapMs: number }, onLaunch?: (exit: () => void) => void) {
   const root = await mkdtemp(join(tmpdir(), "dohc-watchdog-test-"));
   roots.push(root);
   const launch: AppRuntimeLauncher = (options) => {
     let exited = false;
+    onLaunch?.(() => { exited = true; options.onExit(null); });
     const send = (message: unknown) => { if (!exited) setImmediate(() => options.onMessage(message)); };
     return {
       postMessage(message) {
@@ -47,7 +48,6 @@ async function open(script: Script, timing: { silenceMs: number; commandCapMs: n
       tables: ["items"],
       scope: { workspaceId: "workspace", datasetId: "dataset", hostEpoch: "epoch-1", approvedRevisionHash: hash("approved") },
       cursor: { revision: 0, digest: hash("initial") },
-      ...(deadlineMs ? { limits: { deadlineMs } } : {}),
     },
     { launch, entryPath: join(root, "worker.mjs"), ...timing },
   );
@@ -95,12 +95,13 @@ it("fails a worker that keeps reporting but never finishes, at the command cap",
   }
 });
 
-it("does not treat progress as more time for app code", async () => {
+it("says the app's code ran too long when the CPU budget watch ended the worker", async () => {
+  let end!: () => void;
   const worker = await open((command, send) => {
-    // Reports well past its deadline; app code is bounded by the deadline alone.
-    const reporting = setInterval(() => send({ id: command.id, progress: "running the app operation" }), 10);
-    setTimeout(() => clearInterval(reporting), 2_000);
-  }, { silenceMs: 40, commandCapMs: 60_000 }, 200);
+    send({ id: command.id, progress: "running the app operation" });
+    // The worker's budget watch leaves its marker, then the process ends.
+    setTimeout(() => void writeFile(join(roots.at(-1)!, "app-cpu-budget-exceeded"), "5000").then(end), 10);
+  }, { silenceMs: 60_000, commandCapMs: 60_000 }, (exit) => { end = exit; });
   await expect(
     worker.prepare({
       source: "globalThis.operations={run(){return 1}}",
@@ -112,7 +113,7 @@ it("does not treat progress as more time for app code", async () => {
       expected: { revision: 0, digest: hash("initial") },
     }),
   ).rejects.toMatchObject({
-    code: "worker_deadline",
-    message: "The dataset worker exceeded its deadline while running the app operation. Reopen it from the journal.",
+    code: "worker_budget",
+    message: "The app's code ran too long: it used more than 5 s of CPU time while running the app operation. Reopen it from the journal.",
   });
 });
