@@ -1984,12 +1984,12 @@ export function createWorkspaceEngineCapture(
             onSessionError: requestReconnect,
             onSettleStart: (token) => input.onSettleStart(token, generation),
             onSettleError: (error, token) => {
-              if (
+              // Only a transient refusal or a lost session owes a retry. Any
+              // other refusal, such as the file changing outside dohc, also
+              // cancels a retry owed earlier, so a reopen never writes over it.
+              settleOwed =
                 isTransientEngineCause(error) ||
-                hasRefusalInCauseChain(error, isEngineSessionReconnectError)
-              ) {
-                settleOwed = true;
-              }
+                hasRefusalInCauseChain(error, isEngineSessionReconnectError);
               input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {

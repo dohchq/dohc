@@ -53,7 +53,7 @@ export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
 // dohc cannot tell whether the original was moved or deleted, only that
 // another file now has its path.
 export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "Another file replaced this file while you had it open.";
+  "Another file replaced this file while you had it open. Close this tab to open the file now at this path.";
 
 export type FileSaveState = SaveState | "deleted";
 
