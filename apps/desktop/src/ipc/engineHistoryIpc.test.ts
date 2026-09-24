@@ -22,7 +22,8 @@ import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
-  automation: (automationId) => ({ name: `Named ${automationId}`, collection: "Tasks" }),
+  automation: (automationId) =>
+    automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
 };
 
 const TEXT_SHA = "a".repeat(64);
@@ -125,6 +126,9 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.automationAuthor).toEqual({ name: "Named collection:Tasks#stamp", collection: "Tasks" });
     expect(record.agentAuthorName).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    // A plugin's automation keeps the moment's origin label.
+    detail.moment.author = {kind: "automation", automationId: "plugin:tools/stamp", onBehalfOf: "local", depth: 1};
+    expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(

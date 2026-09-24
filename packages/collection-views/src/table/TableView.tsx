@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -107,6 +107,70 @@ interface EditingCell {
   field: string;
 }
 
+/**
+ * One field's header: its name sorts the table. A mark's words show while
+ * the pointer is over the header or its words, or its sort control has
+ * focus, and Escape hides them. The state lives here, so showing the words
+ * renders this header alone.
+ */
+function FieldHeader(props: {
+  name: string;
+  sorted: "asc" | "desc" | null;
+  mark: TableFieldMark | undefined;
+  onSort: () => void;
+}) {
+  const { mark, sorted } = props;
+  const markId = useId();
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      role="columnheader"
+      aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
+      className="relative"
+      style={{ width: COLUMN_WIDTH }}
+      {...(mark ? { onMouseEnter: () => setOpen(true), onMouseLeave: () => setOpen(false) } : {})}
+    >
+      <button
+        type="button"
+        className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
+        onClick={props.onSort}
+        {...(mark
+          ? {
+              "aria-describedby": markId,
+              onFocus: () => setOpen(true),
+              onBlur: () => setOpen(false),
+              onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
+                if (event.key !== "Escape" || !open) return;
+                event.stopPropagation();
+                setOpen(false);
+              },
+            }
+          : {})}
+      >
+        <span className="truncate">{props.name}</span>
+        {mark ? (
+          <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
+            {mark.icon}
+          </span>
+        ) : null}
+        {sorted ? (
+          <span aria-hidden="true" className="text-subtle">
+            {sorted === "asc" ? "↑" : "↓"}
+          </span>
+        ) : null}
+      </button>
+      {mark ? (
+        // No gap between the header and its words, so the pointer can move onto them.
+        <span id={markId} role="tooltip" hidden={!open} className="absolute left-2 top-full z-20 pt-1">
+          <span className="dohc-popover block w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-[12px] font-normal text-ink">
+            {mark.label}
+          </span>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function TableView({
   schema,
   records,
@@ -124,7 +188,6 @@ export function TableView({
   fieldMarks,
   onNearEnd,
 }: TableViewProps) {
-  const markId = useId();
   const fields = useMemo(
     () => deriveColumns(schema, visibleFields),
     [schema, visibleFields],
@@ -245,48 +308,15 @@ export function TableView({
         {onOpenRecord ? (
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
         ) : null}
-        {fields.map((field, index) => {
-          const sorted = primarySort?.field === field.name ? primarySort.direction : null;
-          const mark = fieldMarks?.get(field.name);
-          const markLabelId = `${markId}-mark-${index}`;
-          return (
-            <div
-              key={field.name}
-              role="columnheader"
-              aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
-              className="group/header relative"
-              style={{ width: COLUMN_WIDTH }}
-            >
-              <button
-                type="button"
-                aria-describedby={mark ? markLabelId : undefined}
-                className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
-                onClick={() => toggleSort(field.name)}
-              >
-                <span className="truncate">{field.name}</span>
-                {mark ? (
-                  <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
-                    {mark.icon}
-                  </span>
-                ) : null}
-                {sorted ? (
-                  <span aria-hidden="true" className="text-subtle">
-                    {sorted === "asc" ? "↑" : "↓"}
-                  </span>
-                ) : null}
-              </button>
-              {mark ? (
-                <span
-                  id={markLabelId}
-                  role="tooltip"
-                  className="dohc-popover pointer-events-none absolute left-2 top-full z-20 mt-1 hidden w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-[12px] font-normal text-ink group-hover/header:block group-has-[:focus-visible]/header:block"
-                >
-                  {mark.label}
-                </span>
-              ) : null}
-            </div>
-          );
-        })}
+        {fields.map((field) => (
+          <FieldHeader
+            key={field.name}
+            name={field.name}
+            sorted={primarySort?.field === field.name ? primarySort.direction : null}
+            mark={fieldMarks?.get(field.name)}
+            onSort={() => toggleSort(field.name)}
+          />
+        ))}
       </div>
       {records.length === 0 ? (
         <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>

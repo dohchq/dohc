@@ -1,7 +1,7 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
@@ -60,36 +60,33 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 
 // A moment authored by a dohc-tracked agent run displays as
 // "the agent name" (the same formatting rule the chat rail uses via
-// chatAuthorLabel), and one an automation authored as the automation's
-// name; everything else keeps its actor-neutral origin label.
+// chatAuthorLabel), and one a Collection automation authored as the
+// automation's name and its Collection; everything else keeps its
+// actor-neutral origin label.
 export function engineMomentSourceLabel(
   moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">,
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
-  if (moment.automationAuthor) return moment.automationAuthor.name;
+  if (moment.automationAuthor) return `${moment.automationAuthor.name} in ${moment.automationAuthor.collection}`;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
     : engineOriginLabel(moment.origin);
 }
 
 // Where a moment came from, as one line of History. An automation's name
-// follows the ⚡ mark, and hovering says which Collection it belongs to.
+// and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
   moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">;
   testId: string;
+  id?: string;
 }) {
   const { moment } = props;
-  const automation = moment.automationAuthor;
-  if (automation) {
+  if (moment.automationAuthor) {
     return (
-      <span
-        data-testid={props.testId}
-        title={automation.collection ? `Automation in ${automation.collection}` : "Automation"}
-        className="inline-flex items-center gap-1 text-muted"
-      >
+      <span id={props.id} data-testid={props.testId} className="inline-flex items-center gap-1 text-muted">
         <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
         <span className="sr-only">Automation </span>
-        {automation.name}
+        {engineMomentSourceLabel(moment)}
       </span>
     );
   }
@@ -190,9 +187,14 @@ function MomentRow(props: {
 }) {
   const { moment } = props;
   const recordedAt = formatChatTime(moment.recordedAtMs);
+  // The row's name says what it opens, so an automation that wrote the
+  // change is its description.
+  const sourceId = useId();
+  const describedBySource = moment.automationAuthor !== undefined && !props.nested;
   return (
     <button
       type="button"
+      aria-describedby={describedBySource ? sourceId : undefined}
       data-testid="engine-moment-open"
       data-moment-id={moment.id}
       data-moment-path={moment.path}
@@ -238,7 +240,7 @@ function MomentRow(props: {
               engineOperationLabel(moment)
             ) : (
               <>
-                <EngineMomentSource moment={moment} testId="engine-moment-source" />
+                <EngineMomentSource moment={moment} testId="engine-moment-source" id={sourceId} />
                 {" · "}
                 <time
                   data-testid="engine-moment-recorded-at"

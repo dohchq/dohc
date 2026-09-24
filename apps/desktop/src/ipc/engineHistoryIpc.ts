@@ -21,11 +21,12 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["author"]>;
 
 // Main supplies how an author reads. An agent follows the display-name rule
 // the chat rail uses (onBehalfOf "local" -> the cloud email or "You";
-// anything else is already a user-facing label). An automation reads as its
-// name and the Collection it belongs to.
+// anything else is already a user-facing label). A Collection automation
+// reads as its name and the Collection it belongs to; null leaves any other
+// automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string;
-  automation(automationId: string): { name: string; collection: string | null };
+  automation(automationId: string): { name: string; collection: string } | null;
 }
 
 export async function listEngineMomentsForIpc(
@@ -71,9 +72,7 @@ function engineMomentBaseForIpc(
       ? { agentAuthorName: names.agent(moment.author) }
       : {}),
     ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
-    ...(moment.author?.kind === "automation"
-      ? { automationAuthor: names.automation(moment.author.automationId) }
-      : {}),
+    ...automationAuthorOf(moment.author, names),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),
@@ -81,6 +80,11 @@ function engineMomentBaseForIpc(
       ? { correlationId: moment.metadata.correlationId }
       : {}),
   };
+}
+
+function automationAuthorOf(author: MomentAuthor | undefined, names: EngineMomentAuthorNames) {
+  const automationAuthor = author?.kind === "automation" ? names.automation(author.automationId) : null;
+  return automationAuthor === null ? {} : { automationAuthor };
 }
 
 function engineMomentForIpc(

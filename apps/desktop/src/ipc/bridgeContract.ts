@@ -1369,9 +1369,9 @@ export const EngineMomentRecord = z.object({
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
-  // Present when an automation authored the moment: its name as this
-  // computer's automations.yaml has it, and the Collection it belongs to.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).nullable() }).strict().optional(),
+  // Present when a Collection automation authored the moment: its name as
+  // this computer's automations.yaml has it, and the Collection it belongs to.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic

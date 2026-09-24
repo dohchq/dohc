@@ -1156,14 +1156,16 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
 }
 
-// An automation that wrote a moment, as History shows it: its name from the
-// workspace's automations.yaml as this computer read it, or its id when the
-// file no longer has it, and the Collection it belongs to.
-function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string | null } {
+// A Collection automation that wrote a moment, as History shows it: its
+// name from the workspace's automations.yaml as this computer read it, or
+// its id when the file no longer has it, and the Collection it belongs to.
+// Any other automation, such as a plugin's, keeps the moment's origin label.
+function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
   const parsed = parseCollectionAutomationId(automationId);
+  if (parsed === null) return null;
   return {
-    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed?.id ?? automationId,
-    collection: parsed ? posix.basename(parsed.collectionPath) : null,
+    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
+    collection: posix.basename(parsed.collectionPath),
   };
 }
 

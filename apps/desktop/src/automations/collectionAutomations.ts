@@ -530,11 +530,23 @@ export class CollectionAutomations {
   async fieldMarks(collectionPath: string): Promise<CollectionFieldMark[]> {
     if (this.opened === null) return [];
     await this.opened;
+    // A mark says a run writes the field, so it passes the checks a run
+    // makes before it writes: every Collection a step names is a document
+    // Collection this index knows, and no step's reach verdict stopped it.
+    const datasets = new Map<string, Promise<boolean>>();
+    const isDataset = (path: string) => {
+      const known = datasets.get(path) ?? this.options.pathExists(`${path}/dataset.json`);
+      datasets.set(path, known);
+      return known;
+    };
+    const writable = async (path: string) => this.collections.has(path) && !(await isDataset(path));
+    if (!(await writable(collectionPath))) return [];
     const marks = new Map<string, Map<string, string>>();
     for (const { automationId, collectionPath: home, automation } of this.everyAutomation()) {
       if (!automation.enabled) continue;
-      for (const write of fieldWritesOf(automation)) {
-        if ((write.collection ?? home) !== collectionPath) continue;
+      const writes = fieldWritesOf(automation).filter((write) => (write.collection ?? home) === collectionPath);
+      if (writes.length === 0 || !(await this.canRun(automationId, home, automation, writable))) continue;
+      for (const write of writes) {
         const names = marks.get(write.field) ?? new Map<string, string>();
         names.set(automationId, automation.name);
         marks.set(write.field, names);
@@ -543,10 +555,19 @@ export class CollectionAutomations {
     return [...marks].map(([field, names]) => ({ field, automations: [...names.values()] }));
   }
 
-  /** The name an automation has in its Collection's file now, or null when the file no longer has it. */
+  /**
+   * The name an automation has in its Collection's file now, even while the
+   * entry cannot be read, or null when the file no longer has it.
+   */
   automationName(automationId: string): string | null {
     const parsed = parseCollectionAutomationId(automationId);
-    return parsed ? (this.definitionFor(parsed)?.name ?? null) : null;
+    const indexed = parsed ? this.files.get(parsed.collectionPath) : undefined;
+    if (!parsed || indexed?.file.status !== "read") return null;
+    for (const entry of indexed.file.entries) {
+      const [id, name] = entry.status === "valid" ? [entry.automation.id, entry.automation.name] : [entry.id, entry.name];
+      if (id === parsed.id && name !== null) return name;
+    }
+    return null;
   }
 
   /**
@@ -696,6 +717,26 @@ export class CollectionAutomations {
         candidate.status === "valid" && candidate.automation.id === id.id,
     );
     return entry?.automation ?? null;
+  }
+
+  /**
+   * Whether a run would get past the checks it makes before its first write,
+   * as far as this computer knows now: no step's reach verdict is stopped,
+   * and `writable` accepts every Collection a step names.
+   */
+  private async canRun(
+    automationId: string,
+    collectionPath: string,
+    automation: Automation,
+    writable: (path: string) => Promise<boolean>,
+  ): Promise<boolean> {
+    const hash = definitionHash(automation);
+    const steps = reachStepsOf(automation, collectionNamed(collectionPath), collectionNamed);
+    for (const [step, reach] of steps.entries()) {
+      if (this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict === "stopped") return false;
+      if ("collection" in reach && !(await writable(reach.collection.path))) return false;
+    }
+    return true;
   }
 
   /** Every automation dohc can run, whether or not it is switched on. */

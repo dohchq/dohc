@@ -156,7 +156,7 @@ export function CollectionPage({
   const state = useCollectionStore(store);
   // The ⚡ on each field an automation sets: one read per Collection, again
   // only when main's automations change.
-  const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(workspaceId, collectionPath));
+  const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(collectionPath));
 
   const views = details?.schema.views ?? [];
   const activeView: ViewDefinition | null =

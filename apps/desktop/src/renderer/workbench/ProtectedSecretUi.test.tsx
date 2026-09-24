@@ -47,7 +47,7 @@ afterEach(() => {
 });
 
 describe("EngineHistoryView automation rows", () => {
-  it("shows the automation's name after the ⚡, and its Collection on hover", () => {
+  it("shows the automation's name and Collection after the ⚡, and describes the row by them", () => {
     render(
       <EngineHistoryView
         moments={[
@@ -61,9 +61,11 @@ describe("EngineHistoryView automation rows", () => {
       />,
     );
     const source = screen.getByTestId("engine-moment-source");
-    expect(source.textContent).toBe("Automation Stamp the finish date");
-    expect(source.getAttribute("title")).toBe("Automation in Tasks");
+    expect(source.textContent).toBe("Automation Stamp the finish date in Tasks");
     expect(source.querySelector("svg")).not.toBeNull();
+    const row = screen.getByTestId("engine-moment-open");
+    expect(row.getAttribute("aria-label")).toBe("Open diff for Tasks/new.md");
+    expect(row.getAttribute("aria-describedby")).toBe(source.id);
   });
 });
 

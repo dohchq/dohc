@@ -142,7 +142,7 @@ async function harness() {
       return missingAdapter ? null : work(adapter);
     },
     requireEngineCapture, localAgentDisplayName: displayName,
-    automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: null }),
+    automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     notifyRenderer: notify,
     retryOwnerLiveDelivery,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,

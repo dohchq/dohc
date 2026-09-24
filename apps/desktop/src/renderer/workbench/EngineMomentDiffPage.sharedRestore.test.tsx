@@ -16,7 +16,7 @@ const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...b
 async function open(detail: WorkspaceEngineMomentDetail) {
   const moment = engineMomentDetailForIpc(detail, {
     agent: () => "Owner",
-    automation: (automationId) => ({ name: automationId, collection: null }),
+    automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
   });
   const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], pendingOperation: null,
     nextGrantCursor: null, nextBeforeCursor: null});

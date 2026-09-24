@@ -131,19 +131,48 @@ describe("paused table editing", () => {
 describe("field marks", () => {
   it("shows a field's mark after its name, and says what it means without renaming the sort control", () => {
     const schema = makeSchema([{ name: "title", type: "text" }, { name: "done", type: "checkbox" }]);
-    const marks = new Map([["done", { icon: <svg data-testid="mark-icon" />, label: 'Set by the automation "Stamp"' }]]);
+    const marks = new Map([["done", { icon: <svg data-testid="mark-icon" />, label: '"Stamp" sets this field' }]]);
     const onSortChange = vi.fn();
     render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} onSortChange={onSortChange} />);
 
     const done = screen.getByRole("button", { name: "done" });
     const description = document.getElementById(done.getAttribute("aria-describedby") ?? "");
     expect(description?.getAttribute("role")).toBe("tooltip");
-    expect(description?.textContent).toBe('Set by the automation "Stamp"');
+    expect(description?.textContent).toBe('"Stamp" sets this field');
     expect(done.querySelector('[data-testid="mark-icon"]')).not.toBeNull();
     expect(screen.getByRole("button", { name: "title" }).hasAttribute("aria-describedby")).toBe(false);
     expect(screen.getAllByTestId("table-field-mark")).toHaveLength(1);
 
     fireEvent.click(done);
     expect(onSortChange).toHaveBeenCalledWith([{ field: "done", direction: "asc" }]);
+  });
+
+  it("shows the words on hover and focus, keeps them while the pointer is on them, and hides them on Escape", () => {
+    const schema = makeSchema([{ name: "done", type: "checkbox" }]);
+    const marks = new Map([["done", { icon: <svg />, label: '"Stamp" sets this field' }]]);
+    render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} />);
+    const done = screen.getByRole("button", { name: "done" });
+    const words = document.getElementById(done.getAttribute("aria-describedby") ?? "")!;
+    const header = screen.getByRole("columnheader", { name: /done/ });
+    expect(words.hidden).toBe(true);
+
+    fireEvent.mouseEnter(header);
+    expect(words.hidden).toBe(false);
+    // The words sit inside the header, so moving onto them keeps them open.
+    fireEvent.mouseOver(words);
+    expect(words.hidden).toBe(false);
+    fireEvent.mouseLeave(header);
+    expect(words.hidden).toBe(true);
+
+    fireEvent.focus(done);
+    expect(words.hidden).toBe(false);
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    fireEvent.keyDown(done, { key: "Escape" });
+    document.removeEventListener("keydown", outer);
+    expect(words.hidden).toBe(true);
+    expect(outer).not.toHaveBeenCalled();
+    fireEvent.blur(done);
+    expect(words.hidden).toBe(true);
   });
 });

@@ -1370,11 +1370,38 @@ describe("Collection automations", () => {
     await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
     expect(w.executor.automationName(TASKS)).toBe("Bump");
 
-    // A reload says so once it has read the file again.
-    await w.writeAutomations("Tasks", BUMP.replace("name: Bump", "name: Bump the count"));
+    // A reload says so once it has read the file again. A broken entry keeps its name.
+    await w.writeAutomations("Tasks", BUMP.replace("name: Bump", "name: Bump the count").replace("{field-changed: Status}", "whenever"));
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.automationsChanged() === 2);
-    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Bump the count"] }]);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+    expect(w.executor.automationName(TASKS)).toBe("Bump the count");
     expect(w.executor.automationName("collection:Tasks#stamp")).toBeNull();
+  });
+
+  it("marks only what a run would write: no dataset, no missing Collection, no stopped step", async () => {
+    const w = await world({ collections: ["Tasks", "Log", "Ledger"], automations: { Tasks: [
+      BUMP,
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status, to: Done}",
+      "    do: [{set: {Count: 0}}]",
+      "  - id: post",
+      "    name: Post",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Posted: true}}, {add-record: {Amount: 1}, collection: Ledger}]",
+      "  - id: lost",
+      "    name: Lost",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Lost: true}}, {add-record: {Amount: 1}, collection: Nowhere}]",
+    ].join("\n") } });
+    await writeFile(join(w.root, "Ledger", "dataset.json"), "{}\n");
+    // Ana edits Tasks but not Log, so Bump's step into Log is stopped.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Stamp"] }]);
+    await expect(w.executor.fieldMarks("Ledger")).resolves.toEqual([]);
+    await expect(w.executor.fieldMarks("Nowhere")).resolves.toEqual([]);
   });
 });
