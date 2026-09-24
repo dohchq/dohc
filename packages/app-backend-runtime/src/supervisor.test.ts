@@ -102,12 +102,12 @@ it("refuses an expired preview and releases its reservation on explicit discard"
   await f.supervisor.discardMigration(access);expect(balance).toBe(0);
 });
 
-function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void): AppRuntimeLauncher {
+function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void, observe?: (message: unknown) => void): AppRuntimeLauncher {
   return options => {
     const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", options.entryPath], {
       cwd: options.cwd, env: options.env, stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true,
     });
-    child.on("error", options.onError); child.on("close", options.onExit); child.on("message", options.onMessage);
+    child.on("error", options.onError); child.on("close", options.onExit); child.on("message", message => { observe?.(message); options.onMessage(message); });
     return { postMessage(message) { hook(message, { stop: () => child.kill("SIGKILL"), deliver: () => child.send(message as object) }); }, kill() { child.kill("SIGKILL"); } };
   };
 }
@@ -386,6 +386,67 @@ it("recovers from a materialization cache and replays only its tail while retain
   expect(opened).toEqual([0,2]);expect(replayed).toEqual([3]);
   const original={id:"1",value:"saved"};
   expect(await reopened.invoke({...input,input:original,idempotencyKey:"1",payloadSha256:hash(JSON.stringify(original)),readOnly:false})).toMatchObject({revision:1,replayed:true});
+});
+
+it("caches a replay that rebuilt the dataset so the next reopen does not repeat it",async()=>{
+  const swapSource=`globalThis.operations={run(ctx,input){
+    if(input.swap){ctx.db.execute("UPDATE items SET value='temp' WHERE id='a'");ctx.db.execute("UPDATE items SET value='x' WHERE id='b'");ctx.db.execute("UPDATE items SET value='y' WHERE id='a'");}
+    else if(input.id) ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,input.value]);
+    return ctx.db.query('SELECT * FROM items ORDER BY id');
+  }}`;
+  const storage={authorize(){},account(){}};
+  const f=await fixture({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL UNIQUE);",source:swapSource,maintenanceStorage:storage});
+  await f.invoke({id:"a",value:"x"},{idempotencyKey:"a"});await f.invoke({id:"b",value:"y"},{idempotencyKey:"b"});
+  // Replaying the swap row by row breaks the UNIQUE index, so the worker rebuilds the dataset.
+  await f.invoke({swap:true},{idempotencyKey:"swap"});
+  await f.supervisor.close();
+  const opened:number[]=[],replayed:number[]=[],steps:string[]=[];
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+    controls.deliver();
+  },message=>{const step=(message as {progress?:unknown}).progress;if(typeof step==="string")steps.push(step);});
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
+  for(const round of [1,2]) {
+    const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,replayCacheMs:0});
+    try {
+      expect((await supervisor.invoke(read)).result).toEqual(swapped);
+      if(round===1) await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(3),{timeout:30_000});
+    } finally {await supervisor.close();}
+  }
+  expect(steps).toContain("rebuilding the dataset from the replay copy");
+  expect(opened).toEqual([0,3]);expect(replayed).toEqual([1,2,3]);
+});
+
+it("waits longer before each reopen of a dataset whose worker ran out of CPU",async()=>{
+  let now=1_000_000,failing=true,directory="";
+  const replayed:number[]=[];
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="open")directory=command.command.input.directory;
+    if(command.command.kind==="applyBatch") {
+      replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+      // The worker's CPU budget watch leaves this marker, then ends the worker.
+      if(failing){void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);return;}
+    }
+    controls.deliver();
+  });
+  const f=await fixture();
+  await f.invoke({id:"one",value:"saved"});
+  await f.supervisor.close();
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},nowMs:()=>now});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
+  await expect(supervisor.invoke(read)).rejects.toThrow("The dataset stopped before its work finished. Try again in 5 s.");
+  expect(replayed).toEqual([1]);
+  now+=5_000;
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
+  await expect(supervisor.invoke(read)).rejects.toThrow("Try again in 10 s.");
+  expect(replayed).toEqual([1,1]);
+  now+=10_000;failing=false;
+  expect((await supervisor.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);
+  expect(replayed).toEqual([1,1,1]);
 });
 
 it("serves committed reads and writes while a captured cache is being sealed",async()=>{

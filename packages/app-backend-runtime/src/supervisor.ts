@@ -89,6 +89,8 @@ export interface DatasetSupervisorOptions {
   nowMs?: () => number;
   /** Maximum journal events between successful materialization caches. */
   materializationEvents?: number;
+  /** A journal replay that takes at least this long is cached at once, so a later reopen does not repeat it. */
+  replayCacheMs?: number;
   onMaintenanceError?: (scope: DatasetScope, error: unknown) => void;
   /** Host-lifetime maintenance authority and quota, independent of any request credential. */
   maintenanceStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
@@ -97,6 +99,7 @@ type Worker = { runtime: PersistentAppBackend; directory: string; cursor: Datase
 type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
 type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const REOPEN_WAIT_MS = 5_000, REOPEN_WAIT_CAP_MS = 30 * 60_000;
 function copyScope(value:DatasetScope):DatasetScope {
   if(!value||![value.workspaceId,value.datasetId].every(part=>typeof part==="string"&&/^[A-Za-z0-9._:-]{1,128}$/.test(part)))throw new Error("Invalid dataset scope.");
   return {workspaceId:value.workspaceId,datasetId:value.datasetId};
@@ -109,10 +112,11 @@ const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.worksp
 /** Coordinates one authority journal and recoverable workers. This is not a public request handler. */
 export async function createDatasetSupervisor(options: DatasetSupervisorOptions) {
   const maxWorkers = options.maxWorkers ?? 4, idleMs = options.idleMs ?? 30_000, queueMs = options.queueMs ?? 30_000;
-  const materializationEvents = options.materializationEvents ?? 128;
+  const materializationEvents = options.materializationEvents ?? 128, replayCacheMs = options.replayCacheMs ?? 1000;
   for (const [value, max] of [[maxWorkers, 16], [idleMs, 300_000], [queueMs, 60_000], [materializationEvents, 4096]]) {
     if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error("Invalid dataset worker limit.");
   }
+  if (!Number.isSafeInteger(replayCacheMs) || replayCacheMs < 0 || replayCacheMs > 60_000) throw new Error("Invalid dataset worker limit.");
   await mkdir(options.directory, { recursive: true });
   const root = await realpath(options.directory);
   const ownership=await acquireSupervisorOwnership(root);
@@ -122,6 +126,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const maintenance = new Map<string,{cancel:AbortController;done:Promise<void>}>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
+  // A worker that ran out of time or CPU would repeat the same work when it
+  // reopens, so each such failure in a row doubles the wait before a reopen.
+  const reopenWaits = new Map<string, { failures: number; untilMs: number }>();
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
   const now = options.nowMs ?? Date.now;
@@ -132,7 +139,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     maintenanceWarnings.add(key);
     try {options.onMaintenanceError?.({...scope},error);} catch { /* Diagnostics cannot change a committed response. */ }
   }
-  async function maintainMaterialization(lane:Lane):Promise<void> {
+  async function maintainMaterialization(lane:Lane,afterCostlyReplay=false):Promise<void> {
     const storage=options.maintenanceStorage,worker=lane.worker;
     const key=JSON.stringify(lane.scope);
     if(!storage||!worker||closed||maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key))return;
@@ -153,7 +160,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed during materialization maintenance.");
       const previous=options.journal.materialization({scope:lane.scope,authorize});
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
-      if(expected.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0))return;
+      if(expected.revision<=after||(!afterCostlyReplay&&expected.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0)))return;
       lane.nextMaterializationRevision=expected.revision+materializationEvents;
       // Account the physical snapshot before SQLite creates it, including its overlap with chunk staging.
       reservations.push(options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:current.capacityBytes,
@@ -292,6 +299,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     if(!head(input).active)throw new Error("Dataset authority was transferred.");
   }
   async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
+    const wait=reopenWaits.get(JSON.stringify(lane.scope));
+    if(wait&&now()<wait.untilMs)throw new Error(`The dataset stopped before its work finished. Try again in ${Math.ceil((wait.untilMs-now())/1000)} s.`);
     let waiting=false;
     const admitWait=()=>{
       if(waiting)return;
@@ -383,6 +392,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
     const worker = lane.worker ?? await openWorker(lane, input);
     if (worker.cursor.revision > current.cursor.revision) throw new Error("Dataset materialization is ahead of its journal.");
+    const replayStart = performance.now();
+    let replayed = false;
     while (!sameCursor(worker.cursor, current.cursor)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
       if (!page.events.length) throw new Error("Dataset recovery history is incomplete.");
@@ -392,6 +403,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})));
       worker.cursor=page.events.at(-1)!.cursor;
       standing(input);
+      replayed = true;
+    }
+    // An app's events can make every replay rebuild the whole dataset. Cache a
+    // costly replay now, before this job can fail and stop the worker, so no
+    // later reopen repeats it.
+    if (replayed && performance.now() - replayStart >= replayCacheMs) {
+      await maintainMaterialization(lane, true);
+      if (lane.worker !== worker) throw new Error("The dataset worker stopped while saving its replay. Try again.");
     }
     return worker;
   }
@@ -608,8 +627,10 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     lane.admission={bytes:job.bytes,deadline:job.deadline};
     lane.done = (async () => {
       let released=false;
+      const key=JSON.stringify(lane.scope);
       try {
         const result = await job.work();
+        reopenWaits.delete(key);
         if(options.maintenanceStorage&&lane.worker&&!blockedMaintenance.has(JSON.stringify(lane.scope))&&lane.worker.cursor.revision>=(lane.nextMaterializationRevision??materializationEvents)) {
           job.resolve(result);
           // Capture an immutable cache, then let foreground work continue during its staging.
@@ -619,7 +640,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           })();
           await lane.idleWork;
         } else {released=true;lane.admission=undefined;lane.active=false;pump(lane);job.resolve(result);return;}
-      } catch (error) { job.reject(error); }
+      } catch (error) {
+        const code=(error as {code?:unknown}).code;
+        if(code==="worker_budget"||code==="worker_stalled"||code==="worker_deadline") {
+          const failures=(reopenWaits.get(key)?.failures??0)+1;
+          reopenWaits.set(key,{failures,untilMs:now()+Math.min(REOPEN_WAIT_MS*2**(failures-1),REOPEN_WAIT_CAP_MS)});
+        }
+        job.reject(error);
+      }
       finally {if(!released){lane.admission=undefined;lane.active=false;pump(lane);}}
     })();
   }
@@ -688,6 +716,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     /** Called after the authority has durably deleted the dataset. */
     async retire(raw: DatasetScope): Promise<void> {
       const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
+      reopenWaits.delete(key);
       if(lane)lane.lifecycle.abort(new Error("Dataset was permanently deleted."));
       await cancelMaintenance(scope);
       if (!lane) {await retireMigrationCandidates(scope);return;}
