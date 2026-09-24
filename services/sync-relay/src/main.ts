@@ -30,7 +30,7 @@ import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-contr
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
-import { createEngineProjection, DOCUMENT_PROJECTION_LIMITS } from "./engineProjection";
+import { DOCUMENT_PROJECTION_LIMITS, startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
@@ -186,11 +186,6 @@ const engineExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
 if (!isDevOrTest && !engineExecutable) {
   fatal("FATAL: DOHC_RELAY_ENGINE_EXECUTABLE must name the engine executable outside development/test.");
 }
-const documentProjection = engineExecutable === undefined ? undefined : (() => {
-  try { return createEngineProjection({ engineExecutable, ...DOCUMENT_PROJECTION_LIMITS }); }
-  catch (error) { fatal(`FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid. ${error instanceof Error ? error.message : String(error)}`); }
-})();
-
 const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? (selfHostedLive ? {version: 1} : undefined) : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
 const appPublicationLimits = (() => {
   try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
@@ -235,6 +230,11 @@ const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
+// Started after every configuration check and before storage opens, so a
+// file that is not a working engine stops the relay before it listens.
+const documentProjection = engineExecutable === undefined ? undefined
+  : await startEngineProjection({ engineExecutable, ...DOCUMENT_PROJECTION_LIMITS })
+    .catch((error: unknown) => fatal(`FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid. ${error instanceof Error ? error.message : String(error)}`));
 const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);

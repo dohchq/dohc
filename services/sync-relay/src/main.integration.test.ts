@@ -2,13 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { initializeRelayDeployment } from "./relayDeployment";
+import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -16,6 +17,10 @@ import { initializeRelayDeployment } from "./relayDeployment";
 // budget the assertions need. File-level rather than package-level: only some of
 // the test files here spawn a relay child, and the rest keep the tighter default.
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
+
+// A relay that names an engine starts it and asks for engine.ping and
+// ydoc.project before it listens, so these startups need the real binary.
+const engine = requireEngineBinaryOrSkip();
 
 // Some sandboxes refuse loopback listens with EPERM. Every test below spawns
 // a relay that listens, so decide once here and report the whole suite as
@@ -925,12 +930,12 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
-  it("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
+  it.skipIf(engine.missing)("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
     const root = await tempRoot("self-host-ready"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const baseUrl = await spawnRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
-      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
+      DOHC_RELAY_ENGINE_EXECUTABLE: engine.path!, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
       DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
     await vi.waitFor(async () => {
@@ -1007,8 +1012,8 @@ describe("sync relay startup guards", () => {
     DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
     DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
     BETTER_AUTH_SECRET: "x".repeat(32),
-    // Validated at startup; the engine child starts on first use.
-    DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath,
+    // Tests that fail before the engine starts never run it.
+    DOHC_RELAY_ENGINE_EXECUTABLE: engine.path ?? process.execPath,
     SYNC_RELAY_PORT: "0",
     FORCE_COLOR: "0",
   } as const;
@@ -1027,7 +1032,7 @@ describe("sync relay startup guards", () => {
     await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("keeps public Edit routes closed in production without a release marker", async () => {
+  it.skipIf(engine.missing)("keeps public Edit routes closed in production without a release marker", async () => {
     const root = await tempRoot("closed-public-edit-release");
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
@@ -1042,7 +1047,7 @@ describe("sync relay startup guards", () => {
     }
   });
 
-  it("refuses a production release marker without a configured live host", async () => {
+  it.skipIf(engine.missing)("refuses a production release marker without a configured live host", async () => {
     const root = await tempRoot("public-edit-release-no-host");
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
@@ -1068,16 +1073,32 @@ describe("sync relay startup guards", () => {
     expect(stderr).toContain("DOHC_RELAY_SHARE_WEB_ORIGIN must be set");
   });
 
-  it.each([
-    ["unset", undefined, "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE must name the engine executable outside development/test."],
-    ["relative", "dohc-workspace-engine", "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid."],
-    ["a directory", tmpdir(), "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid."],
-  ])("refuses to start in production when the engine executable is %s", async (label, executable, reason) => {
-    const dbPath = join(await tempRoot(`engine-executable-${label.replaceAll(" ", "-")}`), "relay.sqlite");
+  it("refuses to start in production without the engine executable", async () => {
+    const dbPath = join(await tempRoot("engine-executable-unset"), "relay.sqlite");
     const { code, stderr } = await spawnRelayExpectExit({
-      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: executable, SYNC_RELAY_DB_PATH: dbPath,
+      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: undefined, SYNC_RELAY_DB_PATH: dbPath,
     });
     expect(code).toBe(1);
+    expect(stderr).toContain("FATAL: DOHC_RELAY_ENGINE_EXECUTABLE must name the engine executable outside development/test.");
+    await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    ["a relative path", async () => "dohc-workspace-engine", "must be an absolute path to a file"],
+    ["a directory", async () => tmpdir(), "must be an absolute path to a file"],
+    ["not an engine", async () => {
+      const path = join(await tempRoot("engine-executable-text"), "engine");
+      await writeFile(path, "not an engine");
+      return path;
+    }, "did not start"],
+  ])("refuses to start when the engine executable is %s", async (label, executable, reason) => {
+    const dbPath = join(await tempRoot(`engine-executable-${label.replaceAll(" ", "-")}`), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath,
+      DOHC_RELAY_ENGINE_EXECUTABLE: await executable(), FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid.");
     expect(stderr).toContain(reason);
     await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
   });

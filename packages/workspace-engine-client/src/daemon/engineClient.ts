@@ -649,6 +649,8 @@ export interface EngineClientSpawnOptions {
   args?: string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** false gives the child only `env` and its auth token, none of this process's environment. */
+  inheritEnvironment?: boolean;
   authToken: string;
   protocolVersion: number;
   capabilities: string[];
@@ -2257,7 +2259,7 @@ export async function createEngineClient(
   const child = spawn(options.command, options.args ?? [], {
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     env: {
-      ...process.env,
+      ...(options.inheritEnvironment === false ? {} : process.env),
       ...options.env,
       DOHC_ENGINE_LIVE_HOST_CONFIG: options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG,
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,

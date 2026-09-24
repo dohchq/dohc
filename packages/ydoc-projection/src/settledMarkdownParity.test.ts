@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -5,7 +6,8 @@ import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirro
 import * as Y from 'yjs'
 import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { requireEngineBinaryOrSkip } from '../../../apps/desktop/src/testing/engineBinary.js'
-import { createEngineProjection, type EngineProjection } from '../../../services/sync-relay/src/engineProjection.js'
+import { DOCUMENT_PROJECTION_LIMITS, startEngineProjection, type EngineProjection } from '../../../services/sync-relay/src/engineProjection.js'
+import { encodeFrame } from '../../workspace-engine-client/src/daemon/engineClient.js'
 
 // The relay derives a shared document's file with the engine's `ydoc.project`,
 // which writes the bytes an owner device settles. The Yjs vectors are written
@@ -18,9 +20,9 @@ const yrsFixture = new URL('yrs.json', fixtures)
 type Vector = { name: string; updates: string[]; markdown: string }
 
 const engine = requireEngineBinaryOrSkip()
-// Generous multiples of the relay's own budgets: a debug engine on a loaded machine.
-const projection = engine.path === null ? undefined : createEngineProjection({ engineExecutable: engine.path,
-  maxInFlight: 4, maxQueued: 1_024, deadlineMs: 120_000, connectTimeoutMs: 120_000 })
+// The relay's own limits, with generous deadlines for a debug engine on a loaded machine.
+const projection = engine.path === null ? undefined : await startEngineProjection({ ...DOCUMENT_PROJECTION_LIMITS,
+  engineExecutable: engine.path, maxQueued: 1_024, maxQueuedBytes: 1024 * 1024 * 1024, deadlineMs: 120_000, connectTimeoutMs: 120_000 })
 afterAll(() => projection?.close())
 const TIMEOUT_MS = 300_000
 
@@ -300,6 +302,31 @@ describe.skipIf(engine.missing)('the engine settle through the relay projection'
     } finally { doc.destroy() }
   }, TIMEOUT_MS)
 
+  it.each([
+    ['MAX_PROJECTION_NODES', () => Array.from({ length: 140_000 }, () => {
+      const paragraph = new Y.XmlElement('paragraph')
+      paragraph.insert(0, [new Y.XmlText('a')])
+      return paragraph
+    })],
+    ['MAX_PROJECTION_DEPTH', () => {
+      let node = new Y.XmlElement('paragraph')
+      node.insert(0, [new Y.XmlText('deep')])
+      for (let level = 0; level < 130; level += 1) {
+        const quote = new Y.XmlElement('blockquote')
+        quote.insert(0, [node])
+        node = quote
+      }
+      return [node]
+    }],
+  ])('refuses a document past %s and names the budget', async (budget, body) => {
+    const doc = new Y.Doc()
+    try {
+      doc.getXmlFragment('body').insert(0, body())
+      const result = await project([Y.encodeStateAsUpdate(doc)])
+      expect(result).toMatchObject({ kind: 'refused', reason: 'too-large', message: expect.stringContaining(budget) })
+    } finally { doc.destroy() }
+  }, TIMEOUT_MS)
+
   it('refuses active preserved source above the live-editing limit and ignores stale source', async () => {
     for (const stale of [false, true]) {
       const doc = markdownToYDoc('Body')
@@ -315,4 +342,29 @@ describe.skipIf(engine.missing)('the engine settle through the relay projection'
       } finally { doc.destroy() }
     }
   }, TIMEOUT_MS)
+
+  it('exits when its host closes stdin, even in the middle of a projection', async () => {
+    // Source bound to the document's own projection, which the engine checks
+    // by folding it block by block: about three minutes of work in a debug
+    // engine, longer than this test waits. A relay that dies closes stdin.
+    const doc = markdownToYDoc('Body')
+    const source = `a${'\n\na'.repeat(120_000)}`
+    const meta = doc.getMap('meta')
+    meta.set('dohcMarkdownSource', source)
+    meta.set('dohcMarkdownSourceSha256', hash(source))
+    meta.set('dohcMarkdownSourceProjectionSha256', hash('Body'))
+    const update = Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64')
+    doc.destroy()
+    const child = spawn(engine.require(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      env: { SystemRoot: process.env.SystemRoot, DOHC_ENGINE_AUTH_TOKEN: 'shutdown-test' } })
+    const exited = new Promise(resolve => child.once('exit', resolve))
+    child.stdout.resume()
+    child.stderr.resume()
+    const frame = (envelope: object) => encodeFrame(1, 0, Buffer.from(JSON.stringify(envelope)), 8 * 1024 * 1024)
+    child.stdin.write(frame({ type: 'hello', protocolVersion: 2, authToken: 'shutdown-test', capabilities: [], lastSessionGeneration: null, maxFrameBytes: null }))
+    child.stdin.write(frame({ type: 'request', id: 1, method: 'ydoc.project', workspace: null, deadlineMs: 1_000, idempotencyKey: null,
+      params: { contentKind: 'richdoc', updatesBase64: [update] } }))
+    child.stdin.end()
+    await exited
+  }, 60_000)
 })
