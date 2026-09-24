@@ -9,6 +9,7 @@ import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, 
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
+import { changesetTables } from "./dataset-change-facts.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
@@ -127,11 +128,14 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     if (!db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The prepared operation violates a foreign-key constraint.");
     if (changeset.byteLength>config.limits.databaseBytes) reject("resource_limit","The changeset exceeds the dataset storage reservation.");
     const changesetSha256=digest(changeset), proposalId=randomUUID();
+    // The changeset records columns in table_info order, which leaves out generated columns as sessions do.
+    const columns=Object.fromEntries(changesetTables(changeset).map(table=>[table,
+      db!.prepare(`PRAGMA table_info("${table.replaceAll('"','""')}")`).all().map(column=>String(column.name))]));
     if (command.guest.readOnly) {
       if (changeset.byteLength || attachedFileIds.length) reject("invalid_state","A read operation changed the dataset.");
       rollback();
     } else pending={id:proposalId,changesetSha256};
-    return {proposalId,readOnly:command.guest.readOnly,result:JSON.parse(resultJson),changeset,changesetSha256,attachedFileIds};
+    return {proposalId,readOnly:command.guest.readOnly,result:JSON.parse(resultJson),changeset,changesetSha256,attachedFileIds,columns};
   }
   if (command.kind==="apply") {
     nextCursor(command.input);
