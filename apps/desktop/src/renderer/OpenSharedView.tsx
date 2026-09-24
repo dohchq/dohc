@@ -324,15 +324,17 @@ export function OpenSharedView(props: {
             role="radiogroup"
             aria-label="How to open it"
           >
+            {/* Neither half is checked until the grant decides the default,
+                so a click while checking is a choice, not a confirmation. */}
             <ModeOption
-              checked={mode === "mount"}
+              checked={!checkingAccess && mode === "mount"}
               testId="open-share-mode-mount"
               icon={<FolderInput size={14} strokeWidth={1.9} aria-hidden />}
               label="Add to this workspace"
               onClick={() => setPickedMode("mount")}
             />
             <ModeOption
-              checked={mode === "separate"}
+              checked={!checkingAccess && mode === "separate"}
               testId="open-share-mode-separate"
               icon={<AppWindow size={14} strokeWidth={1.9} aria-hidden />}
               label="Open separately"

@@ -517,18 +517,19 @@ describe("OpenSharedView", () => {
 
 describe("OpenSharedView defaults for a pasted code", () => {
   const CODE = "dohc-share:share-1:http://localhost:1788";
+  const OTHER_CODE = "dohc-share:share-2:http://localhost:1788";
 
-  function received(access: ShareAccess): GetRelayReceivedShareResult {
+  function received(access: ShareAccess, shareId = "share-1"): GetRelayReceivedShareResult {
     return {
       found: true,
       share: {
-        shareId: "share-1",
+        shareId,
         granterEmail: "granter@dohc.test",
         genericChatWritable: false,
-        grantId: "grant-1",
+        grantId: `grant-${shareId}`,
         generation: 1,
         createdAtMs: 1,
-        shareCode: CODE,
+        shareCode: `dohc-share:${shareId}:http://localhost:1788`,
         selector: { paths: ["docs"], versionId: null },
         access,
       },
@@ -560,6 +561,9 @@ describe("OpenSharedView defaults for a pasted code", () => {
     const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
     await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
     expect(start.disabled).toBe(true);
+    // Neither half looks chosen, so nobody confirms a default that may move.
+    expect(modeChecked("mount")).toBe("false");
+    expect(modeChecked("separate")).toBe("false");
     // Enter reaches open() without the button.
     fireEvent.keyDown(screen.getByTestId("open-share-code"), { key: "Enter" });
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
@@ -639,5 +643,86 @@ describe("OpenSharedView defaults for a pasted code", () => {
     await waitFor(() => expect(signedOutStart.disabled).toBe(false));
     expect(signedOutStart.textContent).toBe("Add share");
     expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
+  });
+
+  it("does not let code A's late answer decide code B, and keeps it for A", async () => {
+    const answers = new Map([
+      ["share-1", deferred<GetRelayReceivedShareResult>()],
+      ["share-2", deferred<GetRelayReceivedShareResult>()],
+    ]);
+    bridgeMock.getRelayReceivedShare.mockImplementation(
+      ({ shareId }: { shareId: string }) => answers.get(shareId)!.promise,
+    );
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+    fireEvent.change(input, { target: { value: OTHER_CODE } });
+    await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
+
+    // A is Edit, and its answer lands while B is on screen.
+    await act(async () => answers.get("share-1")!.resolve(received("edit", "share-1")));
+    expect(start.textContent).toBe("Checking the share…");
+    expect(modeChecked("mount")).toBe("false");
+    expect(modeChecked("separate")).toBe("false");
+
+    await act(async () => answers.get("share-2")!.resolve(received("view", "share-2")));
+    await waitFor(() => expect(start.textContent).toBe("Add share"));
+    expect(modeChecked("mount")).toBe("true");
+
+    // Back to A: the answer it already had decides, with no second request.
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(modeChecked("separate")).toBe("true"));
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks after an inline sign-in, then defaults an Edit code to Open separately", async () => {
+    vi.useFakeTimers();
+    try {
+      const signedOut = { connected: false, serverUrl: "http://localhost:1786" };
+      bridgeMock.cloudStatus
+        .mockResolvedValueOnce(signedOut)
+        .mockResolvedValueOnce(signedOut)
+        .mockResolvedValue({
+          connected: true,
+          email: "recipient@dohc.test",
+          serverUrl: "http://localhost:1786",
+          relayUrl: "http://localhost:1788",
+        });
+      bridgeMock.cloudLoginStart.mockResolvedValue({
+        userCode: "ABCD",
+        verificationUri: "http://localhost:1786/device",
+      });
+      bridgeMock.cloudLoginPoll.mockResolvedValue({
+        status: "complete",
+        email: "recipient@dohc.test",
+      });
+      bridgeMock.getRelayReceivedShare.mockResolvedValue(received("edit"));
+      renderInWorkspace();
+      await act(async () => {});
+      fireEvent.change(screen.getByTestId("open-share-code"), { target: { value: CODE } });
+      await act(async () => {});
+      expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
+
+      // Open without a session asks for sign-in inline.
+      fireEvent.click(screen.getByTestId("open-share-start"));
+      await act(async () => {});
+      fireEvent.click(screen.getByTestId("cloud-connect-start"));
+      await act(async () => {});
+      // CloudLogin polls the approval every 3 s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      await act(async () => {});
+
+      expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({
+        shareId: "share-1",
+      });
+      expect(modeChecked("separate")).toBe("true");
+      expect(screen.getByTestId("open-share-start").textContent).toBe("Open share");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
