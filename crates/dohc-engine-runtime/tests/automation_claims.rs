@@ -344,7 +344,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         served_facts.fields,
         vec![AutomationFieldFact {
             field_name: "status".to_owned(),
-            history_id: facts.fields[0].history_id,
+            history_id: Some(facts.fields[0].history_id),
             previous: Some(AutomationFactValue::Whole {
                 value: serde_json::json!("open"),
             }),

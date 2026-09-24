@@ -97,6 +97,7 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
             origin_seq,
         } => json!({ "originId": origin_id, "originSeq": origin_seq }),
         AutomationTrigger::History { history_id } => json!({ "historyId": history_id }),
+        AutomationTrigger::Moment { moment_order } => json!({ "momentOrder": moment_order }),
     };
     let mut value = json!({
         "claimId": claim.claim_id,

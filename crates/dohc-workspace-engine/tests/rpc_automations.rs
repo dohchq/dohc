@@ -11,8 +11,9 @@ use common::*;
 use dohc_engine_domain::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_RECLAIM_EXHAUSTED,
     AutomationChangeKind, AutomationSubscription, ChangeActorKind, ChangeAttribution,
-    CollectionFieldChangeFact, CollectionRecordApplyFacts, NoFaults,
-    claim_automation_triggers_in_tx, subscribe_automation_in_tx,
+    CollectionFieldChangeFact, CollectionRecordApplyFacts, NoFaults, VersionedTextStore, WriteText,
+    claim_automation_triggers_in_tx, claim_record_lifecycle_in_tx, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx, subscribe_automation_in_tx,
 };
 use dohc_engine_protocol::{
     error::ErrorCode,
@@ -654,4 +655,207 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         let error = call_error(&transport, &handle, &mut id, "automations.settle", params).await;
         assert_eq!(error.code, ErrorCode::InvalidParams, "{wrong}");
     }
+}
+
+/// A record added on this computer and then written through
+/// `versionedText.write` claims once for each change: the added claim keys
+/// on the moment that created the file and lists its values, the field
+/// write keys on its history row and carries previous and next values, and
+/// a repeated or body-only write claims nothing. Each claim announces
+/// itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
+    const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OBJECT: &str = "object-alpha";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let record =
+        |status: &str, body: &str| format!("---\nid: {RECORD}\nstatus: {status}\n---\n\n{body}");
+    {
+        let db = engine_db_path(&scratch).expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        store
+            .write_with(&NoFaults, |tx| {
+                subscribe_automation_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    &AutomationSubscription {
+                        automation_id: "collection:tasks#watch".to_owned(),
+                        prefix: "tasks".to_owned(),
+                        kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+                        fields: None,
+                    },
+                    5,
+                )
+            })
+            .expect("subscribe");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .expect("main version");
+        for (object_id, path, text, moment_id) in [
+            (
+                "object-schema",
+                "tasks/collection.yaml",
+                "fields:\n  status:\n    type: text\n".to_owned(),
+                "schema",
+            ),
+            (
+                OBJECT,
+                "tasks/alpha.md",
+                record("open", "Body"),
+                "alpha-created",
+            ),
+        ] {
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object_id.to_owned(),
+                        path: path.to_owned(),
+                        text,
+                        moment_id: moment_id.to_owned(),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("seed collection file");
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                let reconciliation = reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+                set_collection_adoption_state_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    "main",
+                    "tasks/alpha.md",
+                    RECORD,
+                    "adopted",
+                )?;
+                claim_record_lifecycle_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    "main",
+                    &reconciliation.lifecycle,
+                    20,
+                )
+            })
+            .expect("bind the record and claim its addition");
+    }
+    let service = Arc::new(EngineService::new());
+    let mut notices = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "captureMode": "none",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let mut id = 1;
+    let claim_next = async |id: &mut u64| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "automations.claimNext",
+            json!({ "automationIdPrefix": "collection:" }),
+        )
+        .await
+    };
+
+    let added = claim_next(&mut id).await;
+    assert_eq!(added["recordId"], json!(RECORD));
+    assert!(
+        added["trigger"]["momentOrder"].is_i64(),
+        "an added record keys on its creating moment: {added}"
+    );
+    assert_eq!(
+        added["change"],
+        json!({
+            "kind": "added",
+            "authorOriginId": null,
+            "actorKind": null,
+            "onBehalfOf": null,
+            "fields": [{
+                "field": "status",
+                "historyId": null,
+                "previous": null,
+                "next": { "value": "open" },
+            }],
+            "fieldsOmitted": 0,
+        })
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.settle",
+        json!({ "claimId": added["claimId"], "state": "done" }),
+    )
+    .await;
+
+    let write = async |id: &mut u64, moment_id: &str, text: String| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "objectId": OBJECT,
+                "path": "tasks/alpha.md",
+                "text": text,
+                "momentId": moment_id,
+                "origin": "api",
+            }),
+        )
+        .await
+    };
+    while notices.try_recv().is_ok() {}
+    write(&mut id, "alpha-done", record("done", "Body")).await;
+    let notice = notices
+        .try_recv()
+        .expect("the field write announces its claim");
+    assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    assert_eq!(notice.payload["change"]["kind"], json!("changed"));
+    let changed = claim_next(&mut id).await;
+    assert!(changed["trigger"]["historyId"].is_i64(), "{changed}");
+    assert_eq!(
+        changed["change"]["fields"],
+        json!([{
+            "field": "status",
+            "historyId": changed["change"]["fields"][0]["historyId"],
+            "previous": { "value": "open" },
+            "next": { "value": "done" },
+        }])
+    );
+    assert!(changed["change"]["fields"][0]["historyId"].is_i64());
+
+    write(&mut id, "alpha-again", record("done", "Body")).await;
+    write(&mut id, "alpha-body", record("done", "New body")).await;
+    assert_eq!(
+        claim_next(&mut id).await,
+        Value::Null,
+        "a repeated or body-only write claims nothing"
+    );
+    assert!(notices.try_recv().is_err(), "and announces nothing");
 }

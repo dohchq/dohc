@@ -278,15 +278,25 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
         subscribe_automation(&mut store, WS, &filter, 10, &NO_FAULTS).expect("subscribe");
     }
 
+    // A record is added when reconcile binds it. The apply that writes its
+    // first fields is a field change like any other.
     let mut created = field_change(1, &["status", "title"]);
     created.created = true;
     let claims = claim_for(&mut store, WS, &created, 20);
     assert_eq!(
         claimed_ids(&claims),
-        vec!["collection:tasks#added"],
-        "the apply that writes a record's first fields is an added record"
+        vec![
+            "collection:tasks#any-field",
+            "collection:tasks#split",
+            "collection:tasks#status",
+        ],
+        "writing a record's first fields is a changed record"
     );
-    assert_eq!(claims[0].change.kind, AutomationChangeKind::Added);
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.change.kind == AutomationChangeKind::Changed)
+    );
 
     let title = claim_for(&mut store, WS, &field_change(2, &["title"]), 30);
     assert_eq!(
@@ -447,7 +457,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         vec![
             AutomationFieldFact {
                 field_name: "body".to_owned(),
-                history_id: 11,
+                history_id: Some(11),
                 previous: Some(AutomationFactValue::Truncated {
                     truncated: true,
                     bytes: big.len(),
@@ -459,7 +469,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
             },
             AutomationFieldFact {
                 field_name: "status".to_owned(),
-                history_id: 12,
+                history_id: Some(12),
                 previous: None,
                 next: Some(AutomationFactValue::Whole {
                     value: json!("done"),

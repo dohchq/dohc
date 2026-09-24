@@ -13,7 +13,9 @@ use std::collections::HashSet;
 
 use crate::chats::base32_lowercase_no_padding;
 use crate::collections::{
-    ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts, field_fact_value,
+    ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
+    CollectionRecordLifecycle, CollectionRecordLifecycleKind, MAX_CHANGE_ATTRIBUTION_DEPTH,
+    field_fact_value, indexed_record_fields, parent_path,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::{
@@ -68,12 +70,13 @@ pub const AUTOMATION_CLAIM_HISTORY_LIMIT: i64 = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AutomationChangeKind {
-    /// The apply that wrote the record's first fields
-    /// ([`CollectionRecordApplyFacts::created`]).
+    /// A moment on this computer created the record's file in its
+    /// Collection or moved it in.
     Added,
-    /// Any later apply that changed the record's fields.
+    /// A change on this computer wrote one or more of the record's fields.
     Changed,
-    /// The record left its Collection.
+    /// A moment on this computer deleted the record's file or moved it out
+    /// of its Collection.
     Removed,
 }
 
@@ -141,21 +144,25 @@ pub enum AutomationFactValue {
     },
     /// The value is larger or deeper than a claim carries, or the claim's
     /// budget was spent. `bytes` is its size as stored JSON; the whole value
-    /// is in the field history row the fact names.
+    /// is in the field history row the fact names, or, for an added or
+    /// removed record, in the record or its last moment.
     Truncated {
         truncated: bool,
         bytes: usize,
     },
 }
 
-/// One changed field on a claim: the history row that recorded it and the
-/// value before and after, `None` where the field was absent.
+/// One field on a claim, with its value before and after the change,
+/// `None` where the field was absent. A changed field names the history row
+/// that recorded it. An added record lists its fields as `next` values and a
+/// removed record its last known values as `previous`; neither has a
+/// history row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutomationFieldFact {
     #[serde(rename = "field")]
     pub field_name: String,
-    pub history_id: i64,
+    pub history_id: Option<i64>,
     pub previous: Option<AutomationFactValue>,
     pub next: Option<AutomationFactValue>,
 }
@@ -201,14 +208,18 @@ impl AutomationClaimState {
     }
 }
 
-/// The durable per-change key a claim holds. A synced-lineage change keys on
-/// its replication coordinate — the one identifier every peer derives
-/// identically — and a change no other device can see keys on this device's
-/// history row id (the settled Phase 4 fallback).
+/// The durable per-change key a claim holds. A synced-lineage field change
+/// keys on its replication coordinate — the one identifier every peer
+/// derives identically — and a field change no other device can see keys on
+/// this device's history row id (the settled Phase 4 fallback). An added or
+/// removed record keys on the moment that moved its file into or out of
+/// the Collection, together with the change kind, so however often
+/// reconcile derives the same change it claims it once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationTrigger {
     Coordinate { origin_id: String, origin_seq: i64 },
     History { history_id: i64 },
+    Moment { moment_order: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,7 +338,8 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
-     created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run";
+     created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
+     trigger_moment_order";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -350,6 +362,7 @@ fn claim_from_row(
     let actor_kind: Option<String> = row.get(15)?;
     let on_behalf_of: Option<String> = row.get(16)?;
     let run: i64 = row.get(17)?;
+    let trigger_moment_order: Option<i64> = row.get(18)?;
     let claim = (|| {
         let actor_kind = actor_kind
             .map(|kind| {
@@ -358,12 +371,18 @@ fn claim_from_row(
                 })
             })
             .transpose()?;
-        let trigger = match (trigger_origin_id, trigger_origin_seq, trigger_history_id) {
-            (Some(origin_id), Some(origin_seq), None) => AutomationTrigger::Coordinate {
+        let trigger = match (
+            trigger_origin_id,
+            trigger_origin_seq,
+            trigger_history_id,
+            trigger_moment_order,
+        ) {
+            (Some(origin_id), Some(origin_seq), None, None) => AutomationTrigger::Coordinate {
                 origin_id,
                 origin_seq,
             },
-            (None, None, Some(history_id)) => AutomationTrigger::History { history_id },
+            (None, None, Some(history_id), None) => AutomationTrigger::History { history_id },
+            (None, None, None, Some(moment_order)) => AutomationTrigger::Moment { moment_order },
             _ => {
                 return Err(DomainError::StateCorrupt {
                     reason: "automation claim trigger key is not exactly one shape",
@@ -532,12 +551,31 @@ fn fact_value(json: Option<&str>, whole: bool) -> Option<AutomationFactValue> {
     })
 }
 
-fn field_fact(change: &CollectionFieldChangeFact, whole: bool) -> AutomationFieldFact {
+/// One field of a change, as the bounded facts read it.
+struct FieldChange<'a> {
+    field_name: &'a str,
+    history_id: Option<i64>,
+    previous_json: Option<&'a str>,
+    next_json: Option<&'a str>,
+}
+
+impl<'a> From<&'a CollectionFieldChangeFact> for FieldChange<'a> {
+    fn from(change: &'a CollectionFieldChangeFact) -> Self {
+        FieldChange {
+            field_name: &change.field_name,
+            history_id: Some(change.history_id),
+            previous_json: change.previous_json.as_deref(),
+            next_json: change.next_json.as_deref(),
+        }
+    }
+}
+
+fn field_fact(change: &FieldChange<'_>, whole: bool) -> AutomationFieldFact {
     AutomationFieldFact {
-        field_name: change.field_name.clone(),
+        field_name: change.field_name.to_owned(),
         history_id: change.history_id,
-        previous: fact_value(change.previous_json.as_deref(), whole),
-        next: fact_value(change.next_json.as_deref(), whole),
+        previous: fact_value(change.previous_json, whole),
+        next: fact_value(change.next_json, whole),
     }
 }
 
@@ -546,12 +584,12 @@ fn fact_bytes(fact: &AutomationFieldFact) -> usize {
     serde_json::to_vec(fact).map_or(usize::MAX, |json| json.len() + 1)
 }
 
-/// Bound one apply's field changes for a claim within
+/// Bound one change's fields for a claim within
 /// [`MAX_AUTOMATION_FIELD_FACTS_BYTES`]. Every field is named first, with
 /// its values truncated; a field whose name alone does not fit is counted
 /// in `omitted`. Then, in field order, values travel whole while the rest
 /// of the budget allows.
-fn bounded_field_facts(changes: &[CollectionFieldChangeFact]) -> AutomationFieldFacts {
+fn bounded_field_facts(changes: &[FieldChange<'_>]) -> AutomationFieldFacts {
     let mut facts = AutomationFieldFacts::default();
     let mut budget = MAX_AUTOMATION_FIELD_FACTS_BYTES;
     let mut named = Vec::with_capacity(changes.len());
@@ -596,17 +634,145 @@ fn wants_changed_fields(
         .any(|change| field_names.contains(&change.field_name)))
 }
 
+/// One subscription as the claim paths read it.
+struct SubscriptionRow {
+    automation_id: String,
+    prefix: String,
+    field_names_json: Option<String>,
+    created_at_ms: i64,
+}
+
+/// The subscriptions that want one change kind, ordered by automation id.
+fn subscriptions_wanting(
+    conn: &Connection,
+    workspace_id: &str,
+    kind: AutomationChangeKind,
+) -> Result<Vec<SubscriptionRow>, DomainError> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT automation_id, prefix, field_names_json, created_at_ms \
+             FROM automation_subscriptions \
+             WHERE workspace_id = ?1 AND {} = 1 ORDER BY automation_id, prefix",
+            kind.subscription_column()
+        ))
+        .map_err(DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id], |row| {
+            Ok(SubscriptionRow {
+                automation_id: row.get(0)?,
+                prefix: row.get(1)?,
+                field_names_json: row.get(2)?,
+                created_at_ms: row.get(3)?,
+            })
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)
+}
+
+/// Everything one change's claims share: every claiming automation gets a
+/// claim with these facts.
+struct ClaimedChange<'a> {
+    trigger: AutomationTrigger,
+    record_id: &'a str,
+    collection_path: &'a str,
+    depth: u32,
+    change: AutomationChange,
+    fields: AutomationFieldFacts,
+    chain_stopped: bool,
+}
+
+/// Insert one claim per automation for a change. The trigger key's unique
+/// index makes a repeat a no-op. Returns only the claims inserted.
+fn insert_claims(
+    conn: &Connection,
+    workspace_id: &str,
+    automation_ids: &[&str],
+    claimed: &ClaimedChange<'_>,
+    now_ms: i64,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let fields_json = serde_json::to_string(&claimed.fields.fields)
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    let (origin_id, origin_seq, history_id, moment_order) = match &claimed.trigger {
+        AutomationTrigger::Coordinate {
+            origin_id,
+            origin_seq,
+        } => (Some(origin_id.as_str()), Some(*origin_seq), None, None),
+        AutomationTrigger::History { history_id } => (None, None, Some(*history_id), None),
+        AutomationTrigger::Moment { moment_order } => (None, None, None, Some(*moment_order)),
+    };
+    let (state, error) = if claimed.chain_stopped {
+        (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
+    } else {
+        (AutomationClaimState::Pending, None)
+    };
+    let mut inserted = Vec::new();
+    for automation_id in automation_ids {
+        let claim_id = mint_claim_id()?;
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
+                  trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
+                  state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
+                  author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
+                  change_fields_omitted) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
+                         ?15, ?16, ?17, ?18, ?19)",
+                params![
+                    workspace_id,
+                    claim_id,
+                    automation_id,
+                    origin_id,
+                    origin_seq,
+                    history_id,
+                    moment_order,
+                    claimed.record_id,
+                    claimed.collection_path,
+                    i64::from(claimed.depth),
+                    state.as_str(),
+                    error,
+                    now_ms,
+                    claimed.change.kind.as_str(),
+                    claimed.change.author_origin_id,
+                    claimed.change.actor_kind.map(ChangeActorKind::as_str),
+                    claimed.change.on_behalf_of,
+                    fields_json,
+                    claimed.fields.omitted,
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+        if rows == 1 {
+            inserted.push(AutomationClaim {
+                claim_id,
+                automation_id: (*automation_id).to_owned(),
+                trigger: claimed.trigger.clone(),
+                record_id: claimed.record_id.to_owned(),
+                collection_path: claimed.collection_path.to_owned(),
+                depth: claimed.depth,
+                change: claimed.change.clone(),
+                state,
+                attempts: 0,
+                run: 1,
+                error: error.map(str::to_owned),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+            });
+        }
+    }
+    Ok(inserted)
+}
+
 /// Turn one committed local apply into pending claims, in the apply's own
-/// transaction. An apply that wrote the record's first fields is an added
-/// record; any other is a changed one. For each subscription that wants that
-/// kind and whose prefix contains the facts' collection path, except the
-/// writing automation's own subscription (an automation never re-triggers
-/// itself), insert one pending claim keyed by the change's trigger key. A
-/// changed-record subscription that names fields claims only when one of
-/// them changed. Each claim carries the change's kind, actor, and bounded
-/// field facts. Idempotent: a re-run over the same facts hits the partial
-/// unique indexes and inserts nothing. Returns only the claims this call
-/// inserted.
+/// transaction. An apply that wrote a record's fields is a changed record.
+/// For each subscription that wants changed records and whose prefix
+/// contains the facts' collection path, except the writing automation's own
+/// subscription (an automation never re-triggers itself), insert one pending
+/// claim keyed by the change's trigger key. A subscription that names fields
+/// claims only when one of them changed. Each claim carries the change's
+/// author and bounded field facts. Idempotent: a re-run over the same facts
+/// hits the partial unique indexes and inserts nothing. Returns only the
+/// claims this call inserted.
 ///
 /// A change already at the chain depth cap runs nothing: instead of a
 /// pending claim, each would-have-triggered automation records a failed
@@ -640,48 +806,16 @@ pub fn claim_automation_triggers_in_tx(
             AutomationTrigger::History { history_id }
         }
     };
-    let change = AutomationChange {
-        kind: if facts.created {
-            AutomationChangeKind::Added
-        } else {
-            AutomationChangeKind::Changed
-        },
-        author_origin_id: facts.author_origin_id.clone(),
-        actor_kind: facts
-            .attribution
-            .as_ref()
-            .map(|attribution| attribution.actor_kind),
-        on_behalf_of: facts
-            .attribution
-            .as_ref()
-            .and_then(|attribution| attribution.on_behalf_of.clone()),
-    };
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT automation_id, prefix, field_names_json FROM automation_subscriptions \
-             WHERE workspace_id = ?1 AND {} = 1 ORDER BY automation_id, prefix",
-            change.kind.subscription_column()
-        ))
-        .map_err(DomainError::sql_corrupt)?;
-    let subscriptions: Vec<(String, String, Option<String>)> = statement
-        .query_map(params![workspace_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(DomainError::sql_corrupt)?
-        .collect::<Result<_, _>>()
-        .map_err(DomainError::sql_corrupt)?;
+    let subscriptions = subscriptions_wanting(conn, workspace_id, AutomationChangeKind::Changed)?;
     let mut claiming: Vec<&str> = Vec::new();
-    for (automation_id, prefix, field_names_json) in &subscriptions {
+    for subscription in &subscriptions {
+        let automation_id = subscription.automation_id.as_str();
         // One claim per automation even when several of its subscriptions
         // match (the list is ordered by automation_id).
-        if claiming.last() == Some(&automation_id.as_str())
-            || !prefix_contains(prefix, &facts.collection_path)
-            || facts.author_origin_id.as_deref() == Some(automation_id.as_str())
-        {
-            continue;
-        }
-        if change.kind == AutomationChangeKind::Changed
-            && !wants_changed_fields(field_names_json.as_deref(), &facts.fields)?
+        if claiming.last() == Some(&automation_id)
+            || !prefix_contains(&subscription.prefix, &facts.collection_path)
+            || facts.author_origin_id.as_deref() == Some(automation_id)
+            || !wants_changed_fields(subscription.field_names_json.as_deref(), &facts.fields)?
         {
             continue;
         }
@@ -690,76 +824,337 @@ pub fn claim_automation_triggers_in_tx(
     if claiming.is_empty() {
         return Ok(Vec::new());
     }
-    // A stopped chain never runs, so its claim keeps no facts.
-    let field_facts = if chain_stopped {
-        AutomationFieldFacts::default()
-    } else {
-        bounded_field_facts(&facts.fields)
+    let changes: Vec<FieldChange<'_>> = facts.fields.iter().map(FieldChange::from).collect();
+    let claimed = ClaimedChange {
+        trigger,
+        record_id: &facts.record_id,
+        collection_path: &facts.collection_path,
+        depth,
+        change: AutomationChange {
+            kind: AutomationChangeKind::Changed,
+            author_origin_id: facts.author_origin_id.clone(),
+            actor_kind: facts
+                .attribution
+                .as_ref()
+                .map(|attribution| attribution.actor_kind),
+            on_behalf_of: facts
+                .attribution
+                .as_ref()
+                .and_then(|attribution| attribution.on_behalf_of.clone()),
+        },
+        // A stopped chain never runs, so its claim keeps no facts.
+        fields: if chain_stopped {
+            AutomationFieldFacts::default()
+        } else {
+            bounded_field_facts(&changes)
+        },
+        chain_stopped,
     };
-    let field_facts_json = serde_json::to_string(&field_facts.fields)
-        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
-    let (origin_id, origin_seq, history_id) = match &trigger {
-        AutomationTrigger::Coordinate {
-            origin_id,
-            origin_seq,
-        } => (Some(origin_id.as_str()), Some(*origin_seq), None),
-        AutomationTrigger::History { history_id } => (None, None, Some(*history_id)),
+    insert_claims(conn, workspace_id, &claiming, &claimed, now_ms)
+}
+
+/// The moment that moved a record's file into or out of its Collection:
+/// the claim key for an added or removed record, and the test of which
+/// computer made the change.
+struct LifecycleMoment {
+    moment_order: i64,
+    recorded_at_ms: i64,
+    author_json: Option<String>,
+}
+
+/// The moment that brought an object's file into `collection_path`: its
+/// newest moment that wrote the file there with no preimage (a creation;
+/// `before_present = 2` records a file that existed) or renamed it in from
+/// another folder.
+fn entering_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    collection_path: &str,
+) -> Result<Option<LifecycleMoment>, DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT moment_order, recorded_at_ms, author_json, path, operation, \
+                    before_present, payload_before_path \
+             FROM moments \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND ((operation = 'write' AND before_present <> 2) OR operation = 'rename') \
+             ORDER BY moment_order DESC",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let mut rows = statement
+        .query(params![workspace_id, version_id, object_id])
+        .map_err(DomainError::sql_corrupt)?;
+    while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
+        let path: String = row.get(3).map_err(DomainError::sql_corrupt)?;
+        let operation: String = row.get(4).map_err(DomainError::sql_corrupt)?;
+        let before_present: i64 = row.get(5).map_err(DomainError::sql_corrupt)?;
+        let before_path: Option<String> = row.get(6).map_err(DomainError::sql_corrupt)?;
+        if parent_path(&path) != collection_path {
+            continue;
+        }
+        let entered = (operation == "write" && before_present != 2)
+            || (operation == "rename"
+                && before_path
+                    .as_deref()
+                    .is_none_or(|before| parent_path(before) != collection_path));
+        if entered {
+            return Ok(Some(LifecycleMoment {
+                moment_order: row.get(0).map_err(DomainError::sql_corrupt)?,
+                recorded_at_ms: row.get(1).map_err(DomainError::sql_corrupt)?,
+                author_json: row.get(2).map_err(DomainError::sql_corrupt)?,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The moment that took an object's file out of `collection_path`: its
+/// newest moment, when that moment deleted the file or renamed it into
+/// another folder. `None` when the file is still in the Collection (its
+/// frontmatter broke, or the Collection itself went away).
+fn leaving_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    collection_path: &str,
+) -> Result<Option<LifecycleMoment>, DomainError> {
+    let newest: Option<(i64, i64, Option<String>, String, String)> = conn
+        .query_row(
+            "SELECT moment_order, recorded_at_ms, author_json, path, operation FROM moments \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+             ORDER BY moment_order DESC LIMIT 1",
+            params![workspace_id, version_id, object_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(newest.and_then(
+        |(moment_order, recorded_at_ms, author_json, path, operation)| {
+            (operation == "delete"
+                || (operation == "rename" && parent_path(&path) != collection_path))
+                .then_some(LifecycleMoment {
+                    moment_order,
+                    recorded_at_ms,
+                    author_json,
+                })
+        },
+    ))
+}
+
+/// Whether a moment was committed on this computer: no replication import
+/// wrote it. Only an imported moment has an `imported = 1` journal row.
+fn moment_is_local(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT NOT EXISTS ( \
+             SELECT 1 FROM moments m JOIN replication_log r \
+               ON r.workspace_id = m.workspace_id AND r.op_kind = 'moment.append' \
+              AND json_extract(r.payload_json, '$.momentId') = m.moment_id \
+             WHERE m.workspace_id = ?1 AND m.moment_order = ?2 AND r.imported = 1)",
+        params![workspace_id, moment_order],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// A moment's author as a claim names it, with the chain depth it
+/// declared. A moment records the author its writer passed: an agent
+/// (`{kind: "agent", agentId, onBehalfOf}`, as capture records an agent
+/// run), an automation (`{kind: "automation", automationId, onBehalfOf,
+/// depth}`, as an automation that creates or deletes a record must), or a
+/// person. Anything else declares no author and depth 0.
+fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
+    let author = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok());
+    let text = |key: &str| {
+        author
+            .as_ref()
+            .and_then(|author| author.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
     };
-    let (state, error) = if chain_stopped {
-        (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
-    } else {
-        (AutomationClaimState::Pending, None)
+    let actor_kind = text("kind").and_then(|kind| ChangeActorKind::parse(&kind));
+    let author_origin_id = match actor_kind {
+        Some(ChangeActorKind::Agent) => text("agentId"),
+        Some(ChangeActorKind::Automation) => text("automationId"),
+        _ => None,
     };
+    let depth = match actor_kind {
+        Some(ChangeActorKind::Automation) => author
+            .as_ref()
+            .and_then(|author| author.get("depth"))
+            .and_then(Value::as_u64)
+            .map_or(0, |depth| {
+                u32::try_from(depth)
+                    .unwrap_or(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                    .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
+            }),
+        _ => 0,
+    };
+    let change = AutomationChange {
+        kind,
+        actor_kind,
+        on_behalf_of: text("onBehalfOf"),
+        author_origin_id,
+    };
+    (change, depth)
+}
+
+/// Whether any automation wants removed records, so reconcile reads a
+/// removed record's last values before the index drops them.
+pub(crate) fn removed_records_wanted_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM automation_subscriptions \
+         WHERE workspace_id = ?1 AND on_removed = 1)",
+        params![workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Turn one reconcile's added and removed records into pending claims, in
+/// the reconcile's own transaction. A record claims only when a moment
+/// committed on this computer moved its file into the Collection (added) or
+/// out of it (removed), and only for subscriptions that existed when that
+/// moment was recorded. The moment's declared author sets the claim's
+/// author and chain depth, so the self-trigger guard and the depth cap apply
+/// as they do to field changes. Everything else that binds or unbinds a record,
+/// such as a Collection appearing or disappearing, frontmatter breaking or
+/// healing, or a synced moment from another computer, claims nothing. The
+/// key is the moment and the kind, so a record whose binding a later
+/// reconcile derives again is not claimed twice. An added record's claim
+/// lists its fields; a removed record's lists its last known values.
+pub fn claim_record_lifecycle_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    lifecycle: &[CollectionRecordLifecycle],
+    now_ms: i64,
+) -> Result<Vec<AutomationClaim>, DomainError> {
     let mut inserted = Vec::new();
-    for automation_id in claiming {
-        let claim_id = mint_claim_id()?;
-        let rows = conn
-            .execute(
-                "INSERT OR IGNORE INTO automation_claims \
-                 (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
-                  trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
-                  created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, \
-                  on_behalf_of, change_fields_json, change_fields_omitted) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?12, ?13, ?14, \
-                         ?15, ?16, ?17, ?18)",
-                params![
+    for kind in [AutomationChangeKind::Added, AutomationChangeKind::Removed] {
+        let records: Vec<&CollectionRecordLifecycle> = lifecycle
+            .iter()
+            .filter(|record| match record.kind {
+                CollectionRecordLifecycleKind::Added => kind == AutomationChangeKind::Added,
+                CollectionRecordLifecycleKind::Removed => kind == AutomationChangeKind::Removed,
+            })
+            .collect();
+        if records.is_empty() {
+            continue;
+        }
+        let subscriptions = subscriptions_wanting(conn, workspace_id, kind)?;
+        if subscriptions.is_empty() {
+            continue;
+        }
+        for record in records {
+            let moment = match kind {
+                AutomationChangeKind::Added => entering_moment(
+                    conn,
                     workspace_id,
-                    claim_id,
-                    automation_id,
-                    origin_id,
-                    origin_seq,
-                    history_id,
-                    facts.record_id,
-                    facts.collection_path,
-                    i64::from(depth),
-                    state.as_str(),
-                    error,
-                    now_ms,
-                    change.kind.as_str(),
-                    change.author_origin_id,
-                    change.actor_kind.map(ChangeActorKind::as_str),
-                    change.on_behalf_of,
-                    field_facts_json,
-                    field_facts.omitted,
-                ],
-            )
-            .map_err(DomainError::sql_persist)?;
-        if rows == 1 {
-            inserted.push(AutomationClaim {
-                claim_id,
-                automation_id: automation_id.to_owned(),
-                trigger: trigger.clone(),
-                record_id: facts.record_id.clone(),
-                collection_path: facts.collection_path.clone(),
+                    version_id,
+                    &record.object_id,
+                    &record.collection_path,
+                )?,
+                _ => leaving_moment(
+                    conn,
+                    workspace_id,
+                    version_id,
+                    &record.object_id,
+                    &record.collection_path,
+                )?,
+            };
+            let Some(moment) = moment else {
+                continue;
+            };
+            if !moment_is_local(conn, workspace_id, moment.moment_order)? {
+                continue;
+            }
+            let (change, depth) = moment_change(kind, moment.author_json.as_deref());
+            let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
+            let mut claiming: Vec<&str> = Vec::new();
+            for subscription in &subscriptions {
+                let automation_id = subscription.automation_id.as_str();
+                if claiming.last() == Some(&automation_id)
+                    || !prefix_contains(&subscription.prefix, &record.collection_path)
+                    || subscription.created_at_ms > moment.recorded_at_ms
+                    || change.author_origin_id.as_deref() == Some(automation_id)
+                {
+                    continue;
+                }
+                claiming.push(automation_id);
+            }
+            if claiming.is_empty() {
+                continue;
+            }
+            // An added record's values are in the index now; a removed
+            // record's were read before the index dropped them.
+            let added_fields = match kind {
+                AutomationChangeKind::Added if !chain_stopped => {
+                    indexed_record_fields(conn, workspace_id, version_id, &record.record_id)?
+                }
+                _ => Vec::new(),
+            };
+            let values = match kind {
+                AutomationChangeKind::Added => &added_fields,
+                _ => &record.removed_fields,
+            };
+            let changes: Vec<FieldChange<'_>> = values
+                .iter()
+                .map(|(field_name, value_json)| {
+                    let value = Some(value_json.as_str());
+                    FieldChange {
+                        field_name,
+                        history_id: None,
+                        previous_json: (kind == AutomationChangeKind::Removed)
+                            .then_some(value)
+                            .flatten(),
+                        next_json: (kind == AutomationChangeKind::Added)
+                            .then_some(value)
+                            .flatten(),
+                    }
+                })
+                .collect();
+            let claimed = ClaimedChange {
+                trigger: AutomationTrigger::Moment {
+                    moment_order: moment.moment_order,
+                },
+                record_id: &record.record_id,
+                collection_path: &record.collection_path,
                 depth,
-                change: change.clone(),
-                state,
-                attempts: 0,
-                run: 1,
-                error: error.map(str::to_owned),
-                created_at_ms: now_ms,
-                updated_at_ms: now_ms,
-            });
+                change,
+                // A stopped chain never runs, so its claim keeps no facts.
+                fields: if chain_stopped {
+                    AutomationFieldFacts::default()
+                } else {
+                    bounded_field_facts(&changes)
+                },
+                chain_stopped,
+            };
+            inserted.extend(insert_claims(
+                conn,
+                workspace_id,
+                &claiming,
+                &claimed,
+                now_ms,
+            )?);
         }
     }
     Ok(inserted)
@@ -1043,18 +1438,35 @@ pub(crate) fn settle_automation_claim_in_tx(
     let settled = claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
         reason: "settled automation claim not found after update",
     })?;
+    // Past the history, a done field claim goes. A done added or removed
+    // claim keeps its row, without facts: a later reconcile can derive the
+    // same moment again (a record whose frontmatter broke and healed), and
+    // the row's key is what keeps it from claiming twice.
+    let older_done = "workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
+         AND claim_id NOT IN ( \
+             SELECT claim_id FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 \
+             ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
+    let prune = params![
+        workspace_id,
+        settled.automation_id,
+        AUTOMATION_CLAIM_HISTORY_LIMIT
+    ];
     conn.execute(
-        "DELETE FROM automation_claims \
-         WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
-           AND claim_id NOT IN ( \
-               SELECT claim_id FROM automation_claims \
-               WHERE workspace_id = ?1 AND automation_id = ?2 \
-               ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)",
-        params![
-            workspace_id,
-            settled.automation_id,
-            AUTOMATION_CLAIM_HISTORY_LIMIT
-        ],
+        &format!(
+            "DELETE FROM automation_claims \
+             WHERE trigger_moment_order IS NULL AND {older_done}"
+        ),
+        prune,
+    )
+    .map_err(DomainError::sql_persist)?;
+    conn.execute(
+        &format!(
+            "UPDATE automation_claims SET change_fields_json = '[]', change_fields_omitted = 0 \
+             WHERE trigger_moment_order IS NOT NULL AND change_fields_json <> '[]' \
+               AND {older_done}"
+        ),
+        prune,
     )
     .map_err(DomainError::sql_persist)?;
     Ok(settled)

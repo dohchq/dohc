@@ -1629,6 +1629,7 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     match resulting {
         ResultingHead::Text { path, text } => {
             fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
+                .map(|_| ())
         }
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
@@ -1636,7 +1637,10 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 
 /// Reconcile a locally-originated file mutation with its closed Y.Doc
 /// lineage. The generated CRDT update is journaled before the mutation's
-/// artifact operation, so every peer applies one canonical rewrite.
+/// artifact operation, so every peer applies one canonical rewrite. Returns
+/// the collection record fields the mutation changed, if it wrote a bound
+/// record's frontmatter: from the lineage's fold, or, when the lineage holds
+/// no content, from the record's index against the written text.
 pub fn reconcile_local_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -1645,14 +1649,14 @@ pub fn reconcile_local_resulting_head_in_tx(
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let key =
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
@@ -1660,9 +1664,33 @@ pub fn reconcile_local_resulting_head_in_tx(
             actor_origin_id,
             now_ms,
             true,
-        ),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded(facts) => Ok(facts),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                workspace_id,
+                version_id,
+                object_id,
+                path,
+                text,
+                actor_origin_id,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
+}
+
+/// What folding a file's text into its Y.Doc lineage did.
+pub(crate) enum LineageFold {
+    /// The lineage holds no content: the file alone carries the text.
+    NoContent,
+    /// The lineage holds the text now, with the record fields its append
+    /// changed, if any.
+    Folded(Option<dohc_engine_domain::CollectionRecordApplyFacts>),
 }
 
 /// Finalize an imported file mutation without creating a second CRDT edit.
@@ -1781,6 +1809,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         state: complete,
     };
     fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
+        .map(|_| ())
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1791,12 +1820,12 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     actor_origin_id: Option<&str>,
     now_ms: i64,
     journal: bool,
-) -> Result<(), SyncError> {
+) -> Result<LineageFold, SyncError> {
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     };
     let has_content = marker.lineage_claim_status.has_claimed_base()
         || marker.head_update_seq > 0
@@ -1814,8 +1843,9 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             ],
         )
         .map_err(SyncError::persist)?;
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     }
+    let mut record_facts = None;
     let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
     if projection.content != chosen_text {
         if marker.content_kind == ContentKind::Scene {
@@ -1826,7 +1856,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             // scene. The durable file head is canonical: retire the lineage
             // and let the next open seed a fresh scene from the artifact,
             // exactly like a first open.
-            return retire_complete_ydoc_lineage_in_tx(tx, complete);
+            return retire_complete_ydoc_lineage_in_tx(tx, complete)
+                .map(|()| LineageFold::Folded(None));
         }
         let canonical_projection = doc
             .project(marker.content_kind)
@@ -1915,11 +1946,13 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                 now_ms,
             )?;
         }
+        record_facts = outcome.record_facts;
     }
     // The resolution's head IS the settled artifact now: align the settle
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
-    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)
+    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)?;
+    Ok(LineageFold::Folded(record_facts))
 }
 
 fn settle_ydoc_marker_to_text(
