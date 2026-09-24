@@ -4477,7 +4477,8 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
   const retryCloudSyncCommand = useCallback(
-    (askedFor: string) => bridge().retryCloudSync({ workspaceId: askedFor }),
+    (askedFor: string, reason: "person" | "reconnect") =>
+      bridge().retryCloudSync({ workspaceId: askedFor, reason }),
     [],
   );
   const syncFailureNotice = useSyncFailureNotice({

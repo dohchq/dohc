@@ -426,7 +426,7 @@ function makeBaseBridge(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
     retryCloudSync: vi.fn(
-      async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS,
+      async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
@@ -15587,7 +15587,7 @@ describe("owner live documents", () => {
     bridge.getSyncStatus = vi.fn(async () => status);
     // The first Try again meets the same outage; the second gets through.
     bridge.retryCloudSync = vi
-      .fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => failing(3))
+      .fn(async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => failing(3))
       .mockImplementationOnce(async () => {
         status = failing(3);
         return status;

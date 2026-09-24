@@ -133,7 +133,7 @@ async function harness() {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
-  const retryCloudSync = vi.fn(async (_workspaceId: string) => undefined);
+  const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const registrations = createWorkspaceEngineIpc({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
@@ -193,11 +193,13 @@ describe("workspace engine IPC registrations", () => {
     const order: string[] = [];
     h.retryCloudSync.mockImplementation(async () => { order.push("pass"); });
     h.getStatus.mockImplementation(() => { order.push("status"); return healthy; });
-    await expect(h.invoke(CHANNELS.retryCloudSync)).resolves.toMatchObject({ state: "synced" });
-    expect(h.retryCloudSync).toHaveBeenCalledWith("workspace");
+    const asked = { workspaceId: "workspace", reason: "person" };
+    await expect(h.invoke(CHANNELS.retryCloudSync, asked)).resolves.toMatchObject({ state: "synced" });
+    expect(h.retryCloudSync).toHaveBeenCalledWith("workspace", "person");
+    await expect(h.invoke(CHANNELS.retryCloudSync)).rejects.toThrow();
     expect(order).toEqual(["pass", "status"]);
     h.writable.mockImplementation(() => {throw new Error("readonly");});
-    await expect(h.invoke(CHANNELS.retryCloudSync)).rejects.toThrow("readonly");
+    await expect(h.invoke(CHANNELS.retryCloudSync, asked)).rejects.toThrow("readonly");
     expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
   });
   it("registers the four groups in order and rejects untrusted callers before parsing", async () => {

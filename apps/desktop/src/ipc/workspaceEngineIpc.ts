@@ -5,7 +5,7 @@ import {
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
-  RestoreEngineMomentFileResult, WorkspaceIdPayload, SyncStatusResult,
+  RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
@@ -47,7 +47,7 @@ export function createWorkspaceEngineIpc<
   localAgentDisplayName(): string;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
-  retryCloudSync(workspaceId: string): Promise<void>;
+  retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -221,10 +221,10 @@ export function createWorkspaceEngineIpc<
     // Try again can say whether it worked.
     registerHandler(CHANNELS.retryCloudSync, async (event, payload) => {
       assertTrustedSender(event);
-      const input = WorkspaceIdPayload.parse(payload);
+      const input = RetryCloudSyncPayload.parse(payload);
       const workspace = requireWorkspace(input.workspaceId);
       assertWritableWorkspace(workspace);
-      await dependencies.retryCloudSync(input.workspaceId);
+      await dependencies.retryCloudSync(input.workspaceId, input.reason);
       return SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,

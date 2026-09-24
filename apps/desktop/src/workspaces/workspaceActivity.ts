@@ -456,8 +456,14 @@ export function createWorkspaceActivity(
   // The person asked to sync now, from a sync failure's Try again. Runs a
   // pass without waiting out the backoff and settles when it ends; the
   // outcome is in the status. No-op when the workspace has no engine.
-  function retryCloudSync(state: WorkspaceActivityState): Promise<void> {
-    return state.entry?.engine?.retryNow() ?? Promise.resolve();
+  function retryCloudSync(
+    state: WorkspaceActivityState,
+    reason: "person" | "reconnect",
+  ): Promise<void> {
+    return (
+      state.entry?.engine?.retryNow({ countsAsAttempt: reason === "person" }) ??
+      Promise.resolve()
+    );
   }
 
   // Sets (or clears) the active agent run for an open workspace. The engine

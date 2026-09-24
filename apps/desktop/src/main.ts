@@ -1883,9 +1883,12 @@ const activity = {
   },
   // Starts the pass under the lease and waits for it outside, so a pass that
   // waits on an unreachable server holds no workspace authority.
-  retryCloudSync: (workspaceId: string): Promise<void> =>
+  retryCloudSync: (
+    workspaceId: string,
+    reason: "person" | "reconnect",
+  ): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) =>
-      workspaceActivity.retryCloudSync(lease.state.activity),
+      workspaceActivity.retryCloudSync(lease.state.activity, reason),
     ),
   retryFailingCloudSyncs: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -1896,7 +1899,7 @@ const activity = {
           const failing = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
             workspaceActivity.getStatus(workspace, lease.state.activity).syncFailure,
           );
-          return failing ? activity.retryCloudSync(workspaceId) : undefined;
+          return failing ? activity.retryCloudSync(workspaceId, "reconnect") : undefined;
         })
         .catch((error: unknown) => {
           console.error(`[desktop] sync retry after wake failed for ${workspaceId}:`, error);
@@ -4051,7 +4054,7 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
-    retryCloudSync: workspaceId => activity.retryCloudSync(workspaceId),
+    retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,

@@ -37,7 +37,7 @@ function unreachable(sinceMs: number, attempts: number): Failure {
 // The shell's two hooks together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; failure: Failure | null | undefined },
-  retryCloudSync = vi.fn(async (_id: string): Promise<SyncStatusResult> => HEALTHY),
+  retryCloudSync = vi.fn(async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => HEALTHY),
 ) {
   const view = renderHook(
     ({ workspaceId, failure }: { workspaceId: string; failure: Failure | null | undefined }) => {
@@ -107,6 +107,40 @@ describe("useSyncFailureNotice", () => {
 
   // The shell remounts on every workspace switch, and its status starts
   // unknown until the workspace answers. That is not a recovery.
+  // #1233 review: each new attempt refiled the row as seen, which closed an
+  // open toast by itself.
+  it("keeps an open toast open when the next attempt fails", () => {
+    const view = renderNotice({ failure: unreachable(100, 2) });
+    expect(view.toasts()).toHaveLength(1);
+    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
+    expect(view.toasts()).toHaveLength(1);
+    expect(view.toasts()[0]!.detail).toBe("RelayUnreachableError: attempt 3");
+  });
+
+  // #1233 review: a retry answered after the shell unmounted marked the
+  // failure as toasted, so coming back showed a quiet row and later failures
+  // never interrupted.
+  it("ignores a retry that answers after the shell unmounted", async () => {
+    let answer: ((status: SyncStatusResult) => void) | null = null;
+    const retryCloudSync = vi.fn(
+      (_id: string, _reason: "person" | "reconnect") =>
+        new Promise<SyncStatusResult>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const first = renderNotice({ failure: unreachable(100, 1) }, retryCloudSync);
+    act(() => first.result.current.notice.retry());
+    await waitFor(() => expect(answer).not.toBeNull());
+    first.unmount();
+    await act(async () => {
+      answer?.({ ...HEALTHY, state: "sync-failed", syncFailure: unreachable(100, 2) });
+    });
+
+    const second = renderNotice({ failure: undefined });
+    second.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
+    expect(second.toasts()).toHaveLength(1);
+  });
+
   it("keeps a dismissal through a remount that starts with the status still loading", () => {
     const first = renderNotice({ failure: unreachable(100, 2) });
     act(() => {
@@ -154,7 +188,7 @@ describe("useSyncFailureNotice", () => {
 
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(retryCloudSync).toHaveBeenCalledWith("ws-a");
+    expect(retryCloudSync).toHaveBeenCalledWith("ws-a", "person");
 
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     await waitFor(() => expect(retryCloudSync).toHaveBeenCalledTimes(2));
@@ -162,7 +196,7 @@ describe("useSyncFailureNotice", () => {
   });
 
   it("files a failed retry request as the sync failure, so recovery clears it", async () => {
-    const retryCloudSync = vi.fn(async (_id: string): Promise<SyncStatusResult> => {
+    const retryCloudSync = vi.fn(async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => {
       throw new Error("This workspace is no longer active.");
     });
     const view = renderNotice({ failure: unreachable(100, 1) }, retryCloudSync);
@@ -180,7 +214,7 @@ describe("useSyncFailureNotice", () => {
     act(() => {
       window.dispatchEvent(new Event("online"));
     });
-    expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a");
+    expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "reconnect");
   });
 
   // A failed sync pass proves nothing about this machine's copy, so no

@@ -90,8 +90,10 @@ export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   // Runs a pass now instead of waiting out the backoff, and settles when it
-  // ends. The outcome is in the next snapshot, not in the promise.
-  retryNow(): Promise<void>;
+  // ends. The outcome is in the next snapshot, not in the promise. A pass that
+  // does not count as an attempt (a retry on reconnecting or waking) updates
+  // a failure's detail without adding to its attempts.
+  retryNow(options: { countsAsAttempt: boolean }): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -160,7 +162,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  function handleFailure(error: unknown, displacedDueAtMs: number | null | undefined): void {
+  function handleFailure(
+    error: unknown,
+    displacedDueAtMs: number | null | undefined,
+    countsAsAttempt: boolean,
+  ): void {
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
@@ -174,7 +180,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
       detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       sinceMs: syncFailure?.sinceMs ?? nowMs(),
-      attempts: (syncFailure?.attempts ?? 0) + 1,
+      attempts: syncFailure
+        ? syncFailure.attempts + (countsAsAttempt ? 1 : 0)
+        : 1,
     });
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
     scheduleBackoff(
@@ -275,7 +283,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  function runPass(rethrow: boolean, manual = false): Promise<void> {
+  function runPass(
+    rethrow: boolean,
+    manual = false,
+    countsAsAttempt = true,
+  ): Promise<void> {
     const result = chain.then(async () => {
       if (stopped) return;
       // A retry someone asked for keeps the automatic pass it displaces, in
@@ -297,7 +309,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       try {
         await doPass();
       } catch (error) {
-        handleFailure(error, displacedDueAtMs);
+        handleFailure(error, displacedDueAtMs, countsAsAttempt);
         if (rethrow) throw error;
       } finally {
         syncing = false;
@@ -329,9 +341,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }, debounceMs);
     },
 
-    retryNow() {
+    retryNow(options) {
       if (authExpired || stopped) return Promise.resolve();
-      return runPass(false, true);
+      return runPass(false, true, options.countsAsAttempt);
     },
 
     snapshot() {

@@ -36,28 +36,38 @@ export function useShellError(workspaceId: string) {
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
-  // `seen` files the row without a toast.
+  // `seen` files the row without a toast; "keep" gives it the seen state of
+  // the row of its kind it replaces, so an open toast stays open.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" = false) => {
       nextId.current += 1;
-      const next: ShellError = {
-        ...error,
-        message:
-          error.message.length > SHELL_ERROR_MAX_CHARS
-            ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
-            : error.message,
-        id: `shell-error-${nextId.current}`,
-        atMs: Date.now(),
-        seen,
-      };
-      setShellErrors((current) => [
-        ...current.filter(
-          (existing) =>
-            existing.message !== next.message &&
-            (next.kind === undefined || existing.kind !== next.kind),
-        ),
-        next,
-      ]);
+      const id = `shell-error-${nextId.current}`;
+      const atMs = Date.now();
+      const message =
+        error.message.length > SHELL_ERROR_MAX_CHARS
+          ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
+          : error.message;
+      setShellErrors((current) => {
+        const replaced =
+          error.kind === undefined
+            ? undefined
+            : current.find((existing) => existing.kind === error.kind);
+        const next: ShellError = {
+          ...error,
+          message,
+          id,
+          atMs,
+          seen: seen === "keep" ? (replaced?.seen ?? true) : seen,
+        };
+        return [
+          ...current.filter(
+            (existing) =>
+              existing.message !== next.message &&
+              (next.kind === undefined || existing.kind !== next.kind),
+          ),
+          next,
+        ];
+      });
     },
     [],
   );
@@ -133,8 +143,8 @@ export function useShellError(workspaceId: string) {
     [reportShellError],
   );
   const clearSearchError = useCallback(() => clearKind("workspace-search"), [clearKind]);
-  // One sync failure at a time: a new report replaces the last one, and
-  // `toast` decides whether it interrupts or only files its row.
+  // One sync failure at a time: a new report replaces the last one. A toast
+  // interrupts; otherwise the row keeps whatever toast its predecessor had.
   const reportSyncFailure = useCallback(
     (
       notice: { message: string; detail: string; toast: boolean },
@@ -142,7 +152,7 @@ export function useShellError(workspaceId: string) {
     ) =>
       push(
         { message: notice.message, detail: notice.detail, retry, kind: "cloud-sync" },
-        !notice.toast,
+        notice.toast ? false : "keep",
       ),
     [push],
   );

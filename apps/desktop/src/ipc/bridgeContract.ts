@@ -365,6 +365,13 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+// Who asked for a sync pass now. A person's retry counts toward the attempts
+// a failure's notice weighs; a retry on reconnecting or waking does not.
+export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
+  reason: z.enum(["person", "reconnect"]),
+});
+export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
@@ -6496,7 +6503,7 @@ export interface DohcDesktopBridge
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
-  retryCloudSync(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
+  retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;

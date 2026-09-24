@@ -33,13 +33,26 @@ export function useSyncFailureNotice(input: {
   workspaceId: string;
   // `undefined` while the status is still loading: unknown, not recovered.
   failure: SyncFailure | null | undefined;
-  retryCloudSync: (workspaceId: string) => Promise<SyncStatusResult>;
+  retryCloudSync: (
+    workspaceId: string,
+    reason: "person" | "reconnect",
+  ) => Promise<SyncStatusResult>;
   report: (notice: SyncFailureNotice, retry: () => void) => void;
   clear: () => void;
 }): { retry: () => void; noteDismissed: () => void } {
   const { workspaceId, failure, retryCloudSync, report, clear } = input;
   const workspaceRef = useRef(workspaceId);
   workspaceRef.current = workspaceId;
+  // A retry can answer after this shell unmounted on a workspace switch. Its
+  // answer then belongs to no surface and must not touch what the next mount
+  // reads.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const failureRef = useRef(failure);
   failureRef.current = failure;
   // The failed pass this mount last filed, so a status read that repeats it
@@ -57,9 +70,9 @@ export function useSyncFailureNotice(input: {
 
   const retry = useCallback(() => {
     const askedFor = workspaceRef.current;
-    void retryCloudSync(askedFor).then(
+    void retryCloudSync(askedFor, "person").then(
       (status) => {
-        if (workspaceRef.current !== askedFor) return;
+        if (!mountedRef.current || workspaceRef.current !== askedFor) return;
         const next = status.syncFailure;
         if (!next) {
           shownFailures.delete(askedFor);
@@ -81,7 +94,7 @@ export function useSyncFailureNotice(input: {
         );
       },
       (error: unknown) => {
-        if (workspaceRef.current !== askedFor) return;
+        if (!mountedRef.current || workspaceRef.current !== askedFor) return;
         file(
           {
             message: "dohc could not retry sync for this workspace.",
@@ -130,7 +143,7 @@ export function useSyncFailureNotice(input: {
   useEffect(() => {
     const onOnline = () => {
       if (!failureRef.current) return;
-      void retryCloudSync(workspaceRef.current).catch(() => undefined);
+      void retryCloudSync(workspaceRef.current, "reconnect").catch(() => undefined);
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
