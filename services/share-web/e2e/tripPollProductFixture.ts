@@ -5,6 +5,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 import {compileClosedApp} from '../../../apps/desktop/src/workspaces/closedAppCompiler';
+import {parseAppPublicationDeclaration} from '../../../apps/desktop/src/workspaces/ownerAppPublication';
 import {openSyncRelayStorage} from '../../sync-relay/src/storage';
 import {createSyncRelayHandler} from '../../sync-relay/src/server';
 import {hashLinkBearer} from '../../sync-relay/src/linkSecurity';
@@ -17,12 +18,10 @@ export async function tripPollProductFixture(evidence:string,viewerAssetsDir:str
   let storage:ReturnType<typeof openSyncRelayStorage>|undefined;
   try{
   execFileSync(process.execPath,[fileURLToPath(new URL('../../../apps/desktop/scripts/stage-trip-poll.mjs',import.meta.url)),root],{windowsHide:true,stdio:'pipe'});
-  const declaration=JSON.parse(readFileSync(join(root,'trip-poll/app.publish.json'),'utf8'));
+  const declaration=parseAppPublicationDeclaration(readFileSync(join(root,'trip-poll/app.publish.json')),'trip-poll');
   const digest=(value:Uint8Array|string)=>createHash('sha256').update(value).digest('hex');
-  // app.publish.json paths are relative to the app folder.
-  const at=(path:string)=>`trip-poll/${path}`,entryPath=at(declaration.entryPath);
-  const packageMap=Object.fromEntries(Object.entries(declaration.packageMap as Record<string,string>).map(([name,path])=>[name,at(path)]));
-  const inputs=declaration.inputs.map((path:string)=>{const bytes=readFileSync(join(root,at(path)));return{path:at(path),bytes,sha256:digest(bytes)};});
+  const {entryPath,packageMap}=declaration,collection=declaration.collection!;
+  const inputs=declaration.inputs.map(path=>{const bytes=readFileSync(join(root,path));return{path,bytes,sha256:digest(bytes)};});
   const bundle=await compileClosedApp({entryPath,inputs,packageMap,bounds:{maxInputFiles:512,maxInputBytes:128*1024*1024,maxOutputBytes:32*1024*1024}});
   storage=openSyncRelayStorage(join(root,'relay.sqlite'));const secret='S'.repeat(43),secondSecret='T'.repeat(43);
   const key='app-launch-fixture-key-with-more-than-thirty-two-bytes',exchangeKey='app-launch-relay-exchange-key-with-more-than-thirty-two-bytes';
@@ -30,7 +29,7 @@ export async function tripPollProductFixture(evidence:string,viewerAssetsDir:str
   storage.claimWorkspace({workspaceId:'w',ownerUserId:'owner',createdAtMs:1});
   for(const [grantId,bearer]of [['g',secret],['g2',secondSecret]] as const)storage.createFileLinkShare({share:{shareId:grantId,workspaceId:'w',granterUserId:'owner',selectorJson:JSON.stringify({paths:['trip-poll'],versionId:null}),createdAtMs:1},grant:{grantId,shareId:grantId,principalKind:'link',principalUserId:null,principalEmail:null,access:'view',generation:1,status:'active',createdAtMs:1,revokedAtMs:null,parentGrantId:null},credential:{credentialId:grantId,grantId,secretHash:hashLinkBearer(bearer,key),generation:1,mintedAtMs:1,retiredAtMs:null},guard:()=>{}});
   const schemaPath='trip-poll/responses/collection.yaml',schema=readFileSync(join(root,schemaPath));
-  const capability={...declaration.collection,collectionPath:at(declaration.collection.collectionPath),schemaSha256:digest(schema)};
+  const capability={...collection,schemaSha256:digest(schema)};
   const files=[...inputs,{path:schemaPath,bytes:schema,sha256:digest(schema)}];
   for(const file of files)storage.putBlob({workspaceId:'w',sha256:file.sha256,content:file.bytes,createdAtMs:1});
   storage.appendLogBatch({workspaceId:'w',originId:'owner',ops:files.map((file,index)=>({originSeq:index,opKind:'moment.append',recordedAtMs:1,payloadJson:JSON.stringify({momentId:'source-'+index,versionId:'main',objectId:'source-'+index,path:file.path,recordedAtMs:1,operation:'write',beforePresent:'null',payloadBeforeBlobSha256:null,payloadBeforePath:null,payloadAfterBlobSha256:file.sha256,payloadAfterPath:file.path,payloadAfterContentKind:'text',payloadAfterByteLength:file.bytes.byteLength,metadata:{origin:'api'}})}))});

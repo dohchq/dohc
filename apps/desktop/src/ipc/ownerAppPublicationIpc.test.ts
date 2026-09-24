@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
@@ -16,31 +16,15 @@ function harness() {
     ["app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {} }))],
     ["app/index.js", Buffer.from("document.body.textContent='trip';")],
   ]);
-  const blobs = new Map<string, Uint8Array>();
   const controller = new AbortController();
   const workspace = { workspaceId: "w", shareView: undefined as unknown };
   let rendererGeneration = 1, credentialGeneration = 1, current = true, captures = 0;
   let beforeCapture: (count: number) => void = () => {};
   const requests: string[] = [];
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    requests.push(request.method);
-    const params = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.list") return { id: request.id, result: { nextAfterPath: null, files: [...source].map(([path, bytes]) => ({ path, objectId: path,
-      contentKind: "text", sha256: hash(bytes), byteLength: bytes.byteLength, binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
-    if (request.method === "versionedText.captureSources") {
-      beforeCapture(++captures);
-      const paths = params.paths as string[];
-      const files = [...paths].sort().map(path => {
-        const bytes = source.get(path)!;
-        const sha256 = hash(bytes); blobs.set(sha256, Uint8Array.from(bytes));
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" };
-      });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files, totalBytes: files.reduce((n, f) => n + f.byteLength, 0),
-        sourceDigest: hash(JSON.stringify(["dohc-source-capture-v1", "w", "main", files])) } };
-    }
-    const bytes = blobs.get(String(params.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const adapter = sourceCaptureAdapter(source, { onRequest(method) {
+    requests.push(method);
+    if (method === "versionedText.captureSources") beforeCapture(++captures);
+  } });
   const credentials = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" };
   const grant = { shareId: "s", grantId: "g", generation: 7, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null },
     createdAtMs: 1, lastUsedAtMs: null, urlIssuedAtMs: null, dependents: [], access: "view" };
