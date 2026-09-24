@@ -2854,6 +2854,7 @@ function rememberPendingCliRunMessageLink(
 }
 
 const chatDispatchService = createChatDispatchService({
+  postNotice: (input) => noticeStore().postNotice(input),
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,

@@ -1,4 +1,6 @@
 import { configuredRunnerCommand } from "./agentToolCatalog";
+import { NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import type { PostNoticeInput } from "../notices/noticeStore";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -21,6 +23,14 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+
+// "Your agent finished in "Plan day 2"", shortening the thread's name to fit.
+function runNoticeTitle(what: string, thread: string): string {
+  if (!thread) return what;
+  const room = NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length;
+  const name = [...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`;
+  return `${what} in "${name}"`;
+}
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
 const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
@@ -115,6 +125,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   nowMs?: () => number;
   createId?: () => string;
   onError?: (error: unknown) => void;
+  // Tells this computer's person that a run ended.
+  postNotice?(input: PostNoticeInput): Promise<void>;
 }
 
 interface ChatDispatchThreadState {
@@ -605,6 +617,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         scheduleRecoveryScan(live.workspace);
         return false;
       }
+      await noticeRunEnded(live).catch(reportError);
     }
     if (!live.child.hasExited()) return false;
     await clearLiveAttribution(live);
@@ -642,7 +655,29 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch (error) {
       reportError(error);
       scheduleRecoveryScan(live.workspace);
+      return;
     }
+    await noticeRunEnded(live).catch(reportError);
+  }
+
+  // Tells this computer's person that a run ended, once its end is durable,
+  // naming the thread it ran in. The thread explains a failure.
+  async function noticeRunEnded(live: LiveRun): Promise<void> {
+    const intent = live.terminalIntent;
+    if (!options.postNotice || !intent) return;
+    const { workspaceId } = live.workspace;
+    const { runId, threadId } = live.claim.run;
+    const threads = await options.chatStoreFor(live.workspace).listThreads({ workspaceId });
+    const thread = threads.find((candidate) => candidate.id === threadId)?.title.replace(/\s+/gu, " ").trim() ?? "";
+    const failed = intent.kind === "fail" || intent.exitCode !== 0;
+    await options.postNotice({
+      workspaceId,
+      noticeId: `agent-run:${workspaceId}:${runId}`,
+      kind: "agent-run",
+      title: runNoticeTitle(failed ? "Your agent's run failed" : "Your agent finished", thread),
+      body: "",
+      target: { thread: threadId, run: runId },
+    });
   }
 
   async function failClaimBeforeRun(
