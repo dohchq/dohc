@@ -988,3 +988,132 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
         json!({ "value": "blocked" })
     );
 }
+
+/// A record an automation creates through `versionedText.write`, as the
+/// desktop's `collections.createRecord` does, is added as that
+/// automation's change: the moment records the author, and the added claim
+/// names it at its depth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
+    const STAMP: &str = "collection:tasks#stamp";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("engine db path");
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        store
+            .write_with(&NoFaults, |tx| {
+                subscribe_automation_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    &AutomationSubscription {
+                        automation_id: "collection:tasks#watch".to_owned(),
+                        prefix: "tasks".to_owned(),
+                        kinds: vec![AutomationChangeKind::Added],
+                        fields: None,
+                    },
+                    5,
+                )
+            })
+            .expect("subscribe");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-schema".to_owned(),
+                    path: "tasks/collection.yaml".to_owned(),
+                    text: "fields:\n  status:\n    type: text\n".to_owned(),
+                    moment_id: "schema".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed the schema");
+    }
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let mut id = 0;
+    let open = async |id: &mut u64| -> WorkspaceHandle {
+        *id += 1;
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    *id,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID,
+                        "captureMode": "none",
+                    }),
+                ),
+            )
+            .await
+            .expect("open workspace");
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
+    };
+    let handle = open(&mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "object-beta",
+            "path": "tasks/beta.md",
+            "text": "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nstatus: open\n---\n\nBody",
+            "momentId": "beta-created",
+            "origin": "api",
+            "author": {
+                "kind": "automation",
+                "automationId": STAMP,
+                "onBehalfOf": "local",
+                "depth": 2,
+            },
+        }),
+    )
+    .await;
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen store");
+        store
+            .write_with(&NoFaults, |tx| {
+                let reconciliation = reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+                claim_record_lifecycle_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    "main",
+                    &reconciliation.lifecycle,
+                    20,
+                )
+            })
+            .expect("bind the record and claim its addition");
+    }
+    let handle = open(&mut id).await;
+    let added = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimNext",
+        json!({ "automationIdPrefix": "collection:" }),
+    )
+    .await;
+    assert_eq!(added["automationId"], json!("collection:tasks#watch"));
+    assert_eq!(added["change"]["kind"], json!("added"));
+    assert_eq!(added["change"]["authorOriginId"], json!(STAMP));
+    assert_eq!(added["change"]["actorKind"], json!("automation"));
+    assert_eq!(added["depth"], json!(2));
+}
