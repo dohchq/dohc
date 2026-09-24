@@ -202,6 +202,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             json!({ "claimId": "atc_x", "state": "done" }),
         ),
         ("automations.retry", json!({ "claimId": "atc_x" })),
+        ("automations.release", json!({ "claimId": "atc_x" })),
     ] {
         id += 1;
         let error = transport
@@ -542,6 +543,57 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         "attempts keep rising, and this is run 2"
     );
     assert_eq!(rerun["change"], second["change"]);
+
+    // An executor that cannot run the claim yet hands it back: pending with
+    // the attempts it had before this serve, the same run, and announced so
+    // a drain serves it again. Only a running claim can be released.
+    while notices.try_recv().is_ok() {}
+    let released = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.release",
+        json!({ "claimId": rerun["claimId"], "nowMs": 1010 }),
+    )
+    .await;
+    assert_eq!(
+        (
+            released["state"].clone(),
+            released["attempts"].clone(),
+            released["run"].clone()
+        ),
+        (json!("pending"), json!(1), json!(2))
+    );
+    let notice = notices.try_recv().expect("the release announces the claim");
+    assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    assert_eq!(notice.payload["claimId"], rerun["claimId"]);
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.release",
+        json!({ "claimId": rerun["claimId"] }),
+    )
+    .await;
+    assert_eq!(
+        error.code,
+        ErrorCode::InvalidParams,
+        "a pending claim cannot be released"
+    );
+    let rerun = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimNext",
+        json!({ "nowMs": 1010, "automationIdPrefix": "plugin:" }),
+    )
+    .await;
+    assert_eq!(rerun["claimId"], second["claimId"]);
+    assert_eq!(
+        (rerun["attempts"].clone(), rerun["run"].clone()),
+        (json!(2), json!(2)),
+        "the released serve did not count"
+    );
     call(
         &transport,
         &handle,
@@ -661,8 +713,9 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
 /// `versionedText.write` claims once for each change: the added claim keys
 /// on the moment that created the file and lists its values, the field
 /// write keys on its history row and carries previous and next values, and
-/// a repeated or body-only write claims nothing. Each claim announces
-/// itself.
+/// a repeated or body-only write claims nothing. A write an automation
+/// authors claims as that automation, never for itself, and a rollback
+/// claims like any write. Each claim announces itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
     const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -858,4 +911,81 @@ async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
         "a repeated or body-only write claims nothing"
     );
     assert!(notices.try_recv().is_err(), "and announces nothing");
+
+    // An automation's write names it: the writer skips its own change, and
+    // another automation's write claims at that writer's depth.
+    let write_as = async |id: &mut u64, moment_id: &str, text: String, automation_id: &str| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "objectId": OBJECT,
+                "path": "tasks/alpha.md",
+                "text": text,
+                "momentId": moment_id,
+                "origin": "api",
+                "author": {
+                    "kind": "automation",
+                    "automationId": automation_id,
+                    "onBehalfOf": "local",
+                    "depth": 2,
+                },
+            }),
+        )
+        .await
+    };
+    write_as(
+        &mut id,
+        "alpha-own",
+        record("blocked", "New body"),
+        "collection:tasks#watch",
+    )
+    .await;
+    assert_eq!(
+        claim_next(&mut id).await,
+        Value::Null,
+        "an automation does not claim its own write"
+    );
+    let stamped = write_as(
+        &mut id,
+        "alpha-stamped",
+        record("review", "New body"),
+        "collection:tasks#stamp",
+    )
+    .await;
+    let stamped_claim = claim_next(&mut id).await;
+    assert_eq!(stamped_claim["depth"], json!(2));
+    assert_eq!(
+        stamped_claim["change"]["authorOriginId"],
+        json!("collection:tasks#stamp")
+    );
+    assert_eq!(stamped_claim["change"]["actorKind"], json!("automation"));
+
+    // Rolling a write back changes the record too, and wakes the executor.
+    while notices.try_recv().is_ok() {}
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.rollback",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "mutationMomentId": stamped["moment"]["momentId"],
+            "origin": "restore",
+        }),
+    )
+    .await;
+    let notice = notices
+        .try_recv()
+        .expect("the rollback announces its claim");
+    assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    let rolled_back = claim_next(&mut id).await;
+    assert_eq!(
+        rolled_back["change"]["fields"][0]["next"],
+        json!({ "value": "blocked" })
+    );
 }

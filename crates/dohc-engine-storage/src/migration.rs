@@ -2135,7 +2135,8 @@ CREATE INDEX idx_automation_claims_automation
 /// may now hold a third trigger shape. SQLite cannot change a CHECK in
 /// place, so the claims table is rebuilt with every row kept. Capture now
 /// looks up the record a written file is bound to, so bindings gain an index
-/// by object.
+/// by object. `merged_moments` names the moments a merge wrote: they replay
+/// another version's changes, which claimed where they were made.
 const V2_AUTOMATION_RECORD_LIFECYCLE_DDL: &str = "\
 CREATE TABLE automation_claims_next (
     workspace_id          TEXT    NOT NULL,
@@ -2187,7 +2188,7 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
     ON automation_claims(workspace_id, automation_id, trigger_history_id)
     WHERE trigger_history_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
-    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind)
+    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
     WHERE trigger_moment_order IS NOT NULL;
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
@@ -2195,6 +2196,11 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 CREATE INDEX collection_records_by_object
     ON collection_records(workspace_id, version_id, object_id);
+CREATE TABLE merged_moments (
+    workspace_id TEXT    NOT NULL,
+    moment_order INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, moment_order)
+) STRICT;
 ";
 
 /// The frozen, ordered list of migrations this build knows.
@@ -2493,7 +2499,7 @@ mod tests {
             ),
             (
                 "v2-automation-record-lifecycle",
-                "db51f8e825349f1728bb563f523e8b3a269aeb1664a4e3ab4eb7b8bb188a717a",
+                "4303a35f9bcb94db49201155c1f0bab8bd94aa95d98fabb894333d2d1d70f64d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

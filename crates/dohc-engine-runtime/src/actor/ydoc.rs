@@ -1913,6 +1913,47 @@ pub(super) fn ydoc_record_update_on_store(
     }
 }
 
+/// The author a settle's moment records: the actor of the lineage's newest
+/// update, when it declared an agent or an automation. A record an
+/// automation creates through a document session is then added as that
+/// automation's change, at its depth.
+fn newest_update_author_json(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, dohc_engine_domain::DomainError> {
+    tx.query_row(
+        "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth FROM ydoc_updates \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+         ORDER BY seq DESC LIMIT 1",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| {
+            let kind: Option<String> = row.get(1)?;
+            let Some(actor_kind) = kind
+                .as_deref()
+                .and_then(dohc_engine_domain::ChangeActorKind::parse)
+            else {
+                return Ok(None);
+            };
+            let depth: Option<i64> = row.get(3)?;
+            let attribution = ChangeAttribution {
+                actor_kind,
+                on_behalf_of: row.get(2)?,
+                depth: depth
+                    .and_then(|depth| u32::try_from(depth).ok())
+                    .unwrap_or(0),
+            };
+            let actor: Option<String> = row.get(0)?;
+            Ok(dohc_engine_domain::moment_author_json(
+                actor.as_deref(),
+                Some(&attribution),
+            ))
+        },
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|error| dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(error)))
+}
+
 /// One recorded Y.Doc append, and what its origination attempt decided.
 ///
 /// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
@@ -2502,6 +2543,7 @@ pub(super) fn ydoc_settle_on_store(
             "moment-ydoc-{}",
             dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
         );
+        let author_json = newest_update_author_json(tx, key)?;
         let result = write_projected_text_in_tx(
             tx,
             ProjectedWriteText {
@@ -2514,7 +2556,7 @@ pub(super) fn ydoc_settle_on_store(
                 metadata_origin: "ydoc",
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: author_json.as_deref(),
                 now_ms,
                 request_id: None,
             },

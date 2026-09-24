@@ -50,12 +50,15 @@ pub struct MergeExecutionResult {
     pub materialize_outcome: PostCommitMaterializeOutcome,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackExecutionResult {
     pub deduped: bool,
     pub materialize_enqueued: bool,
     pub materialized: bool,
     pub materialize_outcome: PostCommitMaterializeOutcome,
+    /// Automation claims the restored text's field changes inserted, for the
+    /// caller to announce.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 impl ActorHandle {
@@ -584,6 +587,10 @@ fn versioned_text_write_on_store(
         return Err(RuntimeError::Cancelled);
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
+    // The write's author names who changed the record's fields: an agent, an
+    // automation at its chain depth, or a person.
+    let (actor, attribution) =
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
         let mut result = match restore_before_moment_id {
             Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
@@ -600,7 +607,8 @@ fn versioned_text_write_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
-                None,
+                actor.as_deref(),
+                attribution.as_ref(),
                 input.now_ms,
             )?
         {
@@ -667,6 +675,7 @@ fn versioned_binary_write_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 None,
                 input.now_ms,
             )?;
@@ -784,6 +793,7 @@ fn versioned_text_rename_on_store(
                     &input.version_id,
                     &result.object.object_id,
                     resulting,
+                    None,
                     None,
                     input.now_ms,
                 )
@@ -1233,6 +1243,9 @@ fn versioned_text_rollback_on_store(
         return Err(RuntimeError::SceneAssetDeletePending);
     }
     let mut restored_asset_jobs = Vec::new();
+    let mut automation_claims = Vec::new();
+    let (actor, attribution) =
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
@@ -1251,20 +1264,20 @@ fn versioned_text_rollback_on_store(
                 |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
             );
             // Restoring older text is a change on this computer: its field
-            // changes claim like any other write. The claims wait for the
-            // executor's next drain; a rollback announces none.
+            // changes claim like any other write.
             if let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
                 object_id,
                 resulting,
-                None,
+                actor.as_deref(),
+                attribution.as_ref(),
                 recorded_at_ms,
             )
             .map_err(map_fold_error)?
             {
-                dohc_engine_domain::claim_automation_triggers_in_tx(
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
                     tx,
                     &input.workspace_id,
                     &facts,
@@ -1308,6 +1321,7 @@ fn versioned_text_rollback_on_store(
                      {error}"
                 );
                 return Ok(RollbackExecutionResult {
+                    automation_claims: automation_claims.clone(),
                     deduped,
                     materialize_enqueued: true,
                     materialized: false,
@@ -1337,6 +1351,7 @@ fn versioned_text_rollback_on_store(
         _ => {
             eprintln!("engine: rollback committed but loading its restore job(s) failed");
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1364,6 +1379,7 @@ fn versioned_text_rollback_on_store(
                  restore remains pending for normal replay: {error}"
             );
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1401,6 +1417,7 @@ fn versioned_text_rollback_on_store(
                  {error}"
             );
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1408,6 +1425,7 @@ fn versioned_text_rollback_on_store(
             });
         }
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: has_jobs || !restored_asset_jobs.is_empty(),
             materialized: false,
@@ -1426,6 +1444,7 @@ fn versioned_text_rollback_on_store(
         && !restored_asset_jobs.is_empty()
     {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1434,6 +1453,7 @@ fn versioned_text_rollback_on_store(
     }
     if !has_jobs {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: !restored_asset_jobs.is_empty(),
             materialized: !restored_asset_jobs.is_empty(),
@@ -1448,6 +1468,7 @@ fn versioned_text_rollback_on_store(
     if let Some(job) = job {
         if deduped && job.status != JobStatus::Pending {
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped: true,
                 materialize_enqueued: false,
                 materialized: false,
@@ -1470,6 +1491,7 @@ fn versioned_text_rollback_on_store(
             }
         };
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized,
@@ -1480,6 +1502,7 @@ fn versioned_text_rollback_on_store(
     let (Some(write_job), Some(delete_job)) = (rename_write_job, rename_delete_job) else {
         eprintln!("engine: rollback committed with an incomplete rename restore job pair");
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1489,6 +1512,7 @@ fn versioned_text_rollback_on_store(
     if deduped && write_job.status != JobStatus::Pending && delete_job.status != JobStatus::Pending
     {
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped: true,
             materialize_enqueued: false,
             materialized: false,
@@ -1525,6 +1549,7 @@ fn versioned_text_rollback_on_store(
             );
         }
         return Ok(RollbackExecutionResult {
+            automation_claims: automation_claims.clone(),
             deduped,
             materialize_enqueued: true,
             materialized: false,
@@ -1535,6 +1560,7 @@ fn versioned_text_rollback_on_store(
         Ok(Some(job)) => job,
         Ok(None) | Err(_) => {
             return Ok(RollbackExecutionResult {
+                automation_claims: automation_claims.clone(),
                 deduped,
                 materialize_enqueued: true,
                 materialized: false,
@@ -1558,6 +1584,7 @@ fn versioned_text_rollback_on_store(
         }
     };
     Ok(RollbackExecutionResult {
+        automation_claims: automation_claims.clone(),
         deduped,
         materialize_enqueued: true,
         materialized,
@@ -1852,6 +1879,7 @@ fn versioned_text_merge_on_store(
                                 text: &write.snapshot.text,
                             },
                             None,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -1883,6 +1911,7 @@ fn versioned_text_merge_on_store(
                             &delete.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                             None,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -1900,6 +1929,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &write.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             None,
                             input.now_ms,
                         )

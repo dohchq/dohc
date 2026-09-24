@@ -73,6 +73,13 @@ struct AutomationRetryParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationReleaseParams {
+    claim_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationListClaimsParams {
     automation_id: String,
 }
@@ -310,6 +317,38 @@ impl EngineService {
             ),
         )
         .await?;
+        Ok(automation_claim_json(&claim))
+    }
+
+    /// An executor hands back a running claim it cannot run yet. The claim
+    /// is pending again without an attempt counted, and announces itself
+    /// post-commit like a new one, so a drain picks it up again.
+    pub(super) async fn automations_release(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationReleaseParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.release",
+            open.actor.automation_release(
+                open.workspace_id.clone(),
+                params.claim_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            std::slice::from_ref(&claim),
+        );
         Ok(automation_claim_json(&claim))
     }
 
