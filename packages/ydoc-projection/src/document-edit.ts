@@ -29,11 +29,11 @@ const BLOCK_SEPARATOR = '\n\n'
 
 // What an agent can do when its edit would lose what a person types.
 export const DOCUMENT_OPEN_REFUSAL =
-  'Someone has this document open, and this edit would remove a block, join two blocks, ' +
-  'or change a block\'s kind, such as a paragraph into a heading. Anything they type into ' +
-  'that block meanwhile would be lost, so nothing changed. Instead, change only the text ' +
-  'inside blocks and add new blocks; ask the person to make this change; or retry after ' +
-  'they close the document.'
+  'Someone may be typing in this document, here or on a device it syncs to, and this edit ' +
+  'would remove a block, join two blocks, or change a block\'s kind, such as a paragraph ' +
+  'into a heading. Anything they type into that block meanwhile would be lost, so nothing ' +
+  'changed. Instead, change only the text inside blocks and add new blocks; ask the person ' +
+  'to make this change; or retry after they close the document.'
 
 export interface DocumentEdit {
   /** Markdown that occurs exactly once in the document. Omit it to add `replacement` at the end. */

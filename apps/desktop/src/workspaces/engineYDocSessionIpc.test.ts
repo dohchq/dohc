@@ -1330,7 +1330,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const h = harness(session);
       await h.ipc.open(new FakeSender(7), openPayload);
       await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." })))
-        .rejects.toThrow("Someone has this document open, and this edit would remove a block");
+        .rejects.toThrow("this edit would remove a block");
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
       await h.ipc.shutdown();
     });
@@ -1373,6 +1373,29 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(trace).toEqual(["apply", "settle", "close"]);
       expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.");
+    });
+
+    it("keeps blocks in a synced document no editor here holds, since another device may be typing", async () => {
+      const session = Object.assign(editableSession(), { lineageClaimId: "claim-1" });
+      const h = harness(session);
+      keepBlocksSeen.length = 0;
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." })))
+        .rejects.toThrow("this edit would remove a block");
+      expect(keepBlocksSeen).toEqual([true]);
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("runs two edits to one document in turn, so the second reads the first one's result", async () => {
+      const session = editableSession([], "Budget: 400 dollars");
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const first = h.ipc.editDocument(edit({ find: "400", replacement: "450" }));
+      const second = h.ipc.editDocument(edit({ find: "400", replacement: "500" }));
+      await expect(first).resolves.toEqual({ path: "notes/a.md", changed: true });
+      await expect(second).rejects.toThrow("not in the document");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("Budget: 450 dollars");
+      await h.ipc.shutdown();
     });
 
     it("reports a saved edit as done when only the session's release fails", async () => {

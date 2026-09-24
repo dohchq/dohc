@@ -300,6 +300,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
+  // One main-side edit at a time per document. Each edit reads the document's
+  // state when its turn comes, so a second edit matches against the first
+  // one's result instead of the state both started from.
+  readonly #documentEdits = new Map<string, Promise<unknown>>();
   readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
 
   constructor(options: EngineYDocSessionIpcOptions) {
@@ -738,27 +742,42 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
       const path = await this.#markdownDocumentPath(workspace, input.path);
-      authority.assertCurrent();
-      const attachment = workspace.attachmentId;
-      const held = this.#owner.documentSession(attachment, path);
-      if (held) return { path, changed: await this.#editHeld(held, path, input) };
+      const key = `${workspace.workspaceId}\u0000${path}`;
+      const turn = (this.#documentEdits.get(key) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async () => {
+          authority.assertCurrent();
+          return await this.#editResolved(workspace, path, input);
+        });
+      this.#documentEdits.set(key, turn);
       try {
-        const changed = await this.#documentReservations.runMutation(
-          attachment,
-          path,
-          () => this.#owner.ownsDocument(attachment, path),
-          async () => {
-            authority.assertCurrent();
-            return await this.#editUnheld(workspace, path, input);
-          },
-        );
-        return { path, changed };
-      } catch (error) {
-        if (!(error instanceof LiveDocumentOwnedError)) throw error;
-        throw new Error(`${path} opened in an editor as dohc began the edit, and nothing changed. Try again.`);
+        return { path, changed: await turn };
+      } finally {
+        if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
     } finally {
       authority.release();
+    }
+  }
+
+  async #editResolved(
+    workspace: EngineYDocWorkspace,
+    path: string,
+    input: LiveDocumentEdit,
+  ): Promise<boolean> {
+    const attachment = workspace.attachmentId;
+    const held = this.#owner.documentSession(attachment, path);
+    if (held) return await this.#editHeld(held, path, input);
+    try {
+      return await this.#documentReservations.runMutation(
+        attachment,
+        path,
+        () => this.#owner.ownsDocument(attachment, path),
+        async () => await this.#editUnheld(workspace, path, input),
+      );
+    } catch (error) {
+      if (!(error instanceof LiveDocumentOwnedError)) throw error;
+      throw new Error(`${path} opened in an editor as dohc began the edit, and nothing changed. Try again.`);
     }
   }
 
@@ -822,7 +841,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         throw new Error(`${path} is not a Markdown document.`);
       }
       changed = await applyDocumentEdit(provider, path, input, {
-        keepBlocks: false,
+        // No editor here holds it, but a replicated lineage is shared with
+        // other devices or share recipients, who may be typing in it.
+        keepBlocks: provider.lineageClaimId != null,
         assertSame: () => undefined,
         show: () => undefined,
       });
