@@ -24,6 +24,7 @@ import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sha
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChannelSync";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 
@@ -83,7 +84,9 @@ export function registerDirectMessagesIpcHandlers<
   listWorkspaces(): RegistryEntry[];
   stateDir(): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
-  syncRendererSharedChannelsForChatTarget(operation: Operation, target?: ChatRelayIdentityTarget): Promise<unknown>;
+  syncRendererSharedChannelsForChatTarget(
+    operation: Operation, target?: ChatRelayIdentityTarget,
+  ): Promise<SharedChannelPassOutcome>;
   assertShareNotHeldElsewhere(shareId: string, workspaceId: string, channelWireId?: string): void;
   reserveAndPullSharedChannelForWorkspace(input: {
     operation: Operation; assertCurrent?: () => void; relay: SyncRelayConnection;
@@ -221,16 +224,21 @@ export function registerDirectMessagesIpcHandlers<
           try {
             // Push the member's local ops, pull everyone else's, for the joined
             // DMs (and other shared channels) this bounded pass reaches.
-            await syncRendererSharedChannelsForChatTarget(
+            const outcome = await syncRendererSharedChannelsForChatTarget(
               operation,
               input.openChannelId
                 ? { channelId: input.openChannelId }
                 : undefined,
             );
             assertCurrentDmSyncSession();
+            // Only a pass that moved ops gives the cloud engine follow-up work.
+            // Queueing after an idle pass would emit a change event, refresh
+            // Chats, and run this handler again.
             // The cloud engine owns its work after this request queues it. Do
             // not extend the renderer operation into that durable process.
-            activity.queueCloudSync(workspace.workspaceId);
+            if (outcome.pushed || outcome.changed) {
+              activity.queueCloudSync(workspace.workspaceId);
+            }
           } catch (error) {
             assertCurrentDmSyncSession();
             // Offline degradation: the local DM list still serves and the next

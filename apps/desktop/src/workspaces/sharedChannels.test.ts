@@ -501,6 +501,7 @@ describe("syncJoinedSharedChannels", () => {
     expect(result).toEqual({
       endedShareIds: [],
       readOnlyShareIds: [],
+      pushed: true,
       changed: true,
       uncovered: 0,
       failedRows: 0,
@@ -570,6 +571,7 @@ describe("syncJoinedSharedChannels", () => {
     expect(result).toEqual({
       endedShareIds: [],
       readOnlyShareIds: [],
+      pushed: false,
       changed: false,
       uncovered: 0,
       // The flaky row was reached and not refreshed: in the rotation, not fresh.

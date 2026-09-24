@@ -13,6 +13,7 @@ import { readDeclinedDms } from "../workspaces/dmRequestStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChannelSync";
 import type { JoinedSharedChannel, RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -108,7 +109,9 @@ async function harness() {
     return { fetched: 1, applied: 1, skipped: 0, nextCursor: 1 };
   });
   const project = vi.fn(async () => { events.push("project"); });
-  const sync = vi.fn(async () => { events.push("sync"); return 0; });
+  const sync = vi.fn(async (): Promise<SharedChannelPassOutcome> => {
+    events.push("sync"); return { unrefreshed: 0, pushed: false, changed: false };
+  });
   const activity = { queueCloudSync: vi.fn(() => { events.push("cloud"); }) };
   const dispatch = { scanWorkspace: vi.fn(async () => { events.push("dispatch"); }) };
   const kinds = new Map<string, "dm" | "not-dm">([["request", "dm"]]);
@@ -245,6 +248,29 @@ describe("registered direct message boundaries", () => {
     await rejected;
     expect(h.relayJson).not.toHaveBeenCalled();
     expect(h.linkedChatStoreFor).not.toHaveBeenCalled();
+  });
+
+  it("does not queue a cloud sync after a pass that moved nothing", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" })).resolves.toMatchObject({ available: true, dms: [], pending: [], declined: [] });
+    expect(h.events).toEqual(["list-grants", "sync"]);
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, SharedChannelPassOutcome]>([
+    ["pushed", { unrefreshed: 0, pushed: true, changed: false }],
+    ["applied pulled", { unrefreshed: 0, pushed: false, changed: true }],
+  ])("queues one cloud sync after a pass that %s ops and none after the idle passes that follow", async (_moved, outcome) => {
+    const h = await harness();
+    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return outcome; });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    expect(h.events).toEqual(["list-grants", "sync", "cloud"]);
+    // The cloud engine's change event refreshes Chats. Those passes move
+    // nothing, so they must not queue again.
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    expect(h.sync).toHaveBeenCalledTimes(3);
+    expect(h.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
   });
 
   it("serves local conversations while signed out without syncing", async () => {

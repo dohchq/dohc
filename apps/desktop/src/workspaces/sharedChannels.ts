@@ -249,6 +249,8 @@ export interface SyncJoinedSharedChannelsResult {
   // Shares whose ACCESS turned out read-only on push (flipped or always was):
   // their local ops stay local; pull still ran.
   readOnlyShareIds: string[];
+  // True when any push sent local ops to the relay.
+  pushed: boolean;
   // True when any pull applied new ops — the caller should refresh the UI.
   changed: boolean;
   // Live rows the rotation did not reach this pass.
@@ -300,6 +302,7 @@ export async function syncJoinedSharedChannels(input: {
   const { pull, push } = input;
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
+  let pushed = false;
   let changed = false;
   let failedRows = 0;
   // The window rotates: this pass resumes after the row the last one stopped on
@@ -362,7 +365,7 @@ export async function syncJoinedSharedChannels(input: {
     try {
       if (channel.access === "read-write") {
         try {
-          await push(target);
+          if ((await push(target)).pushed > 0) pushed = true;
         } catch (error) {
           // The grant's access can be read-only even when we recorded
           // read-write (a stale registry row): reads keep flowing, appends
@@ -391,6 +394,7 @@ export async function syncJoinedSharedChannels(input: {
   return {
     endedShareIds,
     readOnlyShareIds,
+    pushed,
     changed,
     uncovered,
     failedRows,

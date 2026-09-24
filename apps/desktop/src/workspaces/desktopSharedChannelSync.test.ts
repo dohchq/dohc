@@ -56,8 +56,11 @@ function harness(rows: JoinedSharedChannel[]) {
   });
   const rendererPass = () => authorities.withOperation("workspace", (operation) =>
     sync.syncRendererWorkspaceSharedChannels(operation));
+  const rendererPassForChannel = () => authorities.withOperation("workspace", (operation) =>
+    sync.syncRendererSharedChannelsForChatTarget(operation, { channelId: "channel" }));
   return {
-    workspace, state, authorities, sync, rendererPass, warm, pull, push, relayForRegistered, write, notify, project,
+    workspace, state, authorities, sync, rendererPass, rendererPassForChannel,
+    warm, pull, push, relayForRegistered, write, notify, project,
     rotateCredentials: () => { generation += 1; },
     signOut: () => { currentCredentials = null; },
   };
@@ -108,6 +111,26 @@ describe("desktop shared-channel pass composition", () => {
     expect(h.write).not.toHaveBeenCalled();
     expect(h.notify).not.toHaveBeenCalled();
     expect(h.project).not.toHaveBeenCalled();
+  });
+
+  it("reports an idle pass without waking the renderer", async () => {
+    const h = harness([joined("one", { access: "read-write" })]);
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: false, changed: false });
+    expect(h.push).toHaveBeenCalledOnce();
+    expect(h.pull).toHaveBeenCalledOnce();
+    expect(h.notify).not.toHaveBeenCalled();
+    expect(h.project).not.toHaveBeenCalled();
+  });
+
+  it("reports pushed and applied ops apart, and wakes the renderer only for applied ones", async () => {
+    const h = harness([joined("one", { access: "read-write" })]);
+    h.push.mockResolvedValueOnce({ pushed: 2 });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: true, changed: false });
+    expect(h.notify).not.toHaveBeenCalled();
+    h.pull.mockResolvedValueOnce({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: false, changed: true });
+    expect(h.notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
+    expect(h.project).toHaveBeenCalledExactlyOnceWith("workspace");
   });
 
   it("keeps registry downgrades and bookmark projection after a current pass", async () => {
