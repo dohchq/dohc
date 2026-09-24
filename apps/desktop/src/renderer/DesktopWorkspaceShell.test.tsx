@@ -267,7 +267,7 @@ function dmSyncResult(
   dms: DmRecord[] = [],
   available = true,
 ): SyncDmsResult {
-  return { available, dms, pending: [], declined: [] };
+  return { available, dms, pending: [], declined: [], failed: false };
 }
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -1064,6 +1064,7 @@ describe("direct message workspace picker", () => {
         { shareId: "share-request", granterEmail: "alice@example.com" },
       ],
       declined: [],
+      failed: false,
     }));
     const sharedView: Workspace = {
       ...SHARE_VIEW,

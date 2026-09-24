@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, DmRecord } from "../../ipc/bridgeContract";
 import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
 import {
+  ChatsView,
   channel,
   message,
   dm,
@@ -243,6 +244,7 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.syncDms.mock.calls[1]?.[0]).toEqual({
       workspaceId: "workspace-a",
       openChannelId: oldDm.channelId,
+      poll: true,
     });
 
     act(() => emitCloudSessionChanged("session-b"));
@@ -851,13 +853,16 @@ describe("ChatsView direct messages", () => {
         const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
         const participant = dm({ role: "participant", shareId: "share-dm-1" });
         const revoked = { ...participant, connected: false };
+        const connected = {
+          available: true,
+          dms: [participant],
+          pending: [],
+          declined: [],
+        };
+        // The list and the sync that opening the DM runs both see the grant.
         bridgeMock.syncDms
-          .mockResolvedValueOnce({
-            available: true,
-            dms: [participant],
-            pending: [],
-            declined: [],
-          })
+          .mockResolvedValueOnce(connected)
+          .mockResolvedValueOnce(connected)
           .mockResolvedValue({
             available: true,
             dms: [revoked],
@@ -1175,5 +1180,221 @@ describe("ChatsView direct messages", () => {
 
     await user.click(screen.getByTestId("chats-dm-back"));
     expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
+  });
+});
+
+// The DM polls and the workspace activity event both refresh the list, but
+// only the polls may pull the owner's relay log. A refresh an activity event
+// caused must not, or the pull's own events would refresh again while the
+// desktop sits idle. A failed sync holds the syncs nobody asked for instead
+// of running a queued one the moment it ends.
+describe("ChatsView DM polling", () => {
+  const idle = { available: true, dms: [], pending: [], declined: [], failed: false };
+
+  it("marks its own polls and the first refresh, not a refresh an activity event caused", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.syncDms.mockResolvedValue(idle);
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledWith({ workspaceId: "workspace-a", poll: true });
+
+      bridgeMock.syncDms.mockClear();
+      act(() => emitWorkspaceActivity());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
+
+      bridgeMock.syncDms.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", poll: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the polls after a failed sync instead of running the queued one the moment it ends", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.syncDms.mockResolvedValue(idle);
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const mounted = bridgeMock.syncDms.mock.calls.length;
+
+      // The poll at 5 s fails slowly; the poll at 10 s queues behind it.
+      let finishFailure!: () => void;
+      bridgeMock.syncDms.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFailure = () => resolve({ ...idle, failed: true });
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await act(async () => { finishFailure(); await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+
+      // The polls at 15 s and 20 s fall inside the hold; the one at 25 s runs.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pulls for an open DM waiting for its thread only on open and on its timer, not on activity", async () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = dm({ threadId: null });
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [waiting] });
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.click(screen.getByTestId("chats-dm-item"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a", openChannelId: waiting.channelId, poll: true,
+      });
+
+      // Each pull can end in an activity event. A refresh for that event
+      // must not pull, or it would queue the next pull itself.
+      bridgeMock.syncDms.mockClear();
+      for (let event = 0; event < 3; event += 1) {
+        act(() => emitWorkspaceActivity());
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      }
+      expect(bridgeMock.syncDms.mock.calls).toEqual(Array.from({ length: 3 }, () => [
+        { workspaceId: "workspace-a", openChannelId: waiting.channelId },
+      ]));
+
+      bridgeMock.syncDms.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "workspace-a", openChannelId: waiting.channelId, poll: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the polls and activity refreshes, but not a refresh a person asked for", async () => {
+    vi.useFakeTimers();
+    try {
+      const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, pending: [request], failed: true });
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      bridgeMock.syncDms.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      act(() => emitWorkspaceActivity());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByTestId("chats-dm-request-decline"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.declineDm).toHaveBeenCalledWith({ shareId: request.shareId });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("syncs a conversation once when a person opens it during a hold, not again when its fields update", async () => {
+    vi.useFakeTimers();
+    try {
+      const open = dm();
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [open], failed: true });
+      bridgeMock.listChatMessages.mockResolvedValue({
+        messages: [message({ id: "m-local", threadId: open.threadId!, body: "Already here" })],
+      });
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const listed = bridgeMock.syncDms.mock.calls.length;
+
+      // Opening paints the local conversation first, then syncs it although
+      // the failed list sync holds the polls. The sync brings new fields for
+      // the same DM, which changes nav but is not another opening.
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [{ ...open, unreadCount: 3 }], failed: true });
+      fireEvent.click(screen.getByTestId("chats-dm-item"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("Already here")).toBeTruthy();
+      expect(bridgeMock.syncDms.mock.calls.slice(listed)).toEqual([[
+        { workspaceId: "workspace-a", openChannelId: open.channelId, poll: true },
+      ]]);
+
+      // The ticks at 4 s and 8 s fall inside the renewed hold.
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(listed + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps one conversation sync in flight and holds the queued one after it fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const open = dm();
+      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [open] });
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.click(screen.getByTestId("chats-dm-item"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const opened = bridgeMock.syncDms.mock.calls.length;
+
+      // The tick at 4 s fails slowly. The ticks at 8 s and 12 s queue one
+      // pass behind it instead of stacking two more syncs in main.
+      let finishFailure!: () => void;
+      bridgeMock.syncDms.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFailure = () => resolve({ ...idle, dms: [open], failed: true });
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      await act(async () => { finishFailure(); await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
+
+      // The failure at 12 s holds until 27 s: the ticks at 16, 20 and 24 s
+      // wait, and the one at 28 s runs.
+      await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores an older failure that lands after a newer success", async () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = dm({ threadId: null });
+      const synced = { ...idle, dms: [waiting] };
+      let finishOlder!: () => void;
+      bridgeMock.syncDms
+        .mockResolvedValueOnce(synced)
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          finishOlder = () => resolve({ ...synced, failed: true });
+        }))
+        .mockResolvedValue(synced);
+      const props = { workspaceId: "workspace-a", onOpenFileChat: vi.fn(), onError: vi.fn() };
+      const view = render(<ChatsView {...props} dmReadRevision={0} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Opening the DM starts the older sync.
+      fireEvent.click(screen.getByTestId("chats-dm-item"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // A landed read starts a newer one, which succeeds first.
+      view.rerender(<ChatsView {...props} dmReadRevision={1} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(3);
+      await act(async () => { finishOlder(); await vi.advanceTimersByTimeAsync(0); });
+
+      // The older failure does not hold the next tick.
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(4);
+      expect(bridgeMock.syncDms).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a", openChannelId: waiting.channelId, poll: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
