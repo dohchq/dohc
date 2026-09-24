@@ -585,13 +585,13 @@ fn versioned_text_write_on_store(
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
-        let result = match restore_before_moment_id {
+        let mut result = match restore_before_moment_id {
             Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
             None => write_text_in_tx(tx, input),
         }
         .map_err(RuntimeError::from)?;
-        if !result.deduped {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+        if !result.deduped
+            && let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -601,6 +601,13 @@ fn versioned_text_write_on_store(
                     text: &result.snapshot.text,
                 },
                 None,
+                input.now_ms,
+            )?
+        {
+            result.automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                tx,
+                &input.workspace_id,
+                &facts,
                 input.now_ms,
             )?;
         }
@@ -1243,7 +1250,10 @@ fn versioned_text_rollback_on_store(
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                 |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
             );
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            // Restoring older text is a change on this computer: its field
+            // changes claim like any other write. The claims wait for the
+            // executor's next drain; a rollback announces none.
+            if let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -1252,7 +1262,15 @@ fn versioned_text_rollback_on_store(
                 None,
                 recorded_at_ms,
             )
-            .map_err(map_fold_error)?;
+            .map_err(map_fold_error)?
+            {
+                dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &facts,
+                    recorded_at_ms,
+                )?;
+            }
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -1821,6 +1839,9 @@ fn versioned_text_merge_on_store(
             match result {
                 MergeTextFileResult::Write { write, .. } => {
                     if !write.deduped {
+                        // A merge replays changes made on another version,
+                        // which claimed when they were made: it indexes the
+                        // record and claims nothing.
                         dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                             tx,
                             &input.workspace_id,

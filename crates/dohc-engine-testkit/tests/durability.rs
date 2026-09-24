@@ -300,7 +300,7 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // Each shipped migration, including pending owner settlements, runs once.
     assert_eq!(
         store.table_row_count("engine_migrations").expect("ledger"),
-        6
+        7
     );
     let conflict_objects = store
         .read_with(|conn| {

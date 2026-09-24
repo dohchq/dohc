@@ -799,6 +799,27 @@ pub fn apply_committed(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
+            // The session host commits every accepted frame of a live-shared
+            // document as local, the owner's and each collaborator's alike,
+            // so the host is the one computer that claims its field changes
+            // (ADR 0008). The owner applies the same frame from the host's
+            // acceptance and a collaborator never journals it; neither
+            // claims. The author is the principal the relay accepted it from.
+            if let Some(mut facts) = append.record_facts {
+                let (_, principal_id, _, _) = event.metadata.accepted.authority.fields();
+                facts.author_origin_id = Some(principal_id.to_owned());
+                dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &facts,
+                    event.metadata.accepted.received_at_ms,
+                )
+                .map_err(|error| {
+                    ApplicationError::Collab(CollabError::Corrupt {
+                        reason: format!("automation claim insert failed: {error}"),
+                    })
+                })?;
+            }
             accepted_history::append(tx, &held, &event, working_reserve_bytes)?;
             let readback = read_application(tx, &held.namespace, &event.metadata.accepted.receipt)?
                 .ok_or(ApplicationError::Corrupt)?;
@@ -2528,5 +2549,140 @@ mod tests {
             assert_eq!(result.application_replayed, committed);
             assert_eq!(count(&store, "live_device_update_applications"), 1);
         }
+    }
+
+    /// A live-shared record: the session host commits each accepted frame,
+    /// the owner's and a collaborator's alike, so it claims the frame's field
+    /// changes once, as the principal the relay accepted it from.
+    #[test]
+    fn the_session_host_claims_each_accepted_field_change_once() {
+        use dohc_engine_domain::{
+            AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
+        };
+        let dir = ScratchDir::new_named("live-device-application-claims").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version("workspace-1", "main", 0, &NoFaults)
+            .unwrap();
+        for (object_id, path, text) in [
+            (
+                "schema-object",
+                "notes/collection.yaml",
+                "fields:\n  status:\n    type: text\n",
+            ),
+            (
+                "object-1",
+                "notes/a.md",
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: open\n---\n",
+            ),
+        ] {
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: "workspace-1".into(),
+                        version_id: "main".into(),
+                        object_id: object_id.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: format!("moment:{object_id}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace-1", "main")?;
+                dohc_engine_domain::subscribe_automation_in_tx(
+                    tx,
+                    "workspace-1",
+                    &AutomationSubscription {
+                        automation_id: "collection:notes#watch".into(),
+                        prefix: "notes".into(),
+                        kinds: vec![AutomationChangeKind::Changed],
+                        fields: None,
+                    },
+                    1,
+                )
+            })
+            .unwrap();
+        durable::ensure_marker(
+            &mut store,
+            &key(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            put_binary_blob_with_sha(tx,&Ydoc::wire().encode_full_state(),&binding().lineage_claim_id).unwrap();
+            tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1,lineage_claim_status='exact',path='notes/a.md'",[binding().lineage_claim_id]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
+        let handle = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("connection-1"),
+                binding(),
+            )
+            .unwrap();
+        let mut cache = WriterDocCache::new();
+        let claims = |store: &EngineStore| -> Vec<(String, Option<String>)> {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT change_kind, author_origin_id FROM automation_claims \
+                         ORDER BY created_at_ms, claim_id",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, rusqlite::Error>(rows)
+                })
+                .unwrap()
+        };
+
+        let source = Ydoc::wire();
+        let owner_edit = event("owner-edit", 1, source.frontmatter_set("status", "done"));
+        ack(apply(&mut store, &mut cache, &handle, owner_edit.clone()));
+        assert_eq!(
+            claims(&store),
+            vec![("changed".to_owned(), Some("owner-1".to_owned()))],
+            "the owner's accepted edit claims on the host"
+        );
+        let replayed = ack(apply(&mut store, &mut cache, &handle, owner_edit));
+        assert!(replayed.application_replayed);
+        assert_eq!(claims(&store).len(), 1, "a replayed frame claims nothing");
+
+        let mut guest_edit = event("guest-edit", 2, source.frontmatter_set("status", "late"));
+        guest_edit.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest-1".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        guest_edit.metadata.accepted.received_at_ms = 20;
+        ack(apply(&mut store, &mut cache, &handle, guest_edit));
+        assert_eq!(
+            claims(&store),
+            vec![
+                ("changed".to_owned(), Some("owner-1".to_owned())),
+                ("changed".to_owned(), Some("guest-1".to_owned())),
+            ],
+            "a collaborator's accepted edit claims on the host too"
+        );
+
+        let body_only = event("body-only", 3, source.plaintext_insert(0, "body"));
+        ack(apply(&mut store, &mut cache, &handle, body_only));
+        assert_eq!(claims(&store).len(), 2, "a body-only frame claims nothing");
     }
 }

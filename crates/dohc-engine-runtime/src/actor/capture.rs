@@ -444,7 +444,7 @@ fn capture_ingest_in_tx(
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let mut admitted = false;
-    let result = match batch.as_deref_mut() {
+    let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
             input,
@@ -481,7 +481,7 @@ fn capture_ingest_in_tx(
             },
             None => true,
         };
-        if has_ydoc_state {
+        let changed = if has_ydoc_state {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
@@ -492,6 +492,29 @@ fn capture_ingest_in_tx(
                     text: &result.snapshot.text,
                 },
                 actor_origin_id.as_deref(),
+                input.now_ms,
+            )?
+        } else {
+            // No Y.Doc lineage exists in this version, so the file alone
+            // carries the write.
+            dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+                actor_origin_id.as_deref(),
+                input.now_ms,
+            )?
+        };
+        // A disk edit captured here is a change on this computer: claim the
+        // automations it triggers in the capture's own transaction.
+        if let Some(facts) = changed {
+            result.automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                tx,
+                &input.workspace_id,
+                &facts,
                 input.now_ms,
             )?;
         }

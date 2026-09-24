@@ -806,13 +806,16 @@ const automationClaimFields = {
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**
-   * The change that inserted the claim, keyed either by its replication
-   * coordinate or — on a never-synced lineage — by the device-local history
-   * row id. Exactly one of the two shapes.
+   * The change that inserted the claim. A field change keys on its
+   * replication coordinate or, on a never-synced lineage, on the
+   * device-local history row id. An added or removed record keys on the
+   * moment that moved its file into or out of the Collection. Exactly one
+   * of the three shapes.
    */
   trigger: Schema.Union([
     mutableStruct({ originId: Schema.NonEmptyString, originSeq: Schema.Int }),
     mutableStruct({ historyId: Schema.Int }),
+    mutableStruct({ momentOrder: Schema.Int }),
   ]),
   recordId: Schema.NonEmptyString,
   collectionPath: Schema.NonEmptyString,
@@ -869,12 +872,17 @@ const AutomationClaimSchema = mutableStruct({
   ...automationClaimFields,
   change: mutableStruct({
     ...automationChangeFields,
-    /** The changed fields in field-name order. */
+    /**
+     * The fields in field-name order. A changed record lists its changed
+     * fields with the history row that recorded each. An added record lists
+     * its values as next, a removed record its last values as previous;
+     * neither has a history row.
+     */
     fields: Schema.mutable(
       Schema.Array(
         mutableStruct({
           field: Schema.String,
-          historyId: Schema.Int,
+          historyId: NullableInt,
           previous: AutomationFactValueSchema,
           next: AutomationFactValueSchema,
         }),
