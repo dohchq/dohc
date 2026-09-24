@@ -367,3 +367,75 @@ it('pauses reader autoplay for external selector focus while finishing the selec
   expect(showcase.querySelector('[data-reader-side="human"]').getAttribute('aria-pressed')).toBe('true');
   flip.destroy();
 });
+
+describe('Drive waitlist', () => {
+  const join = async (email = 'ada@example.com') => {
+    await mount('#drive');
+    const form = document.querySelector('[data-waitlist]');
+    form.querySelector('input[name="email"]').value = email;
+    form.querySelector('button[type="submit"]').focus();
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return form;
+  };
+
+  it('posts the email and source to the Loops form endpoint and confirms', async () => {
+    vi.mocked(fetch).mockImplementation(async () => Response.json({ success: true }));
+    const form = await join();
+    await vi.waitFor(() => expect(form.dataset.state).toBe('joined'));
+    const [url, request] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe(form.action);
+    expect(url).toMatch(/^https:\/\/app\.loops\.so\/api\/newsletter-form\//);
+    expect(request.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+    expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({ email: 'ada@example.com', source: 'Drive waitlist' });
+    expect(document.querySelector('[data-waitlist-status]').textContent).toContain('on the list');
+    expect(document.activeElement).toBe(document.querySelector('[data-waitlist-status]'));
+  });
+
+  it('leaves focus alone when the visitor moved on before the signup finished', async () => {
+    let finish;
+    vi.mocked(fetch).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const form = await join();
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    finish(Response.json({ success: true }));
+    await vi.waitFor(() => expect(form.dataset.state).toBe('joined'));
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('explains a rate limit and lets the visitor try again', async () => {
+    vi.mocked(fetch).mockImplementation(async () => new Response('{}', { status: 429 }));
+    const form = await join();
+    await vi.waitFor(() => expect(form.dataset.state).toBe('error'));
+    expect(document.querySelector('[data-waitlist-status]').textContent).toContain('Too many signups');
+    const submit = form.querySelector('button[type="submit"]');
+    expect(submit.hasAttribute('aria-disabled')).toBe(false);
+    expect(submit.textContent).toBe('Join the waitlist');
+  });
+
+  it('announces a pending request, blocks a second submission, and reports the failure', async () => {
+    let fail;
+    vi.mocked(fetch).mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    const form = await join();
+    const status = document.querySelector('[data-waitlist-status]');
+    expect(status.textContent).toBe('Joining the waitlist…');
+    expect(form.querySelector('button[type="submit"]').getAttribute('aria-disabled')).toBe('true');
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    expect(fetch).toHaveBeenCalledOnce();
+    fail(new TypeError('offline'));
+    await vi.waitFor(() => expect(form.dataset.state).toBe('error'));
+    expect(status.textContent).toContain('Check your connection');
+    expect(form.querySelector('button[type="submit"]').hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it.each([
+    ['an accepted but unconfirmed response', () => Response.json({ success: true }, { status: 202 })],
+    ['a success flag that is not true', () => Response.json({ success: 'false' })],
+    ['a Loops rejection', () => Response.json({ success: false, message: 'Invalid email' }, { status: 400 })],
+  ])('does not claim a signup for %s', async (_, respond) => {
+    vi.mocked(fetch).mockImplementation(async () => respond());
+    const form = await join();
+    await vi.waitFor(() => expect(form.dataset.state).toBe('error'));
+    expect(document.querySelector('[data-waitlist-status]').textContent).not.toContain('on the list');
+  });
+});

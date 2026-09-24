@@ -87,3 +87,17 @@ it('restores the preview and stops animation when the renderer fails after loadi
   expect(worker.terminate).toHaveBeenCalledOnce();
   expect(frames.size).toBe(0);
 });
+
+it('tells the renderer the page theme so the shadows match it', async () => {
+  document.documentElement.dataset.theme = 'light';
+  dispose = mountEngine(host);
+  const themes = () => worker.postMessage.mock.calls.map(([value]) => value).filter((value) => value.type === 'theme').map((value) => value.dark);
+  expect(themes()).toEqual([false]);
+  document.documentElement.dataset.theme = 'dark';
+  await Promise.resolve();
+  expect(themes()).toEqual([false, true]);
+  dispose();
+  document.documentElement.dataset.theme = 'light';
+  await Promise.resolve();
+  expect(themes()).toEqual([false, true]);
+});
