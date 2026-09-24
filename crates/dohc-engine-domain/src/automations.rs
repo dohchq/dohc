@@ -81,6 +81,11 @@ pub enum AutomationChangeKind {
     /// This computer stored a new message in a watched Group. Only a Group
     /// subscription claims it; a record subscription cannot name it.
     Message,
+    /// A person on this computer pressed a Button field on a record.
+    Button,
+    /// A schedule came due on the computer that runs the workspace's
+    /// schedules.
+    Schedule,
 }
 
 impl AutomationChangeKind {
@@ -90,6 +95,8 @@ impl AutomationChangeKind {
             AutomationChangeKind::Changed => "changed",
             AutomationChangeKind::Removed => "removed",
             AutomationChangeKind::Message => "message",
+            AutomationChangeKind::Button => "button",
+            AutomationChangeKind::Schedule => "schedule",
         }
     }
 
@@ -99,6 +106,8 @@ impl AutomationChangeKind {
             "changed" => Ok(AutomationChangeKind::Changed),
             "removed" => Ok(AutomationChangeKind::Removed),
             "message" => Ok(AutomationChangeKind::Message),
+            "button" => Ok(AutomationChangeKind::Button),
+            "schedule" => Ok(AutomationChangeKind::Schedule),
             _ => Err(DomainError::StateCorrupt {
                 reason: "automation change kind is not a known kind",
             }),
@@ -106,13 +115,16 @@ impl AutomationChangeKind {
     }
 
     /// The `automation_subscriptions` column that says whether a record
-    /// subscription wants this kind. Messages have Group subscriptions.
+    /// subscription wants this kind. Messages have Group subscriptions, and
+    /// presses and schedules claim without one.
     fn subscription_column(self) -> Option<&'static str> {
         match self {
             AutomationChangeKind::Added => Some("on_added"),
             AutomationChangeKind::Changed => Some("on_changed"),
             AutomationChangeKind::Removed => Some("on_removed"),
-            AutomationChangeKind::Message => None,
+            AutomationChangeKind::Message
+            | AutomationChangeKind::Button
+            | AutomationChangeKind::Schedule => None,
         }
     }
 }
@@ -555,6 +567,15 @@ pub fn subscribe_automation_in_tx(
     if subscription.kinds.contains(&AutomationChangeKind::Message) {
         return Err(DomainError::InvalidInput {
             reason: "A record subscription cannot name messages. Subscribe to a Group.",
+        });
+    }
+    if subscription
+        .kinds
+        .iter()
+        .any(|kind| kind.subscription_column().is_none())
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "A record subscription cannot name buttons or schedules. They claim when pressed or due.",
         });
     }
     let wants = |kind| subscription.kinds.contains(&kind);
@@ -1564,6 +1585,311 @@ pub fn claim_record_lifecycle_in_tx(
     Ok(inserted)
 }
 
+/// How long this computer remembers a button press, so the same press sent
+/// again, after a reply was lost, finds its claim instead of running twice.
+pub const AUTOMATION_PRESS_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// The most due times one `automations.claimSchedule` call runs. A scheduler
+/// runs the times it reached and skips the ones it missed, so a call
+/// normally runs one.
+pub const MAX_AUTOMATION_SCHEDULE_RUNS: usize = 100;
+
+/// A person pressed a Button field on a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationPress {
+    /// The pressing window's id for this press. A press sent again after a
+    /// lost reply carries the same id.
+    pub press_id: String,
+    /// The automation the button runs: `collection:<collection path>#<id>`.
+    pub automation_id: String,
+    pub record_id: String,
+    /// The person who pressed. The run acts for them.
+    pub pressed_by: String,
+}
+
+/// What `automations.press` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationPressed {
+    /// The press inserted a pending claim.
+    Claimed(AutomationClaim),
+    /// The press was already recorded, or the automation already had a
+    /// pending or running claim for the record. This is that claim.
+    Joined(AutomationClaim),
+}
+
+/// The Collection path of the Collection automation a button or schedule
+/// runs.
+fn button_or_schedule_collection(automation_id: &str) -> Result<&str, DomainError> {
+    collection_automation_path(automation_id).ok_or(DomainError::InvalidInput {
+        reason: "Buttons and schedules run Collection automations, collection:<path>#<id>.",
+    })
+}
+
+/// Record one button press and return the claim that runs it, in one
+/// transaction. A press id this computer remembers returns its claim. When
+/// the automation already has a pending or running claim for the record,
+/// the press joins it, so a double click or two windows run once. Otherwise
+/// the press inserts a pending claim keyed `press:<press id>`, at depth 0,
+/// acting for the person who pressed. Presses older than
+/// [`AUTOMATION_PRESS_RETENTION_MS`] are forgotten first. Claim pruning
+/// skips a claim a remembered press names, so a remembered press always
+/// finds its claim.
+pub fn press_automation_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    press: &AutomationPress,
+    now_ms: i64,
+) -> Result<AutomationPressed, DomainError> {
+    let collection_path = button_or_schedule_collection(&press.automation_id)?;
+    let press_id = normalize_automation_identifier(&press.press_id, "Button press id is invalid.")?;
+    let record_id =
+        normalize_automation_identifier(&press.record_id, "Button record id is invalid.")?;
+    let pressed_by = normalize_automation_identifier(
+        &press.pressed_by,
+        "The person who pressed the button is invalid.",
+    )?;
+    conn.execute(
+        "DELETE FROM automation_presses WHERE workspace_id = ?1 AND pressed_at_ms < ?2",
+        params![
+            workspace_id,
+            now_ms.saturating_sub(AUTOMATION_PRESS_RETENTION_MS)
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let remembered: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT automation_id, record_id, claim_id FROM automation_presses \
+             WHERE workspace_id = ?1 AND press_id = ?2",
+            params![workspace_id, press_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if let Some((automation_id, remembered_record, claim_id)) = remembered {
+        if automation_id != press.automation_id || remembered_record != record_id {
+            return Err(DomainError::InvalidInput {
+                reason: "This press id already names a press of another button or record.",
+            });
+        }
+        return claim_by_id(conn, workspace_id, &claim_id)?
+            .map(AutomationPressed::Joined)
+            .ok_or(DomainError::StateCorrupt {
+                reason: "a remembered button press lost its claim",
+            });
+    }
+    let active: Option<String> = conn
+        .query_row(
+            "SELECT claim_id FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND record_id = ?3 \
+               AND change_kind = 'button' AND state IN ('pending', 'running')",
+            params![workspace_id, press.automation_id, record_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let pressed = match active {
+        Some(claim_id) => AutomationPressed::Joined(
+            claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+                reason: "an active button claim vanished under the single writer",
+            })?,
+        ),
+        None => {
+            let claimed = ClaimedChange {
+                trigger: AutomationTrigger::Key {
+                    key: format!("press:{press_id}"),
+                },
+                record_id: Some(record_id.as_str()),
+                collection_path,
+                depth: 0,
+                change: AutomationChange {
+                    kind: AutomationChangeKind::Button,
+                    author_origin_id: None,
+                    actor_kind: Some(ChangeActorKind::Human),
+                    on_behalf_of: Some(pressed_by.clone()),
+                },
+                fields: AutomationFieldFacts::default(),
+                chain_stopped: false,
+            };
+            // The key is taken only by a press this computer forgot: the
+            // same id sent again more than 30 days later.
+            let claim = insert_claims(
+                conn,
+                workspace_id,
+                &[press.automation_id.as_str()],
+                &claimed,
+                now_ms,
+            )?
+            .pop()
+            .ok_or(DomainError::InvalidInput {
+                reason: "This press id was used by an earlier press.",
+            })?;
+            AutomationPressed::Claimed(claim)
+        }
+    };
+    let (AutomationPressed::Claimed(claim) | AutomationPressed::Joined(claim)) = &pressed;
+    conn.execute(
+        "INSERT INTO automation_presses \
+         (workspace_id, press_id, automation_id, record_id, pressed_by, pressed_at_ms, claim_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            workspace_id,
+            press_id,
+            press.automation_id,
+            record_id,
+            pressed_by,
+            now_ms,
+            claim.claim_id
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(pressed)
+}
+
+/// How far one schedule has been claimed or skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationScheduleMark {
+    pub automation_id: String,
+    /// The scheduler's hash of the schedule the mark counts for. A changed
+    /// schedule starts a new mark.
+    pub schedule_hash: String,
+    /// Every due time at or before this was claimed or skipped.
+    pub through_ms: i64,
+}
+
+/// One scheduler step for one schedule: the due times it runs and where the
+/// mark moves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationScheduleClaim {
+    pub automation_id: String,
+    pub schedule_hash: String,
+    /// Due times to run, each after the stored mark and at or before
+    /// `through_ms`. At most [`MAX_AUTOMATION_SCHEDULE_RUNS`].
+    pub run: Vec<i64>,
+    /// The mark's new position. A due time between the stored mark and this
+    /// one that is not in `run` is skipped.
+    pub through_ms: i64,
+}
+
+/// Claim a schedule's due times and move its mark, in one transaction. Each
+/// due time claims once, keyed `schedule:<due ms>`, with no record, at depth
+/// 0. A time at or before the stored mark is refused, and the mark never
+/// moves back. A new automation, a changed schedule, or a switch-on starts
+/// the mark: when no mark exists for the automation, or the stored mark
+/// counts a different schedule, the call only sets the mark, so it runs
+/// nothing. Returns the claims inserted.
+pub fn claim_automation_schedule_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    schedule: &AutomationScheduleClaim,
+    now_ms: i64,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let collection_path = button_or_schedule_collection(&schedule.automation_id)?;
+    let schedule_hash =
+        normalize_automation_identifier(&schedule.schedule_hash, "Schedule hash is invalid.")?;
+    if schedule.run.len() > MAX_AUTOMATION_SCHEDULE_RUNS {
+        return Err(DomainError::InvalidInput {
+            reason: "A schedule claim runs at most 100 due times.",
+        });
+    }
+    let stored: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT schedule_hash, through_ms FROM automation_schedule_marks \
+             WHERE workspace_id = ?1 AND automation_id = ?2",
+            params![workspace_id, schedule.automation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let mut inserted = Vec::new();
+    match stored {
+        Some((hash, through_ms)) if hash == schedule_hash => {
+            if schedule.through_ms < through_ms {
+                return Err(DomainError::InvalidInput {
+                    reason: "A schedule's mark cannot move back.",
+                });
+            }
+            if schedule
+                .run
+                .iter()
+                .any(|due_ms| *due_ms <= through_ms || *due_ms > schedule.through_ms)
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "A due time must be after the schedule's mark and at or before its new mark.",
+                });
+            }
+            for due_ms in &schedule.run {
+                let claimed = ClaimedChange {
+                    trigger: AutomationTrigger::Key {
+                        key: format!("schedule:{due_ms}"),
+                    },
+                    record_id: None,
+                    collection_path,
+                    depth: 0,
+                    change: AutomationChange {
+                        kind: AutomationChangeKind::Schedule,
+                        author_origin_id: None,
+                        actor_kind: None,
+                        on_behalf_of: None,
+                    },
+                    fields: AutomationFieldFacts::default(),
+                    chain_stopped: false,
+                };
+                inserted.extend(insert_claims(
+                    conn,
+                    workspace_id,
+                    &[schedule.automation_id.as_str()],
+                    &claimed,
+                    now_ms,
+                )?);
+            }
+        }
+        _ if !schedule.run.is_empty() => {
+            return Err(DomainError::InvalidInput {
+                reason: "A new or changed schedule sets its mark before it runs a due time.",
+            });
+        }
+        _ => {}
+    }
+    conn.execute(
+        "INSERT INTO automation_schedule_marks \
+         (workspace_id, automation_id, schedule_hash, through_ms) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(workspace_id, automation_id) DO UPDATE SET \
+           schedule_hash = excluded.schedule_hash, through_ms = excluded.through_ms",
+        params![
+            workspace_id,
+            schedule.automation_id,
+            schedule_hash,
+            schedule.through_ms
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(inserted)
+}
+
+/// Every schedule mark in the workspace, ordered by automation id.
+pub(crate) fn list_automation_schedule_marks_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<AutomationScheduleMark>, DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT automation_id, schedule_hash, through_ms FROM automation_schedule_marks \
+             WHERE workspace_id = ?1 ORDER BY automation_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id], |row| {
+            Ok(AutomationScheduleMark {
+                automation_id: row.get(0)?,
+                schedule_hash: row.get(1)?,
+                through_ms: row.get(2)?,
+            })
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)
+}
+
 /// One failed-claim summary per automation, for the owner-visible failure
 /// surface: the newest failed claim, its error and time, plus a generation.
 /// The generation counts every time one of the automation's claims failed:
@@ -1782,6 +2108,22 @@ pub(crate) fn retry_automation_claim_in_tx(
         }
         AutomationClaimState::Failed => {}
     }
+    if existing.change.kind == AutomationChangeKind::Button {
+        let busy: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM automation_claims \
+                 WHERE workspace_id = ?1 AND automation_id = ?2 AND record_id = ?3 \
+                   AND change_kind = 'button' AND state IN ('pending', 'running'))",
+                params![workspace_id, existing.automation_id, existing.record_id],
+                |row| row.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        if busy {
+            return Err(DomainError::InvalidInput {
+                reason: "This button is already running for this record.",
+            });
+        }
+    }
     let rows = conn
         .execute(
             "UPDATE automation_claims \
@@ -1898,7 +2240,9 @@ pub(crate) fn settle_automation_claim_in_tx(
     // same moment again (a record whose frontmatter broke and healed), and
     // the row's key is what keeps it from claiming twice. A done message
     // claim keeps its key without its message for the same reason: a message
-    // stored again after its thread was removed must not run twice.
+    // stored again after its thread was removed must not run twice. A done
+    // button claim stays while a remembered press names it, so the press
+    // sent again finds it.
     let prune = params![
         workspace_id,
         settled.automation_id,
@@ -1911,12 +2255,16 @@ pub(crate) fn settle_automation_claim_in_tx(
     Ok(settled)
 }
 
-/// Delete an automation's settled record claims past its history. The terms
+/// Delete an automation's settled record and button claims past its
+/// history, except a button claim a kept press names. The terms
 /// before `claim_id` match `idx_automation_claims_prunable`, so the delete
 /// reads only those claims, not the key rows message claims keep.
 pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation_claims \
      WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
        AND trigger_moment_order IS NULL AND change_kind <> 'message' \
+       AND NOT EXISTS (SELECT 1 FROM automation_presses p \
+         WHERE p.workspace_id = automation_claims.workspace_id \
+           AND p.claim_id = automation_claims.claim_id) \
        AND claim_id NOT IN ( \
            SELECT claim_id FROM automation_claims \
            WHERE workspace_id = ?1 AND automation_id = ?2 \
@@ -2109,6 +2457,37 @@ pub fn list_automation_claims(
     automation_id: &str,
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     store.read_with(|conn| list_automation_claims_in_tx(conn, workspace_id, automation_id))
+}
+
+pub fn press_automation(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    press: &AutomationPress,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationPressed, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        press_automation_in_tx(tx, workspace_id, press, now_ms)
+    })?)
+}
+
+pub fn claim_automation_schedule(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    schedule: &AutomationScheduleClaim,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        claim_automation_schedule_in_tx(tx, workspace_id, schedule, now_ms)
+    })?)
+}
+
+pub fn list_automation_schedule_marks(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<AutomationScheduleMark>, DomainError> {
+    store.read_with(|conn| list_automation_schedule_marks_in_tx(conn, workspace_id))
 }
 
 pub fn settle_automation_claim(

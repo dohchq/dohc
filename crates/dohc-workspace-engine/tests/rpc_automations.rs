@@ -203,6 +203,20 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         ),
         ("automations.retry", json!({ "claimId": "atc_x" })),
         ("automations.release", json!({ "claimId": "atc_x" })),
+        (
+            "automations.press",
+            json!({
+                "pressId": "p",
+                "automationId": "collection:x#y",
+                "recordId": "r",
+                "pressedBy": "u",
+            }),
+        ),
+        (
+            "automations.claimSchedule",
+            json!({ "automationId": "collection:x#y", "scheduleHash": "h", "run": [], "throughMs": 1 }),
+        ),
+        ("automations.scheduleMarks", json!({})),
     ] {
         id += 1;
         let error = transport
@@ -1300,4 +1314,147 @@ async fn group_messages_written_here_claim_through_rpc() {
     assert_eq!(unsubscribed, json!({ "unsubscribed": true }));
     send(&mut id, "m4", "/task Again").await;
     assert!(claimed_events(&mut notices).is_empty(), "unsubscribed");
+}
+
+/// A button press and a schedule step claim through RPC: a new press
+/// announces its claim and the same press sent again answers it without a
+/// second, a schedule starts its mark before it claims, and the marks read
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn presses_and_schedule_steps_claim_through_rpc() {
+    const PAY: &str = "collection:Invoices#mark-paid";
+    const REPORT: &str = "collection:Invoices#weekday-report";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let service = Arc::new(EngineService::new());
+    let mut notices = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "captureMode": "none",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let mut id = 1;
+    claimed_events(&mut notices);
+
+    let press = json!({
+        "pressId": "press-1",
+        "automationId": PAY,
+        "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pressedBy": "user:ada",
+        "nowMs": 100,
+    });
+    let pressed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.press",
+        press.clone(),
+    )
+    .await;
+    assert_eq!(pressed["trigger"], json!({ "key": "press:press-1" }));
+    assert_eq!(pressed["recordId"], json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    assert_eq!(pressed["collectionPath"], json!("Invoices"));
+    assert_eq!(pressed["depth"], json!(0));
+    assert_eq!(
+        pressed["change"],
+        json!({
+            "kind": "button",
+            "authorOriginId": null,
+            "actorKind": "human",
+            "onBehalfOf": "user:ada",
+        })
+    );
+    assert_eq!(pressed["state"], json!("pending"));
+    let claimed = claimed_events(&mut notices);
+    assert_eq!(claimed.len(), 1, "{claimed:?}");
+    assert_eq!(claimed[0]["claimId"], pressed["claimId"]);
+
+    let again = call(&transport, &handle, &mut id, "automations.press", press).await;
+    assert_eq!(again["claimId"], pressed["claimId"]);
+    assert!(
+        claimed_events(&mut notices).is_empty(),
+        "a remembered press announces nothing"
+    );
+    let not_collection = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.press",
+        json!({
+            "pressId": "press-2",
+            "automationId": "plugin:triage",
+            "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pressedBy": "user:ada",
+        }),
+    )
+    .await;
+    assert_eq!(not_collection.code, ErrorCode::InvalidParams);
+
+    let started = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimSchedule",
+        json!({ "automationId": REPORT, "scheduleHash": "h1", "run": [], "throughMs": 1_000 }),
+    )
+    .await;
+    assert_eq!(started, json!({ "claims": [] }));
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimSchedule",
+        json!({ "automationId": REPORT, "scheduleHash": "h1", "run": [1_000], "throughMs": 2_000 }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    let ran = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimSchedule",
+        json!({
+            "automationId": REPORT,
+            "scheduleHash": "h1",
+            "run": [2_000],
+            "throughMs": 3_000,
+            "nowMs": 3_100,
+        }),
+    )
+    .await;
+    assert_eq!(ran["claims"].as_array().map(Vec::len), Some(1), "{ran}");
+    assert_eq!(
+        ran["claims"][0]["trigger"],
+        json!({ "key": "schedule:2000" })
+    );
+    assert_eq!(ran["claims"][0]["recordId"], Value::Null);
+    assert_eq!(ran["claims"][0]["change"]["kind"], json!("schedule"));
+    assert_eq!(claimed_events(&mut notices).len(), 1);
+
+    let marks = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.scheduleMarks",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        marks,
+        json!({ "marks": [{ "automationId": REPORT, "scheduleHash": "h1", "throughMs": 3_000 }] })
+    );
 }
