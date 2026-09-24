@@ -1627,10 +1627,16 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 ) -> Result<(), SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
-                .map(|_| ())
-        }
+        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+            tx,
+            &complete,
+            path,
+            text,
+            LineageFoldAuthor::default(),
+            now_ms,
+            false,
+        )
+        .map(|_| ()),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
 }
@@ -1641,6 +1647,7 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 /// the collection record fields the mutation changed, if it wrote a bound
 /// record's frontmatter: from the lineage's fold, or, when the lineage holds
 /// no content, from the record's index against the written text.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_local_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -1648,6 +1655,7 @@ pub fn reconcile_local_resulting_head_in_tx(
     object_id: &str,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
 ) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let key =
@@ -1661,7 +1669,10 @@ pub fn reconcile_local_resulting_head_in_tx(
             &complete,
             path,
             text,
-            actor_origin_id,
+            LineageFoldAuthor {
+                actor_origin_id,
+                attribution,
+            },
             now_ms,
             true,
         )? {
@@ -1674,6 +1685,7 @@ pub fn reconcile_local_resulting_head_in_tx(
                 path,
                 text,
                 actor_origin_id,
+                attribution,
                 now_ms,
             )
             .map_err(map_domain_hard_error),
@@ -1682,6 +1694,13 @@ pub fn reconcile_local_resulting_head_in_tx(
             retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
         }
     }
+}
+
+/// Who wrote the text a fold folds in.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LineageFoldAuthor<'a> {
+    pub(crate) actor_origin_id: Option<&'a str>,
+    pub(crate) attribution: Option<&'a dohc_engine_domain::ChangeAttribution>,
 }
 
 /// What folding a file's text into its Y.Doc lineage did.
@@ -1808,8 +1827,16 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
-    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
-        .map(|_| ())
+    fold_complete_ydoc_lineage_in_tx(
+        tx,
+        &complete,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+        true,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1817,10 +1844,14 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
     path: &str,
     chosen_text: &str,
-    actor_origin_id: Option<&str>,
+    author: LineageFoldAuthor<'_>,
     now_ms: i64,
     journal: bool,
 ) -> Result<LineageFold, SyncError> {
+    let LineageFoldAuthor {
+        actor_origin_id,
+        attribution,
+    } = author;
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     require_unfenced_lineage(tx, key)?;
@@ -1910,7 +1941,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             key,
             &update,
             actor_origin_id,
-            None,
+            attribution,
             now_ms,
         )
         .map_err(|error| {
@@ -1940,7 +1971,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
                     actor_origin_id,
-                    None,
+                    attribution,
                     false,
                 ),
                 now_ms,

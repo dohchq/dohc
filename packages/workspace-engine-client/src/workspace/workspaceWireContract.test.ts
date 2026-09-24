@@ -629,6 +629,9 @@ describe("automations wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
     ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary),
+    ).toEqual(summary);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
     ).toThrow(ProtocolShapeError);

@@ -546,6 +546,22 @@ impl Fixture {
         Self::with_relay(false).await
     }
     async fn with_relay(replicates: bool) -> Self {
+        Self::build(
+            replicates,
+            vector("rich-unicode"),
+            "notes/example.md",
+            |_| {},
+        )
+        .await
+    }
+    /// Bootstrap `bytes` as the live document at `path`, after `seed`
+    /// writes the store.
+    async fn build(
+        replicates: bool,
+        bytes: Vec<u8>,
+        path: &str,
+        seed: impl FnOnce(&mut EngineStore),
+    ) -> Self {
         let root = ScratchDir::new().unwrap();
         let db = engine_db_path(&root).unwrap();
         let mut store = EngineStore::open(&db, 0).unwrap();
@@ -580,6 +596,7 @@ impl Fixture {
             )
             .unwrap();
         }
+        seed(&mut store);
         drop(store);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).unwrap().actor;
@@ -587,7 +604,6 @@ impl Fixture {
             .live_application_owner("workspace".into())
             .await
             .unwrap();
-        let bytes = vector("rich-unicode");
         let doc = Ydoc::wire();
         doc.apply(&bytes).unwrap();
         let markdown = doc.project(ContentKind::Richdoc).unwrap().content;
@@ -596,8 +612,8 @@ impl Fixture {
             main_version_id: "main".into(),
             object_id: "object".into(),
             lineage_claim_id: hex_sha256(&bytes),
-            current_path: "notes/example.md".into(),
-            selector_paths: vec!["notes/example.md".into()],
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         };
         let handle = owner
@@ -665,6 +681,23 @@ impl Fixture {
             .await
     }
     async fn apply(&self, cursor: i64, bytes: Vec<u8>) -> LiveUpdateReceipt {
+        self.apply_as(
+            cursor,
+            bytes,
+            ServerDerivedLiveUpdateAuthority::Owner {
+                principal_id: "owner".into(),
+            },
+            2,
+        )
+        .await
+    }
+    async fn apply_as(
+        &self,
+        cursor: i64,
+        bytes: Vec<u8>,
+        authority: ServerDerivedLiveUpdateAuthority,
+        received_at_ms: i64,
+    ) -> LiveUpdateReceipt {
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -677,10 +710,8 @@ impl Fixture {
                 accepted: RelayAcceptedLiveUpdate {
                     receipt: receipt.clone(),
                     binding: self.binding.clone(),
-                    authority: ServerDerivedLiveUpdateAuthority::Owner {
-                        principal_id: "owner".into(),
-                    },
-                    received_at_ms: 2,
+                    authority,
+                    received_at_ms,
                 },
                 first_seen: vec![],
             },
@@ -691,7 +722,7 @@ impl Fixture {
                 .apply(event, Arc::new(NoFaults), 100_000_000)
                 .await
                 .unwrap(),
-            ApplicationResult::Applied(_)
+            ApplicationResult::Applied(..)
         ));
         receipt
     }
@@ -738,7 +769,7 @@ impl Fixture {
                 .apply(event, Arc::new(NoFaults), 100_000_000)
                 .await
                 .unwrap(),
-            ApplicationResult::Applied(_)
+            ApplicationResult::Applied(..)
         ));
         self.handle = self
             .owner
@@ -840,7 +871,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             )
             .await
             .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let second = f
         .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
@@ -1765,6 +1796,161 @@ async fn stopped_bootstrap_preserves_replay_after_file_mutation_attempts() {
             receipt
         );
     }
+}
+
+/// A live-shared record on the session host: the owner's and a
+/// collaborator's accepted frames each claim once. Settling the session,
+/// capturing the settled file, and reconciling the Collection claim nothing
+/// more.
+#[tokio::test]
+async fn accepted_frames_claim_once_through_settlement_and_capture() {
+    use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription};
+    const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PATH: &str = "tasks/alpha.md";
+    let source = Ydoc::wire();
+    source.apply(&vector("ordinary-frontmatter-order")).unwrap();
+    source.frontmatter_set("id", RECORD);
+    source.frontmatter_set("status", "open");
+    let f = Fixture::build(false, source.encode_full_state(), PATH, |store| {
+        dohc_engine_domain::VersionedTextStore::new(store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "schema-object".into(),
+                    path: "tasks/collection.yaml".into(),
+                    text: "fields:\n  status:\n    type: text\n".into(),
+                    moment_id: "schema".into(),
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 0,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    })
+    .await;
+    let actor = f.supervisor.open(&f.db, 2).unwrap().actor;
+    let reconcile = async |now_ms: i64| {
+        actor
+            .reconcile_collections(
+                "workspace".into(),
+                "main".into(),
+                f.root.path().to_owned(),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(()),
+                now_ms,
+                Arc::new(NoFaults),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .automation_claims
+    };
+    // Bind the bootstrapped record as adopted; its file reaches disk only
+    // when the session settles.
+    let mut raw = rusqlite::Connection::open(&f.db).unwrap();
+    let tx = raw.transaction().unwrap();
+    dohc_engine_domain::reconcile_collections_in_tx(&tx, "workspace", "main").unwrap();
+    dohc_engine_domain::set_collection_adoption_state_in_tx(
+        &tx,
+        "workspace",
+        "main",
+        PATH,
+        RECORD,
+        "adopted",
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(raw);
+    actor
+        .automation_subscribe(
+            "workspace".into(),
+            AutomationSubscription {
+                automation_id: "collection:tasks#watch".into(),
+                prefix: "tasks".into(),
+                kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+                fields: None,
+            },
+            4,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let claims = || -> Vec<(String, Option<String>)> {
+        f.read(|db| {
+            let mut statement = db
+                .prepare(
+                    "SELECT change_kind, author_origin_id FROM automation_claims \
+                     ORDER BY created_at_ms, claim_id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+    };
+
+    f.apply(5, source.frontmatter_set("status", "done")).await;
+    // The collaborator's frame arrives later, so its claim sorts after.
+    let terminal = f
+        .apply_as(
+            6,
+            source.frontmatter_set("status", "late"),
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "guest".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            6,
+        )
+        .await;
+    let accepted = vec![
+        ("changed".to_owned(), Some("owner".to_owned())),
+        ("changed".to_owned(), Some("guest".to_owned())),
+    ];
+    assert_eq!(claims(), accepted, "each accepted frame claims once");
+
+    f.settle(Some(terminal), 4, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let settled = std::fs::read_to_string(f.root.path().join(PATH)).unwrap();
+    assert!(settled.contains("status: late"), "{settled}");
+    let captured = actor
+        .capture_ingest_indexed(
+            dohc_engine_domain::CaptureIngest {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                path: PATH.into(),
+                text: settled,
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            f.root.path().to_owned(),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(captured.automation_claims.is_empty());
+    assert!(reconcile(21).await.is_empty());
+    assert_eq!(
+        claims(),
+        accepted,
+        "settlement and capture claim nothing more"
+    );
 }
 
 #[tokio::test]

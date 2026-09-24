@@ -14,8 +14,8 @@ use std::collections::HashSet;
 use crate::chats::base32_lowercase_no_padding;
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
-    CollectionRecordLifecycle, CollectionRecordLifecycleKind, MAX_CHANGE_ATTRIBUTION_DEPTH,
-    field_fact_value, indexed_record_fields, parent_path,
+    CollectionRecordLifecycle, CollectionRecordLifecycleKind, field_fact_value,
+    indexed_record_fields, moment_author_attribution, parent_path,
 };
 use crate::error::DomainError;
 use dohc_engine_storage::{
@@ -807,6 +807,18 @@ pub fn claim_automation_triggers_in_tx(
         }
     };
     let subscriptions = subscriptions_wanting(conn, workspace_id, AutomationChangeKind::Changed)?;
+    // Writing a new record's first fields is part of adding it. An
+    // automation that wants added records hears of the record from the
+    // reconcile that binds it, not twice.
+    let wanting_added: HashSet<String> = if facts.created {
+        subscriptions_wanting(conn, workspace_id, AutomationChangeKind::Added)?
+            .into_iter()
+            .filter(|subscription| prefix_contains(&subscription.prefix, &facts.collection_path))
+            .map(|subscription| subscription.automation_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let mut claiming: Vec<&str> = Vec::new();
     for subscription in &subscriptions {
         let automation_id = subscription.automation_id.as_str();
@@ -815,6 +827,7 @@ pub fn claim_automation_triggers_in_tx(
         if claiming.last() == Some(&automation_id)
             || !prefix_contains(&subscription.prefix, &facts.collection_path)
             || facts.author_origin_id.as_deref() == Some(automation_id)
+            || wanting_added.contains(automation_id)
             || !wants_changed_fields(subscription.field_names_json.as_deref(), &facts.fields)?
         {
             continue;
@@ -862,16 +875,24 @@ struct LifecycleMoment {
     author_json: Option<String>,
 }
 
-/// The moment that brought an object's file into `collection_path`: its
-/// newest moment that wrote the file there with no preimage (a creation;
-/// `before_present = 2` records a file that existed) or renamed it in from
-/// another folder.
-fn entering_moment(
+/// One of an object's moments, as the lifecycle walks read them.
+struct ObjectMoment {
+    moment: LifecycleMoment,
+    path: String,
+    operation: String,
+    before_present: i64,
+    before_path: Option<String>,
+}
+
+/// Walk an object's moments in this version, newest first, until `decide`
+/// answers. `decide` returns `Some(true)` for the moment it looks for,
+/// `Some(false)` to stop without one, and `None` to go on to an older one.
+fn walk_object_moments(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
-    collection_path: &str,
+    decide: impl Fn(&ObjectMoment) -> Option<bool>,
 ) -> Result<Option<LifecycleMoment>, DomainError> {
     let mut statement = conn
         .prepare(
@@ -879,7 +900,6 @@ fn entering_moment(
                     before_present, payload_before_path \
              FROM moments \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-               AND ((operation = 'write' AND before_present <> 2) OR operation = 'rename') \
              ORDER BY moment_order DESC",
         )
         .map_err(DomainError::sql_corrupt)?;
@@ -887,33 +907,60 @@ fn entering_moment(
         .query(params![workspace_id, version_id, object_id])
         .map_err(DomainError::sql_corrupt)?;
     while let Some(row) = rows.next().map_err(DomainError::sql_corrupt)? {
-        let path: String = row.get(3).map_err(DomainError::sql_corrupt)?;
-        let operation: String = row.get(4).map_err(DomainError::sql_corrupt)?;
-        let before_present: i64 = row.get(5).map_err(DomainError::sql_corrupt)?;
-        let before_path: Option<String> = row.get(6).map_err(DomainError::sql_corrupt)?;
-        if parent_path(&path) != collection_path {
-            continue;
-        }
-        let entered = (operation == "write" && before_present != 2)
-            || (operation == "rename"
-                && before_path
-                    .as_deref()
-                    .is_none_or(|before| parent_path(before) != collection_path));
-        if entered {
-            return Ok(Some(LifecycleMoment {
-                moment_order: row.get(0).map_err(DomainError::sql_corrupt)?,
-                recorded_at_ms: row.get(1).map_err(DomainError::sql_corrupt)?,
-                author_json: row.get(2).map_err(DomainError::sql_corrupt)?,
-            }));
+        let read = || -> rusqlite::Result<ObjectMoment> {
+            Ok(ObjectMoment {
+                moment: LifecycleMoment {
+                    moment_order: row.get(0)?,
+                    recorded_at_ms: row.get(1)?,
+                    author_json: row.get(2)?,
+                },
+                path: row.get(3)?,
+                operation: row.get(4)?,
+                before_present: row.get(5)?,
+                before_path: row.get(6)?,
+            })
+        };
+        let moment = read().map_err(DomainError::sql_corrupt)?;
+        match decide(&moment) {
+            Some(true) => return Ok(Some(moment.moment)),
+            Some(false) => return Ok(None),
+            None => {}
         }
     }
     Ok(None)
 }
 
-/// The moment that took an object's file out of `collection_path`: its
-/// newest moment, when that moment deleted the file or renamed it into
-/// another folder. `None` when the file is still in the Collection (its
-/// frontmatter broke, or the Collection itself went away).
+/// The moment that brought an object's file into `collection_path`: the
+/// newest moment that wrote the file there with no preimage (a creation;
+/// `before_present = 2` records a file that existed) or renamed it in from
+/// another folder. Edits inside the Collection since then are passed over.
+fn entering_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    collection_path: &str,
+) -> Result<Option<LifecycleMoment>, DomainError> {
+    walk_object_moments(conn, workspace_id, version_id, object_id, |moment| {
+        let inside = parent_path(&moment.path) == collection_path;
+        let entered = inside
+            && match moment.operation.as_str() {
+                "write" => moment.before_present != 2,
+                "rename" => moment
+                    .before_path
+                    .as_deref()
+                    .is_none_or(|before| parent_path(before) != collection_path),
+                _ => false,
+            };
+        entered.then_some(true)
+    })
+}
+
+/// The moment that took an object's file out of `collection_path`: walking
+/// back from the newest, the first moment that deleted the file there or
+/// renamed it from there into another folder. Edits made after the file
+/// left are passed over. `None` when the file is still in the Collection
+/// (its frontmatter broke, or the Collection itself went away).
 fn leaving_moment(
     conn: &Connection,
     workspace_id: &str,
@@ -921,39 +968,82 @@ fn leaving_moment(
     object_id: &str,
     collection_path: &str,
 ) -> Result<Option<LifecycleMoment>, DomainError> {
-    let newest: Option<(i64, i64, Option<String>, String, String)> = conn
+    walk_object_moments(conn, workspace_id, version_id, object_id, |moment| {
+        let inside = parent_path(&moment.path) == collection_path;
+        match moment.operation.as_str() {
+            "delete" if inside => Some(true),
+            "rename"
+                if !inside
+                    && moment
+                        .before_path
+                        .as_deref()
+                        .is_some_and(|before| parent_path(before) == collection_path) =>
+            {
+                Some(true)
+            }
+            // The file is in the Collection at this moment, and nothing
+            // newer took it out.
+            _ if inside => Some(false),
+            _ => None,
+        }
+    })
+}
+
+/// When `collection_path` last became a Collection in this version: the
+/// moment that created its schema file there. A file that entered the folder
+/// before it cannot have been added to the Collection. `None` when the
+/// schema predates the version (a fork copies files, not their moments), as
+/// every file that entered before the fork does.
+fn collection_since(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Option<i64>, DomainError> {
+    let schema_object: Option<String> = conn
         .query_row(
-            "SELECT moment_order, recorded_at_ms, author_json, path, operation FROM moments \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-             ORDER BY moment_order DESC LIMIT 1",
-            params![workspace_id, version_id, object_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            "SELECT s.object_id FROM collections c JOIN snapshots s \
+               ON s.workspace_id = c.workspace_id AND s.version_id = c.version_id \
+              AND s.path = c.schema_path \
+             WHERE c.workspace_id = ?1 AND c.version_id = ?2 AND c.collection_path = ?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get(0),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    Ok(newest.and_then(
-        |(moment_order, recorded_at_ms, author_json, path, operation)| {
-            (operation == "delete"
-                || (operation == "rename" && parent_path(&path) != collection_path))
-                .then_some(LifecycleMoment {
-                    moment_order,
-                    recorded_at_ms,
-                    author_json,
-                })
-        },
-    ))
+    let Some(schema_object) = schema_object else {
+        return Ok(None);
+    };
+    Ok(entering_moment(
+        conn,
+        workspace_id,
+        version_id,
+        &schema_object,
+        collection_path,
+    )?
+    .map(|moment| moment.moment_order))
 }
 
-/// Whether a moment was committed on this computer: no replication import
-/// wrote it. Only an imported moment has an `imported = 1` journal row.
+/// Whether a moment is a merge's: the merge replayed a change another
+/// version made, which claimed where it was made.
+fn moment_is_merged(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM merged_moments \
+         WHERE workspace_id = ?1 AND moment_order = ?2)",
+        params![workspace_id, moment_order],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Whether a moment was committed on this computer, by the rule sync
+/// enrolment uses to decide which moments are this computer's to journal:
+/// no replication import wrote it, or its import was refused and the
+/// refusal is still pending.
 fn moment_is_local(
     conn: &Connection,
     workspace_id: &str,
@@ -964,54 +1054,34 @@ fn moment_is_local(
              SELECT 1 FROM moments m JOIN replication_log r \
                ON r.workspace_id = m.workspace_id AND r.op_kind = 'moment.append' \
               AND json_extract(r.payload_json, '$.momentId') = m.moment_id \
-             WHERE m.workspace_id = ?1 AND m.moment_order = ?2 AND r.imported = 1)",
+             WHERE m.workspace_id = ?1 AND m.moment_order = ?2 AND r.imported = 1 \
+               AND NOT EXISTS (SELECT 1 FROM replication_pending_refusals p \
+                 WHERE p.workspace_id = r.workspace_id AND p.origin_id = r.origin_id \
+                   AND p.origin_seq = r.origin_seq))",
         params![workspace_id, moment_order],
         |row| row.get(0),
     )
     .map_err(DomainError::sql_corrupt)
 }
 
-/// A moment's author as a claim names it, with the chain depth it
-/// declared. A moment records the author its writer passed: an agent
-/// (`{kind: "agent", agentId, onBehalfOf}`, as capture records an agent
-/// run), an automation (`{kind: "automation", automationId, onBehalfOf,
-/// depth}`, as an automation that creates or deletes a record must), or a
-/// person. Anything else declares no author and depth 0.
+/// A moment's author as a claim names it, with the chain depth it declared
+/// ([`moment_author_attribution`]).
 fn moment_change(kind: AutomationChangeKind, author_json: Option<&str>) -> (AutomationChange, u32) {
-    let author = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok());
-    let text = |key: &str| {
-        author
-            .as_ref()
-            .and_then(|author| author.get(key))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
-    let actor_kind = text("kind").and_then(|kind| ChangeActorKind::parse(&kind));
-    let author_origin_id = match actor_kind {
-        Some(ChangeActorKind::Agent) => text("agentId"),
-        Some(ChangeActorKind::Automation) => text("automationId"),
-        _ => None,
-    };
-    let depth = match actor_kind {
-        Some(ChangeActorKind::Automation) => author
-            .as_ref()
-            .and_then(|author| author.get("depth"))
-            .and_then(Value::as_u64)
-            .map_or(0, |depth| {
-                u32::try_from(depth)
-                    .unwrap_or(MAX_CHANGE_ATTRIBUTION_DEPTH)
-                    .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
-            }),
-        _ => 0,
-    };
+    let (author_origin_id, attribution) = moment_author_attribution(author_json);
     let change = AutomationChange {
         kind,
-        actor_kind,
-        on_behalf_of: text("onBehalfOf"),
         author_origin_id,
+        actor_kind: attribution
+            .as_ref()
+            .map(|attribution| attribution.actor_kind),
+        on_behalf_of: attribution
+            .as_ref()
+            .and_then(|attribution| attribution.on_behalf_of.clone()),
     };
-    (change, depth)
+    (
+        change,
+        attribution.map_or(0, |attribution| attribution.depth),
+    )
 }
 
 /// Whether any automation wants removed records, so reconcile reads a
@@ -1049,6 +1119,8 @@ pub fn claim_record_lifecycle_in_tx(
     now_ms: i64,
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     let mut inserted = Vec::new();
+    let mut collection_since: std::collections::HashMap<&str, Option<i64>> =
+        std::collections::HashMap::new();
     for kind in [AutomationChangeKind::Added, AutomationChangeKind::Removed] {
         let records: Vec<&CollectionRecordLifecycle> = lifecycle
             .iter()
@@ -1084,7 +1156,29 @@ pub fn claim_record_lifecycle_in_tx(
             let Some(moment) = moment else {
                 continue;
             };
-            if !moment_is_local(conn, workspace_id, moment.moment_order)? {
+            // A file that entered the folder before it became a Collection
+            // was not added to it: the Collection appeared around it.
+            if kind == AutomationChangeKind::Added {
+                let since = match collection_since.get(record.collection_path.as_str()) {
+                    Some(since) => *since,
+                    None => {
+                        let since = self::collection_since(
+                            conn,
+                            workspace_id,
+                            version_id,
+                            &record.collection_path,
+                        )?;
+                        collection_since.insert(&record.collection_path, since);
+                        since
+                    }
+                };
+                if since.is_some_and(|since| moment.moment_order <= since) {
+                    continue;
+                }
+            }
+            if !moment_is_local(conn, workspace_id, moment.moment_order)?
+                || moment_is_merged(conn, workspace_id, moment.moment_order)?
+            {
                 continue;
             }
             let (change, depth) = moment_change(kind, moment.author_json.as_deref());
@@ -1388,6 +1482,47 @@ pub(crate) fn retry_automation_claim_in_tx(
         .map(AutomationRetry::Requeued)
 }
 
+/// Hand a running claim back without running it, when its executor cannot
+/// run it yet: its roster is unknown, a step is held, the evaluator is busy,
+/// or a check before the run failed. The claim is pending again with the
+/// attempts it had before `claimNext` served it (a release is not an
+/// attempt) and the same run. The reaper watches running claims only, so a
+/// released claim cannot linger behind a dead holder, and its next serve
+/// starts the reaper's clock again. Refuses a claim that is not running.
+pub(crate) fn release_automation_claim_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    claim_id: &str,
+    now_ms: i64,
+) -> Result<AutomationClaim, DomainError> {
+    let claim_id = normalize_automation_identifier(claim_id, "Automation claim id is invalid.")?;
+    let existing =
+        claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::InvalidInput {
+            reason: "Automation claim not found.",
+        })?;
+    if existing.state != AutomationClaimState::Running {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation claim is not running.",
+        });
+    }
+    let rows = conn
+        .execute(
+            "UPDATE automation_claims \
+             SET state = 'pending', attempts = attempts - 1, updated_at_ms = ?3 \
+             WHERE workspace_id = ?1 AND claim_id = ?2 AND state = 'running' AND attempts > 0",
+            params![workspace_id, claim_id, now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    if rows != 1 {
+        return Err(DomainError::StateCorrupt {
+            reason: "running automation claim has no attempt to release",
+        });
+    }
+    claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "released automation claim not found after update",
+    })
+}
+
 /// Close a running claim: done, or failed with the handler's error text.
 /// Refuses a claim that is not running — a settle is not idempotent, matching
 /// the chat ledger's exactly-one-transition rule. Then prunes the
@@ -1600,6 +1735,18 @@ pub fn retry_automation_claim(
 ) -> Result<AutomationRetry, DomainError> {
     committed(store.write_with(faults, |tx| {
         retry_automation_claim_in_tx(tx, workspace_id, claim_id, now_ms)
+    })?)
+}
+
+pub fn release_automation_claim(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    claim_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationClaim, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        release_automation_claim_in_tx(tx, workspace_id, claim_id, now_ms)
     })?)
 }
 

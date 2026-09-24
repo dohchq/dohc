@@ -443,6 +443,10 @@ fn capture_ingest_in_tx(
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
+    // A captured agent run declares itself as an agent at depth 0.
+    let attribution = actor_origin_id.as_ref().and_then(|_| {
+        dohc_engine_domain::moment_author_attribution(input.author_json.as_deref()).1
+    });
     let mut admitted = false;
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
@@ -492,6 +496,7 @@ fn capture_ingest_in_tx(
                     text: &result.snapshot.text,
                 },
                 actor_origin_id.as_deref(),
+                attribution.as_ref(),
                 input.now_ms,
             )?
         } else {
@@ -505,6 +510,7 @@ fn capture_ingest_in_tx(
                 &result.snapshot.path,
                 &result.snapshot.text,
                 actor_origin_id.as_deref(),
+                attribution.as_ref(),
                 input.now_ms,
             )?
         };
@@ -957,6 +963,7 @@ fn capture_ingest_binary_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 None,
                 input.now_ms,
             )?;

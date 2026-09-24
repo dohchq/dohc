@@ -763,6 +763,11 @@ impl EngineService {
             .await;
         drop(session_serial);
         let result = result.map_err(map_runtime)?;
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &result.automation_claims,
+        );
         Ok(json!({
             "rolledBack": true,
             "deduped": result.deduped,

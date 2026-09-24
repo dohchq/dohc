@@ -1,13 +1,15 @@
 //! Added and removed records (ADR 0008): reconcile claims a record whose file
 //! a moment on this computer brought into its Collection or took out of it,
 //! once per automation, keyed by that moment. A moment synced from another
-//! computer, a moment older than the subscription, and every binding change
-//! with no such moment (frontmatter breaking and healing) claim nothing.
+//! computer, a moment older than the subscription or the Collection, a merge
+//! replaying another version's change, and every binding change with no such
+//! moment (frontmatter breaking and healing) claim nothing.
 
 use dohc_engine_domain::{
     AutomationChangeKind, AutomationClaim, AutomationFactValue, AutomationSubscription,
-    AutomationTrigger, DeleteTextFile, NoFaults, RenameTextFile, TxnOutcome, VersionedTextStore,
-    WriteText, claim_record_lifecycle_in_tx, reconcile_collections_in_tx, subscribe_automation,
+    AutomationTrigger, CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion,
+    MergeTextFileResult, NoFaults, RenameTextFile, TxnOutcome, VersionedTextStore, WriteText,
+    claim_record_lifecycle_in_tx, reconcile_collections_in_tx, subscribe_automation,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -57,12 +59,33 @@ fn write_as(
     now_ms: i64,
     author_json: Option<String>,
 ) {
+    write_object(
+        store,
+        (MAIN, &format!("object:{path}")),
+        path,
+        text,
+        moment_id,
+        now_ms,
+        author_json,
+    );
+}
+
+/// Write `path` as `object` in `version`.
+fn write_object(
+    store: &mut EngineStore,
+    (version, object): (&str, &str),
+    path: &str,
+    text: &str,
+    moment_id: &str,
+    now_ms: i64,
+    author_json: Option<String>,
+) {
     VersionedTextStore::new(store)
         .write_text(
             &WriteText {
                 workspace_id: WS.to_owned(),
-                version_id: MAIN.to_owned(),
-                object_id: format!("object:{path}"),
+                version_id: version.to_owned(),
+                object_id: object.to_owned(),
                 path: path.to_owned(),
                 text: text.to_owned(),
                 moment_id: moment_id.to_owned(),
@@ -94,18 +117,47 @@ fn moment_order(store: &EngineStore, moment_id: &str) -> i64 {
         .expect("moment order")
 }
 
-/// One reconcile pass and its lifecycle claims, in one transaction.
+/// One reconcile pass of main and its lifecycle claims, in one transaction.
 fn reconcile(store: &mut EngineStore, now_ms: i64) -> Vec<AutomationClaim> {
+    reconcile_version(store, MAIN, now_ms)
+}
+
+fn reconcile_version(store: &mut EngineStore, version: &str, now_ms: i64) -> Vec<AutomationClaim> {
     match store
         .write_with(&NoFaults, |tx| {
-            let reconciliation = reconcile_collections_in_tx(tx, WS, MAIN)?;
-            claim_record_lifecycle_in_tx(tx, WS, MAIN, &reconciliation.lifecycle, now_ms)
+            let reconciliation = reconcile_collections_in_tx(tx, WS, version)?;
+            claim_record_lifecycle_in_tx(tx, WS, version, &reconciliation.lifecycle, now_ms)
         })
         .expect("reconcile")
     {
         TxnOutcome::Committed(claims) => claims,
         TxnOutcome::Crashed { .. } => unreachable!("no faults injected"),
     }
+}
+
+/// Each claim's kind and record.
+fn claimed(claims: &[AutomationClaim]) -> Vec<(AutomationChangeKind, &str)> {
+    claims
+        .iter()
+        .map(|claim| (claim.change.kind, claim.record_id.as_str()))
+        .collect()
+}
+
+/// Journal `moment_id` as a replication import from another computer.
+fn import(store: &mut EngineStore, moment_id: &str, origin_seq: i64) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, \
+                  imported) \
+                 VALUES (?1, 'origin-peer', ?2, 'moment.append', ?3, 11, 1)",
+                rusqlite::params![WS, origin_seq, json!({ "momentId": moment_id }).to_string()],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("journal the moment as imported");
 }
 
 fn seed_collection(store: &mut EngineStore) {
@@ -262,6 +314,8 @@ fn served_facts(
     served
 }
 
+/// A record moved out of its Collection is removed by the move, even when
+/// the moved file is edited before reconcile runs.
 #[test]
 fn a_record_moved_out_of_its_collection_is_removed_by_the_rename() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -295,7 +349,16 @@ fn a_record_moved_out_of_its_collection_is_removed_by_the_rename() {
             &NoFaults,
         )
         .expect("move record out");
-    let removed = reconcile(&mut store, 31);
+    write_object(
+        &mut store,
+        (MAIN, "object:tasks/gamma.md"),
+        "archive/gamma.md",
+        &record(GAMMA, "done"),
+        "gamma-edited",
+        31,
+        None,
+    );
+    let removed = reconcile(&mut store, 32);
     assert_eq!(removed.len(), 1, "{removed:?}");
     assert_eq!(removed[0].change.kind, AutomationChangeKind::Removed);
     assert_eq!(
@@ -321,19 +384,7 @@ fn a_synced_or_older_moment_claims_nothing() {
         "beta-remote",
         11,
     );
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO replication_log \
-                 (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, \
-                  imported) \
-                 VALUES (?1, 'origin-peer', 7, 'moment.append', ?2, 11, 1)",
-                rusqlite::params![WS, json!({ "momentId": "beta-remote" }).to_string()],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("mark beta as imported");
+    import(&mut store, "beta-remote", 7);
     assert!(
         reconcile(&mut store, 20).is_empty(),
         "the computer that created the file claims it, not this one"
@@ -525,5 +576,269 @@ fn a_pruned_added_claim_keeps_its_key() {
     assert!(
         reconcile(&mut store, 2_011).is_empty(),
         "the kept key stops a second addition"
+    );
+}
+
+/// A record made on a branch is added there, once. Merging it into main
+/// replays that change: main binds the record and claims nothing more.
+#[test]
+fn a_record_merged_from_a_branch_is_added_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, LIFECYCLE, 5);
+    seed_collection(&mut store);
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: MAIN.to_owned(),
+                now_ms: 11,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("fork");
+    write_object(
+        &mut store,
+        ("feat", "object:feat/alpha"),
+        "tasks/alpha.md",
+        &record(ALPHA, "open"),
+        "alpha-on-feat",
+        12,
+        None,
+    );
+    assert_eq!(
+        claimed(&reconcile_version(&mut store, "feat", 20)),
+        vec![(AutomationChangeKind::Added, ALPHA)],
+        "the branch that made the record adds it"
+    );
+
+    let merged = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version_with(
+            &MergeTextFileFromVersion {
+                workspace_id: WS.to_owned(),
+                target_version_id: MAIN.to_owned(),
+                source_version_id: "feat".to_owned(),
+                path: "tasks/alpha.md".to_owned(),
+                object_id: "object:main/alpha".to_owned(),
+                moment_id: "alpha-merged".to_owned(),
+                request_id: None,
+                conflict_id: "alpha-conflict".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+            },
+            &NoFaults,
+            |_, _| Ok(()),
+        )
+        .expect("merge");
+    assert!(matches!(merged, MergeTextFileResult::Write { .. }));
+    assert!(
+        reconcile(&mut store, 31).is_empty(),
+        "main claims nothing for the merged record"
+    );
+    let bound: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND record_id = ?3",
+                [WS, MAIN, ALPHA],
+                |row| row.get(0),
+            )
+        })
+        .expect("main's binding");
+    assert_eq!(bound, 1, "main did bind the merged record");
+}
+
+/// A folder that becomes a Collection around its files adds none of them;
+/// a file created in it afterwards is added.
+#[test]
+fn a_collection_made_around_existing_files_adds_none_of_them() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, LIFECYCLE, 5);
+    write(
+        &mut store,
+        "tasks/alpha.md",
+        &record(ALPHA, "open"),
+        "alpha-created",
+        8,
+    );
+    seed_collection(&mut store);
+    assert!(
+        reconcile(&mut store, 20).is_empty(),
+        "alpha was in the folder before it was a Collection"
+    );
+    write(
+        &mut store,
+        "tasks/beta.md",
+        &record(BETA, "open"),
+        "beta-created",
+        30,
+    );
+    assert_eq!(
+        claimed(&reconcile(&mut store, 31)),
+        vec![(AutomationChangeKind::Added, BETA)]
+    );
+}
+
+/// A bound record's `id` belongs to the engine, but a record whose
+/// frontmatter broke is unbound, and healing it under another id binds a
+/// new record. That record is added, keyed like the old one by the moment
+/// its file entered the Collection.
+#[test]
+fn a_record_healed_under_a_new_id_is_added_under_it() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, LIFECYCLE, 5);
+    seed_collection(&mut store);
+    write(
+        &mut store,
+        "tasks/alpha.md",
+        &record(ALPHA, "open"),
+        "alpha-created",
+        11,
+    );
+    assert_eq!(reconcile(&mut store, 20).len(), 1);
+    write(
+        &mut store,
+        "tasks/alpha.md",
+        "---\nstatus: [\n---\n",
+        "alpha-broken",
+        25,
+    );
+    assert!(reconcile(&mut store, 26).is_empty());
+    write(
+        &mut store,
+        "tasks/alpha.md",
+        &record(BETA, "open"),
+        "alpha-renumbered",
+        30,
+    );
+    let claims = reconcile(&mut store, 31);
+    assert_eq!(claimed(&claims), vec![(AutomationChangeKind::Added, BETA)]);
+    assert_eq!(
+        claims[0].trigger,
+        AutomationTrigger::Moment {
+            moment_order: moment_order(&store, "alpha-created"),
+        }
+    );
+}
+
+/// An import that was refused wrote nothing: a moment of this computer's
+/// that shares its moment id is still this computer's, as sync enrolment
+/// reads it.
+#[test]
+fn a_refused_import_leaves_the_moment_local() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, LIFECYCLE, 5);
+    seed_collection(&mut store);
+    write(
+        &mut store,
+        "tasks/beta.md",
+        &record(BETA, "open"),
+        "beta-created",
+        11,
+    );
+    import(&mut store, "beta-created", 7);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_pending_refusals \
+                 (workspace_id, origin_id, origin_seq, op_kind, reason_code, reason_message) \
+                 VALUES (?1, 'origin-peer', 7, 'moment.append', 'invalid-input', 'refused')",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("refuse the import");
+    assert_eq!(
+        claimed(&reconcile(&mut store, 20)),
+        vec![(AutomationChangeKind::Added, BETA)]
+    );
+}
+
+/// Writing a new record's first fields is part of adding it. An automation
+/// that wants added records hears of the creation once, from reconcile; one
+/// that wants only changed records still hears the first values.
+#[test]
+fn a_new_records_first_fields_claim_only_where_added_is_not_wanted() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe_automation(
+        &mut store,
+        WS,
+        &AutomationSubscription {
+            automation_id: "collection:tasks#both".to_owned(),
+            prefix: "tasks".to_owned(),
+            kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+            fields: None,
+        },
+        5,
+        &NoFaults,
+    )
+    .expect("subscribe both");
+    subscribe_automation(
+        &mut store,
+        WS,
+        &AutomationSubscription {
+            automation_id: "collection:tasks#changed".to_owned(),
+            prefix: "tasks".to_owned(),
+            kinds: vec![AutomationChangeKind::Changed],
+            fields: None,
+        },
+        5,
+        &NoFaults,
+    )
+    .expect("subscribe changed");
+    let facts = |created: bool, history_id: i64| dohc_engine_domain::CollectionRecordApplyFacts {
+        collection_path: "tasks".to_owned(),
+        record_id: ALPHA.to_owned(),
+        created,
+        author_origin_id: None,
+        attribution: None,
+        source: Some(("origin-a".to_owned(), history_id)),
+        recorded_at_ms: 10 + history_id,
+        fields: vec![dohc_engine_domain::CollectionFieldChangeFact {
+            field_name: "status".to_owned(),
+            previous_json: None,
+            next_json: Some("\"open\"".to_owned()),
+            history_id,
+        }],
+    };
+    let claims = store
+        .write_with(&NoFaults, |tx| {
+            let mut claims =
+                dohc_engine_domain::claim_automation_triggers_in_tx(tx, WS, &facts(true, 1), 20)?;
+            claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(
+                tx,
+                WS,
+                &facts(false, 2),
+                21,
+            )?);
+            Ok::<_, dohc_engine_domain::DomainError>(claims)
+        })
+        .expect("claim");
+    let TxnOutcome::Committed(claims) = claims else {
+        unreachable!("no faults injected")
+    };
+    assert_eq!(
+        claims
+            .iter()
+            .map(|claim| claim.automation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "collection:tasks#changed",
+            "collection:tasks#both",
+            "collection:tasks#changed",
+        ],
+        "the creation claims once per automation; a later edit claims for both"
     );
 }

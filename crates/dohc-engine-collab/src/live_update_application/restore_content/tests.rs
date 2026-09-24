@@ -431,7 +431,7 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
             |_, _, _, _| Ok(())
         )
         .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let after = snapshot(&f.store);
     assert_eq!(after.0, 4095);
@@ -669,7 +669,7 @@ impl Fixture {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
-        let ApplicationResult::Applied(ack) = result else {
+        let ApplicationResult::Applied(ack, _) = result else {
             panic!("apply refused")
         };
         self.sequence = ack.local_ydoc_sequence;

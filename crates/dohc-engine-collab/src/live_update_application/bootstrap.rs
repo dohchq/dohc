@@ -557,7 +557,7 @@ mod tests {
                         |_, _, _, _| Ok(())
                     )
                     .unwrap(),
-                    ApplicationResult::Applied(_)
+                    ApplicationResult::Applied(..)
                 ));
             }
             assert!(matches!(

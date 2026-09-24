@@ -469,7 +469,12 @@ pub enum ApplicationPending {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
-    Applied(LiveUpdateHostApplicationAck),
+    /// The frame is applied, with the automation claims its field changes
+    /// inserted; a replayed frame claims nothing.
+    Applied(
+        LiveUpdateHostApplicationAck,
+        Vec<dohc_engine_domain::AutomationClaim>,
+    ),
     Pending(ApplicationPending),
 }
 
@@ -769,6 +774,7 @@ pub fn apply_committed(
                         record.sequence,
                         true,
                     ),
+                    Vec::new(),
                 ));
             }
             check_provenance(tx, &held.namespace, &event)?;
@@ -804,11 +810,23 @@ pub fn apply_committed(
             // so the host is the one computer that claims its field changes
             // (ADR 0008). The owner applies the same frame from the host's
             // acceptance and a collaborator never journals it; neither
-            // claims. The author is the principal the relay accepted it from.
+            // claims. The author is the attribution this engine recorded when
+            // the frame is its own draft (an automation's write keeps its
+            // chain depth), and otherwise the principal the relay accepted it
+            // from, at depth 0.
+            let mut automation_claims = Vec::new();
             if let Some(mut facts) = append.record_facts {
-                let (_, principal_id, _, _) = event.metadata.accepted.authority.fields();
-                facts.author_origin_id = Some(principal_id.to_owned());
-                dohc_engine_domain::claim_automation_triggers_in_tx(
+                match own_draft_attribution(tx, &event.metadata.accepted.receipt.update_digest)? {
+                    Some((actor, attribution)) => {
+                        facts.author_origin_id = actor;
+                        facts.attribution = attribution;
+                    }
+                    None => {
+                        let (_, principal_id, _, _) = event.metadata.accepted.authority.fields();
+                        facts.author_origin_id = Some(principal_id.to_owned());
+                    }
+                }
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
                     tx,
                     &key.workspace_id,
                     &facts,
@@ -839,6 +857,7 @@ pub fn apply_committed(
                     append.seq,
                     false,
                 ),
+                automation_claims,
             ))
         },
     );
@@ -848,7 +867,7 @@ pub fn apply_committed(
     match outcome {
         Ok(TxnOutcome::Committed(result)) => {
             if compaction_due
-                && matches!(&result, ApplicationResult::Applied(ack) if !ack.application_replayed)
+                && matches!(&result, ApplicationResult::Applied(ack, _) if !ack.application_replayed)
             {
                 // The key is already evicted. As in self_bound_log, an injected
                 // fold crash keeps the committed ACK; a real error suppresses it.
@@ -868,6 +887,55 @@ pub fn apply_committed(
         )),
         Err(TransactionError::Application(error)) => Err(error),
     }
+}
+
+/// The actor and attribution this engine recorded for a native update it
+/// drafted with these bytes, when the accepted frame is its own draft.
+#[allow(clippy::type_complexity)]
+fn own_draft_attribution(
+    tx: &Transaction<'_>,
+    update_digest: &str,
+) -> Result<
+    Option<(
+        Option<String>,
+        Option<dohc_engine_domain::ChangeAttribution>,
+    )>,
+    ApplicationError,
+> {
+    let source: Option<String> = tx
+        .query_row(
+            "SELECT native_source_json FROM owner_ydoc_outbox_entries \
+             WHERE update_digest = ?1 AND native_source_json IS NOT NULL LIMIT 1",
+            params![update_digest],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let source: crate::owner_outbox::OwnerOutboxNativeSource =
+        serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
+    let crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+        actor_origin_id,
+        actor_kind,
+        on_behalf_of,
+        chain_depth,
+        ..
+    } = source.origin
+    else {
+        return Ok(None);
+    };
+    let attribution = match (actor_kind, chain_depth) {
+        (Some(kind), Some(depth)) => Some(dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::parse(&kind)
+                .ok_or(ApplicationError::Corrupt)?,
+            on_behalf_of,
+            depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
+        }),
+        _ => None,
+    };
+    Ok(Some((actor_origin_id, attribution)))
 }
 
 struct ApplicationRecord {
@@ -1318,7 +1386,7 @@ mod tests {
     }
     fn ack(result: ApplicationResult) -> LiveUpdateHostApplicationAck {
         match result {
-            ApplicationResult::Applied(ack) => ack,
+            ApplicationResult::Applied(ack, _) => ack,
             other => panic!("expected applied: {other:?}"),
         }
     }
@@ -2378,7 +2446,7 @@ mod tests {
                         100_000_000,
                         |_, _, _, _| Ok(())
                     ),
-                    Ok(ApplicationResult::Applied(_))
+                    Ok(ApplicationResult::Applied(..))
                 ),
                 "{pointer}"
             );
@@ -2438,7 +2506,7 @@ mod tests {
                         &NoFaults,
                         100_000_000
                     , |_,_,_,_| Ok(())),
-                    Ok(ApplicationResult::Applied(_))
+                    Ok(ApplicationResult::Applied(..))
                 ),
                 "{damage}"
             );
@@ -2654,14 +2722,28 @@ mod tests {
 
         let source = Ydoc::wire();
         let owner_edit = event("owner-edit", 1, source.frontmatter_set("status", "done"));
-        ack(apply(&mut store, &mut cache, &handle, owner_edit.clone()));
+        let ApplicationResult::Applied(_, returned) =
+            apply(&mut store, &mut cache, &handle, owner_edit.clone())
+        else {
+            panic!("expected applied");
+        };
         assert_eq!(
             claims(&store),
             vec![("changed".to_owned(), Some("owner-1".to_owned()))],
             "the owner's accepted edit claims on the host"
         );
-        let replayed = ack(apply(&mut store, &mut cache, &handle, owner_edit));
+        assert_eq!(
+            returned.len(),
+            1,
+            "the host returns its claim, so the caller can wake the executor"
+        );
+        let ApplicationResult::Applied(replayed, returned) =
+            apply(&mut store, &mut cache, &handle, owner_edit)
+        else {
+            panic!("expected applied");
+        };
         assert!(replayed.application_replayed);
+        assert!(returned.is_empty());
         assert_eq!(claims(&store).len(), 1, "a replayed frame claims nothing");
 
         let mut guest_edit = event("guest-edit", 2, source.frontmatter_set("status", "late"));

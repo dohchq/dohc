@@ -2367,6 +2367,78 @@ pub struct ChangeAttribution {
 /// limit.
 pub const MAX_CHANGE_ATTRIBUTION_DEPTH: u32 = 64;
 
+/// The actor and attribution a moment's recorded author declares. An agent
+/// (`{kind: "agent", agentId, onBehalfOf}`) writes as itself at depth 0; an
+/// automation (`{kind: "automation", automationId, onBehalfOf, depth}`)
+/// writes as itself at its depth. Any other author, or none, declares
+/// neither, as a person's write does.
+pub fn moment_author_attribution(
+    author_json: Option<&str>,
+) -> (Option<String>, Option<ChangeAttribution>) {
+    let Some(author) = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok()) else {
+        return (None, None);
+    };
+    let text = |key: &str| {
+        author
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (actor, actor_kind, depth) = match author.get("kind").and_then(Value::as_str) {
+        Some("agent") => (text("agentId"), ChangeActorKind::Agent, 0),
+        Some("automation") => (
+            text("automationId"),
+            ChangeActorKind::Automation,
+            author
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map_or(0, |depth| {
+                    u32::try_from(depth)
+                        .unwrap_or(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                        .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                }),
+        ),
+        _ => return (None, None),
+    };
+    let Some(actor) = actor else {
+        return (None, None);
+    };
+    let attribution = ChangeAttribution {
+        actor_kind,
+        on_behalf_of: text("onBehalfOf"),
+        depth,
+    };
+    (Some(actor), Some(attribution))
+}
+
+/// The author a moment records for a write made by `actor` with
+/// `attribution`, the inverse of [`moment_author_attribution`]. A person's
+/// write, with no declared agent or automation, records none.
+pub fn moment_author_json(
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Option<String> {
+    let actor = actor_origin_id?;
+    let attribution = attribution?;
+    let on_behalf_of = attribution.on_behalf_of.as_deref()?;
+    let author = match attribution.actor_kind {
+        ChangeActorKind::Agent => serde_json::json!({
+            "kind": "agent",
+            "agentId": actor,
+            "onBehalfOf": on_behalf_of,
+        }),
+        ChangeActorKind::Automation => serde_json::json!({
+            "kind": "automation",
+            "automationId": actor,
+            "onBehalfOf": on_behalf_of,
+            "depth": attribution.depth,
+        }),
+        ChangeActorKind::Human => return None,
+    };
+    Some(author.to_string())
+}
+
 impl ChangeAttribution {
     /// Bounds every declared field. Both wire entry points (the engine's
     /// `ydoc.recordUpdate` params and the replicated `ydoc.update` payload)
@@ -2661,6 +2733,7 @@ pub fn index_collection_record_text_in_tx(
     path: &str,
     text: &str,
     author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     recorded_at_ms: i64,
 ) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
     if !is_collection_markdown_path(path) {
@@ -2689,7 +2762,24 @@ pub fn index_collection_record_text_in_tx(
             .collect::<serde_json::Map<_, _>>()
     });
     if collection_mappings_equal(Some(&before), after_fields.as_ref()) {
-        return Ok(None);
+        // Equal values can still validate differently (`estimate: .nan`
+        // against `estimate: ".nan"`). Reindex, without a change, when the
+        // file or the index flags a value.
+        let flagged_before: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM collection_record_fields \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                   AND validation_status='flagged')",
+                params![workspace_id, version_id, record_id],
+                |row| row.get(0),
+            )
+            .map_err(crate::DomainError::sql_corrupt)?;
+        if !flagged_before
+            && provenance.non_finite_fields.is_empty()
+            && provenance.unsupported_tag_fields.is_empty()
+        {
+            return Ok(None);
+        }
     }
     let before = Value::Object(before);
     index_collection_frontmatter_apply_in_tx(
@@ -2703,7 +2793,7 @@ pub fn index_collection_record_text_in_tx(
         &after,
         Some(&provenance),
         author_origin_id,
-        None,
+        attribution,
         None,
         recorded_at_ms,
     )
