@@ -606,6 +606,8 @@ describe("values, conditions, and templates", () => {
     ["`${ {a: '}'}.a }`", "an object inside a template literal"],
     ["/}/.test(record.Name)", "a regular expression"],
     ["record.Name.replace(/[{}]/g, '')", "a character class"],
+    ["/\\?./u.test(record.Name)", "a regular expression with an escaped ?"],
+    [" {valueOf(){return 4}} / 2", "an object literal before a division"],
     ["record.Total / 2", "a division"],
     ["record.Total /* } */ + 1", "a block comment"],
     ["typeof /}/", "a regular expression after typeof"],
@@ -623,6 +625,8 @@ describe("values, conditions, and templates", () => {
     ["record?.of / 2", "of after optional chaining"],
     ["record?.return / 2", "a keyword after optional chaining"],
     ["record.Done ?.5 : 1 / 2", "a conditional before a number"],
+    ["a?.b / 2", "an optional property"],
+    [" {valueOf(){return 4}} / 2", "an object literal"],
     ["1. / 2", "a number that ends in a point"],
     ["a++ / 2", "a postfix increment"],
     ["a-- / 2", "a postfix decrement"],
@@ -1139,7 +1143,8 @@ describe("automations.yaml diagnostics", () => {
     },
   );
 
-  it.each(["+08:00", "-05:00", "+0800", "UTC+8", "Mars/Olympus"])(
+  const minus = String.fromCharCode(0x2212);
+  it.each(["+08:00", "-05:00", "+0800", `${minus}08:00`, `${minus}0500`, "UTC+8", "Mars/Olympus"])(
     "refuses the time zone %s",
     (timezone) => {
       expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([

@@ -1,4 +1,4 @@
-import { tokenizer, tokTypes } from "acorn";
+import { Parser, tokenizer, tokTypes, type TokenType } from "acorn";
 import {
   CORE_SCHEMA,
   defineMappingTag,
@@ -47,9 +47,9 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //   it has no "=".
 // - Message text (`notify`, `post`, `direct-message`, `wake-agent`) is a
 //   template. `{expression}` inserts a value, and `{{` and `}}` write one
-//   brace. An expression ends at the first "}" that JavaScript's tokenizer
-//   reads outside the expression's own braces, so a "}" inside a string,
-//   template literal, regular expression, or comment does not end it. To
+//   brace. The text after `{` must parse as one JavaScript expression,
+//   followed by `}`, so a "}" inside the expression's strings, template
+//   literals, regular expressions, or object literals does not end it. To
 //   start a message with "=", write `{"="}`.
 // - All other text, such as a name or a reference, cannot start with "=".
 //
@@ -676,13 +676,12 @@ function readFieldValues(
   return values;
 }
 
-// A name or alias Intl knows, in any letter case. Every fixed offset, such
-// as "+08:00", starts with a sign.
+// A name or alias Intl knows, in any letter case. Intl resolves every fixed
+// offset it accepts, however it is spelled, to "+HH:MM" or "-HH:MM".
 function isTimeZoneName(value: string): boolean {
-  if (value.startsWith("+") || value.startsWith("-")) return false;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: value });
-    return true;
+    const { timeZone } = new Intl.DateTimeFormat(undefined, { timeZone: value }).resolvedOptions();
+    return !timeZone.startsWith("+") && !timeZone.startsWith("-");
   } catch {
     return false;
   }
@@ -1068,30 +1067,44 @@ export function parseAutomationsFile(text: string): AutomationsFileParseResult {
   return loaded.status === "read" ? { status: "read", entries: readEntries(loaded.list) } : loaded;
 }
 
-// The index of the "}" that ends a JavaScript expression starting at
-// `start`, or -1. acorn's tokenizer skips strings, template literals,
-// regular expressions, and comments, and tells a regular expression from a
-// division. It reads one token at a time, so text after the expression is
-// never scanned. acorn reads the word after "." as a property name but not
-// the word after "?.", so the scan reads each "?." as " .", which has the
-// same length. "?.5" is a conditional before a number and stays.
-function expressionEnd(source: string, start: number): number {
-  const scanned = source.slice(start).replace(/\?\.(?!\d)/gu, " .");
-  let depth = 0;
-  try {
-    for (const token of tokenizer(scanned, { ecmaVersion: "latest" })) {
-      if (token.type === tokTypes.braceL || token.type === tokTypes.dollarBraceL) {
-        depth += 1;
-      } else if (token.type === tokTypes.braceR) {
-        if (depth === 0) return start + token.start;
-        depth -= 1;
+// acorn reads the word after "." as a property name, but not the word after
+// "?.". acorn 8.18 therefore reads "record?.of / 2" as "record?.of" and then
+// a regular expression, and refuses "record?.return / 2". This parser also
+// reads the word after "?." as a property name, through updateContext, the
+// hook acorn plugins such as acorn-jsx override. acorn's typings leave these
+// members out.
+interface TokenState {
+  type: TokenType;
+  exprAllowed: boolean;
+}
+const ExpressionParser = Parser.extend((Base) => {
+  const { updateContext } = Base.prototype as unknown as {
+    updateContext(this: TokenState, prevType: TokenType): void;
+  };
+  return class extends Base {
+    updateContext(this: TokenState, prevType: TokenType): void {
+      if (prevType === tokTypes.questionDot && (this.type === tokTypes.name || this.type.keyword)) {
+        this.exprAllowed = false;
+      } else {
+        updateContext.call(this, prevType);
       }
     }
+  };
+});
+
+// The index of the "}" that ends the JavaScript expression starting at
+// `start`, or -1. acorn parses one expression in expression context, so a
+// "}" inside a string, template literal, regular expression, or object
+// literal does not end it. Its tokenizer then reads the next token, skipping
+// spaces and comments; that token must be "}".
+function expressionEnd(source: string, start: number): number {
+  try {
+    const { end } = ExpressionParser.parseExpressionAt(source, start, { ecmaVersion: "latest" });
+    const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
+    return next.type === tokTypes.braceR ? end + next.start : -1;
   } catch {
-    // An unterminated string, template literal, regular expression, or
-    // comment.
+    return -1;
   }
-  return -1;
 }
 
 /**
