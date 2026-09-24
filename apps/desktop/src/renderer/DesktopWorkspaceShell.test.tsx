@@ -50,6 +50,7 @@ import type {
   ChatChannelRecord,
   DismissShareSkipsPayload,
   MountShareResult,
+  GetRelayReceivedShareResult,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -631,6 +632,12 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pickWorkspaceRoot: vi.fn(async () => null),
+    getRelayReceivedShare: vi.fn(
+      async (): Promise<GetRelayReceivedShareResult> => ({ found: false }),
+    ),
+    getDefaultShareRoot: vi.fn(
+      async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
+    ),
     // Typed to the contract so a test that adds a share can answer it.
     mountShare: vi.fn(async (): Promise<MountShareResult> => {
       throw new Error("not used in shell tests");
@@ -992,11 +999,12 @@ describe("workspace share handoff placement", () => {
 
 describe("adding a share to this workspace", () => {
   // The folder under shared-with-me is read-only at every level, so the
-  // message names the level only where it has somewhere else to go.
+  // message names the level only where it has somewhere else to go. An
+  // Edit code defaults to Open separately; this person chose Add.
   it.each([
     [
       "edit",
-      "Added sam to shared-with-me. Its files are read-only in this workspace. To use your Edit access, open the share again and choose Open separately.",
+      "Added sam to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
     ],
     [
       "view",
@@ -1016,6 +1024,20 @@ describe("adding a share to this workspace", () => {
         },
         mount: { shareId: "share-1", label: "sam", status: "updated", changedPaths: 1 },
       });
+      bridge.getRelayReceivedShare.mockResolvedValue({
+        found: true,
+        share: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          genericChatWritable: false,
+          grantId: "grant-1",
+          generation: 1,
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-1:https://relay.dohc.test",
+          selector: { paths: ["docs"], versionId: null },
+          access,
+        },
+      });
       renderShell(bridge);
 
       await user.click(await screen.findByTestId("workspace-switcher"));
@@ -1024,6 +1046,12 @@ describe("adding a share to this workspace", () => {
         await screen.findByTestId("open-share-code"),
         "dohc-share:share-1:https://relay.dohc.test",
       );
+      await waitFor(() =>
+        expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe(
+          access === "edit" ? "true" : "false",
+        ),
+      );
+      await user.click(screen.getByTestId("open-share-mode-mount"));
       await user.click(screen.getByTestId("open-share-start"));
 
       expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(

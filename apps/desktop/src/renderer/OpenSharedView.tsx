@@ -5,7 +5,7 @@ import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-rea
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
-import type { ShareAccess } from "../ipc/bridgeContract";
+import type { RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
@@ -26,6 +26,16 @@ type Gate =
 
 function isWindows(): boolean {
   return bridge().platform === "win32";
+}
+
+// Edit on the live version is the grant a separate view can edit. A folder
+// added to a workspace is read-only at every level.
+export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
+  return (
+    share.access === "edit" &&
+    share.selector !== null &&
+    (share.selector.versionId === null || share.selector.versionId === "main")
+  );
 }
 
 function displayPath(path: string): string {
@@ -88,9 +98,14 @@ export function OpenSharedView(props: {
   // share. `chosen` wins; `suggested` counts only for the share it answers.
   const [chosen, setChosen] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
-  const [mode, setMode] = useState<"mount" | "separate">(
-    props.mountInto && !props.liveEditing ? "mount" : "separate",
+  // The mode the person chose. Until they choose, the grant decides.
+  const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
+  // Whether each pasted share opens for live editing, asked once per share
+  // id while this dialog is open. A failed lookup counts as no.
+  const [pastedLiveEditing, setPastedLiveEditing] = useState<ReadonlyMap<string, boolean>>(
+    () => new Map(),
   );
+  const accessLookups = useRef(new Map<string, Promise<boolean>>());
   const [signingIn, setSigningIn] = useState(false);
   const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
@@ -100,6 +115,7 @@ export function OpenSharedView(props: {
   const folderRequestRef = useRequestSequence();
   const suggestRequestRef = useRequestSequence();
   const actionRequests = useRequestSequence();
+  const accessRequests = useRequestSequence();
 
   useEffect(() => {
     if (signingIn) signInPanel.current?.focus();
@@ -134,9 +150,40 @@ export function OpenSharedView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const mounting = mode === "mount" && !!props.mountInto;
   const shareCode = props.resolvedShare?.shareCode ?? code.trim();
   const shareId = props.resolvedShare?.shareId ?? parseShareCode(shareCode)?.shareId ?? null;
+  const liveEditing = props.resolvedShare
+    ? !!props.liveEditing
+    : shareId !== null && pastedLiveEditing.get(shareId) === true;
+  // Edit defaults to Open separately, as the browser handoff does, because
+  // a folder added to this workspace cannot be edited.
+  const mode = pickedMode ?? (props.mountInto && !liveEditing ? "mount" : "separate");
+  const mounting = mode === "mount" && !!props.mountInto;
+
+  // Only a pasted code has an unknown grant, and only a signed-in session
+  // can ask the relay about it. A mode the person picked needs no answer.
+  const accessShareId =
+    props.mountInto && !props.resolvedShare && pickedMode === null && gate.kind === "signed-in"
+      ? shareId
+      : null;
+  const checkingAccess = accessShareId !== null && !pastedLiveEditing.has(accessShareId);
+  useEffect(() => {
+    const request = accessRequests.next();
+    if (accessShareId === null) return;
+    // One relay request per share id: a code pasted again reuses its answer.
+    let lookup = accessLookups.current.get(accessShareId);
+    if (lookup === undefined) {
+      lookup = bridge()
+        .getRelayReceivedShare({ shareId: accessShareId })
+        .then((result) => result.found && opensForLiveEditing(result.share))
+        .catch(() => false);
+      accessLookups.current.set(accessShareId, lookup);
+    }
+    void lookup.then((live) => {
+      if (!accessRequests.isCurrent(request)) return;
+      setPastedLiveEditing((current) => new Map(current).set(accessShareId, live));
+    });
+  }, [accessShareId, accessRequests]);
 
   // Ask main for the default folder whenever the share id changes. Main
   // approves the path, so opening into it needs no dialog. Any change
@@ -166,7 +213,8 @@ export function OpenSharedView(props: {
   }
 
   async function open() {
-    if (opening || shareCode.length === 0) return;
+    // Enter reaches here without the button, so the lookup gates both.
+    if (opening || checkingAccess || shareCode.length === 0) return;
     if (!mounting && !folder) return;
     if (gate.kind !== "signed-in") {
       // Sign-in is a gate, not a step: open the panel inline and let the
@@ -209,6 +257,7 @@ export function OpenSharedView(props: {
   const canOpen =
     gate.kind !== "checking" &&
     !opening &&
+    !checkingAccess &&
     shareCode.length > 0 &&
     (mounting || folder !== null);
 
@@ -280,20 +329,20 @@ export function OpenSharedView(props: {
               testId="open-share-mode-mount"
               icon={<FolderInput size={14} strokeWidth={1.9} aria-hidden />}
               label="Add to this workspace"
-              onClick={() => setMode("mount")}
+              onClick={() => setPickedMode("mount")}
             />
             <ModeOption
               checked={mode === "separate"}
               testId="open-share-mode-separate"
               icon={<AppWindow size={14} strokeWidth={1.9} aria-hidden />}
               label="Open separately"
-              onClick={() => setMode("separate")}
+              onClick={() => setPickedMode("separate")}
             />
           </div>
         </div>
       ) : null}
 
-      {props.liveEditing && props.mountInto ? (
+      {liveEditing && props.mountInto ? (
         <p className="m-0 text-xs leading-relaxed text-muted">
           Open separately to edit shared Markdown. Adding it to this workspace creates a read-only folder.
         </p>
@@ -322,7 +371,11 @@ export function OpenSharedView(props: {
         disabled={!canOpen}
         onClick={() => void open()}
       >
-        {opening
+        {/* The busy label is the disabled button's reason, as it is while
+            opening, and it names no mode before the grant decides one. */}
+        {checkingAccess
+          ? "Checking the share…"
+          : opening
           ? mounting
             ? "Adding the share…"
             : "Opening the share…"

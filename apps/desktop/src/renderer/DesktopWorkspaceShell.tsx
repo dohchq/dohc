@@ -4336,11 +4336,12 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles().catch(() => undefined);
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    // A mount is read-only whatever the grant allows. Edit works only in a
-    // share opened separately, so an Edit grant is told how to reach it.
+    // A mount is read-only whatever the grant allows. Open a share defaults
+    // an Edit grant to Open separately; a person who chose Add is told how
+    // to reach the access they have.
     showSuccessNotice(
       access === "edit"
-        ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, open the share again and choose Open separately.`
+        ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
         : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
     );
   }

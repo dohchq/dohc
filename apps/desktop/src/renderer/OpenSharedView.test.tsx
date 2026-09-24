@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
 import { deferred } from "../testing/deferred";
+import type { GetRelayReceivedShareResult, ShareAccess } from "../ipc/bridgeContract";
 
 // Same deadline discipline as FileInspector.test.tsx. These tests type
 // 40-character share codes keystroke by keystroke through jsdom, honest work
@@ -19,6 +20,7 @@ const bridgeMock = {
   cloudStatus: vi.fn(),
   openSharedView: vi.fn(),
   mountShare: vi.fn(),
+  getRelayReceivedShare: vi.fn(),
   pickWorkspaceRoot: vi.fn(),
   getDefaultShareRoot: vi.fn(),
   createLocalWorkspace: vi.fn(),
@@ -55,6 +57,7 @@ beforeEach(() => {
     `/home/sam/dohc/shared/${shareId}`,
   );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: false });
   bridgeMock.mountShare.mockResolvedValue({
     workspace: {
       ...SHARED_VIEW,
@@ -509,5 +512,132 @@ describe("OpenSharedView", () => {
     const panel = await screen.findByTestId("cloud-sync-panel");
     expect(panel.parentElement).toBe(document.activeElement);
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenSharedView defaults for a pasted code", () => {
+  const CODE = "dohc-share:share-1:http://localhost:1788";
+
+  function received(access: ShareAccess): GetRelayReceivedShareResult {
+    return {
+      found: true,
+      share: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        genericChatWritable: false,
+        grantId: "grant-1",
+        generation: 1,
+        createdAtMs: 1,
+        shareCode: CODE,
+        selector: { paths: ["docs"], versionId: null },
+        access,
+      },
+    };
+  }
+
+  function renderInWorkspace() {
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+  }
+
+  function modeChecked(mode: "mount" | "separate"): string | null {
+    return screen.getByTestId(`open-share-mode-${mode}`).getAttribute("aria-checked");
+  }
+
+  it("holds Open while the relay answers, then defaults an Edit code to Open separately", async () => {
+    const lookup = deferred<GetRelayReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare.mockReturnValue(lookup.promise);
+    renderInWorkspace();
+    fireEvent.change(await screen.findByTestId("open-share-code"), {
+      target: { value: CODE },
+    });
+
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+    expect(start.disabled).toBe(true);
+    // Enter reaches open() without the button.
+    fireEvent.keyDown(screen.getByTestId("open-share-code"), { key: "Enter" });
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+
+    await act(async () => lookup.resolve(received("edit")));
+    await waitFor(() => expect(modeChecked("separate")).toBe("true"));
+    expect(screen.getByText(/Open separately to edit shared Markdown/)).toBeTruthy();
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(start.textContent).toBe("Open share");
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1" });
+  });
+
+  it.each([
+    ["View", async () => received("view")],
+    ["Comment", async () => received("comment")],
+    ["an unknown share", async (): Promise<GetRelayReceivedShareResult> => ({ found: false })],
+    [
+      "a failed lookup",
+      async (): Promise<GetRelayReceivedShareResult> => {
+        throw new Error("offline");
+      },
+    ],
+  ])("keeps Add to this workspace for %s", async (_label, answer) => {
+    bridgeMock.getRelayReceivedShare.mockImplementation(answer);
+    renderInWorkspace();
+    fireEvent.change(await screen.findByTestId("open-share-code"), {
+      target: { value: CODE },
+    });
+
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledOnce());
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(start.textContent).toBe("Add share");
+    expect(modeChecked("mount")).toBe("true");
+  });
+
+  it("keeps the mode the person picked when the answer lands", async () => {
+    const lookup = deferred<GetRelayReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare.mockReturnValue(lookup.promise);
+    const user = userEvent.setup();
+    renderInWorkspace();
+    fireEvent.change(await screen.findByTestId("open-share-code"), {
+      target: { value: CODE },
+    });
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+
+    await user.click(screen.getByTestId("open-share-mode-mount"));
+    expect(start.disabled).toBe(false);
+    await act(async () => lookup.resolve(received("edit")));
+    expect(modeChecked("mount")).toBe("true");
+    expect(start.textContent).toBe("Add share");
+  });
+
+  it("asks once per share id, and never while signed out", async () => {
+    bridgeMock.getRelayReceivedShare.mockResolvedValue(received("view"));
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    for (const value of [CODE, "dohc-share:share-2:http://localhost:1788", CODE]) {
+      fireEvent.change(input, { target: { value } });
+      await waitFor(() => expect(start.disabled).toBe(false));
+    }
+    expect(bridgeMock.getRelayReceivedShare.mock.calls).toEqual([
+      [{ shareId: "share-1" }],
+      [{ shareId: "share-2" }],
+    ]);
+
+    cleanup();
+    bridgeMock.getRelayReceivedShare.mockClear();
+    bridgeMock.cloudStatus.mockResolvedValue({ connected: false });
+    renderInWorkspace();
+    fireEvent.change(await screen.findByTestId("open-share-code"), {
+      target: { value: CODE },
+    });
+    const signedOutStart = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    await waitFor(() => expect(signedOutStart.disabled).toBe(false));
+    expect(signedOutStart.textContent).toBe("Add share");
+    expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
   });
 });

@@ -926,6 +926,7 @@ test("mount side: add a share into a workspace and open it beside local files", 
     });
     await granter.writeTextFiles([
       { path: "docs/brief.md", text: "# Brief\n\nThe lighthouse memo.\n" },
+      { path: "reviews/draft.md", text: "# Draft\n\nOpen for comments.\n" },
       { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
     ]);
     const create = await relayJson(
@@ -940,6 +941,17 @@ test("mount side: add a share into a workspace and open it beside local files", 
     expect(create.status).toBe(200);
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
     const shareCode = `dohc-share:${shareId}:${relay.baseUrl}`;
+    const commentCreate = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${granterWorkspaceId}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["reviews"], access: "comment" }),
+      },
+    );
+    expect(commentCreate.status).toBe(200);
+    const commentShareId = (JSON.parse(commentCreate.body) as { shareId: string }).shareId;
 
     // The recipient's ordinary workspace (the mount host) with its own files.
     await seedWorkspaceManifest(temp, hostWorkspaceId);
@@ -971,7 +983,18 @@ test("mount side: add a share into a workspace and open it beside local files", 
       "true",
     );
     await expect(page.getByTestId("open-share-choose-folder")).toHaveCount(0);
-    await page.getByTestId("open-share-code").fill(shareCode);
+
+    // Open waits for the relay to state the grant. View and Comment codes
+    // then keep Add to this workspace.
+    for (const code of [`dohc-share:${commentShareId}:${relay.baseUrl}`, shareCode]) {
+      await page.getByTestId("open-share-code").fill(code);
+      await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
+      await expect(page.getByTestId("open-share-start")).toBeEnabled();
+      await expect(page.getByTestId("open-share-mode-mount")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    }
     await page.getByTestId("open-share-start").click();
 
     // The mount lands: a toast, tree rows under shared-with-me/e2e-granter,
@@ -993,7 +1016,7 @@ test("mount side: add a share into a workspace and open it beside local files", 
   }
 });
 
-test("mount side: an Edit share added to a workspace is read-only there and says how to edit it", async () => {
+test("mount side: an Edit code opens separately by default, and added to a workspace it says how to edit", async () => {
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const hostWorkspaceId = "share-mount-edit-host-e2e";
@@ -1048,20 +1071,22 @@ test("mount side: an Edit share added to a workspace is read-only there and says
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // A pasted code carries no access, so the dialog defaults to adding
-    // the share to this workspace, as it does for View.
+    // Once the relay states the grant, an Edit code defaults to Open
+    // separately. This person chooses Add to this workspace anyway.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
-    await expect(page.getByTestId("open-share-mode-mount")).toHaveAttribute(
+    await page.getByTestId("open-share-code").fill(shareCode);
+    await expect(page.getByTestId("open-share-mode-separate")).toHaveAttribute(
       "aria-checked",
       "true",
     );
-    await page.getByTestId("open-share-code").fill(shareCode);
+    await page.getByTestId("open-share-mode-mount").click();
+    await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
     // The message arrives as a toast, not a bar across the workbench, and
     // says where Edit works.
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
-      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, open the share again and choose Open separately.",
+      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
     );
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
@@ -1105,12 +1130,17 @@ test("mount side: an Edit share added to a workspace is read-only there and says
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    // The instruction works: the same share, opened separately, offers
-    // Send changes.
+    // Pasted again with the defaults, the code opens the live-editing view
+    // with Send changes.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
-    await page.getByTestId("open-share-mode-separate").click();
     await page.getByTestId("open-share-code").fill(shareCode);
+    await expect(page.getByTestId("open-share-mode-separate")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(page.getByTestId("open-share-start")).toHaveText("Open share");
+    await expect(page.getByTestId("open-share-start")).toBeEnabled();
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toContainText(
       "Markdown edits save to the live host.",
