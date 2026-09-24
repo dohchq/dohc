@@ -2678,6 +2678,10 @@ mod tests {
                 "v2-chat-automation-author",
                 "d5589dd027faf792b65857b27897731a0da25379df7b421c2c8749985ac1e947",
             ),
+            (
+                "v2-automation-trigger-keys",
+                "03b5e42a48083341a41a2b13c0bc4de727f381cbbe5429c7b8dab971089d3dfe",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
