@@ -9,7 +9,6 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "./CollectionPage";
@@ -33,15 +32,6 @@ import {
   SetWorkspaceUiStatePayload,
 } from "../ipc/bridgeContract";
 
-// These drive userEvent through async UI settles — 67 findBy* awaits across 47
-// tests — so the wall-clock profile is the file, not one test.
-//
-// asyncUtilTimeout is the constraint that actually bit: findBy* rejects on RTL's
-// own 1000ms default, so these failed at ~1-3s with "Unable to find
-// [data-testid=...]" while the test budget was never reached. Raising testTimeout
-// alone fixed nothing here.
-configure({ asyncUtilTimeout: 5_000 });
-vi.setConfig({ testTimeout: 15_000 });
 import type {
   AgentRunStatusResult,
   DismissAutomationFailurePayload,
@@ -2392,7 +2382,7 @@ describe("collection folders", () => {
     // The second accepted edit still reaches its record's live document.
     await waitFor(
       () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
-      { timeout: 5_000 },
+      { timeout: 10_000 },
     );
     await waitFor(() => {
       const updates =
@@ -3801,7 +3791,7 @@ describe("editor groups", () => {
       })),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
 
@@ -7211,7 +7201,7 @@ describe("engine store recovery", () => {
       await screen.findByTestId(
         "markdown-source-toggle",
         {},
-        { timeout: 5_000 },
+        { timeout: 10_000 },
       );
       await waitFor(() =>
         expect(openEngineYDocSession).toHaveBeenCalledTimes(1),
@@ -7484,7 +7474,7 @@ describe("engine store recovery", () => {
       })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
 
     await user.click(
@@ -16015,7 +16005,7 @@ describe("set-aside draft recovery", () => {
       ),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
 
     await user.type(screen.getByTestId("page-title"), " changed");
     await screen.findByTestId("tab-dirty");

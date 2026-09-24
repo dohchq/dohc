@@ -11,10 +11,12 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import { EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { deferred } from "../testing/deferred";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
   OwnerYDocOutboxDrainer,
@@ -177,8 +179,8 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "utf8");
   await writeFile(join(root, "owner.md"), "Owner outbox frame fixture", "utf8");
   // Match the real-session helper's aggregate-load allowance for startup smoke.
-  const lifecycle = new EngineDaemonLifecycle({
-    command: engine.require(), maxRestarts: 0, requestTimeoutMs: 10_000,
+  const lifecycle = createRealDaemonLifecycle({
+    command: engine.require(), maxRestarts: 0,
   });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "owner-outbox-frame", rootPath: root, attachmentId: Symbol("owner-pages") };
@@ -351,7 +353,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
   bodyText(doc).insert(bodyText(doc).length, " B");
   const updateB = Y.encodeStateAsUpdate(doc, beforeB);
   const limits = { ...LIMITS, maxPendingBytes: updateA.length + updateB.length };
-  const lifecycle = new EngineDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "owner-outbox-sealed-receipt", rootPath: root, attachmentId: Symbol("owner-receipt") };
   const capture = createWorkspaceEngineCapture({
@@ -453,7 +455,7 @@ it.skipIf(engine.missing)(
     const ownerUpdate = Y.encodeStateAsUpdate(ownerDoc, baseStateVector);
     const expectedMarkdown = yDocToMarkdown(ownerDoc);
 
-    let lifecycle = new EngineDaemonLifecycle({
+    let lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -519,7 +521,7 @@ it.skipIf(engine.missing)(
       await sessions.closeAll();
       await lifecycle.stop();
 
-      lifecycle = new EngineDaemonLifecycle({
+      lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
         maxRestarts: 0,
       });

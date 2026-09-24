@@ -27,6 +27,12 @@ export default defineConfig({
     // so the suite can no longer go red without naming a test.
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
+    // A loaded machine stretches honest work: on a 24-process load the slowest
+    // share-code test took 1.73 s and site-runner tests took up to 2.3 s.
+    // vitest.setup.ts gives Testing Library waits 10 s to match.
+    // In a full gate beside other work, the 100-tab-limit shell tests took over
+    // 15 s; each passes alone. 30 s matches the storage and service packages.
+    testTimeout: 30_000,
     // node >= 25 ships a default-on WebStorage whose localStorage global is
     // created without a backing file in the workers ("--localstorage-file was
     // provided without a valid path") and shadows jsdom's real Storage, so

@@ -38,3 +38,15 @@ if (
     value: () => null,
   });
 }
+
+// Testing Library's own 1 s default for waitFor and findBy* failed loaded runs
+// with "Unable to find" while the product was healthy. A full gate beside other
+// work then missed a 5 s wait for the source-view toggle that passes alone.
+// 10 s stays inside vitest.config.ts's 30 s test timeout, so a stuck wait
+// still reports what it waited for.
+if (typeof document !== "undefined") {
+  const { configure } = await import("@testing-library/dom");
+  configure({ asyncUtilTimeout: 10_000 });
+}
+
+export {};
