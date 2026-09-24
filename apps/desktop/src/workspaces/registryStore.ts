@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import type { RosterGrant, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
 
@@ -309,6 +310,9 @@ export interface RegistryEntry extends CreatedWorkspace {
   // after the render has a higher generation, so a stale click cannot hide
   // it, and an acknowledgment never moves backwards.
   automationFailureAcks?: Record<string, number>;
+  // The grants the owner gave on this workspace, as the relay last listed
+  // them. Absent until the first listing. See automations/shareRoster.ts.
+  shareRoster?: ShareRoster;
 }
 
 /**
@@ -600,6 +604,18 @@ export function createRegistryStore(registryFile: string) {
             [automationId]: next,
           },
         };
+      });
+    },
+
+    /**
+     * Store a new listing of the workspace's grants. The version rises only
+     * when the grants differ, so an unchanged listing writes nothing.
+     */
+    setShareRoster(workspaceId: string, grants: RosterGrant[] | null): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const current = entry.shareRoster;
+        if (current && JSON.stringify(current.grants) === JSON.stringify(grants)) return undefined;
+        return { ...entry, shareRoster: { version: (current?.version ?? 0) + 1, grants } };
       });
     },
 

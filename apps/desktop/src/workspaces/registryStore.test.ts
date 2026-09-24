@@ -137,6 +137,32 @@ describe("automation failure acknowledgments", () => {
   });
 });
 
+describe("share roster", () => {
+  const grant = (grantId: string) => ({
+    grantId,
+    recipientUserId: "u-ana",
+    recipientEmail: "ana@dohc.test",
+    files: { paths: ["Trip"], versionId: null, access: "edit" as const },
+    channel: null,
+  });
+
+  it("raises the version only when the grants change, and survives a reopen", () => {
+    store.register(personal);
+    store.setShareRoster("ws-1", [grant("g-1")]);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")] });
+
+    vi.mocked(renameSync).mockClear();
+    store.setShareRoster("ws-1", [grant("g-1")]);
+    expect(renameSync, "an unchanged listing rewrote the registry").not.toHaveBeenCalled();
+    expect(store.find("ws-1")?.shareRoster?.version).toBe(1);
+
+    store.setShareRoster("ws-1", null);
+    store.setShareRoster("ws-1", [grant("g-1"), grant("g-2")]);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")] });
+    expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.version).toBe(3);
+  });
+});
+
 describe("share skip records", () => {
   const op = (originSeq: number) => ({
     originId: "origin-granter",

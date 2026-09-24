@@ -174,10 +174,12 @@ import {
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
+  setWorkspaceShareRoster,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
 import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
@@ -1025,6 +1027,22 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
+// Each open workspace's copy of the grants its owner gave, for the automation
+// reach check.
+const shareRosters = createShareRosters({
+  findWorkspace,
+  saveRoster: setWorkspaceShareRoster,
+  listGrants: async (workspace) => {
+    const { credentials } = await remoteForWorkspace(workspace);
+    return listRosterGrants(workspace.workspaceId, (path) =>
+      relayShareJsonWithCredentials<unknown>(credentials, path),
+    );
+  },
+  localUserId: () => cachedCredentials?.userId ?? null,
+  logError: (workspaceId, error) =>
+    console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
+});
+
 // MU-C4 shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
@@ -1172,6 +1190,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     };
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
+    shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1740,10 +1759,12 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: () =>
-      withWorkspaceAttachmentAsync(workspace, () =>
+    afterSuccessfulPull: () => {
+      shareRosters.pulled(workspace.workspaceId);
+      return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
-      ),
+      );
+    },
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
@@ -2932,6 +2953,7 @@ async function openWorkspaceActivityForOperation(
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
+  shareRosters.open(canonicalWorkspace.workspaceId);
   return result;
 }
 
@@ -4106,6 +4128,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
@@ -4407,6 +4430,7 @@ function registerIpcHandlers(): void {
         ...(labelHint.length > 0 ? { labelHint } : {}),
         assertCurrent,
       }),
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({

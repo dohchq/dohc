@@ -142,6 +142,8 @@ export function registerRelaySharesIpcHandlers<
     ReturnType<typeof createPresencePollRegistry>,
     "begin" | "cancel"
   >;
+  // A grant changed on the relay. Null when the change names no workspace.
+  sharesChanged(workspaceId: string | null): void;
 }): void {
   const {
     registerHandler,
@@ -155,6 +157,7 @@ export function registerRelaySharesIpcHandlers<
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    sharesChanged,
   } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<
     Sender,
@@ -315,8 +318,8 @@ export function registerRelaySharesIpcHandlers<
       input.workspaceId,
       async (operation, credentials, session) => {
         const workspace = operation.workspace;
-        const created = await session.run(() =>
-          relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
+        const created = await session.run(async () => {
+          const share = await relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
             credentials,
             `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
             {
@@ -328,8 +331,11 @@ export function registerRelaySharesIpcHandlers<
                 ...(input.versionId ? { versionId: input.versionId } : {}),
               }),
             },
-          ),
-        );
+          );
+          // The share exists even if this window has moved on.
+          sharesChanged(workspace.workspaceId);
+          return share;
+        });
         const shareCode = buildShareCode({
           shareId: created.shareId,
           relayUrl: credentials.relayUrl!,
@@ -413,6 +419,7 @@ export function registerRelaySharesIpcHandlers<
         method: "POST",
       },
     );
+    sharesChanged(null);
     return undefined;
   });
 
@@ -536,6 +543,8 @@ export function registerRelaySharesIpcHandlers<
             dependents: conflict.data.dependents,
           });
         }
+        // A new level applies to the link's dependents too.
+        sharesChanged(operation.workspace.workspaceId);
         const widened = RelayShareLinkRetuneWidenResponse.safeParse(
           relayResult.body,
         );
@@ -639,6 +648,8 @@ export function registerRelaySharesIpcHandlers<
             dependents: conflict.data.dependents,
           });
         }
+        // Ending a link ends its dependents.
+        sharesChanged(operation.workspace.workspaceId);
         const ended = RelayShareLinkEndResponse.safeParse(relayResult.body);
         if (!ended.success) {
           throw new Error(relayShareErrorCopy(500, null));
@@ -986,6 +997,7 @@ export function registerRelaySharesIpcHandlers<
             },
           ),
         );
+        sharesChanged(operation.workspace.workspaceId);
         const parsed = RelayShareGrantPromotionResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
@@ -1022,6 +1034,7 @@ export function registerRelaySharesIpcHandlers<
             },
           ),
         );
+        sharesChanged(operation.workspace.workspaceId);
         const parsed = RelayShareGrantRevokeResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
