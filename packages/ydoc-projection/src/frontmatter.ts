@@ -6,7 +6,7 @@
 // and crates/dohc-engine-collab/tests/live-bootstrap-fixtures pin both sides.
 // This module imports only js-yaml, so the desktop can read frontmatter
 // without loading the editor.
-import { exceedsLiveMarkdownLimit } from '@dohc/live-session-contract/limits'
+import { exceedsLiveMarkdownLimit, utf8ByteLength } from '@dohc/live-session-contract/limits'
 import * as yaml from 'js-yaml'
 import {
   boolCoreTag,
@@ -22,9 +22,12 @@ import {
   EVENT_SCALAR,
   EVENT_SEQUENCE,
   floatCoreTag,
+  getScalarValue,
   intCoreTag,
   NOT_RESOLVED,
   nullCoreTag,
+  SCALAR_STYLE_FOLDED_BLOCK,
+  SCALAR_STYLE_LITERAL_BLOCK,
   type ScalarTagDefinition,
 } from 'js-yaml'
 
@@ -40,7 +43,14 @@ const MAX_YDOC_INTEGER = (1n << 63n) - 1n
 const MAX_FRONTMATTER_DEPTH = 130
 // Value nodes a frontmatter block may hold once aliases are expanded.
 const MAX_FRONTMATTER_NODES = 262_144
+// UTF-8 bytes of string values and mapping keys once aliases are expanded.
+// Above the largest text file, so only aliases can reach it.
+const MAX_FRONTMATTER_STRING_BYTES = 16 * 1024 * 1024
 const MAX_FRONTMATTER_ALIASES = 256
+// Text both loaders refuse before parsing: a directive, a second document's
+// start marker, or a carriage return that does not end a line. A `%TAG`
+// directive would otherwise copy its prefix into every tagged node.
+const REFUSED_FRONTMATTER_TEXT = /\r(?!\n)|^(?:%|---(?:[ \t\r\n]|$))/mu
 // js-yaml counts nesting differently for block and flow collections, so its
 // own limit sits above MAX_FRONTMATTER_DEPTH for every form and the walk
 // below applies the shared limit.
@@ -198,18 +208,24 @@ function loadFrontmatterYaml(text: string): LoadedFrontmatter {
   } finally {
     loadingRoot = undefined
   }
-  return { value: budgetedFrontmatterValue(loaded, 0, { nodes: 0 }), keys: root.keys }
+  return {
+    value: budgetedFrontmatterValue(loaded, 0, { nodes: 0, bytes: 0 }),
+    keys: root.keys,
+  }
 }
 
 // Aliases share one object, so this walk is where an alias ladder would
-// multiply; the node budget stops it.
+// multiply; the node and string byte budgets stop it.
 function budgetedFrontmatterValue(
   value: unknown,
   depth: number,
-  budget: { nodes: number },
+  budget: { nodes: number; bytes: number },
 ): unknown {
   budget.nodes += 1
-  if (budget.nodes > MAX_FRONTMATTER_NODES) throw new Error('frontmatter holds too many values')
+  if (typeof value === 'string') budget.bytes += utf8ByteLength(value)
+  if (budget.nodes > MAX_FRONTMATTER_NODES || budget.bytes > MAX_FRONTMATTER_STRING_BYTES) {
+    throw new Error('frontmatter holds too much')
+  }
   const collection = Array.isArray(value) || isFrontmatterMap(value)
   if (collection && depth + 1 > MAX_FRONTMATTER_DEPTH) throw new Error('frontmatter nests too deeply')
   if (Array.isArray(value)) {
@@ -218,6 +234,7 @@ function budgetedFrontmatterValue(
   if (!isFrontmatterMap(value)) return value
   const normalized = nullPrototypeRecord()
   for (const key of Object.keys(value).sort()) {
+    budget.bytes += utf8ByteLength(key)
     normalized[key] = budgetedFrontmatterValue(value[key], depth + 1, budget)
   }
   return normalized
@@ -298,6 +315,7 @@ function readFrontmatterBlock(markdown: string): FrontmatterBlock | null | undef
   if (!match) return undefined
   const [, open = '', text = '', closeLine = '', rest = ''] = match
   const block = { open, yaml: text, closing: `${closeLine}${rest}`, rest }
+  if (REFUSED_FRONTMATTER_TEXT.test(text)) return null
   if (isEmptyFrontmatter(text)) return { ...block, value: nullPrototypeRecord(), keys: [] }
   try {
     const loaded = loadFrontmatterYaml(text)
@@ -337,9 +355,14 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
   if (!block) return { meta: {}, body: src }
   const separator = /^(?:\r?\n)*/u.exec(block.rest)?.[0] ?? ''
   const source = src.slice(0, src.length - block.rest.length + separator.length)
-  const canonical = Object.keys(block.value).length === 0
-    ? ''
-    : `---\n${frontmatterYaml(block.value)}---\n\n`
+  let canonical: string
+  try {
+    canonical = Object.keys(block.value).length === 0
+      ? ''
+      : `---\n${frontmatterYaml(block.value)}---\n\n`
+  } catch {
+    return { meta: {}, body: src }
+  }
   return {
     meta: block.value,
     body: block.rest.slice(separator.length),
@@ -354,11 +377,11 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
  * reads as `current`, the text comes back unchanged. Otherwise a key whose
  * value did not change keeps its lines and the comments above them, a
  * changed key gets its canonical entry in place, a removed key loses its
- * lines, and a new key is added after the others. When one key is removed and
- * one added, the new key takes the removed key's place. Undefined when the source
- * is too large or unreadable, when no key or comment is left, or when the
- * result would not read back as `current`; the caller then writes canonical
- * frontmatter. The engine keeps frontmatter the same way (`kept` in
+ * lines, and a new key is added after the others. A new key with the same
+ * value as a removed key is a rename and takes its place. Undefined when the
+ * source is too large or unreadable, when no key or comment is left, or when
+ * the result would not read back as `current`; the caller then writes
+ * canonical frontmatter. The engine keeps frontmatter the same way (`kept` in
  * crates/dohc-engine-collab/src/ydoc/frontmatter_yaml.rs).
  */
 export function keptFrontmatter(
@@ -369,45 +392,54 @@ export function keptFrontmatter(
   try {
     const block = readFrontmatterBlock(source)
     if (!block || !/^(?:\r?\n)*$/u.test(block.rest)) return undefined
-    const expected = frontmatterYaml(current)
-    if (frontmatterYaml(block.value) === expected) return source
-    const lines = rootKeyLines(block.yaml)
-    if (lines === undefined || lines.length !== block.keys.length) return undefined
-    const canonical = (values: Record<string, unknown>): string => {
-      const text = frontmatterYaml(values)
-      return block.open.endsWith('\r\n') ? text.replaceAll('\n', '\r\n') : text
+    // Each value renders once and compares as its canonical entry.
+    const rendered = renderedEntries(current)
+    const readsAsCurrent = (parsed: Map<string, string>): boolean =>
+      parsed.size === rendered.size
+      && [...rendered].every(([key, entry]) => parsed.get(key) === entry)
+    const parsed = renderedEntries(block.value)
+    if (readsAsCurrent(parsed)) return source
+    const entries = rootKeyEntries(block.yaml)
+    if (entries === undefined || entries.length !== block.keys.length) return undefined
+    const crlf = (entry: string): string =>
+      block.open.endsWith('\r\n') ? entry.replaceAll('\n', '\r\n') : entry
+    const added = Object.keys(orderFrontmatter(current))
+      .filter(key => !Object.hasOwn(block.value, key))
+    // A new key with the same value as a removed key is a rename.
+    const valueText = (value: unknown): string => frontmatterYaml({ value })
+    const renames = new Map<string, string>()
+    for (const key of block.keys) {
+      if (Object.hasOwn(current, key)) continue
+      const removed = valueText(block.value[key])
+      const renamed = added.find(candidate =>
+        ![...renames.values()].includes(candidate) && valueText(current[candidate]) === removed)
+      if (renamed !== undefined) renames.set(key, renamed)
     }
-    const added = Object.fromEntries(
-      Object.entries(current).filter(([key]) => !Object.hasOwn(block.value, key)),
-    )
-    const removed = block.keys.filter(key => !Object.hasOwn(current, key))
-    // One key removed and one added is a rename: the new key keeps the place.
-    const renamed = removed.length === 1 && Object.keys(added).length === 1
-      ? { from: removed[0], to: Object.keys(added)[0]! }
-      : undefined
-    let kept = block.yaml.slice(0, lines[0] ?? block.yaml.length)
-    let lead = ''
+    // Comments above the first key belong to it, like those above any other.
+    let kept = entries.length === 0 ? block.yaml : ''
+    let lead = entries.length === 0 ? '' : block.yaml.slice(0, entries[0]!.line)
     block.keys.forEach((key, index) => {
-      // Blank lines and column-0 comments at the end of an entry belong to
-      // the entry below it.
-      const region = block.yaml.slice(lines[index], lines[index + 1] ?? block.yaml.length)
-      const split = trailingTriviaStart(region)
-      if (key === renamed?.from) {
-        kept += `${lead}${canonical({ [renamed.to]: current[renamed.to] })}`
+      const entry = entries[index]!
+      const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
+      const split = entryTextEnd(region, entry.keptBlankLines)
+      const renamed = renames.get(key)
+      if (renamed !== undefined) {
+        kept += `${lead}${crlf(rendered.get(renamed)!)}`
       } else if (Object.hasOwn(current, key)) {
         kept += lead
-        kept += frontmatterYaml({ [key]: block.value[key] }) === frontmatterYaml({ [key]: current[key] })
+        kept += parsed.get(key) === rendered.get(key)
           ? region.slice(0, split)
-          : canonical({ [key]: current[key] })
+          : crlf(rendered.get(key)!)
       }
       lead = region.slice(split)
     })
-    if (renamed === undefined && Object.keys(added).length > 0) kept += canonical(added)
+    const renamedTo = new Set(renames.values())
+    for (const key of added) if (!renamedTo.has(key)) kept += crlf(rendered.get(key)!)
     kept += lead
     if (kept === '') return undefined
     const candidate = `${block.open}${kept}${block.closing}`
     const reread = readFrontmatterBlock(candidate)
-    return reread && /^(?:\r?\n)*$/u.test(reread.rest) && frontmatterYaml(reread.value) === expected
+    return reread && /^(?:\r?\n)*$/u.test(reread.rest) && readsAsCurrent(renderedEntries(reread.value))
       ? candidate
       : undefined
   } catch {
@@ -415,14 +447,22 @@ export function keptFrontmatter(
   }
 }
 
+function renderedEntries(values: Record<string, unknown>): Map<string, string> {
+  return new Map(Object.keys(values).map(key => [key, frontmatterYaml({ [key]: values[key] })]))
+}
+
+type RootKeyEntry = { line: number; keptBlankLines: number }
+
 /**
- * The offset of the line each top-level key starts on, in document order.
- * Undefined unless the root is a block mapping with one key per line.
+ * Where each top-level key's line starts, in document order, with the blank
+ * lines after the entry that its value keeps: the line breaks a
+ * keep-chomped block scalar (`|+`) holds. Undefined unless the root is a
+ * block mapping with one written key per line.
  */
-function rootKeyLines(text: string): number[] | undefined {
+function rootKeyEntries(text: string): RootKeyEntry[] | undefined {
   const events = yaml.parseEvents(text, { maxDepth: PARSER_MAX_DEPTH })
   const frames: { mapping: boolean; keyNext: boolean }[] = []
-  const lines: number[] = []
+  const entries: RootKeyEntry[] = []
   for (const event of events) {
     if (event.type === EVENT_POP) {
       frames.pop()
@@ -433,32 +473,52 @@ function rootKeyLines(text: string): number[] | undefined {
       continue
     }
     const parent = frames.at(-1)
-    const isRootKey = frames.length === 2 && parent?.mapping === true && parent.keyNext
+    const isKey = parent?.mapping === true && parent.keyNext
+    const isRootKey = isKey && frames.length === 2
     if (parent?.mapping) parent.keyNext = !parent.keyNext
     if (event.type === EVENT_MAPPING || event.type === EVENT_SEQUENCE) {
       if (frames.length === 1 && event.style !== COLLECTION_STYLE_BLOCK) return undefined
       frames.push({ mapping: event.type === EVENT_MAPPING, keyNext: true })
+      continue
+    }
+    const last = entries.at(-1)
+    if (!isKey && last !== undefined) {
+      // A keep-chomped block scalar owns the blank lines after it.
+      last.keptBlankLines = event.type === EVENT_SCALAR
+        && (event.style === SCALAR_STYLE_LITERAL_BLOCK || event.style === SCALAR_STYLE_FOLDED_BLOCK)
+        ? Math.max(0, (/\n*$/u.exec(getScalarValue(text, event))?.[0].length ?? 0) - 1)
+        : 0
     }
     if (!isRootKey) continue
     const position = event.type === EVENT_SCALAR
       ? Math.min(...[event.tagStart, event.anchorStart, event.valueStart].filter(at => at >= 0))
       : event.type === EVENT_ALIAS ? event.anchorStart : -1
+    // js-yaml gives an empty key no position, so the block does not split.
     if (!Number.isFinite(position) || position < 0) return undefined
     const line = text.lastIndexOf('\n', position - 1) + 1
-    if (line <= (lines.at(-1) ?? -1)) return undefined
-    lines.push(line)
+    if (line <= (entries.at(-1)?.line ?? -1)) return undefined
+    entries.push({ line, keptBlankLines: 0 })
   }
-  return lines
+  return entries
 }
 
-/** Where the trailing blank lines and column-0 comments of an entry start. */
-function trailingTriviaStart(region: string): number {
+/**
+ * Where an entry's own text ends: before its trailing blank lines and
+ * column-0 comments, which belong to the entry below it, except the blank
+ * lines a keep-chomped block scalar keeps.
+ */
+function entryTextEnd(region: string, keptBlankLines: number): number {
   let start = region.length
   while (start > 0) {
     const lineStart = region.lastIndexOf('\n', start - 2) + 1
     const line = region.slice(lineStart, start).replace(/\r?\n$/u, '')
     if (lineStart === 0 || !(line.trim() === '' || line.startsWith('#'))) break
     start = lineStart
+  }
+  for (let kept = 0; kept < keptBlankLines; kept += 1) {
+    const lineEnd = region.indexOf('\n', start) + 1
+    if (lineEnd === 0 || region.slice(start, lineEnd).trim() !== '') break
+    start = lineEnd
   }
   return start
 }

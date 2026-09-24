@@ -953,6 +953,48 @@ const frontmatter = [
     expected: null,
   },
   {
+    name: "yaml-directive-is-rejected",
+    markdown: "---\n%YAML 1.2\na: 1\n---",
+    expected: null,
+  },
+  {
+    name: "tag-directive-is-rejected",
+    markdown: "---\n%TAG !e! tag:example.com,2026:\na: !e!x 1\n---",
+    expected: null,
+  },
+  {
+    name: "second-document-start-inside-the-block-is-rejected",
+    markdown: "---\n--- # x\na: 1\n---",
+    expected: null,
+  },
+  {
+    name: "carriage-return-inside-a-line-is-rejected",
+    markdown: '---\na: "x\ry"\n---',
+    expected: null,
+  },
+  {
+    name: "closing-delimiter-with-a-bare-carriage-return-does-not-close",
+    markdown: "---\na: 1\n---\r",
+    expected: null,
+  },
+  {
+    name: "opening-delimiter-with-two-carriage-returns-does-not-open",
+    markdown: "---\r\r\na: 1\n---",
+  },
+  {
+    name: "empty-key-reads-as-null",
+    markdown: "---\n: note\ntitle: A\n---",
+  },
+  {
+    name: "nested-anchors-read",
+    markdown: "---\ns: &s x\nv: &a [&b [*s, *s], *b]\n---",
+  },
+  {
+    name: "aliases-past-the-string-byte-budget-are-rejected",
+    markdown: `---\ns: &s "${"x".repeat(1024)}"\nl1: &l1 [${Array(100).fill("*s").join(", ")}]\nl2: &l2 [${Array(100).fill("*l1").join(", ")}]\nl3: [*l2, *l2]\n---`,
+    expected: null,
+  },
+  {
     name: "duplicate-floating-point-key-is-rejected",
     markdown:
       "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n1.5: first\n1.5: second\n---",

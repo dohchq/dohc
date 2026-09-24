@@ -195,10 +195,6 @@ fn scalar(value: &str, indent: usize, key: bool) -> ProjectionResult<String> {
         previous = Some(c);
     }
     if plain {
-        let source = format!("---\nvalue: {value}\n---\n");
-        plain = matches!(dohc_engine_domain::collections::markdown_frontmatter_json(&source),Some(Value::Object(map)) if map.get("value").and_then(Value::as_str)==Some(value));
-    }
-    if plain {
         ensure_projection_string(value.to_owned())
     } else {
         let apostrophes = value.bytes().filter(|byte| *byte == b'\'').count();
@@ -279,84 +275,91 @@ pub(super) fn source(
 }
 
 /// The frontmatter a person wrote, kept through a settle. While it still
-/// reads as `current`, the text comes back unchanged. Otherwise a key whose
-/// value did not change keeps its lines and the comments above them, a
-/// changed key gets its canonical entry in place, a removed key loses its
-/// lines, and a new key is added after the others. When one key is removed
-/// and one added, the new key takes the removed key's place. `None` when the source is
-/// too large or unreadable, when no key or comment is left, or when the
-/// result would not read back as `current`; the caller then writes canonical
-/// frontmatter. The desktop keeps frontmatter the same way (`keptFrontmatter`
-/// in packages/ydoc-projection/src/frontmatter.ts).
-pub(super) fn kept(source: &str, current: &BTreeMap<String, Value>) -> Option<String> {
+/// reads as the current frontmatter, the text comes back unchanged.
+/// Otherwise a key whose value did not change keeps its lines and the
+/// comments above them, a changed key gets its canonical entry in place, a
+/// removed key loses its lines, and a new key is added after the others. A
+/// new key with the same value as a removed key is a rename and takes its
+/// place. `None` when the source is too large or unreadable, when no key or
+/// comment is left, or when the result would not read back as the current
+/// frontmatter; the caller then writes canonical frontmatter. `rendered` holds
+/// each current key's canonical entry. The desktop keeps frontmatter the same
+/// way (`keptFrontmatter` in packages/ydoc-projection/src/frontmatter.ts).
+pub(super) fn kept(
+    source: &str,
+    current: &BTreeMap<String, Value>,
+    rendered: &BTreeMap<String, String>,
+) -> Option<String> {
     if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
         return None;
     }
-    let same = |key: &str, left: &Value, right: &Value| {
-        matches!(
-            (project_frontmatter(key, left), project_frontmatter(key, right)),
-            (Ok(left), Ok(right)) if left == right
-        )
-    };
-    let reads_as_current = |value: &serde_json::Map<String, Value>| {
-        value.len() == current.len()
-            && current
+    let reads_as_current = |parsed: &BTreeMap<&str, Option<String>>| {
+        parsed.len() == rendered.len()
+            && rendered
                 .iter()
-                .all(|(key, right)| value.get(key).is_some_and(|left| same(key, left, right)))
+                .all(|(key, entry)| parsed.get(key.as_str()) == Some(&Some(entry.clone())))
     };
     let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
-    if reads_as_current(&block.value) {
+    let parsed = rendered_entries(&block.value);
+    if reads_as_current(&parsed) {
         return Some(source.to_owned());
     }
     let entries = block.entries.as_ref()?;
     let yaml = block.yaml;
-    let canonical = |key: &str, value: &Value| {
-        let entry = project_frontmatter(key, value).ok()?;
-        Some(if block.open.ends_with("\r\n") {
+    let crlf = |entry: &str| {
+        if block.open.ends_with("\r\n") {
             entry.replace('\n', "\r\n")
         } else {
-            entry
-        })
+            entry.to_owned()
+        }
     };
-    let mut added: Vec<_> = current
-        .iter()
-        .filter(|(key, _)| !block.value.contains_key(*key))
+    let mut added: Vec<&String> = rendered
+        .keys()
+        .filter(|key| !block.value.contains_key(*key))
         .collect();
-    added.sort_by(|(left, _), (right, _)| compare_keys(left, right, true));
-    let mut removed = entries.iter().filter(|(key, _)| !current.contains_key(key));
-    // One key removed and one added is a rename: the new key keeps the place.
-    let renamed = match (removed.next(), removed.next(), added.as_slice()) {
-        (Some((from, _)), None, [(to, value)]) => Some((from, canonical(to, value)?)),
-        _ => None,
+    added.sort_by(|left, right| compare_keys(left, right, true));
+    // A new key with the same value as a removed key is a rename.
+    let value_text = |value: &Value| project_frontmatter("value", value).ok();
+    let mut renames: BTreeMap<&str, &String> = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| !rendered.contains_key(&entry.key))
+    {
+        let removed = block.value.get(&entry.key).and_then(value_text);
+        let pair = added.iter().position(|key| {
+            !renames.values().any(|taken| taken == key)
+                && removed.is_some()
+                && removed == current.get(*key).and_then(value_text)
+        });
+        if let Some(index) = pair {
+            renames.insert(entry.key.as_str(), added[index]);
+        }
+    }
+    // Comments above the first key belong to it, like those above any other.
+    let (mut kept, mut lead) = match entries.first() {
+        Some(first) => (String::new(), &yaml[..first.line]),
+        None => (yaml.to_owned(), ""),
     };
-    let mut kept = String::from(&yaml[..entries.first().map_or(yaml.len(), |(_, start)| *start)]);
-    let mut lead = "";
-    for (index, (key, start)) in entries.iter().enumerate() {
-        let end = entries.get(index + 1).map_or(yaml.len(), |(_, next)| *next);
-        // Blank lines and column-0 comments at the end of an entry belong to
-        // the entry below it.
-        let region = &yaml[*start..end];
-        let (text, trivia) = region.split_at(trailing_trivia_start(region));
-        if let Some((_, entry)) = renamed.as_ref().filter(|(from, _)| *from == key) {
+    for (index, entry) in entries.iter().enumerate() {
+        let end = entries.get(index + 1).map_or(yaml.len(), |next| next.line);
+        let region = &yaml[entry.line..end];
+        let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
+        if let Some(renamed) = renames.get(entry.key.as_str()) {
             kept.push_str(lead);
-            kept.push_str(entry);
-        } else if let Some(value) = current.get(key) {
+            kept.push_str(&crlf(&rendered[*renamed]));
+        } else if let Some(current) = rendered.get(&entry.key) {
             kept.push_str(lead);
-            if block
-                .value
-                .get(key)
-                .is_some_and(|left| same(key, left, value))
-            {
+            if parsed.get(entry.key.as_str()) == Some(&Some(current.clone())) {
                 kept.push_str(text);
             } else {
-                kept.push_str(&canonical(key, value)?);
+                kept.push_str(&crlf(current));
             }
         }
         lead = trivia;
     }
-    if renamed.is_none() {
-        for (key, value) in added {
-            kept.push_str(&canonical(key, value)?);
+    for key in added {
+        if !renames.values().any(|renamed| *renamed == key) {
+            kept.push_str(&crlf(&rendered[key]));
         }
     }
     kept.push_str(lead);
@@ -368,11 +371,22 @@ pub(super) fn kept(source: &str, current: &BTreeMap<String, Value>) -> Option<St
         return None;
     }
     let reread = markdown_frontmatter_block(&candidate)?;
-    (only_line_breaks(reread.body) && reads_as_current(&reread.value)).then_some(candidate)
+    (only_line_breaks(reread.body) && reads_as_current(&rendered_entries(&reread.value)))
+        .then_some(candidate)
 }
 
-/// Where the trailing blank lines and column-0 comments of an entry start.
-fn trailing_trivia_start(region: &str) -> usize {
+/// Each parsed value rendered once, to compare with the current entries.
+fn rendered_entries(value: &serde_json::Map<String, Value>) -> BTreeMap<&str, Option<String>> {
+    value
+        .iter()
+        .map(|(key, value)| (key.as_str(), project_frontmatter(key, value).ok()))
+        .collect()
+}
+
+/// Where an entry's own text ends: before its trailing blank lines and
+/// column-0 comments, which belong to the entry below it, except the blank
+/// lines a keep-chomped block scalar keeps.
+fn entry_text_end(region: &str, kept_blank_lines: usize) -> usize {
     let mut start = region.len();
     while start > 0 {
         let line_start = region[..start - 1].rfind('\n').map_or(0, |index| index + 1);
@@ -381,6 +395,15 @@ fn trailing_trivia_start(region: &str) -> usize {
             break;
         }
         start = line_start;
+    }
+    for _ in 0..kept_blank_lines {
+        let Some(line_end) = region[start..].find('\n').map(|index| start + index + 1) else {
+            break;
+        };
+        if !region[start..line_end].trim().is_empty() {
+            break;
+        }
+        start = line_end;
     }
     start
 }

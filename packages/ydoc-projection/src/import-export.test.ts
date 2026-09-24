@@ -17,6 +17,7 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import { loadMarkdownFrontmatter } from './frontmatter.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -416,12 +417,19 @@ describe('Y.Doc markdown import/export', () => {
         'rating: 5', 'status: booked', '---', '', 'Body',
       ].join('\n'))
     } finally { doc.destroy() }
-    // One key removed and one added is a rename: the new key keeps the place.
+    // A new key with the removed key's value is a rename and keeps the place;
+    // a new key with another value goes after the others.
     const renamed = markdownToYDoc(written)
     try {
+      renamed.getMap('frontmatter').delete('title')
+      renamed.getMap('frontmatter').set('heading', 'Lisbon')
+      expect(yDocToMarkdown(renamed)).toBe(written.replace('title:   Lisbon', 'heading: Lisbon'))
       renamed.getMap('frontmatter').delete('score')
       renamed.getMap('frontmatter').set('rating', 5)
-      expect(yDocToMarkdown(renamed)).toBe(written.replace('score: .nan', 'rating: 5'))
+      expect(yDocToMarkdown(renamed)).toBe([
+        '---', '# Trip', 'heading: Lisbon', 'id: 99999999999999999999', 'zero: -0',
+        'tags:', '- a', 'rating: 5', '---', '', 'Body',
+      ].join('\n'))
     } finally { renamed.destroy() }
   })
 
@@ -441,6 +449,18 @@ describe('Y.Doc markdown import/export', () => {
       doc.getMap('meta').set('dohcFrontmatterSource', source)
       expect(yDocToMarkdown(doc)).toBe('---\ntitle: Plan\n---\n\nBody')
     } finally { doc.destroy() }
+  })
+
+  // A file up to 10 MiB can carry frontmatter that would copy gigabytes if
+  // the loader expanded it. The loader refuses each one within the test's
+  // default timeout.
+  it.each([
+    ['tag directive', `---\n%TAG !e! tag:${'x'.repeat(1 << 20)}\n--- # x\na: [${'!e!x a, '.repeat(140_000)}a]\n---\n`],
+    ['nested anchors', `---\ns: &s "${'x'.repeat(1_900_000)}"\nv: ${'&a ['.repeat(128)}${Array(256).fill('*s').join(', ')}${']'.repeat(128)}\n---\n`],
+    ['aliases of a long string', `---\ns: &s "${'x'.repeat(2_000_000)}"\nv: [${Array(256).fill('*s').join(', ')}]\n---\n`],
+    ['bare carriage return', '---\na: "x\ry"\n---\n'],
+  ])('refuses frontmatter that would expand past its budgets: %s', (_name, markdown) => {
+    expect(loadMarkdownFrontmatter(markdown)).toBeUndefined()
   })
 
   it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {

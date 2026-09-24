@@ -44,6 +44,12 @@ const KEEP_BLOCK_SCALAR = '---\n# note\nb: |+\n  keeps\n\nc: 1\n---\n\nBody\n'
 const ALIAS_LADDER = Array.from({ length: 6 }, (_, level) => `l${level}: &l${level} [${
   Array(10).fill(level === 0 ? 'x' : `*l${level - 1}`).join(', ')
 }]`).join('\n')
+const STRING_BYTE_LADDER = [
+  `s: &s "${'x'.repeat(1024)}"`,
+  `l1: &l1 [${Array(100).fill('*s').join(', ')}]`,
+  `l2: &l2 [${Array(100).fill('*l1').join(', ')}]`,
+  'l3: [*l2, *l2]',
+].join('\n')
 const WRITTEN_FRONTMATTER = [
   '---', '# Trip plan', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999', 'zero: -0',
   'octal: !!int 0o7', 'hex: 0x_1F', 'bin: 0b1010_1010', 'flag: !!bool yes', 'count: !custom 7',
@@ -68,12 +74,17 @@ const settleSamples: Sample[] = [
     'verbatim-tag': '---\nint: !<tag:yaml.org,2002:int> 7\n---\n\nBody\n',
     'number-keys': '---\n1e21: a\n1e-7: b\n-0.0: c\n1.0: d\n---\n\nBody\n',
     aliases: '---\nlist: &list [1, 2]\ncopy: *list\nname: &name key\n*name : value\n---\n\nBody\n',
+    'empty-key': '---\n: note\ntitle: A\n---\n\nBody\n',
+    'folded-keep': '---\nb: >+\n  folded\n\n\nc: 1\n---\n\nBody\n',
     written: WRITTEN_FRONTMATTER,
   }).map(([name, markdown]) => ({ name: `settle-typed-${name}`, markdown, typed: ', typed', keeps: true })),
   // Blocks both loaders refuse stay body text.
   ...Object.entries({
     'quoted-continued-at-sequence-column': '---\na:\n- "x\ny"\n---\n\nBody\n',
     'collection-key': '---\n? [a, b]\n: 1\n---\n\nBody\n',
+    'tag-directive': '---\n%TAG !e! tag:example.com,2026:\na: !e!x 1\n---\n\nBody\n',
+    'inner-document-start': '---\n--- # x\na: 1\n---\n\nBody\n',
+    'bare-carriage-return': '---\na: "x\ry"\n---\n\nBody\n',
   }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed' })),
   { name: 'settle-key-changed', markdown: WRITTEN_FRONTMATTER, values: { title: 'Porto' } },
   { name: 'settle-key-removed', markdown: WRITTEN_FRONTMATTER, remove: ['score'] },
@@ -90,6 +101,15 @@ const settleSamples: Sample[] = [
   // scalar's value, so the settle writes canonical frontmatter.
   { name: 'settle-key-after-keep-block-scalar-removed', markdown: KEEP_BLOCK_SCALAR, remove: ['c'] },
   { name: 'settle-key-renamed', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon' } },
+  { name: 'settle-key-renamed-and-key-added', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon', status: 'booked' } },
+  // A new key with another value is not a rename, so the removed key's
+  // comment goes with it.
+  { name: 'settle-key-replaced', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { note: 'x' } },
+  { name: 'settle-keep-block-scalar-last-key-added', markdown: '---\nb: |+\n  keeps\n\n---\n\nBody\n', values: { c: 1 } },
+  { name: 'settle-keep-block-scalar-changed', markdown: KEEP_BLOCK_SCALAR, values: { b: 'other\n\n' } },
+  { name: 'settle-empty-key-changed', markdown: '---\n: note\ntitle: A\n---\n\nBody\n', values: { title: 'B' } },
+  { name: 'settle-forged-source-tag-directive', markdown: '---\ntitle: Plan\n---\n\nBody', source: '---\n%TAG !e! tag:example.com,2026:\ntitle: !e!x Plan\n---\n\n' },
+  { name: 'settle-forged-source-string-bytes', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${STRING_BYTE_LADDER}\ntitle: Plan\n---\n\n` },
   { name: 'settle-empty-block-key-added', markdown: '---\n---\n\nBody\n', values: { title: 'Plan' } },
   { name: 'settle-last-key-removed', markdown: '---\nz: 1\ntitle: Plan\n---\n\nBody\n', remove: ['z', 'title'] },
 ]

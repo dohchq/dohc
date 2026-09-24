@@ -891,6 +891,7 @@ impl Ydoc {
         let mut source_text_bytes = 0usize;
         let mut frontmatter_yaml = ProjectionBuffer::new();
         let mut entries: BTreeMap<String, Value> = BTreeMap::new();
+        let mut rendered: BTreeMap<String, String> = BTreeMap::new();
         if frontmatter.len(&txn) > 0 {
             has_frontmatter = true;
             for (k, v) in frontmatter.iter(&txn) {
@@ -906,11 +907,14 @@ impl Ydoc {
                     )?,
                 );
             }
-            let mut ordered: Vec<_> = entries.iter().collect();
+            for (key, value) in &entries {
+                rendered.insert(key.clone(), project_frontmatter(key, value)?);
+            }
+            let mut ordered: Vec<_> = rendered.iter().collect();
             ordered
                 .sort_by(|(left, _), (right, _)| frontmatter_yaml::compare_keys(left, right, true));
-            for (k, v) in ordered {
-                frontmatter_yaml.push_str(&project_frontmatter(k, v)?)?;
+            for (_, entry) in ordered {
+                frontmatter_yaml.push_str(entry)?;
             }
         }
         let children: Vec<MarkdownNode> = body
@@ -921,7 +925,7 @@ impl Ydoc {
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
-            if let Some(kept) = frontmatter_yaml::kept(&source, &entries) {
+            if let Some(kept) = frontmatter_yaml::kept(&source, &entries, &rendered) {
                 let mut preserved = ProjectionBuffer::new();
                 preserved.push_str(&kept)?;
                 // A closing delimiter at the end of the file needs a line
@@ -6287,6 +6291,23 @@ fn main() {}
                 "---\ntitle:\n{}Plan{}\n---\n\n",
                 "[".repeat(500_000),
                 "]".repeat(500_000)
+            ),
+            format!(
+                "---\n%TAG !e! tag:{}\n--- # x\ntitle: [{}Plan]\n---\n\n",
+                "x".repeat(512 * 1024),
+                "!e!x a, ".repeat(100_000)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\ntitle: {}{}{}\n---\n\n",
+                "x".repeat(1_900_000),
+                "&a [".repeat(128),
+                vec!["*s"; 256].join(", "),
+                "]".repeat(128)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\ntitle: [{}]\n---\n\n",
+                "x".repeat(2_000_000),
+                vec!["*s"; 256].join(", ")
             ),
             format!("---\n{ladder}title: Plan\n---\n\n"),
             oversized,

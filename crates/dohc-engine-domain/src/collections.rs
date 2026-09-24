@@ -4,19 +4,14 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::rc::Rc;
 
 use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
-use saphyr::{
-    AnnotatedMappingOwned, AnnotatedNodeOwned, LoadableYamlNode, MappingOwned, ScalarOwned,
-    ScalarStyle, Tag, Yaml, YamlDataOwned, YamlOwned,
-};
+use saphyr::{LoadableYamlNode, MappingOwned, ScalarStyle, Tag, YamlOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1207,209 +1202,77 @@ pub fn is_collection_markdown_path(path: &str) -> bool {
 }
 
 /// Whether a line opens or closes a Markdown frontmatter block: `---`, then
-/// only spaces or tabs.
+/// only spaces or tabs, then one line break (`\n` or `\r\n`) or the end.
 #[must_use]
 pub fn is_frontmatter_delimiter(line: &str) -> bool {
-    line.trim_end_matches(['\r', '\n'])
-        .strip_prefix("---")
-        .is_some_and(|suffix| {
-            suffix
-                .chars()
-                .all(|character| matches!(character, ' ' | '\t'))
-        })
+    let content = match line.strip_suffix('\n') {
+        Some(content) => content.strip_suffix('\r').unwrap_or(content),
+        None => line,
+    };
+    content.strip_prefix("---").is_some_and(|suffix| {
+        suffix
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t'))
+    })
 }
 
-static DUPLICATE_YAML_NODE_ID: AtomicUsize = AtomicUsize::new(1);
-
-#[derive(Debug)]
-struct DuplicateYamlNode {
-    id: usize,
-    data: YamlDataOwned<Self>,
-}
-
-impl DuplicateYamlNode {
-    fn new(data: YamlDataOwned<Self>) -> Self {
-        Self {
-            id: DUPLICATE_YAML_NODE_ID.fetch_add(1, AtomicOrdering::Relaxed),
-            data,
-        }
-    }
-}
-
-impl Clone for DuplicateYamlNode {
-    fn clone(&self) -> Self {
-        Self::new(self.data.clone())
-    }
-}
-
-impl PartialEq for DuplicateYamlNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for DuplicateYamlNode {}
-
-impl Hash for DuplicateYamlNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl AnnotatedNodeOwned for DuplicateYamlNode {
-    type HashKey = Self;
-
-    fn parse_representation_recursive(&mut self) -> bool {
-        self.data.parse_representation_recursive()
-    }
-}
-
-impl From<YamlDataOwned<DuplicateYamlNode>> for DuplicateYamlNode {
-    fn from(data: YamlDataOwned<Self>) -> Self {
-        Self::new(data)
-    }
-}
-
-impl<'input> LoadableYamlNode<'input> for DuplicateYamlNode {
-    type HashKey = Self;
-
-    fn from_bare_yaml(yaml: Yaml<'input>) -> Self {
-        Self::new(match yaml {
-            Yaml::Sequence(_) => YamlDataOwned::Sequence(Vec::new()),
-            Yaml::Mapping(_) => YamlDataOwned::Mapping(AnnotatedMappingOwned::new()),
-            Yaml::Alias(alias) => YamlDataOwned::Alias(alias),
-            Yaml::BadValue => YamlDataOwned::BadValue,
-            Yaml::Representation(value, style, tag) => {
-                YamlDataOwned::Representation(value.into_owned(), style, tag.map(Cow::into_owned))
-            }
-            Yaml::Tagged(tag, value) => {
-                YamlDataOwned::Tagged(tag.into_owned(), Box::new(Self::from_bare_yaml(*value)))
-            }
-            Yaml::Value(value) => YamlDataOwned::Value(value.into_owned()),
-        })
-    }
-
-    fn is_sequence(&self) -> bool {
-        self.data.is_sequence()
-    }
-
-    fn is_mapping(&self) -> bool {
-        self.data.is_mapping()
-    }
-
-    fn is_badvalue(&self) -> bool {
-        self.data.is_badvalue()
-    }
-
-    fn sequence_mut(&mut self) -> &mut Vec<Self> {
-        self.data.as_vec_mut().expect("sequence node")
-    }
-
-    fn mapping_mut(&mut self) -> &mut AnnotatedMappingOwned<Self> {
-        self.data.as_mapping_mut().expect("mapping node")
-    }
-
-    fn into_tagged(self, tag: Cow<'input, Tag>) -> Self {
-        Self::new(YamlDataOwned::Tagged(tag.into_owned(), Box::new(self)))
-    }
-
-    fn take(&mut self) -> Self {
-        std::mem::replace(self, Self::new(YamlDataOwned::BadValue))
-    }
+/// A frontmatter YAML node. An alias shares its anchor's node, so the tree
+/// never copies what an alias names.
+enum FrontmatterNode {
+    Scalar {
+        text: String,
+        style: ScalarStyle,
+        tag: Option<Tag>,
+    },
+    Sequence {
+        tag: Option<Tag>,
+        items: Vec<Rc<FrontmatterNode>>,
+    },
+    Mapping {
+        tag: Option<Tag>,
+        entries: Vec<(Rc<FrontmatterNode>, Rc<FrontmatterNode>)>,
+    },
 }
 
 /// A scalar key as text; `None` for a key that is a collection.
-fn duplicate_yaml_key_text(value: &DuplicateYamlNode) -> Option<String> {
-    match &value.data {
-        YamlDataOwned::Representation(text, style, tag) => Some(frontmatter_key_text(
+fn frontmatter_node_key(node: &FrontmatterNode) -> Option<String> {
+    match node {
+        FrontmatterNode::Scalar { text, style, tag } => Some(frontmatter_key_text(
             frontmatter_scalar(text, *style, tag.as_ref()).value,
         )),
-        YamlDataOwned::Value(ScalarOwned::String(value)) => Some(value.clone()),
-        YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
-        YamlDataOwned::Value(ScalarOwned::FloatingPoint(value)) => Some(value.to_string()),
-        YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
-        YamlDataOwned::Value(ScalarOwned::Null) => Some("null".to_owned()),
-        YamlDataOwned::Tagged(_, value) => duplicate_yaml_key_text(value),
         _ => None,
     }
 }
 
-fn duplicate_yaml_string(value: &DuplicateYamlNode) -> Option<&str> {
-    match &value.data {
-        YamlDataOwned::Value(ScalarOwned::String(value))
-        | YamlDataOwned::Representation(value, _, _) => Some(value),
-        YamlDataOwned::Tagged(_, value) => duplicate_yaml_string(value),
-        _ => None,
-    }
-}
-
-fn duplicate_yaml_mapping(
-    value: &DuplicateYamlNode,
-) -> Option<&AnnotatedMappingOwned<DuplicateYamlNode>> {
-    match &value.data {
-        YamlDataOwned::Mapping(mapping) => Some(mapping),
-        YamlDataOwned::Tagged(_, value) => duplicate_yaml_mapping(value),
-        _ => None,
-    }
-}
-
-fn duplicate_yaml_value_has_duplicate_mapping_key(value: &DuplicateYamlNode) -> bool {
-    match &value.data {
-        YamlDataOwned::Sequence(values) => values
+fn frontmatter_node_has_duplicate_key(node: &FrontmatterNode) -> bool {
+    match node {
+        FrontmatterNode::Scalar { .. } => false,
+        FrontmatterNode::Sequence { items, .. } => items
             .iter()
-            .any(duplicate_yaml_value_has_duplicate_mapping_key),
-        YamlDataOwned::Mapping(mapping) => {
+            .any(|item| frontmatter_node_has_duplicate_key(item)),
+        FrontmatterNode::Mapping { entries, .. } => {
             let mut seen = HashSet::new();
-            for (key, value) in mapping {
-                if duplicate_yaml_key_text(key).is_some_and(|key| !seen.insert(key))
-                    || duplicate_yaml_value_has_duplicate_mapping_key(key)
-                    || duplicate_yaml_value_has_duplicate_mapping_key(value)
-                {
-                    return true;
-                }
-            }
-            false
+            entries.iter().any(|(key, value)| {
+                frontmatter_node_key(key).is_some_and(|key| !seen.insert(key))
+                    || frontmatter_node_has_duplicate_key(value)
+            })
         }
-        YamlDataOwned::Tagged(_, value) => duplicate_yaml_value_has_duplicate_mapping_key(value),
-        _ => false,
     }
 }
 
 fn markdown_record_id(markdown: &str) -> Option<String> {
-    let mut lines = markdown.split_inclusive('\n');
-    let first = lines.next()?;
-    if !first.ends_with('\n') || !is_frontmatter_delimiter(first) {
+    let (_, root) = frontmatter_block(markdown).ok()??;
+    let FrontmatterNode::Mapping { entries, .. } = root.as_deref()? else {
         return None;
-    }
-    let yaml_start = first.len();
-    let mut yaml_end = yaml_start;
-    let mut found_end = false;
-    for line in lines {
-        if is_frontmatter_delimiter(line) {
-            found_end = true;
-            break;
-        }
-        yaml_end += line.len();
-    }
-    if !found_end {
-        return None;
-    }
-    let yaml_source = &markdown[yaml_start..yaml_end];
-    let document = load_frontmatter_yaml(yaml_source)?.document?;
-    let document = &document;
-    if duplicate_yaml_value_has_duplicate_mapping_key(document) {
-        return None;
-    }
-    let mapping = duplicate_yaml_mapping(document)?;
-    mapping
+    };
+    entries
         .iter()
         .rev()
-        .find_map(|(key, value)| {
-            (duplicate_yaml_key_text(key).as_deref() == Some(RECORD_ID_FRONTMATTER_KEY))
-                .then_some(value)
+        .find(|(key, _)| frontmatter_node_key(key).as_deref() == Some(RECORD_ID_FRONTMATTER_KEY))
+        .and_then(|(_, value)| match value.as_ref() {
+            FrontmatterNode::Scalar { text, .. } => Some(text.clone()),
+            _ => None,
         })
-        .and_then(duplicate_yaml_string)
-        .map(str::to_owned)
 }
 
 /// One frontmatter scalar as the value model reads it. The rules follow the
@@ -1614,49 +1477,55 @@ fn frontmatter_key_text(value: Value) -> String {
     }
 }
 
-fn frontmatter_node_json(node: &DuplicateYamlNode) -> Value {
-    match &node.data {
-        YamlDataOwned::Representation(text, style, tag) => {
+fn frontmatter_node_json(node: &FrontmatterNode) -> Value {
+    match node {
+        FrontmatterNode::Scalar { text, style, tag } => {
             frontmatter_scalar(text, *style, tag.as_ref()).value
         }
-        YamlDataOwned::Sequence(values) => {
-            Value::Array(values.iter().map(frontmatter_node_json).collect())
-        }
-        YamlDataOwned::Mapping(mapping) => Value::Object(
-            mapping
+        FrontmatterNode::Sequence { items, .. } => Value::Array(
+            items
+                .iter()
+                .map(|item| frontmatter_node_json(item))
+                .collect(),
+        ),
+        FrontmatterNode::Mapping { entries, .. } => Value::Object(
+            entries
                 .iter()
                 .filter_map(|(key, value)| {
-                    duplicate_yaml_key_text(key).map(|key| (key, frontmatter_node_json(value)))
+                    frontmatter_node_key(key).map(|key| (key, frontmatter_node_json(value)))
                 })
                 .collect(),
         ),
-        YamlDataOwned::Tagged(_, value) => frontmatter_node_json(value),
-        _ => Value::Null,
     }
 }
 
-fn frontmatter_node_is_non_finite(node: &DuplicateYamlNode) -> bool {
-    match &node.data {
-        YamlDataOwned::Representation(text, style, tag) => {
+fn frontmatter_node_is_non_finite(node: &FrontmatterNode) -> bool {
+    match node {
+        FrontmatterNode::Scalar { text, style, tag } => {
             frontmatter_scalar(text, *style, tag.as_ref()).non_finite
         }
         _ => false,
     }
 }
 
-fn frontmatter_node_has_unsupported_tag(node: &DuplicateYamlNode) -> bool {
-    match &node.data {
-        YamlDataOwned::Representation(_, _, tag) => {
-            tag.as_ref().is_some_and(|tag| !yaml_tag_is_supported(tag))
+fn frontmatter_node_has_unsupported_tag(node: &FrontmatterNode) -> bool {
+    let unsupported =
+        |tag: &Option<Tag>| tag.as_ref().is_some_and(|tag| !yaml_tag_is_supported(tag));
+    match node {
+        FrontmatterNode::Scalar { tag, .. } => unsupported(tag),
+        FrontmatterNode::Sequence { tag, items } => {
+            unsupported(tag)
+                || items
+                    .iter()
+                    .any(|item| frontmatter_node_has_unsupported_tag(item))
         }
-        YamlDataOwned::Tagged(tag, value) => {
-            !yaml_tag_is_supported(tag) || frontmatter_node_has_unsupported_tag(value)
+        FrontmatterNode::Mapping { tag, entries } => {
+            unsupported(tag)
+                || entries.iter().any(|(key, value)| {
+                    frontmatter_node_has_unsupported_tag(key)
+                        || frontmatter_node_has_unsupported_tag(value)
+                })
         }
-        YamlDataOwned::Sequence(values) => values.iter().any(frontmatter_node_has_unsupported_tag),
-        YamlDataOwned::Mapping(mapping) => mapping.iter().any(|(key, value)| {
-            frontmatter_node_has_unsupported_tag(key) || frontmatter_node_has_unsupported_tag(value)
-        }),
-        _ => false,
     }
 }
 
@@ -1666,36 +1535,79 @@ fn frontmatter_node_has_unsupported_tag(node: &DuplicateYamlNode) -> bool {
 const MAX_FRONTMATTER_DEPTH: usize = 130;
 /// Value nodes a frontmatter block may hold once aliases are expanded.
 const MAX_FRONTMATTER_NODES: usize = 262_144;
+/// UTF-8 bytes of string values and mapping keys once aliases are expanded.
+/// Above the largest text file, so only aliases can reach it.
+const MAX_FRONTMATTER_STRING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FRONTMATTER_ALIASES: usize = 256;
 
+/// Text both loaders refuse before parsing: a directive, a second document's
+/// start marker, or a carriage return that does not end a line. A `%TAG`
+/// directive would otherwise copy its prefix into every tagged node.
+fn frontmatter_yaml_is_refused(yaml: &str) -> bool {
+    let bytes = yaml.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
+        || yaml.split_inclusive('\n').any(|line| {
+            line.starts_with('%')
+                || line.strip_prefix("---").is_some_and(|rest| {
+                    rest.is_empty() || rest.starts_with([' ', '\t', '\r', '\n'])
+                })
+        })
+}
+
+/// One top-level entry of a frontmatter block.
+pub struct FrontmatterEntryPosition {
+    pub key: String,
+    /// Byte offset in the YAML of the line the key starts on.
+    pub line: usize,
+    /// Blank lines after the entry's last line that belong to its value:
+    /// the line breaks a keep-chomped block scalar (`|+`) keeps.
+    pub kept_blank_lines: usize,
+}
+
 struct LoadedFrontmatterYaml {
-    document: Option<DuplicateYamlNode>,
-    /// Byte offset of the line each top-level key starts on, in document
-    /// order. `None` unless the root is a block mapping with one key per line.
-    root_key_lines: Option<Vec<usize>>,
+    document: Option<Rc<FrontmatterNode>>,
+    /// The line and kept blank lines of each top-level key, in document
+    /// order. `None` unless the root is a block mapping with one written key
+    /// per line.
+    root_keys: Option<Vec<(usize, usize)>>,
 }
 
 struct LoadFrame {
-    mapping: bool,
-    key_next: bool,
     flow: bool,
     column: usize,
     line: usize,
     anchor: usize,
     nodes_before: usize,
+    bytes_before: usize,
+    height: usize,
+    tag: Option<Tag>,
+    mapping: bool,
+    items: Vec<Rc<FrontmatterNode>>,
+    entries: Vec<(Rc<FrontmatterNode>, Rc<FrontmatterNode>)>,
+    key: Option<Rc<FrontmatterNode>>,
+}
+
+struct Anchored {
+    node: Rc<FrontmatterNode>,
+    nodes: usize,
+    bytes: usize,
     height: usize,
 }
 
 /// Load frontmatter YAML with every scalar left unresolved, so
 /// [`frontmatter_scalar`] reads it instead of saphyr's own schema. The load
-/// walks parser events itself, because saphyr's loader recurses once per
-/// nesting level and copies each alias, and refuses YAML past the depth,
-/// node, and alias budgets before it builds anything that large. It also
-/// refuses what the desktop's js-yaml loader refuses: a key that is a
-/// collection, an alias to an unknown or unfinished anchor, and a quoted,
-/// plain, or flow value continued at or left of its block's indentation.
+/// walks parser events and builds its own tree, because saphyr's loader
+/// recurses once per nesting level and copies every anchored node. An alias
+/// shares its anchor's node, and the walk refuses YAML past the depth, node,
+/// string byte, and alias budgets before anything expands it. It also refuses
+/// what the desktop's js-yaml loader refuses: a key that is a collection, an
+/// alias to an unknown or unfinished anchor, a second document, and a quoted,
+/// plain, or flow value continued at or left of its block's column.
 fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
-    use saphyr_parser::{Event, SpannedEventReceiver};
+    use saphyr_parser::Event;
 
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(source.match_indices('\n').map(|(index, _)| index + 1))
@@ -1721,55 +1633,31 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
             .filter(|at| before[*at] == '-')
             .unwrap_or(column)
     };
-    let mut loader = saphyr::YamlLoader::<DuplicateYamlNode>::default();
-    loader.early_parse(false);
+    let string_bytes = |value: &Value| value.as_str().map_or(0, str::len);
     let mut frames: Vec<LoadFrame> = Vec::new();
-    let mut anchors: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut anchors: HashMap<usize, Anchored> = HashMap::new();
+    let mut document: Option<Rc<FrontmatterNode>> = None;
     let mut nodes = 0usize;
+    let mut bytes = 0usize;
     let mut aliases = 0usize;
-    let mut root_key_lines = Some(Vec::new());
+    let mut root_keys: Option<Vec<(usize, usize)>> = Some(Vec::new());
     for event in saphyr_parser::Parser::new_from_str(source) {
         let (event, span) = event.ok()?;
-        let is_node = matches!(
-            event,
-            Event::Scalar(..)
-                | Event::SequenceStart(..)
-                | Event::MappingStart(..)
-                | Event::Alias(_)
-        );
-        let is_key = is_node
-            && frames
-                .last()
-                .is_some_and(|frame| frame.mapping && frame.key_next);
-        if is_node
-            && let Some(frame) = frames.last_mut()
-            && frame.mapping
-        {
-            frame.key_next = !frame.key_next;
-        }
-        if is_key && frames.len() == 1 {
-            let line = line_starts.get(span.start.line() - 1).copied()?;
-            if frames[0].flow
-                || root_key_lines
-                    .as_ref()
-                    .and_then(|lines: &Vec<usize>| lines.last())
-                    .is_some_and(|last| *last >= line)
-            {
-                root_key_lines = None;
-            }
-            if let Some(lines) = root_key_lines.as_mut() {
-                lines.push(line);
-            }
-        }
+        // Whether a node this event starts is a mapping key, and whether it is
+        // a key of the root mapping.
+        let is_key = frames
+            .last()
+            .is_some_and(|frame| frame.mapping && frame.key.is_none());
         let block_column = frames
             .last()
             .filter(|frame| !frame.flow)
             .map(|frame| frame.column);
-        match &event {
-            Event::Scalar(_, style, anchor, _) => {
-                if !is_key {
-                    nodes += 1;
-                }
+        let mut root_key = false;
+        let mapping = matches!(event, Event::MappingStart(..));
+        let node = match event {
+            Event::Scalar(text, style, anchor, tag) => {
+                let tag = tag.map(std::borrow::Cow::into_owned);
+                let resolved = frontmatter_scalar(&text, style, tag.as_ref()).value;
                 if matches!(
                     style,
                     ScalarStyle::Plain | ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
@@ -1778,19 +1666,59 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                 {
                     return None;
                 }
-                if *anchor > 0 {
-                    anchors.insert(*anchor, (1, 0));
+                let value_bytes = string_bytes(&resolved);
+                if is_key {
+                    bytes += frontmatter_key_text(resolved).len();
+                } else {
+                    nodes += 1;
+                    bytes += value_bytes;
                 }
+                root_key = is_key && frames.len() == 1;
+                // saphyr writes an empty node as `~` with an empty span.
+                if root_key
+                    && span.start.index() == span.end.index()
+                    && style == ScalarStyle::Plain
+                    && tag.is_none()
+                    && anchor == 0
+                {
+                    // js-yaml gives an empty key no position to split at.
+                    root_keys = None;
+                }
+                if !is_key
+                    && let Some(keys) = root_keys.as_mut()
+                    && let Some(last) = keys.last_mut()
+                {
+                    // A keep-chomped block scalar owns the blank lines after it.
+                    last.1 = if matches!(style, ScalarStyle::Literal | ScalarStyle::Folded) {
+                        (text.len() - text.trim_end_matches('\n').len()).saturating_sub(1)
+                    } else {
+                        0
+                    };
+                }
+                let node = Rc::new(FrontmatterNode::Scalar {
+                    text: text.into_owned(),
+                    style,
+                    tag,
+                });
+                if anchor > 0 {
+                    anchors.insert(
+                        anchor,
+                        Anchored {
+                            node: node.clone(),
+                            nodes: 1,
+                            bytes: value_bytes,
+                            height: 0,
+                        },
+                    );
+                }
+                node
             }
-            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+            Event::SequenceStart(anchor, tag) | Event::MappingStart(anchor, tag) => {
                 if is_key {
                     return None;
                 }
-                let mapping = matches!(event, Event::MappingStart(..));
                 let flow = span.start.index() != span.end.index();
                 frames.push(LoadFrame {
-                    mapping,
-                    key_next: true,
                     flow,
                     column: if mapping || flow {
                         span.start.col()
@@ -1798,14 +1726,21 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                         dash_column(span.start.line(), span.start.col())
                     },
                     line: span.start.line(),
-                    anchor: *anchor,
+                    anchor,
                     nodes_before: nodes,
+                    bytes_before: bytes,
                     height: 0,
+                    tag: tag.map(std::borrow::Cow::into_owned),
+                    mapping,
+                    items: Vec::new(),
+                    entries: Vec::new(),
+                    key: None,
                 });
                 nodes += 1;
-                if frames.len() > MAX_FRONTMATTER_DEPTH {
+                if frames.len() > MAX_FRONTMATTER_DEPTH || nodes > MAX_FRONTMATTER_NODES {
                     return None;
                 }
+                continue;
             }
             Event::SequenceEnd | Event::MappingEnd => {
                 let frame = frames.pop()?;
@@ -1817,43 +1752,92 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                     return None;
                 }
                 let height = frame.height + 1;
+                let node = Rc::new(if frame.mapping {
+                    FrontmatterNode::Mapping {
+                        tag: frame.tag,
+                        entries: frame.entries,
+                    }
+                } else {
+                    FrontmatterNode::Sequence {
+                        tag: frame.tag,
+                        items: frame.items,
+                    }
+                });
+                if frame.anchor > 0 {
+                    anchors.insert(
+                        frame.anchor,
+                        Anchored {
+                            node: node.clone(),
+                            nodes: nodes - frame.nodes_before,
+                            bytes: bytes - frame.bytes_before,
+                            height,
+                        },
+                    );
+                }
                 if let Some(parent) = frames.last_mut() {
                     parent.height = parent.height.max(height);
                 }
-                if frame.anchor > 0 {
-                    anchors.insert(frame.anchor, (nodes - frame.nodes_before, height));
-                }
+                node
             }
             Event::Alias(anchor) => {
+                root_key = is_key && frames.len() == 1;
                 aliases += 1;
-                let (size, height) = anchors.get(anchor).copied()?;
-                if aliases > MAX_FRONTMATTER_ALIASES || (is_key && height > 0) {
+                let anchored = anchors.get(&anchor)?;
+                if aliases > MAX_FRONTMATTER_ALIASES || (is_key && anchored.height > 0) {
                     return None;
                 }
-                if !is_key {
-                    nodes += size;
-                    if frames.len() + height > MAX_FRONTMATTER_DEPTH {
+                if is_key {
+                    bytes += frontmatter_node_key(&anchored.node)?.len();
+                } else {
+                    nodes += anchored.nodes;
+                    bytes += anchored.bytes;
+                    if frames.len() + anchored.height > MAX_FRONTMATTER_DEPTH {
                         return None;
                     }
                     if let Some(parent) = frames.last_mut() {
-                        parent.height = parent.height.max(height);
+                        parent.height = parent.height.max(anchored.height);
+                    }
+                    if let Some(keys) = root_keys.as_mut()
+                        && let Some(last) = keys.last_mut()
+                    {
+                        last.1 = 0;
                     }
                 }
+                anchored.node.clone()
             }
-            _ => {}
-        }
-        if nodes > MAX_FRONTMATTER_NODES {
+            _ => continue,
+        };
+        if nodes > MAX_FRONTMATTER_NODES || bytes > MAX_FRONTMATTER_STRING_BYTES {
             return None;
         }
-        loader.on_event(event, span);
-    }
-    let mut documents = loader.into_documents();
-    if documents.len() > 1 {
-        return None;
+        if root_key {
+            let line = line_starts.get(span.start.line() - 1).copied()?;
+            if frames[0].flow
+                || root_keys
+                    .as_ref()
+                    .and_then(|keys| keys.last())
+                    .is_some_and(|(last, _)| *last >= line)
+            {
+                root_keys = None;
+            }
+            if let Some(keys) = root_keys.as_mut() {
+                keys.push((line, 0));
+            }
+        }
+        match frames.last_mut() {
+            Some(frame) if frame.mapping => match frame.key.take() {
+                Some(key) => frame.entries.push((key, node)),
+                None => frame.key = Some(node),
+            },
+            Some(frame) => frame.items.push(node),
+            // A second root node is a second document.
+            None if document.is_some() => return None,
+            None => document = Some(node),
+        }
     }
     Some(LoadedFrontmatterYaml {
-        document: documents.pop(),
-        root_key_lines,
+        document,
+        root_keys,
     })
 }
 
@@ -1867,17 +1851,19 @@ pub struct MarkdownFrontmatterBlock<'a> {
     /// The closing delimiter line and everything after it.
     pub closing: &'a str,
     pub body: &'a str,
-    /// Each top-level key with the byte offset in `yaml` of the line it
-    /// starts on, in document order. `None` unless the root is a block
-    /// mapping with one key per line.
-    pub entries: Option<Vec<(String, usize)>>,
+    /// Each top-level entry in document order. `None` unless the root is a
+    /// block mapping with one written key per line.
+    pub entries: Option<Vec<FrontmatterEntryPosition>>,
     non_finite_fields: HashSet<String>,
     unsupported_tag_fields: HashSet<String>,
 }
 
-/// The document's frontmatter block. `Ok(None)` when the document has none;
-/// `Err(())` when its block does not read as a mapping.
-fn frontmatter_block(markdown: &str) -> Result<Option<MarkdownFrontmatterBlock<'_>>, ()> {
+/// The document's frontmatter block and its root node. `Ok(None)` when the
+/// document has none; `Err(())` when its block does not read as a mapping.
+#[allow(clippy::type_complexity)]
+fn frontmatter_block(
+    markdown: &str,
+) -> Result<Option<(MarkdownFrontmatterBlock<'_>, Option<Rc<FrontmatterNode>>)>, ()> {
     let mut lines = markdown.split_inclusive('\n');
     let Some(first) = lines
         .next()
@@ -1897,6 +1883,9 @@ fn frontmatter_block(markdown: &str) -> Result<Option<MarkdownFrontmatterBlock<'
     }
     let body_start = body_start.ok_or(())?;
     let yaml = &markdown[yaml_start..yaml_end];
+    if frontmatter_yaml_is_refused(yaml) {
+        return Err(());
+    }
     let mut block = MarkdownFrontmatterBlock {
         value: serde_json::Map::new(),
         open: &markdown[..yaml_start],
@@ -1912,17 +1901,19 @@ fn frontmatter_block(markdown: &str) -> Result<Option<MarkdownFrontmatterBlock<'
         content.is_empty() || content.starts_with('#')
     });
     if yaml_is_empty {
-        return Ok(Some(block));
+        return Ok(Some((block, None)));
     }
     let loaded = load_frontmatter_yaml(yaml).ok_or(())?;
     let document = loaded.document.ok_or(())?;
-    if duplicate_yaml_value_has_duplicate_mapping_key(&document) {
+    if frontmatter_node_has_duplicate_key(&document) {
         return Err(());
     }
-    let mapping = duplicate_yaml_mapping(&document).ok_or(())?;
-    let mut keys = Vec::with_capacity(mapping.len());
-    for (key, value) in mapping {
-        let key = duplicate_yaml_key_text(key).ok_or(())?;
+    let FrontmatterNode::Mapping { entries, .. } = document.as_ref() else {
+        return Err(());
+    };
+    let mut keys = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let key = frontmatter_node_key(key).ok_or(())?;
         if frontmatter_node_is_non_finite(value) {
             block.non_finite_fields.insert(key.clone());
         }
@@ -1932,21 +1923,33 @@ fn frontmatter_block(markdown: &str) -> Result<Option<MarkdownFrontmatterBlock<'
         keys.push(key);
     }
     block.entries = loaded
-        .root_key_lines
+        .root_keys
         .filter(|lines| lines.len() == keys.len())
-        .map(|lines| keys.into_iter().zip(lines).collect());
+        .map(|lines| {
+            keys.into_iter()
+                .zip(lines)
+                .map(|(key, (line, kept_blank_lines))| FrontmatterEntryPosition {
+                    key,
+                    line,
+                    kept_blank_lines,
+                })
+                .collect()
+        });
     let Value::Object(value) = frontmatter_node_json(&document) else {
         return Err(());
     };
     block.value = value;
-    Ok(Some(block))
+    Ok(Some((block, Some(document))))
 }
 
 /// The document's frontmatter block, or `None` when it has none or the block
 /// does not read as a mapping.
 #[must_use]
 pub fn markdown_frontmatter_block(markdown: &str) -> Option<MarkdownFrontmatterBlock<'_>> {
-    frontmatter_block(markdown).ok().flatten()
+    frontmatter_block(markdown)
+        .ok()
+        .flatten()
+        .map(|(block, _)| block)
 }
 
 struct ParsedMarkdownFrontmatter<'a> {
@@ -1964,7 +1967,7 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
             non_finite_fields: HashSet::new(),
             unsupported_tag_fields: HashSet::new(),
         },
-        Some(block) => ParsedMarkdownFrontmatter {
+        Some((block, _)) => ParsedMarkdownFrontmatter {
             value: Value::Object(block.value),
             body: block.body,
             non_finite_fields: block.non_finite_fields,
@@ -6050,6 +6053,37 @@ mod tests {
             flow(super::MAX_FRONTMATTER_DEPTH),
             format!("---\ntitle:\n{}x\n---\n", "- ".repeat(500_000)),
             flow(500_000),
+        ] {
+            assert!(super::markdown_frontmatter_json(&markdown).is_none());
+            assert_eq!(markdown_record_id(&markdown), None);
+        }
+    }
+
+    /// Frontmatter a peer can sync in a file up to 10 MiB. Each input would
+    /// copy gigabytes if the loader expanded it; the loader refuses each one
+    /// before building anything that large.
+    #[test]
+    fn frontmatter_that_would_expand_past_its_budgets_is_refused() {
+        let aliases = |count: usize| vec!["*s"; count].join(", ");
+        for markdown in [
+            format!(
+                "---\n%TAG !e! tag:{}\n--- # x\na: [{}a]\n---\n",
+                "x".repeat(1 << 20),
+                "!e!x a, ".repeat(140_000)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\nv: {}{}{}\n---\n",
+                "x".repeat(1_900_000),
+                "&a [".repeat(128),
+                aliases(256),
+                "]".repeat(128)
+            ),
+            format!(
+                "---\ns: &s \"{}\"\nv: [{}]\n---\n",
+                "x".repeat(2_000_000),
+                aliases(256)
+            ),
+            "---\na: \"x\ry\"\n---\n".to_owned(),
         ] {
             assert!(super::markdown_frontmatter_json(&markdown).is_none());
             assert_eq!(markdown_record_id(&markdown), None);
