@@ -733,10 +733,10 @@ describe("notices after access ends", () => {
     await pull(h, "ana");
     expect(digests).toHaveBeenCalled();
 
-    // Once her only such row is removed, Ana is skipped too.
+    // Once her only such row expires, Ana is skipped too, before any post
+    // sweeps it away.
     await mark(h, "ana", [{ noticeId: "from:owner:automation-failed:run-1", mark: "dismissed" }]);
     clock += NOTICE_DISMISSED_RETENTION_MS;
-    stored(storage, "ana", "later");
     digests.mockClear();
     await pull(h, "ana");
     expect(digests).not.toHaveBeenCalled();

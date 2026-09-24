@@ -167,7 +167,7 @@ export function readNoticeChanges(
   storage: StorageContext,
   input: ReadNoticeChangesInput,
 ): RelayNoticePage {
-  settleLostReach(storage, input.recipientUserId);
+  settleLostReach(storage, input.recipientUserId, input.nowMs);
   return storage.readTx(() => {
     const list = storage.db.prepare(
       "SELECT change_seq, floor_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?",
@@ -371,14 +371,14 @@ function reachToken(storage: StorageContext, userId: string): string {
 // changed since the last check. Each row whose recipient no longer reads
 // its target there moves to another share that admits its path, or loses
 // its target.
-function settleLostReach(storage: StorageContext, recipientUserId: string): void {
+function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs: number): void {
   const stale = storage.readTx(() => {
-    // Nothing to check without a live row placed through a share.
+    // Nothing to check without a live, unexpired row placed through a share.
     const throughShare = storage.db.prepare(
       `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
          WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-           AND removed_at_ms IS NULL) AS present`,
-    ).get(recipientUserId);
+           AND removed_at_ms IS NULL AND expires_at_ms > ?) AS present`,
+    ).get(recipientUserId, nowMs);
     if (Number(throughShare?.present) !== 1) return false;
     const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
       .get(recipientUserId);
@@ -389,9 +389,9 @@ function settleLostReach(storage: StorageContext, recipientUserId: string): void
     const rows = storage.db.prepare(
       `SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
        WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-         AND removed_at_ms IS NULL
+         AND removed_at_ms IS NULL AND expires_at_ms > ?
        ORDER BY change_seq`,
-    ).all(recipientUserId);
+    ).all(recipientUserId, nowMs);
     const reach = shareReach(storage, recipientUserId);
     const move = storage.db.prepare(
       `UPDATE sync_relay_notices
