@@ -2149,6 +2149,7 @@ struct TwoSaves {
     displaces: AtomicU32,
     crash_after_second_move: bool,
     lock_put_backs: bool,
+    snapshot_before_second_move: Option<DbSnapshot>,
 }
 
 impl TwoSaves {
@@ -2157,6 +2158,72 @@ impl TwoSaves {
             displaces: AtomicU32::new(0),
             crash_after_second_move,
             lock_put_backs,
+            snapshot_before_second_move: None,
+        }
+    }
+}
+
+/// A copy of the engine database at one moment. Restoring it while the files
+/// stay as they are is what an operating-system crash leaves: every commit
+/// synced by then survives, and later commits are lost.
+struct DbSnapshot {
+    db: PathBuf,
+    dir: PathBuf,
+}
+
+impl DbSnapshot {
+    fn files(&self) -> Vec<(PathBuf, PathBuf)> {
+        let name = self
+            .db
+            .file_name()
+            .expect("db name")
+            .to_string_lossy()
+            .into_owned();
+        ["", "-wal"]
+            .into_iter()
+            .map(|suffix| {
+                (
+                    self.db.with_file_name(format!("{name}{suffix}")),
+                    self.dir.join(format!("{name}{suffix}")),
+                )
+            })
+            .collect()
+    }
+
+    /// Copy through a handle that shares read, write and delete, as SQLite
+    /// holds its files open.
+    fn copy(from: &Path, to: &Path) {
+        let mut source = std::fs::File::open(from).expect("open database file");
+        let mut copy = std::fs::File::create(to).expect("create copy");
+        std::io::copy(&mut source, &mut copy).expect("copy database file");
+    }
+
+    fn take(&self) {
+        std::fs::create_dir_all(&self.dir).expect("snapshot dir");
+        for (live, saved) in self.files() {
+            if live.exists() {
+                Self::copy(&live, &saved);
+            }
+        }
+    }
+
+    /// Put the copy back. The store must be closed.
+    fn restore(&self) {
+        let shm = {
+            let name = self
+                .db
+                .file_name()
+                .expect("db name")
+                .to_string_lossy()
+                .into_owned();
+            self.db.with_file_name(format!("{name}-shm"))
+        };
+        let _ = std::fs::remove_file(shm);
+        for (live, saved) in self.files() {
+            let _ = std::fs::remove_file(&live);
+            if saved.exists() {
+                Self::copy(&saved, &live);
+            }
         }
     }
 }
@@ -2168,6 +2235,11 @@ impl AtomicReplacer for TwoSaves {
             0 => std::fs::write(target, OUTSIDE).expect("first outside save"),
             1 => std::fs::write(target, NEWER).expect("newer outside save"),
             _ => {}
+        }
+        if n == 1
+            && let Some(snapshot) = &self.snapshot_before_second_move
+        {
+            snapshot.take();
         }
         StdReplacer.displace(target, displaced)?;
         if n == 1 && self.crash_after_second_move {
@@ -2251,5 +2323,52 @@ fn a_locked_put_back_of_a_newer_save_returns_it_on_the_next_run() {
         drain(&store, &sc, &StdReplacer, &NoFaults),
         vec![JobOutcome::Conflict]
     );
+    assert_newer_save_shown(&sc, &store);
+}
+
+/// An operating-system crash after the row naming the newer save's file was
+/// synced keeps every commit up to that row and can lose every commit after
+/// it, here the one that kept the older change's row. The renames survive.
+/// Recovery still returns the newer save.
+#[test]
+fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
+    let sc = Scratch::new("power-loss");
+    let snapshot = DbSnapshot {
+        db: sc.db(),
+        dir: sc.root.join(".dohc").join("power-loss-snapshot"),
+    };
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let mut replacer = TwoSaves::new(false, true);
+        replacer.snapshot_before_second_move = Some(DbSnapshot {
+            db: snapshot.db.clone(),
+            dir: snapshot.dir.clone(),
+        });
+        run_pending_jobs(
+            &store,
+            sc.workspace(),
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &replacer,
+                backoff: &NoBackoff,
+                now_ms: 20,
+                faults: &NoFaults,
+            },
+        )
+        .expect_err("the put-back stays locked");
+    }
+    snapshot.restore();
+    assert!(!sc.target("a.md").exists(), "the name is empty");
+    assert_eq!(displaced_files(&sc).len(), 2, "both renames survived");
+
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    let rows = store.list_unsettled_displacements().expect("unsettled");
+    assert_eq!(
+        rows.iter().map(|row| row.state).collect::<Vec<_>>(),
+        vec![DisplacementState::Open, DisplacementState::Placed],
+        "the newer save's synced row survived; the later keep was lost"
+    );
+    drain(&store, &sc, &StdReplacer, &NoFaults);
     assert_newer_save_shown(&sc, &store);
 }

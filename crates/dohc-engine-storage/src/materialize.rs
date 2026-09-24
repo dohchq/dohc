@@ -579,27 +579,46 @@ fn query_displacements(
 
 /// Record, before the move, that the materializer is about to move a target
 /// aside. Returns the row id later transitions name.
+///
+/// The engine runs with `synchronous = NORMAL`, where an operating-system
+/// crash can lose recent commits while file renames survive. This commit alone
+/// runs with `synchronous = FULL`, which syncs the WAL, so the rename that
+/// follows can never outlive the row that names its file. Every earlier commit
+/// is synced with it. The connection's own setting is restored after.
 pub(crate) fn open_displacement(
     conn: &Connection,
     spec: &DisplacementSpec,
 ) -> Result<i64, StorageError> {
-    conn.execute(
-        "INSERT INTO materialization_displacements \
-         (job_id, workspace_id, target_path, displaced_name, expected_sha256, content_sha256, \
-          state, displaced_sha256, created_at_ms, resolved_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', NULL, ?7, NULL)",
-        rusqlite::params![
-            spec.job_id,
-            spec.workspace_id,
-            spec.target_path,
-            spec.displaced_name,
-            spec.expected_sha256,
-            spec.content_sha256,
-            spec.now_ms,
-        ],
-    )
-    .map_err(StorageError::persist)?;
-    Ok(conn.last_insert_rowid())
+    const SYNCHRONOUS_FULL: i64 = 2;
+    let session: i64 = conn
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(StorageError::corrupt)?;
+    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
+        .map_err(StorageError::persist)?;
+    let inserted = conn
+        .execute(
+            "INSERT INTO materialization_displacements \
+             (job_id, workspace_id, target_path, displaced_name, expected_sha256, content_sha256, \
+              state, displaced_sha256, created_at_ms, resolved_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', NULL, ?7, NULL)",
+            rusqlite::params![
+                spec.job_id,
+                spec.workspace_id,
+                spec.target_path,
+                spec.displaced_name,
+                spec.expected_sha256,
+                spec.content_sha256,
+                spec.now_ms,
+            ],
+        )
+        .map(|_| conn.last_insert_rowid())
+        .map_err(StorageError::persist);
+    let restored = conn
+        .pragma_update(None, "synchronous", session)
+        .map_err(StorageError::persist);
+    let displacement_id = inserted?;
+    restored?;
+    Ok(displacement_id)
 }
 
 /// Record that the job's content is at the target, before the displaced

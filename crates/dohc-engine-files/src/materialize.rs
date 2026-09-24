@@ -26,10 +26,11 @@
 //! so another program can write the target after step 4 read it. An ordinary
 //! write or delete therefore never renames over the target or unlinks it:
 //!
-//! - A durable `open` row in `materialization_displacements` names the
-//!   job's `.dohc-write-*.displaced` sibling before anything moves. The name
-//!   is fixed per job, so replay also finds a displaced file whose row a power
-//!   failure lost.
+//! - An `open` row in `materialization_displacements` names the job's
+//!   `.dohc-write-*.displaced` sibling before anything moves. That one commit
+//!   syncs the WAL, so no rename into a displaced name outlives its row, even
+//!   after an operating-system crash. Later commits keep the engine's
+//!   `synchronous = NORMAL`; recovery handles losing them.
 //! - One rename moves whatever is at the target name to that sibling. A file
 //!   another program renamed over the target after the check moves with it, and
 //!   bytes written in place move with the file they were written to.
@@ -1836,8 +1837,7 @@ fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// The `n`th displaced name for a job, beside `target`. The names are fixed
-/// per job, so replay can find a displaced file whose row a power failure
-/// lost.
+/// per job, so replay can find a displaced file no row names.
 fn displaced_name(job_id: &str, n: u32) -> String {
     let job = filesystem_job_component(job_id);
     match n {
@@ -1960,8 +1960,10 @@ fn recover_job_displacements(
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
     let mut rows = store.list_displacements_for_job(&job.job_id)?;
-    // A displaced file no row names lost its row to a power failure: the
-    // commit is not synced, the rename can be. Adopt it as an open row.
+    // Opening a row syncs it before its rename, so a displaced file no row
+    // names is one whose delete a power failure undid after its row ended,
+    // or one a drive that ignores flushes kept. Adopt it as an open row and
+    // judge it like any other.
     for n in 0..MAX_DISPLACED_NAMES {
         let name = displaced_name(&job.job_id, n);
         if !entry_exists(&sibling_with_name(target, &name))? {

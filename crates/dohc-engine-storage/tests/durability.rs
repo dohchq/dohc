@@ -787,6 +787,11 @@ fn a_displacement_resolves_with_its_job_in_one_transaction() {
             .path_is_displaced("ws", "notes/a.md")
             .expect("displaced")
     );
+    assert_eq!(
+        store.synchronous_setting().expect("synchronous"),
+        1,
+        "opening a row syncs that one commit and leaves the session at NORMAL"
+    );
     store.mark_displacement_placed(placed).expect("placed");
     assert_eq!(
         store.list_displacements_for_job("j1").expect("for job")[0].state,
