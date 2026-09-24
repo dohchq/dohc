@@ -117,6 +117,37 @@ describe("Titlebar", () => {
     );
   });
 
+  it("closes the workspace switcher on Escape and returns focus to it", () => {
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+    );
+    const trigger = screen.getByTestId("workspace-switcher");
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("listbox", { name: "Workspaces" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes the workspace switcher on a press outside it, not inside it", () => {
+    render(
+      <div>
+        <button type="button">Elsewhere</button>
+        <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />
+      </div>,
+    );
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    fireEvent.pointerDown(screen.getByTestId("workspace-switcher-option"));
+    expect(screen.getByRole("listbox", { name: "Workspaces" })).toBeTruthy();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Elsewhere" }));
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+  });
+
   it("omits the chats layout control when the workspace has no chats sidebar", () => {
     render(
       <Titlebar
