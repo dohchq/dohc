@@ -649,12 +649,15 @@ fn read_required_text(
     Some(text.to_owned())
 }
 
+// Mirrors isNormalizedRelativePath in @dohc/workspace-contracts. A colon is
+// refused on every host: on Windows, "C:x" names a drive and "a:x" a stream.
 fn is_workspace_relative_collection_path(value: &str) -> bool {
     canonical_workspace_path_meets_shared_bounds(value)
         && !value.is_empty()
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains('\\')
+        && !value.contains(':')
         && !value.chars().any(|character| character.is_control())
         && value
             .split('/')
