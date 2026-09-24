@@ -35,11 +35,11 @@ Words are for two things: the user's own content (file names, titles, messages),
 | `Unknown source` on every row | An actor glyph, or nothing |
 | An empty state sentence | The actions it offers, with their shortcuts |
 | Prose about what changed | A number, a bar, or the changed words highlighted |
-| A label saying who is an agent | The olive agent voice: its badge or a 6px dot beside the name |
+| A label saying who is an agent | The agent's shape (see Agent attribution) |
 
 **Keep what a picture cannot carry.**
 
-- Every icon-only control keeps an accessible name and a tooltip. A new visible label keeps the control's current accessible name (see Hard invariants).
+- Every icon-only control keeps an accessible name and a tooltip. A new visible label keeps the control's accessible name unless the control changes what it is (see Hard invariants).
 - Distinct facts keep distinct marks. Saved on this machine, accepted by the host, and waiting to share are three states, not one check.
 - An error keeps its words: what happened, why if known, and what to do next. The icon marks the error; the sentence explains it.
 - Color always travels with a second cue (a shape, an icon, or a position), so meaning survives grayscale and color blindness.
@@ -136,7 +136,7 @@ An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that sa
 
 ### Agent copy
 
-Agent activity gets the olive `agent` voice visually. In words:
+An agent is marked visually by its rounded square avatar, and a running agent by its agent-colored dot (see Agent attribution). In words:
 
 - Completed work: past tense, with the count when one exists and means something. `Updated 3 files`. Some runs change no countable set, say what happened without inventing a number.
 - Work in progress: name the concrete action, and the count when known. `Reading 40 files`. Never `Working on it…`.
@@ -171,11 +171,11 @@ But most apparent violations are not one bad string. dohc's UI vocabulary is **u
 
 **Settle a vocabulary, do not rename a string.** Choosing what a thing is called is a deliberate decision taken across every surface that shows it, and it has to be made before any renaming starts.
 
-**Never touch a pinned name.** Every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e and must never be renamed, removed, or restructured away. Updating the tests does not buy you permission. Change the visible copy and leave the accessible name as it is.
+**A copy fix changes visible words only.** The `data-testid`, `aria-*`, `role`, and accessible name stay as they are (see Hard invariants for when they change).
 
 Known so far:
 
-- The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything, and leave the two pinned `aria-label`s alone regardless.
+- The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything. Settling a word changes visible copy and keeps these two `aria-label`s, because the surface stays the same surface (see Hard invariants).
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx` is **mixed**: `document` at `:487`, `:662` and `:669`, but `files` at `:630` a few rows above them.
 
 Do not read existing copy as an example of the rules. And note that `${confirmDelete.length} items` in the Explorer delete dialog is *correct*, the selection can mix files and folders, so `files` would be false.
@@ -210,7 +210,7 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | `text-muted` | Secondary text (labels, inactive items) |
 | `text-subtle` | Decorative text ONLY (hints, timestamps, kbd), 3:1 floor |
 | `bg-accent` / `text-accent` | Green-graphite. Primary buttons, checked/active semantics, focus rings. THE brand accent |
-| `text-agent` / `bg-agent` | Agent presence/attribution, the olive voice |
+| `text-agent` / `bg-agent` | The default agent color, olive (see Agent attribution) |
 | `bg-match` / `text-match` | Find-match highlight ONLY. Never decoration |
 | `text-success` / `warning` / `danger` | State semantics only |
 
@@ -238,7 +238,7 @@ Never invent fractional sizes (`text-[10.5px]`); snap to 10/11/12/13px.
 | Buttons, inputs, list rows, menu items | `rounded-md` (6px) |
 | Cards, menus, dropdowns, larger buttons | `rounded-lg` (8px) |
 | Popovers, dialogs, modals | `rounded-xl` (12px) |
-| Pills, dots, avatars | `rounded-full` |
+| Pills, dots, a person's avatar | `rounded-full` (an agent's avatar is a rounded square; see Agent attribution) |
 
 ### Elevation (classes in styles.css, do not write ad-hoc shadows)
 
@@ -275,7 +275,7 @@ Segmented control: container `flex rounded-lg border border-line bg-panel-2 p-0.
 
 Empty state: centered column, `gap-4`; optional `DohcMark` in `text-line` (ghost); one `text-sm text-muted` line; actions as kbd-chip buttons. Never a wall of gray text.
 
-Agent attribution: olive voice. `text-agent` name/icon or a 6px `bg-agent` dot. Never a filled olive block.
+Agent attribution: shape first. An agent's avatar is a rounded square (`rounded-md`) and a person's is round (`rounded-full`), in both themes and whatever the colors. The square's color is the `agent` token by default, and people will be able to change it, so the shape is the visual cue and color is not. Shape is visual only: every agent mark needs a text alternative, such as the screen-reader "agent" label in `AgentBadge`. Name text uses `text-agent`. The square is for avatars; a running dot stays a 6px round `bg-agent` dot. `ChatAvatar` still draws agents round; that is a known gap, not the rule.
 
 ### Motion
 
@@ -297,7 +297,7 @@ Agent attribution: olive voice. `text-agent` name/icon or a 6px `bg-agent` dot. 
 
 ### Hard invariants (breaking these breaks the product)
 
-- Every `data-testid`, `aria-*`, `role`, and accessible name is PINNED by e2e, restyle freely, never rename/remove/restructure them away.
+- Every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e. Restyles, rewording, and vocabulary changes keep them, because a new name for the same surface is not a new surface. When a surface changes what it is, such as the right panel turning from Chats into About, change those attributes in the same PR as the e2e assertions that read them, so tests and assistive technology follow what the surface now is.
 - No new dependencies. No `any`. No styles.css edits from surface work, new shared patterns get proposed, not inlined.
 - Icons: lucide-react only, 12–18px, `strokeWidth={1.9}` for rail-scale icons.
 - Focus: global `:focus-visible` ring is the default; only opt out when a surface provides an equivalent (and say why in a comment).
