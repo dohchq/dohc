@@ -15251,59 +15251,81 @@ describe("file transfers", () => {
     expect(notices.textContent).not.toContain("Imported 1 file.");
   });
 
-  it("offers Try again on the toast and the Notices row when an import brings nothing, for the same folder", async () => {
+  // Every file was skipped for its name or kind, so the same files would be
+  // skipped again: the notice names the count and offers no Try again.
+  it("offers no Try again when an import brings nothing", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 2 });
     const user = userEvent.setup();
     renderShell(bridge);
 
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Nothing imported (2 skipped).");
+    expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  function sharedViewBridge(refreshOk: boolean[]) {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.refreshSharedView = vi.fn(async () =>
+      refreshOk.shift() === false
+        ? {
+            ok: false as const,
+            changedPaths: 0,
+            errorMessage: "The relay did not answer.",
+          }
+        : {
+            ok: true as const,
+            status: "unchanged" as const,
+            changedPaths: 0,
+            excludedPaths: [],
+            unjournalablePaths: [],
+            collisionRecordQuarantined: false,
+            refusedOps: 0,
+            refusedDetail: null,
+          },
+    );
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md", "notes/two.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    return bridge;
+  }
+
+  async function importIntoNotes(bridge: ReturnType<typeof makeBridge>) {
     const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
     if (!folder) throw new Error("notes folder row missing");
     fireEvent.contextMenu(folder);
     await waitFor(() =>
       expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
     );
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Nothing imported (2 skipped).");
-    expect(within(toast).getByTestId("workspace-shell-error-retry")).toBeTruthy();
+  }
 
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = await screen.findByTestId("notice-center");
-    await user.click(within(notices).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
-    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
-  });
+  const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
 
-  it("refreshes the shared view, then asks for files for the same folder, when an interrupted import is tried again", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.refreshSharedView = vi.fn(async () => ({
-      ok: true as const,
-      status: "unchanged" as const,
-      changedPaths: 0,
-      excludedPaths: [],
-      unjournalablePaths: [],
-      collisionRecordQuarantined: false,
-      refusedOps: 0,
-      refusedDetail: null,
-    }));
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
-    });
+  // Picking the same files again would land second copies under collision
+  // names, so the notice names what landed; Try again refreshes the shared
+  // view, then asks for files for the same folder.
+  it("names what an interrupted import landed, and Try again refreshes before it asks for files for the same folder", async () => {
+    const bridge = sharedViewBridge([true, true]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
-    bridge.importWorkspaceFiles.mockResolvedValueOnce({
-      imported: ["notes/one.md"],
-      skipped: 0,
-      interrupted: true,
-    });
     const user = userEvent.setup();
 
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(await screen.findByText("Import files"));
+    await importIntoNotes(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Imported 1 file before the import stopped.");
+    expect(toast.textContent).toContain(
+      "Imported notes/one.md and notes/two.md before the import stopped. Import only the files that are still missing.",
+    );
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
 
     await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
@@ -15311,7 +15333,23 @@ describe("file transfers", () => {
     expect(bridge.refreshSharedView.mock.invocationCallOrder[1]).toBeLessThan(
       bridge.importWorkspaceFiles.mock.invocationCallOrder[1]!,
     );
-    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test" });
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  it("asks for no files when the refresh before Try again fails", async () => {
+    const bridge = sharedViewBridge([true, false]);
+    renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't refresh the shared view."),
+    );
+    expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
   });
 
   it("reports an interrupted shared import separately from ordinary skips", async () => {
@@ -15327,7 +15365,7 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
 
-    await screen.findByText(/Imported 2 files before the import stopped/);
+    await screen.findByText(/Imported one.md and two.md before the import stopped/);
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(1),
     );

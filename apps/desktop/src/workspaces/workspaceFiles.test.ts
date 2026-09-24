@@ -862,6 +862,22 @@ describe("copyIntoWorkspace", () => {
     expect(await readFile(join(root, "notes (2).md"), "utf8")).toBe("incoming");
   });
 
+  // What a retry after a partial import meets: the files that already landed
+  // are imported again beside themselves, not skipped. The shell names what
+  // landed so the person can pick only the rest.
+  it("imports a repeated batch again under collision names", async () => {
+    const outside = await createTestScratch("dohc-import-");
+    await writeFile(join(outside, "one.md"), "one");
+    await writeFile(join(outside, "two.md"), "two");
+    const batch = [join(outside, "one.md"), join(outside, "two.md")];
+
+    expect(await copyIntoWorkspace(root, batch)).toEqual({ imported: ["one.md", "two.md"], skipped: 0 });
+    expect(await copyIntoWorkspace(root, batch)).toEqual({
+      imported: ["one (2).md", "two (2).md"],
+      skipped: 0,
+    });
+  });
+
   it("fits collision variants within NAME_MAX for near-limit basenames", async () => {
     const outside = await createTestScratch("dohc-import-");
     // 251 chars + ".md" = 254 bytes — legal, but stem + " (2)" would exceed

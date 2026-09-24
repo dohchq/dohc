@@ -519,6 +519,16 @@ function shareUnjournalableNotice(
   return lines.join(" ");
 }
 
+// Up to three paths by name, then how many more, for a sentence a person
+// reads: "a.md and b.md", "a.md, b.md, and c.md", "a.md, b.md, c.md, and 2 more".
+function namedPaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, 3);
+  const more = paths.length - shown.length;
+  if (more > 0) return `${shown.join(", ")}, and ${more} more`;
+  if (shown.length <= 2) return shown.join(" and ");
+  return `${shown.slice(0, -1).join(", ")}, and ${shown.at(-1)}`;
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -2039,7 +2049,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
-  const refreshShareViewRef = useRef<() => Promise<void>>(async () => undefined);
+  const refreshShareViewRef = useRef<() => Promise<boolean>>(async () => true);
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2050,8 +2060,11 @@ export function DesktopWorkspaceShell(props: {
     async (droppedPaths?: string[], targetDir?: string) => {
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
+      // A refresh that fails reports itself and asks for nothing.
       const retry = () => {
-        void refreshShareViewRef.current().then(() => importFiles(undefined, targetDir));
+        void refreshShareViewRef.current().then((current) => {
+          if (current) void importFiles(undefined, targetDir);
+        });
       };
       let outcome: ImportWorkspaceFilesResult;
       try {
@@ -2066,10 +2079,12 @@ export function DesktopWorkspaceShell(props: {
       }
       const count = outcome.imported.length;
       if (outcome.interrupted) {
+        // Importing the same files again would land second copies under
+        // collision names, so name what already landed.
         reportShellError(
           count === 0
             ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-            : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
+            : `Imported ${namedPaths(outcome.imported)} before the import stopped. Import only the files that are still missing.`,
           null,
           retry,
           "import-files",
@@ -2087,8 +2102,10 @@ export function DesktopWorkspaceShell(props: {
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      // Every file was skipped for its name or kind; the same files would be
+      // skipped again, so there is nothing to try again.
       if (count === 0) {
-        reportShellError(`Nothing imported${skippedSuffix}.`, null, retry, "import-files");
+        showShellError(`Nothing imported${skippedSuffix}.`, "import-files");
         return;
       }
       showSuccessNotice(
@@ -2103,7 +2120,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, showShellError, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3863,8 +3880,11 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
   );
 
-  const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewDamaged) return;
+  // Resolves true when the view is current: refreshed, or not a shared
+  // view at all. A failed, superseded, or ended refresh resolves false.
+  const refreshShareView = useCallback(async (): Promise<boolean> => {
+    if (!shareView) return true;
+    if (shareViewDamaged) return false;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -3883,15 +3903,15 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return;
+      if (token !== shareRefreshToken.current) return false;
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return;
+        if (token !== shareRefreshToken.current) return false;
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
         );
-        return;
+        return false;
       }
       if (outcome.collisionRecordQuarantined) {
         showShellError(
@@ -3907,11 +3927,10 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
-      if (outcome.status === "ended") {
-        return;
-      }
+      return outcome.status !== "ended";
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);
+      return false;
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
