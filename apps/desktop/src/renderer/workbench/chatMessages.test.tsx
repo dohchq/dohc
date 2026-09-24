@@ -168,6 +168,7 @@ describe("chat authorship display", () => {
     expect(author.textContent).toBe("Stamp the finish date");
     expect(author.dataset.authorKind).toBe("automation");
     expect(screen.queryByTestId("test-chat-agent-badge")).toBeNull();
+    expect(screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open automation" }));
     expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
   });

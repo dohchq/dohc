@@ -13,6 +13,7 @@ describe("AutomationBadge", () => {
     render(<AutomationBadge testIdPrefix="chats-message" author={author} viewerAuthorId="ice" />);
     const badge = screen.getByTestId("chats-message-automation-badge");
     expect(badge.getAttribute("aria-label")).toBe("automation");
+    expect(badge.querySelector(".sr-only")?.textContent).toBe("automation");
     expect(badge.tabIndex).toBe(0);
     fireEvent.focus(badge);
     expect(screen.getByRole("tooltip").textContent).toBe("Stamp the finish dateRan on Ana's computer");
@@ -22,7 +23,7 @@ describe("AutomationBadge", () => {
   });
 
   it.each([
-    ["your own automation on another computer", { ...author, authorUserId: "ice" }, "Ran on your computer"],
+    ["your own automation on another of your computers", { ...author, authorUserId: "ice" }, "Ran on another of your computers"],
     ["an automation on this computer", { ...author, automation: local }, "Ran on your computer"],
     ["an automation without an owner name", { authorDisplayName: "Stamp the finish date" }, "Ran on another computer"],
   ])("says where %s ran", (_name, value, expected) => {

@@ -17,8 +17,9 @@ function automationsFile(collectionPath: string): string {
 
 // Names an automation author beside its name, like AgentBadge does for an
 // agent: a screen-reader "automation", and a tooltip with the automation's
-// name and the computer it ran on. When it ran on this computer, the mark
-// opens it.
+// name and the computer it ran on. Only a message this computer's automation
+// wrote carries `automation`, so only that one ran on "your computer" and can
+// be opened here.
 export function AutomationBadge(props: {
   testIdPrefix: string;
   author: AutomationAuthor;
@@ -28,14 +29,13 @@ export function AutomationBadge(props: {
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const yours =
-    author.automation !== undefined ||
-    (author.authorUserId !== undefined && author.authorUserId === props.viewerAuthorId);
-  const ranOn = yours
+  const ranOn = author.automation
     ? "Ran on your computer"
-    : author.authorOwnerDisplayName
-      ? `Ran on ${author.authorOwnerDisplayName}'s computer`
-      : "Ran on another computer";
+    : author.authorUserId !== undefined && author.authorUserId === props.viewerAuthorId
+      ? "Ran on another of your computers"
+      : author.authorOwnerDisplayName
+        ? `Ran on ${author.authorOwnerDisplayName}'s computer`
+        : "Ran on another computer";
   const openPath = author.automation && props.onOpenPath ? automationsFile(author.automation.collectionPath) : undefined;
   const markProps = {
     "data-testid": `${props.testIdPrefix}-automation-badge`,
@@ -76,6 +76,7 @@ export function AutomationBadge(props: {
       ) : (
         <span {...markProps} tabIndex={0} aria-label="automation" className="inline-flex rounded">
           <Zap size={12} strokeWidth={1.9} aria-hidden />
+          <span className="sr-only">automation</span>
         </span>
       )}
       {open ? (

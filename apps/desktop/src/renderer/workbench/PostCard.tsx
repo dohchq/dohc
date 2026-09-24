@@ -123,6 +123,7 @@ export function PostCard(props: {
   bookmarkBusy?: boolean;
   onToggleBookmark?: (mode: "live" | "snapshot") => void;
   onOpenBookmark?: () => void;
+  onOpenPath?: (path: string) => void;
 }) {
   const message = props.data.openingMessage;
   const isAgent = message?.authorKind === "agent";
@@ -170,7 +171,7 @@ export function PostCard(props: {
         <div className="flex items-center gap-2.5">
           <ChatAvatar
             name={message?.authorDisplayName ?? "?"}
-            kind={isAgent ? "agent" : "human"}
+            kind={message?.authorKind ?? "human"}
           />
           <div className="flex min-w-0 flex-1 flex-col leading-tight">
             <span className="flex items-center gap-1.5">
@@ -186,7 +187,12 @@ export function PostCard(props: {
                 <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
               ) : null}
               {message?.authorKind === "automation" ? (
-                <AutomationBadge testIdPrefix="chats-post" author={message} viewerAuthorId={props.data.viewerAuthorId} />
+                <AutomationBadge
+                  testIdPrefix="chats-post"
+                  author={message}
+                  viewerAuthorId={props.data.viewerAuthorId}
+                  onOpenPath={props.onOpenPath}
+                />
               ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">

@@ -838,7 +838,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             ) : (
               <ChatAvatar
                 name={message.authorDisplayName}
-                kind={isAgent ? "agent" : "human"}
+                kind={message.authorKind}
                 size="comment"
               />
             )}
