@@ -10,7 +10,7 @@ import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from 
 import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
-import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
+import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
@@ -57,25 +57,31 @@ function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
   config=openRequest({...input,databaseBytes:input.limits.databaseBytes,limits:Object.fromEntries(Object.entries(input.limits).filter(([key])=>key!=="databaseBytes"))});
   assertReplayableSchema(config.schemaSql);
+  progress("taking the dataset lease");
   if(config.ownership) lease=acquireWorkerLease(config.directory,config.ownership);
   noLinks(config.directory);
   if (!statSync(config.directory).isDirectory()) reject("invalid_input","Dataset directory is unavailable.");
   const path=join(config.directory,"app.sqlite");
   if (config.checkpointPath) {
+    progress("copying the checkpoint");
     noLinks(config.checkpointPath);
     const info=statSync(config.checkpointPath);
     if (!info.isFile() || info.size<100 || info.size>config.limits.databaseBytes) reject("invalid_checkpoint","Invalid dataset checkpoint.");
     copyFileSync(config.checkpointPath,path,fsConstants.COPYFILE_EXCL);
   } else { closeSync(openSync(path,"wx",0o600)); }
+  progress("opening the database");
   db=new DatabaseSync(path,databaseOptions);
   db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
   const pageSize=Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
   if (!config.checkpointPath) {
+    progress("creating the schema");
     authorize(db,{tables:config.tables},{initializing:true});
     db.exec(config.schemaSql);db.setAuthorizer(null);
   }
+  progress("checking the schema");
   verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits);
+  progress("recording the dataset cursor");
   const existing=db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(marker);
   if (existing) {
     if (existing.sql!==markerSchema) reject("invalid_checkpoint","Invalid checkpoint cursor schema.");
@@ -93,7 +99,7 @@ function initialize(input:OpenRequest):DatasetCursor {
 async function handle(command:PersistentCommand):Promise<PersistentResult> {
   if (command.kind==="open") return initialize(command.input);
   if (!db) reject("invalid_state","The worker is not open.");
-  if (command.kind==="close") { rollback();db.close();db=undefined;lease?.close();lease=undefined;return null; }
+  if (command.kind==="close") { progress("closing the database");rollback();db.close();db=undefined;lease?.close();lease=undefined;return null; }
   if (command.kind==="discard") {
     if (!pending || pending.id!==command.proposalId) reject("invalid_state","Unknown prepared operation.");
     rollback();return null;
@@ -102,6 +108,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     if (!pending || pending.id!==command.input.proposalId) reject("invalid_state","Unknown prepared operation.");
     nextCursor(command.input);
     if (command.input.changesetSha256!==pending.changesetSha256) reject("invalid_input","The committed changeset differs from the prepared operation.");
+    progress("committing the operation");
     writeMarker(command.input);db.exec("COMMIT");transaction=false;pending=undefined;
     cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
   }
@@ -111,10 +118,11 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     let bytes=0;
     for(const event of command.input)if(!(event.changeset instanceof Uint8Array)||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES)reject("invalid_input","Invalid replay batch bytes.");
     // Each event retains the same validation and atomic rows/cursor commit as individual recovery.
-    for(const event of command.input)await handle({kind:"apply",input:event});
+    for(const [index,event] of command.input.entries()){progress(`replaying journal event ${index+1} of ${command.input.length}`);await handle({kind:"apply",input:event});}
     return {...cursor};
   }
   if (command.kind==="prepare") {
+    progress("running the app operation");
     expectCursor(command.expected);
     db.exec(command.guest.readOnly ? "BEGIN" : "BEGIN IMMEDIATE");transaction=true;
     const session=db.createSession();
@@ -134,6 +142,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     return {proposalId,readOnly:command.guest.readOnly,result:JSON.parse(resultJson),changeset,changesetSha256,attachedFileIds};
   }
   if (command.kind==="apply") {
+    if(!batching) progress("replaying the journal event");
     nextCursor(command.input);
     const {changeset,changesetSha256}=command.input;
     if (!(changeset instanceof Uint8Array) || changeset.byteLength>config.limits.databaseBytes || digest(changeset)!==changesetSha256) reject("invalid_input","Invalid committed changeset.");
@@ -162,6 +171,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     finally { db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }
   }
   if (command.kind==="migrateCheckpoint") {
+    progress("migrating a copy of the dataset");
     noLinks(command.input.path,true);
     if(command.input.reportPath) noLinks(command.input.reportPath,true);
     const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
@@ -198,17 +208,23 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
   }
   noLinks(command.path,true);
   // This connection and its IPC lane are idle and exclusive until the copy completes.
+  progress("checkpointing the database");
   const checkpoint=db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").all()[0]!;
   if(checkpoint.busy!==0||checkpoint.log!==0||checkpoint.checkpointed!==0)reject("invalid_checkpoint","The worker WAL could not be fully checkpointed.");
+  progress("copying the snapshot");
   copyFileSync(join(config.directory,"app.sqlite"),command.path,fsConstants.COPYFILE_EXCL);
   return {path:command.path,cursor:{...cursor}};
 }
 
 const parentPort=(process as unknown as {parentPort?:{on(event:"message",callback:(event:{data:{id:number;command:PersistentCommand}})=>void):void;postMessage(message:PersistentReply):void}}).parentPort;
-const send=(reply:PersistentReply)=>parentPort ? parentPort.postMessage(reply) : process.send!(reply);
+const send=(reply:PersistentReply|PersistentProgress)=>parentPort ? (parentPort.postMessage as (message:PersistentReply|PersistentProgress)=>void)(reply) : process.send!(reply);
+let activeId:number|undefined;
+let batching=false;
+// Reports the step this command starts, so the host can tell slow work from a stopped worker.
+function progress(step:string):void { if(activeId!==undefined) send({id:activeId,progress:step}); }
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }
-  busy=true;
+  busy=true;activeId=message.id;batching=message.command.kind==="applyBatch";
   try {
     const result=await handle(message.command);
     send({id:message.id,ok:true,result});
@@ -219,7 +235,7 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
     send({id:message.id,ok:false,error:error instanceof Error ? error.message.slice(0,1024) : "Dataset operation failed.",
       code:error instanceof PersistentRuntimeError ? error.code : "operation_failed",
       ...(error instanceof AppBackendRuntimeError ? {refusal:error.refusal} : {})});
-  } finally { busy=false; }
+  } finally { busy=false;activeId=undefined;batching=false; }
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
 else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }

@@ -6,12 +6,25 @@ import { dirname } from "node:path";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
-import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
+import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, MigratedCheckpoint, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentProgress, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
-export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string }
+// Work that is slow because of I/O fails only when it stops making progress. The
+// worker reports each step as it starts; a step may block on one fsync, which
+// took up to 8.4 s on a slow Windows disk, so 30 s of silence means it stopped.
+// The cap per command is far beyond healthy work and catches a worker that
+// keeps reporting without finishing.
+//
+// Commands that run app code keep the configured deadline: prepare runs the
+// operation, migrateCheckpoint the migration, and open the app's schema.
+// node:sqlite cannot interrupt a running statement, so until app SQL has a
+// budget measured in work, wall time is the only bound on a runaway query.
+const APP_CODE_COMMANDS:ReadonlySet<PersistentCommand["kind"]>=new Set(["open","prepare","migrateCheckpoint"]);
+export const WORKER_SILENCE_MS=30_000;
+export const WORKER_COMMAND_CAP_MS=600_000;
+export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string; silenceMs?:number; commandCapMs?:number }
 const nodeLauncher:AppRuntimeLauncher=options=>{
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
   const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning","--max-old-space-size=96",options.entryPath],{
@@ -26,15 +39,31 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
   const entryPath=trustedPath(options.entryPath ?? fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/persistent-child")));
   const queueDeadlineMs=input.queueDeadlineMs ?? 30_000;
   if (!Number.isSafeInteger(queueDeadlineMs) || queueDeadlineMs<1 || queueDeadlineMs>60_000) reject("invalid_input","Invalid worker queue deadline.");
-  type Entry={id:number;bytes:number;command:PersistentCommand;resolve:(result:PersistentResult)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
+  const silenceMs=options.silenceMs ?? WORKER_SILENCE_MS, commandCapMs=options.commandCapMs ?? WORKER_COMMAND_CAP_MS;
+  type Entry={id:number;bytes:number;command:PersistentCommand;resolve:(result:PersistentResult)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;
+    cap?:ReturnType<typeof setTimeout>;step?:string;progress:number};
   const queue:Entry[]=[];
   let active:Entry | undefined, child:AppRuntimeChild | undefined, stopped:Error | undefined, closing=false, sequence=0;
   let exited=false, retainedBytes=0;
   let resolveExit:()=>void;
   const exitPromise=new Promise<void>(resolve=>{resolveExit=resolve;});
+  const duration=(ms:number)=>ms<1000 ? `${ms} ms` : ms<60_000 ? `${Math.round(ms/1000)} s` : `${Math.round(ms/60_000)} minutes`;
+  function settle(entry:Entry):void {clearTimeout(entry.timer);clearTimeout(entry.cap);}
+  function during(entry:Entry|undefined):string {return entry?.step ? ` while ${entry.step}` : "";}
+  function watchSilence(entry:Entry):void {
+    clearTimeout(entry.timer);
+    const seen=entry.progress;
+    entry.timer=setTimeout(()=>{
+      // A stalled host fires this before it reads messages that arrived meanwhile.
+      setImmediate(()=>{
+        if(active!==entry || entry.progress!==seen) return;
+        fail(new PersistentRuntimeError("worker_stalled",`The dataset worker made no progress for ${duration(silenceMs)}${during(entry)}. Reopen it from the journal.`));
+      });
+    },silenceMs);
+  }
   function fail(error:Error):void {
     stopped??=error;
-    if(active){clearTimeout(active.timer);retainedBytes-=active.bytes;active.reject(stopped);active=undefined;}
+    if(active){settle(active);retainedBytes-=active.bytes;active.reject(stopped);active=undefined;}
     for(const entry of queue.splice(0)){clearTimeout(entry.timer);retainedBytes-=entry.bytes;entry.reject(stopped);}
     child?.kill();
   }
@@ -43,8 +72,13 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     const entry=queue.shift();
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
-    const deadlineMs=entry.command.kind==="open" ? DEFAULT_LIMITS.deadlineMs : config.limits.deadlineMs;
-    entry.timer=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline","The dataset worker exceeded its deadline. Reopen it from the journal.")),deadlineMs);
+    if(APP_CODE_COMMANDS.has(entry.command.kind)) {
+      const deadlineMs=entry.command.kind==="open" ? DEFAULT_LIMITS.deadlineMs : config.limits.deadlineMs;
+      entry.timer=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker exceeded its deadline${during(entry)}. Reopen it from the journal.`)),deadlineMs);
+    } else {
+      watchSilence(entry);
+      entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Reopen it from the journal.`)),commandCapMs);
+    }
     try {child.postMessage({id:entry.id,command:entry.command});}catch(error){fail(error instanceof Error ? error : new Error(String(error)));}
   }
   function send(command:PersistentCommand):Promise<PersistentResult> {
@@ -57,7 +91,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(command.kind==="applyBatch") command={...command,input:command.input.map(event=>({...event,changeset:Uint8Array.from(event.changeset)}))};
     retainedBytes+=bytes;
     return new Promise((resolve,rejectEntry)=>{
-      const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,timer:setTimeout(()=>{
+      const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,progress:0,timer:setTimeout(()=>{
         const index=queue.indexOf(entry);
         if(index>=0){queue.splice(index,1);retainedBytes-=entry.bytes;rejectEntry(new PersistentRuntimeError("queue_deadline","The operation expired while waiting for the dataset worker."));}
       },queueDeadlineMs)};
@@ -68,15 +102,21 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     // Utility-process exit can precede release of its Windows cwd handle. Keep that handle outside removable data.
     child=(options.launch ?? nodeLauncher)({entryPath,cwd:dirname(entryPath),env:{},
       onMessage(message){
+        const progress=message as PersistentProgress;
+        if(active && progress && progress.id===active.id && typeof progress.progress==="string" && progress.progress.length<=128) {
+          active.step=progress.progress;active.progress++;
+          if(!APP_CODE_COMMANDS.has(active.command.kind)) watchSilence(active);
+          return;
+        }
         const reply=message as PersistentReply;
         if(!active || !reply || reply.id!==active.id || typeof reply.ok!=="boolean") {fail(new PersistentRuntimeError("worker_protocol","Invalid dataset worker response."));return;}
-        const entry=active;active=undefined;clearTimeout(entry.timer);retainedBytes-=entry.bytes;
+        const entry=active;active=undefined;settle(entry);retainedBytes-=entry.bytes;
         if(reply.ok) entry.resolve(reply.result);
         else entry.reject(reply.refusal ? new AppBackendRuntimeError(reply.refusal) : new PersistentRuntimeError(reply.code,reply.error));
         pump();
       },onError:fail,onExit(){
         exited=true;resolveExit();
-        if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped","The dataset worker stopped. Reopen it from the journal."));
+        if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Reopen it from the journal.`));
       },
     });
     if(stopped) child.kill();
