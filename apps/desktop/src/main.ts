@@ -4790,9 +4790,8 @@ function registerIpcHandlers(): void {
   }));
 
   registerOperations(operationBoundary, noticeOperations, {
-    listNotices: async () => ({ notices: await noticeStore().list() }),
-    readNotices: (input) => noticeStore().mark(input.notices, "read"),
-    dismissNotice: (input) => noticeStore().mark([input], "dismissed"),
+    listNotices: () => noticeStore().list(),
+    markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
   });
 
   workspaceEngineIpc.registerYDoc();

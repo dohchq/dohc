@@ -610,6 +610,7 @@ export function DesktopWorkspaceShell(props: {
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   // The Open a share surface: empty, or for a share a notice named.
   const [openShare, setOpenShare] = useState<NoticeShare | "blank" | null>(null);
+  const openSharePath = openShare && openShare !== "blank" ? openShare.path ?? undefined : undefined;
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   useEffect(() => {
     if (handoffStatus.status !== "idle") setOpenShare(null);
@@ -4350,10 +4351,15 @@ export function DesktopWorkspaceShell(props: {
     workspacePath: props.workspace.rootPath,
   } as const;
 
-  function handleMountedShare(label: string) {
+  // `openPath` is the file a notice named, inside the share.
+  function handleMountedShare(label: string, openPath?: string) {
     setOpenShare(null);
     void reloadShareMounts();
-    void refreshFiles().catch(() => undefined);
+    void refreshFiles()
+      .catch(() => undefined)
+      .then(() => {
+        if (openPath) openFile(`shared-with-me/${label}/${openPath}`);
+      });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
     showShellNotice(
@@ -6049,7 +6055,7 @@ export function DesktopWorkspaceShell(props: {
                 })}
             onWorkspaceReady={(workspace) => {
               setOpenShare(null);
-              props.onSwitchWorkspace(workspace);
+              props.onSwitchWorkspace(workspace, openSharePath);
             }}
             onBack={() => setOpenShare(null)}
             onConnectionError={reportConnectionError}
@@ -6058,7 +6064,7 @@ export function DesktopWorkspaceShell(props: {
               : {
                   mountInto: {
                     workspaceId,
-                    onMounted: handleMountedShare,
+                    onMounted: (label: string) => handleMountedShare(label, openSharePath),
                   },
                 })}
           />

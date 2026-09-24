@@ -9370,6 +9370,9 @@ describe("notices sent to you", () => {
   function sentNotices(notices: NoticeRow[]): SentNotices {
     return {
       notices,
+      settled: true,
+      listFailure: null,
+      relist: vi.fn(),
       toast: null,
       hideToast: vi.fn(),
       read: vi.fn(async () => undefined),
@@ -9444,6 +9447,62 @@ describe("notices sent to you", () => {
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
     renderWithNotices(makeBridge(Promise.resolve(null)), { openPathOnReady: "b.md" });
     await screen.findByTestId("tab-b.md");
+  });
+
+  describe("through a share this computer has not added", () => {
+    const THROUGH_SHARE: NoticeRow = {
+      ...MENTION,
+      kind: "automation-notify",
+      senderKind: "automation",
+      workspaceId: null,
+      recipientShareId: "share-1",
+      title: "Weekday report is ready",
+      target: { path: "Trips/Japan/report.md" },
+    };
+    const VIEW: Workspace = { ...WORKSPACE, workspaceId: "ws-owner-view", rootPath: "/home/sam/dohc/owner" };
+    function shareBridge(access: "view" | "edit") {
+      return Object.assign(makeBridge(Promise.resolve(null)), {
+        mountShare: vi.fn(async () => ({
+          workspace: WORKSPACE,
+          mount: { shareId: "share-1", label: "owner", status: "updated" as const, changedPaths: 1 },
+        })),
+        openSharedView: vi.fn(async () => ({ workspace: VIEW })),
+        getRelayReceivedShare: vi.fn(async () => ({
+          found: true as const,
+          share: {
+            shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantId: "g1",
+            generation: 1, createdAtMs: 1, shareCode: "code-1", selector: { paths: ["Trips"], versionId: null }, access,
+          },
+        })),
+        getDefaultShareRoot: vi.fn(async () => "/home/sam/dohc/owner"),
+      });
+    }
+
+    it("adds it to shared-with-me and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("view");
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]) });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      await user.click(await screen.findByTestId("open-share-start"));
+      expect(bridge.mountShare).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, shareCode: "code-1" });
+      await screen.findByTestId("tab-shared-with-me/owner/Trips/Japan/report.md");
+    });
+
+    it("opens it as its own workspace and opens the notice's file there", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("edit");
+      const onSwitchWorkspace = vi.fn();
+      renderWithNotices(bridge, { sentNotices: sentNotices([THROUGH_SHARE]), onSwitchWorkspace });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      const start = await screen.findByTestId("open-share-start");
+      await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+      await user.click(start);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+    });
   });
 });
 

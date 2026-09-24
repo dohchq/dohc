@@ -18,9 +18,9 @@ describe("where a sent notice opens", () => {
   it("opens an owned workspace's file, here or after a switch", () => {
     const trip = workspace("trip");
     expect(sentNoticePlace(owned({ path: "plans/day-1.md" }), [trip], "notes"))
-      .toEqual({ kind: "workspace", workspace: trip, path: "plans/day-1.md" });
+      .toEqual({ kind: "workspace", workspace: trip, path: "plans/day-1.md", mount: null });
     expect(sentNoticePlace(owned({ thread: "t-1" }), [trip], "trip"))
-      .toEqual({ kind: "workspace", workspace: trip, path: null });
+      .toEqual({ kind: "workspace", workspace: trip, path: null, mount: null });
     expect(sentNoticePlace(owned({ path: "plans/day-1.md" }), [], "notes")).toEqual({ kind: "not-here" });
   });
 
@@ -30,14 +30,14 @@ describe("where a sent notice opens", () => {
       shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: "owner@example.com" }],
     });
     expect(sentNoticePlace(shared({ path: "trip/day-1.md" }), [view, here], "notes"))
-      .toEqual({ kind: "workspace", workspace: here, path: "shared-with-me/owner/trip/day-1.md" });
+      .toEqual({ kind: "workspace", workspace: here, path: "shared-with-me/owner/trip/day-1.md", mount: "owner" });
     expect(sentNoticePlace(shared({ path: "trip/day-1.md" }), [view, here], "other"))
-      .toEqual({ kind: "workspace", workspace: view, path: "trip/day-1.md" });
+      .toEqual({ kind: "workspace", workspace: view, path: "trip/day-1.md", mount: null });
   });
 
   it("offers to add a share this computer does not hold", () => {
     expect(sentNoticePlace(shared({ path: "trip/day-1.md" }), [workspace("notes")], "notes"))
-      .toEqual({ kind: "share", shareId: "share-1" });
+      .toEqual({ kind: "share", shareId: "share-1", path: "trip/day-1.md" });
   });
 
   it("has nowhere to go for a notice about no workspace", () => {

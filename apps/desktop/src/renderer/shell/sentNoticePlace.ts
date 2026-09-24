@@ -6,10 +6,11 @@ export type SentNoticePlace =
   | { kind: "none" }
   // The person can no longer read what the notice named.
   | { kind: "access-ended" }
-  // A workspace on this computer, and the notice's file there.
-  | { kind: "workspace"; workspace: WorkspaceSummary; path: string | null }
-  // A share this computer has not added yet.
-  | { kind: "share"; shareId: string }
+  // A workspace on this computer, and the notice's file there. `mount` names
+  // the shared-with-me folder the file sits in, when the share is one.
+  | { kind: "workspace"; workspace: WorkspaceSummary; path: string | null; mount: string | null }
+  // A share this computer has not added yet, and the notice's file in it.
+  | { kind: "share"; shareId: string; path: string | null }
   // A workspace of the person's that is not on this computer.
   | { kind: "not-here" };
 
@@ -27,7 +28,7 @@ export function sentNoticePlace(
   const path = notice.target.path ?? null;
   if (notice.workspaceId !== null) {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === notice.workspaceId);
-    return workspace ? { kind: "workspace", workspace, path } : { kind: "not-here" };
+    return workspace ? { kind: "workspace", workspace, path, mount: null } : { kind: "not-here" };
   }
   const shareId = notice.recipientShareId;
   if (shareId === null) return { kind: "none" };
@@ -36,14 +37,14 @@ export function sentNoticePlace(
     ...workspaces.filter((candidate) => candidate.workspaceId !== currentWorkspaceId),
   ];
   for (const workspace of ordered) {
-    if (workspace.shareView?.shareId === shareId) return { kind: "workspace", workspace, path };
+    if (workspace.shareView?.shareId === shareId) return { kind: "workspace", workspace, path, mount: null };
     const mount = workspace.shareMounts?.find((candidate) => candidate.shareId === shareId);
     if (mount) {
       const folder = `shared-with-me/${mount.label}`;
-      return { kind: "workspace", workspace, path: path === null ? null : `${folder}/${path}` };
+      return { kind: "workspace", workspace, path: path === null ? null : `${folder}/${path}`, mount: mount.label };
     }
   }
-  return { kind: "share", shareId };
+  return { kind: "share", shareId, path };
 }
 
 // The folder a notice's file sits in, which names its Collection. A

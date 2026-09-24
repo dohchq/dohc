@@ -79,7 +79,7 @@ vi.mock("./DesktopWorkspaceShell", () => ({
 // says otherwise.
 function noticeBridge() {
   return {
-    listNotices: vi.fn(async () => ({ notices: [] })),
+    listNotices: vi.fn(async () => ({ account: null, notices: [] })),
     onNoticesChanged: vi.fn(() => () => undefined),
   };
 }

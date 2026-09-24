@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X } from "lucide-react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -76,9 +76,9 @@ export const SENT_NOTICE_PAGE = 50;
 // How long a toast for something finished or sent stays before it fades.
 const FADING_TOAST_MS = 6000;
 
-// The sender's shape: round for a person, a rounded square for an agent.
-// Automations have no shape of their own yet, so they take the agent's.
-// Shape is visual only; the screen reader hears who sent it.
+// The sender's shape: round for a person, a rounded square for an agent,
+// and the bare lightning mark for an automation, as in chat. Shape is
+// visual only; the screen reader hears who sent it.
 const SENDER_NAME = {
   person: "From a person",
   agent: "From an agent",
@@ -87,6 +87,14 @@ const SENDER_NAME = {
 function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
   if (props.kind === null) {
     return <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+  }
+  if (props.kind === "automation") {
+    return (
+      <span className="mt-0.5 shrink-0">
+        <Zap size={14} aria-hidden data-sender-shape="zap" className="text-muted" />
+        <span className="sr-only">{SENDER_NAME.automation}</span>
+      </span>
+    );
   }
   const person = props.kind === "person";
   return (
@@ -106,6 +114,8 @@ function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
     </span>
   );
 }
+
+const sentKey = ({ store, noticeId }: NoticeRow): string => `${store}:${noticeId}`;
 
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
@@ -318,9 +328,12 @@ export function NoticeCenter(props: {
   // fades; the row stays.
   sentNoticeToast?: SentNotice | null;
   onHideSentNoticeToast?: () => void;
+  // The first list has not answered yet: the panel shows no "All clear".
+  sentNoticesLoading?: boolean;
   // Marks the notice read and opens it. Resolves to null once it opened, or
-  // to a sentence that says why it could not.
-  onOpenSentNotice?: (notice: NoticeRow) => Promise<string | null>;
+  // to a sentence that says why it could not. Opens nothing once `signal`
+  // aborts.
+  onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
   onDismissSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
 }) {
@@ -347,25 +360,58 @@ export function NoticeCenter(props: {
   // Why a sent notice could not open, shown on its row. Keyed by store and
   // id, and cleared when the panel closes.
   const [sentNotes, setSentNotes] = useState<ReadonlyMap<string, string>>(new Map());
+  // The Open on its way, if any. Closing the panel, dismissing that notice,
+  // or a newer Open cancels it, so a late answer opens nothing.
+  const opening = useRef<{ key: string; controller: AbortController } | null>(null);
+  const [openingKey, setOpeningKey] = useState<string | null>(null);
+  const cancelOpen = useCallback((key?: string) => {
+    if (!opening.current || (key !== undefined && opening.current.key !== key)) return;
+    opening.current.controller.abort();
+    opening.current = null;
+    setOpeningKey(null);
+  }, []);
   useEffect(() => {
     if (open) return;
+    cancelOpen();
     setSentShown(SENT_NOTICE_PAGE);
     setSentNotes(new Map());
-  }, [open]);
+  }, [cancelOpen, open]);
   const { onOpenSentNotice } = props;
   const openSentNotice = useCallback(
     async (notice: NoticeRow) => {
       if (!onOpenSentNotice) return;
-      const note = await onOpenSentNotice(notice);
+      const key = sentKey(notice);
+      // A second Open of the same notice waits for the first.
+      if (opening.current?.key === key) return;
+      cancelOpen();
+      const controller = new AbortController();
+      opening.current = { key, controller };
+      setOpeningKey(key);
+      setSentNotes((current) => {
+        if (!current.has(key)) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+      let note: string | null;
+      try {
+        note = await onOpenSentNotice(notice, controller.signal);
+      } finally {
+        if (opening.current?.controller === controller) {
+          opening.current = null;
+          setOpeningKey(null);
+        }
+      }
+      if (controller.signal.aborted) return;
       if (note === null) {
         toggleRef.current?.focus({ preventScroll: true });
         setOpen(false);
         return;
       }
       setOpen(true);
-      setSentNotes((current) => new Map(current).set(`${notice.store}:${notice.noticeId}`, note));
+      setSentNotes((current) => new Map(current).set(key, note));
     },
-    [onOpenSentNotice],
+    [cancelOpen, onOpenSentNotice],
   );
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
@@ -868,7 +914,7 @@ export function NoticeCenter(props: {
     return () => clearTimeout(timer);
   }, [errorToast?.id, errorToast?.tone, props.onHideWorkspaceError]);
   const sentToast = props.sentNoticeToast ?? null;
-  const sentToastKey = sentToast ? `${sentToast.notice.store}:${sentToast.notice.noticeId}` : null;
+  const sentToastKey = sentToast ? sentKey(sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
   useEffect(() => {
     if (sentToastKey === null || !onHideSentNoticeToast) return;
@@ -876,9 +922,16 @@ export function NoticeCenter(props: {
     return () => clearTimeout(timer);
   }, [sentToastKey, onHideSentNoticeToast]);
 
+  // A row about to go takes focus to the next row, or the one before, or
+  // the panel, so the keyboard keeps its place in the list.
+  const focusPastRow = (element: Element) => {
+    const row = element.closest<HTMLElement>(NOTICE_ROW);
+    const rows = [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
+    const index = row ? rows.indexOf(row) : -1;
+    (rows[index + 1] ?? rows[index - 1] ?? centerRef.current)?.focus();
+  };
   // Rows answer Enter and Delete while they hold focus themselves, not a
-  // control inside them. Delete moves focus to the next row first, so the
-  // keyboard keeps its place in the list.
+  // control inside them.
   const rowKeys = (actions: { open?: () => void; dismiss?: () => void }) =>
     (event: KeyboardEvent<HTMLElement>) => {
       if (event.target !== event.currentTarget) return;
@@ -887,9 +940,7 @@ export function NoticeCenter(props: {
         actions.open();
       } else if ((event.key === "Delete" || event.key === "Backspace") && actions.dismiss) {
         event.preventDefault();
-        const rows = [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
-        const index = rows.indexOf(event.currentTarget);
-        (rows[index + 1] ?? rows[index - 1] ?? centerRef.current)?.focus();
+        focusPastRow(event.currentTarget);
         actions.dismiss();
       }
     };
@@ -1161,7 +1212,10 @@ export function NoticeCenter(props: {
               <button
                 type="button"
                 data-testid="notice-center-read-all"
-                onClick={props.onReadAllSentNotices}
+                onClick={() => {
+                  centerRef.current?.focus();
+                  props.onReadAllSentNotices?.();
+                }}
                 className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
               >
                 Mark all read
@@ -1177,10 +1231,13 @@ export function NoticeCenter(props: {
             ) : null}
           </header>
           {localCount === 0 && sentNotices.length === 0 ? (
-            <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
-              <Check size={14} aria-hidden />
-              All clear
-            </div>
+            // Nothing to say until the first list of sent notices answers.
+            props.sentNoticesLoading ? null : (
+              <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
+                <Check size={14} aria-hidden />
+                All clear
+              </div>
+            )
           ) : (
             <div className="min-h-0 max-h-80 overflow-y-auto">
               {localCount > 0 ? (
@@ -1251,7 +1308,10 @@ export function NoticeCenter(props: {
                           type="button"
                           data-testid={`notice-${notice.id}-dismiss`}
                           aria-label="Dismiss notice"
-                          onClick={() => notice.onDismiss?.()}
+                          onClick={(event) => {
+                            focusPastRow(event.currentTarget);
+                            notice.onDismiss?.();
+                          }}
                           className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                         >
                           <X size={11} aria-hidden />
@@ -1285,14 +1345,18 @@ export function NoticeCenter(props: {
                   </SectionLabel>
                   <ul className="m-0 list-none p-0">
                     {sentShownRows.map(({ notice, folder, openable }) => {
-                      const key = `${notice.store}:${notice.noticeId}`;
+                      const key = sentKey(notice);
                       const unread = notice.readAtMs === null;
                       const note = sentNotes.get(key);
+                      const busy = openingKey === key;
                       const openNotice = openable && props.onOpenSentNotice
                         ? () => void openSentNotice(notice)
                         : undefined;
                       const dismissNotice = props.onDismissSentNotice
-                        ? () => props.onDismissSentNotice?.(notice)
+                        ? () => {
+                            cancelOpen(key);
+                            props.onDismissSentNotice?.(notice);
+                          }
                         : undefined;
                       return (
                         <li
@@ -1322,10 +1386,11 @@ export function NoticeCenter(props: {
                                 <button
                                   type="button"
                                   data-testid={`sent-notice-${notice.noticeId}-open`}
+                                  aria-busy={busy || undefined}
                                   onClick={openNotice}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink"
+                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink aria-busy:opacity-50"
                                 >
-                                  Open
+                                  {busy ? "Opening…" : "Open"}
                                 </button>
                               ) : null}
                               {dismissNotice ? (
@@ -1333,7 +1398,10 @@ export function NoticeCenter(props: {
                                   type="button"
                                   data-testid={`sent-notice-${notice.noticeId}-dismiss`}
                                   aria-label="Dismiss notice"
-                                  onClick={dismissNotice}
+                                  onClick={(event) => {
+                                    focusPastRow(event.currentTarget);
+                                    dismissNotice();
+                                  }}
                                   className={`${openNotice ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                                 >
                                   <X size={11} aria-hidden />

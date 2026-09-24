@@ -73,8 +73,12 @@ export class NoticeNotSentError extends Error {
 export interface NoticeStore {
   // Throws when the notice breaks the relay's rules, before keeping it.
   postNotice(input: PostNoticeInput): Promise<void>;
-  list(): Promise<NoticeRow[]>;
-  mark(refs: readonly NoticeRef[], mark: NoticeMark): Promise<void>;
+  // The rows and the key of the signed-in account they belong to, read
+  // from one session.
+  list(): Promise<{ account: string | null; notices: NoticeRow[] }>;
+  // `account` is the key the caller's list showed. Account rows are marked
+  // only while that account is signed in; local rows always are.
+  mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
 }
@@ -657,7 +661,7 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function list(): Promise<NoticeRow[]> {
+  async function list(): Promise<{ account: string | null; notices: NoticeRow[] }> {
     const account = (await deps.session())?.account ?? null;
     return await locked(async () => {
       const local = await loadLocal();
@@ -706,13 +710,16 @@ export function createNoticeStore(deps: {
           });
         }
       }
-      return rows.sort((left, right) => right.createdAtMs - left.createdAtMs);
+      return {
+        account: account?.key ?? null,
+        notices: rows.sort((left, right) => right.createdAtMs - left.createdAtMs),
+      };
     });
   }
 
   // Marks every named notice in one write per list, so marking a whole list
   // read costs one save and one pass.
-  async function mark(refs: readonly NoticeRef[], mark: NoticeMark): Promise<void> {
+  async function mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
       const localIds = new Set(refs.filter((ref) => ref.store === "local").map((ref) => ref.noticeId));
@@ -729,9 +736,10 @@ export function createNoticeStore(deps: {
         if (localChanged) await saveLocal(file);
       }
       // A mark from a list shown for an account that is no longer signed in
-      // changes nothing.
+      // changes nothing, even where the new account has a notice with the
+      // same id.
       let accountChanged = false;
-      if (session?.isCurrent()) {
+      if (session?.isCurrent() && session.account.key === account) {
         const file = await loadAccount(session.account);
         const rows = new Map(file.rows.map((row) => [row.noticeId, row]));
         const posts = new Map(file.posts.map((post) => [post.request.noticeId, post]));
