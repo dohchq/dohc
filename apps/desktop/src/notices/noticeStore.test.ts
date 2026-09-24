@@ -44,8 +44,8 @@ interface Relay {
   // Posts of notices fail in transit; marks still go.
   failPosts: boolean;
   failPulls: boolean;
-  // Runs as each request leaves.
-  onRequest?: () => void;
+  // Runs, and is awaited, as each request leaves.
+  onRequest?: (request: Request) => void | Promise<void>;
 }
 
 async function relay(overrides: HandlerOverrides = {}): Promise<Relay> {
@@ -69,7 +69,7 @@ function account(server: Relay, userId: string): NoticeAccount {
       token: `user:${userId}`,
       fetch: async (input, init) => {
         const request = new Request(input, init);
-        server.onRequest?.();
+        await server.onRequest?.(request);
         const path = new URL(request.url).pathname;
         const failing = request.method === "POST" ? server.failPosts && path === "/sync/notices" : server.failPulls;
         if (!server.online || failing) throw new TypeError("fetch failed");
@@ -582,6 +582,56 @@ describe("the outbox", () => {
     await other.store.sync();
     expect(await titles(other)).toEqual(["account:Your agent finished (read)"]);
   });
+
+  for (const mark of ["read", "dismissed"] as const) {
+    for (const answer of ["accepts", "refuses"] as const) {
+      it(`keeps a notice ${mark} while its post is on the way when the relay ${answer} it`, async () => {
+        const server = await relay();
+        const shareId = await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+        const laptop = await computer(account(server, "ana"));
+        laptop.reach = new Map([["ana-trip", { shareId }]]);
+        server.online = false;
+        await laptop.store.postNotice(notice({ workspaceId: "ana-trip" }));
+        server.online = true;
+
+        const markedAtMs = clock;
+        server.onRequest = async (request) => {
+          if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices") return;
+          server.onRequest = undefined;
+          // Ana marks the notice while the post is on its way; for a
+          // refusal, the share ends before the relay reads the post.
+          await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, mark);
+          if (answer === "refuses") expect(server.storage.revokeShare(shareId, clock)).toBe(true);
+          clock += 1;
+        };
+        await laptop.store.sync();
+        await laptop.store.sync();
+        // The relay stamps a read with its own clock when the mark arrives.
+        const readAtMs = answer === "accepts" ? expect.any(Number) : markedAtMs;
+
+        if (answer === "accepts") {
+          const other = await computer(account(server, "ana"));
+          await other.store.sync();
+          expect(await other.store.list()).toEqual(
+            mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
+          );
+        } else {
+          const local = (await file(laptop, "local")).rows;
+          expect(local).toEqual([expect.objectContaining({
+            noticeId: "agent-run:1",
+            workspaceId: "ana-trip",
+            readAtMs: mark === "read" ? markedAtMs : null,
+            dismissedAtMs: mark === "dismissed" ? markedAtMs : null,
+          })]);
+        }
+        expect(await laptop.store.list()).toEqual(
+          mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
+        );
+        const outbox = await file(laptop, "account");
+        expect([outbox.posts, outbox.marks]).toEqual([[], []]);
+      });
+    }
+  }
 
   it("keeps at most the limit of unsent notices, dropping the oldest with its marks", async () => {
     const server = await relay();

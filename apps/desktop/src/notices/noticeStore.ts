@@ -398,25 +398,33 @@ export function createNoticeStore(deps: {
           outcome = "refused";
         }
       }
+      // The outbox as it is now: the person may have read or dismissed the
+      // notice while the post was on its way, and a dismissal takes the
+      // post out of the outbox.
       const moved = await locked(async () => {
         const file = await loadAccount(account);
+        const noticeId = post.request.noticeId;
+        const current = file.posts.find((waiting) => waiting.request.noticeId === noticeId);
         if (outcome === "sent") {
-          post.sent = true;
+          // The relay holds the row now, so a waiting mark goes with the
+          // next batch.
+          if (current) current.sent = true;
           await saveAccount(account, file);
           return false;
         }
-        file.posts = file.posts.filter((waiting) => waiting !== post);
-        const mark = file.marks.find((waiting) => waiting.noticeId === post.request.noticeId);
+        file.posts = file.posts.filter((waiting) => waiting !== current);
+        const mark = file.marks.find((waiting) => waiting.noticeId === noticeId);
         file.marks = file.marks.filter((waiting) => waiting !== mark);
         if (outcome === "refused") {
           const local = await loadLocal();
           const { request } = post;
           addLocal(local, {
-            noticeId: request.noticeId, kind: request.kind, workspaceId: post.workspaceId,
+            noticeId, kind: request.kind, workspaceId: post.workspaceId,
             title: request.title, body: request.body, target: request.target,
           }, post.createdAtMs);
-          const row = local.rows.find((candidate) => candidate.noticeId === request.noticeId);
+          const row = local.rows.find((candidate) => candidate.noticeId === noticeId);
           if (row && mark?.mark === "read") row.readAtMs ??= mark.atMs;
+          if (row && mark?.mark === "dismissed") row.dismissedAtMs ??= mark.atMs;
           await saveLocal(local);
         }
         await saveAccount(account, file);
