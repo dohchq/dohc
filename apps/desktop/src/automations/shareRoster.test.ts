@@ -1,4 +1,3 @@
-import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -290,9 +289,9 @@ describe("keeping the roster current", () => {
   const cached = { kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] };
   const unchecked = (next: string) => ({ kind: "unknown", problem: { kind: "unchecked", next } });
 
-  // A roster listed a second ago, with no sync pass since.
+  // A roster listed before, with no pull since.
   function seed(): void {
-    store.setShareRoster(WORKSPACE, { grants: [ana] }, now - 1_000);
+    store.setShareRoster(WORKSPACE, { grants: [ana] }, false);
   }
 
   // The same registry file, read the way a restarted dohc reads it.
@@ -300,14 +299,18 @@ describe("keeping the roster current", () => {
     store = createRegistryStore(store.registryFile);
   }
 
-  function rosters(listRoster: (workspace: RegistryEntry) => Promise<RosterAnswer>, save = store.setShareRoster) {
+  function rosters(
+    listRoster: (workspace: RegistryEntry) => Promise<RosterAnswer>,
+    save = store.setShareRoster,
+    markRosterPulled = store.markShareRosterPulled,
+  ) {
     const logError = vi.fn();
     const list = vi.fn(listRoster);
     const saveRoster = vi.fn(save);
     return {
       list, logError, saveRoster,
       rosters: createShareRosters({
-        findWorkspace: store.find, saveRoster, markRosterPulled: store.markShareRosterPulled, listRoster: list,
+        findWorkspace: store.find, saveRoster, markRosterPulled, listRoster: list,
         localUserId: async () => null, logError, nowMs: () => now,
       }),
     };
@@ -350,95 +353,105 @@ describe("keeping the roster current", () => {
     expect(list, "a run waited on a relay that already failed").toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the cache offline when sync passes apply nothing", async () => {
+  it("keeps the cache while this computer sends no pull", async () => {
     seed();
     const { rosters: r } = rosters(async () => failing);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     for (let minute = 1; minute <= 3; minute += 1) {
       now += SHARE_ROSTER_FRESH_MS;
-      await r.pulled(WORKSPACE, false);
       expect(await r.forRun(WORKSPACE), `minute ${minute}`).toEqual(cached);
     }
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
   });
 
-  it("makes the roster unknown once a pass applies changes while listings still fail", async () => {
+  it("records a pull before it starts, so one that never reports back still counts", async () => {
     seed();
-    const { list, rosters: r } = rosters(async () => failing);
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
-    r.applied(WORKSPACE);
-    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
-    for (let minute = 1; minute <= 5; minute += 1) {
-      now += SHARE_ROSTER_FRESH_MS;
-      await r.pulled(WORKSPACE, false);
-      expect(list).toHaveBeenCalledTimes(1 + minute);
-      expect(await r.forRun(WORKSPACE), `minute ${minute}`).toEqual(unchecked(failing.next));
-    }
-    list.mockImplementation(async () => answered({ grants: [ana] }));
-    now += SHARE_ROSTER_FRESH_MS;
-    await r.pulled(WORKSPACE, false);
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
-  });
-
-  it("makes the roster unknown when a pass applied changes after the cached listing, before the failing listing", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
-    // t=100: a pass applies changes the listing did not see. The listing is not due yet.
-    now += SHARE_ROSTER_FRESH_MS - 1;
-    r.applied(WORKSPACE);
-    expect(list).toHaveBeenCalledTimes(1);
+    const { rosters: r } = rosters(async () => failing);
+    // The pull starts and its result never arrives: the engine may have
+    // applied a page, and the desktop never hears of it.
+    r.pullStarting(WORKSPACE);
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
-    // t=101: the due listing fails.
-    list.mockImplementation(async () => failing);
-    now += 1;
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
-    expect(list).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps the cache when the last changes were applied before the cached listing started", async () => {
-    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
-    r.applied(WORKSPACE);
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
-    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
-    list.mockImplementation(async () => failing);
-    now += SHARE_ROSTER_FRESH_MS;
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
-  });
-
-  it("remembers across a restart that a pass applied changes after the cached listing", async () => {
+  it("keeps the mark across a restart, so a claim that runs before any listing answers sees it", async () => {
     const before = rosters(async () => answered({ grants: [ana] }));
     await before.rosters.forRun(WORKSPACE);
-    now += 1;
-    before.rosters.applied(WORKSPACE);
+    before.rosters.pullStarting(WORKSPACE);
     restart();
-    now += 1_000;
-    // A claim from before the restart runs before any pass or listing answers.
     const { rosters: after } = rosters(async () => offline);
     expect(await after.forRun(WORKSPACE)).toEqual(unchecked(offline.next));
   });
 
-  it("uses the cache after a restart when no pass applied changes after it was listed", async () => {
+  it("uses the cache after a restart when no pull followed the listing", async () => {
     const before = rosters(async () => answered({ grants: [ana] }));
     await before.rosters.forRun(WORKSPACE);
-    now += 1;
-    await before.rosters.pulled(WORKSPACE, false);
     restart();
-    now += 1_000;
     const { rosters: after } = rosters(async () => offline);
     expect(await after.forRun(WORKSPACE)).toEqual(cached);
   });
 
-  it("counts any change applied this session for a copy saved without its listing time", async () => {
-    seed();
-    const file = JSON.parse(readFileSync(store.registryFile, "utf8")) as { workspaces: Array<{ shareRoster?: { listedAtMs?: number } }> };
-    delete file.workspaces[0]!.shareRoster!.listedAtMs;
-    writeFileSync(store.registryFile, JSON.stringify(file));
-    restart();
-    const { rosters: r } = rosters(async () => failing);
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+  it("does not depend on the clock", async () => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    await r.forRun(WORKSPACE);
     now -= 60 * 60_000;
-    r.applied(WORKSPACE);
+    r.pullStarting(WORKSPACE)();
+    list.mockImplementation(async () => failing);
+    now += 2 * 60 * 60_000;
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+  });
+
+  it("makes the roster unknown when the mark cannot be saved", async () => {
+    seed();
+    const { rosters: r } = rosters(async () => failing, store.setShareRoster, () => {
+      throw new Error("disk full");
+    });
+    r.pullStarting(WORKSPACE)();
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+  });
+
+  it("clears the mark when the next listing answers, unless a pull ran during it", async () => {
+    seed();
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    r.pullStarting(WORKSPACE)();
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+
+    // A pull that is still running when a listing starts may fetch past it.
+    const ended = r.pullStarting(WORKSPACE);
+    now += SHARE_ROSTER_FRESH_MS;
+    await r.forRun(WORKSPACE);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
+    ended();
+
+    // So may a pull that starts while the listing waits for its answer.
+    const answer = deferred<RosterAnswer>();
+    list.mockImplementation(() => answer.promise);
+    now += SHARE_ROSTER_FRESH_MS;
+    const run = r.forRun(WORKSPACE);
+    r.pullStarting(WORKSPACE)();
+    answer.resolve(answered({ grants: [ana] }));
+    await run;
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
+
+    list.mockImplementation(async () => answered({ grants: [ana] }));
+    now += SHARE_ROSTER_FRESH_MS;
+    await r.forRun(WORKSPACE);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+  });
+
+  it("marks a listing it could not save yet", async () => {
+    let fail = true;
+    const { rosters: r } = rosters(async () => answered({ grants: [ana] }), (id, listing, pulledAfter) => {
+      if (fail) throw new Error("disk full");
+      store.setShareRoster(id, listing, pulledAfter);
+    });
+    await r.forRun(WORKSPACE);
+    r.pullStarting(WORKSPACE)();
+    fail = false;
+    await r.forRun(WORKSPACE);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
   });
 
   it("makes the roster unknown when the relay answered part of a listing and then stopped", async () => {
@@ -463,9 +476,9 @@ describe("keeping the roster current", () => {
   it("uses a new listing it could not save, and saves it on the next try", async () => {
     seed();
     let fail = true;
-    const { list, rosters: r } = rosters(async () => answered({ grants: [] }), (id, listing, listedAtMs) => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [] }), (id, listing, pulledAfter) => {
       if (fail) throw new Error("disk full");
-      store.setShareRoster(id, listing, listedAtMs);
+      store.setShareRoster(id, listing, pulledAfter);
     });
     expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
     expect(store.find(WORKSPACE)?.shareRoster?.grants).toEqual([ana]);

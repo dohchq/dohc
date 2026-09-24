@@ -608,28 +608,26 @@ export function createRegistryStore(registryFile: string) {
     },
 
     /**
-     * Store a new listing of the workspace's grants, which started at
-     * `listedAtMs`. The version rises only when the listing differs.
+     * Store a new listing of the workspace's grants. It replaces the last
+     * listing's pull mark. The version rises only when the listing differs.
      */
-    setShareRoster(workspaceId: string, listing: RosterListing, listedAtMs: number): void {
+    setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean): void {
       updateWorkspaceEntry(workspaceId, (entry) => {
         const stored = entry.shareRoster;
         // JSON drops the undefined fields, leaving only the listing to compare.
         const unchanged = stored !== undefined &&
-          JSON.stringify({ ...stored, version: undefined, listedAtMs: undefined, pulledAfter: undefined }) === JSON.stringify(listing);
+          JSON.stringify({ ...stored, version: undefined, pulledAfter: undefined }) === JSON.stringify(listing);
+        if (unchanged && (stored.pulledAfter === true) === pulledAfter) return undefined;
         const version = (stored?.version ?? 0) + (unchanged ? 0 : 1);
-        return { ...entry, shareRoster: { ...listing, version, listedAtMs } };
+        return { ...entry, shareRoster: { ...listing, version, ...(pulledAfter ? { pulledAfter: true } : {}) } };
       });
     },
 
-    /**
-     * Record that a relay sync pass succeeded after the stored listing, when
-     * that listing is still the one that started at `listedAtMs`.
-     */
-    markShareRosterPulled(workspaceId: string, listedAtMs: number): void {
+    /** Record that a pull from the relay started after the stored listing. */
+    markShareRosterPulled(workspaceId: string): void {
       updateWorkspaceEntry(workspaceId, (entry) => {
         const stored = entry.shareRoster;
-        if (!stored || stored.listedAtMs !== listedAtMs || stored.pulledAfter) return undefined;
+        if (!stored || stored.pulledAfter) return undefined;
         return { ...entry, shareRoster: { ...stored, pulledAfter: true } };
       });
     },

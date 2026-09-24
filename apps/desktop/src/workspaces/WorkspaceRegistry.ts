@@ -112,18 +112,15 @@ export function acknowledgeWorkspaceAutomationFailure(
 export function setWorkspaceShareRoster(
   workspaceId: string,
   listing: RosterListing,
-  listedAtMs: number,
+  pulledAfter: boolean,
 ): void {
-  store().setShareRoster(workspaceId, listing, listedAtMs);
+  store().setShareRoster(workspaceId, listing, pulledAfter);
 }
 
-// A relay sync pass succeeded after the stored listing. See
+// A pull from the relay started after the stored listing. See
 // registryStore.markShareRosterPulled.
-export function markWorkspaceShareRosterPulled(
-  workspaceId: string,
-  listedAtMs: number,
-): void {
-  store().markShareRosterPulled(workspaceId, listedAtMs);
+export function markWorkspaceShareRosterPulled(workspaceId: string): void {
+  store().markShareRosterPulled(workspaceId);
 }
 
 export function setWorkspaceShareView(

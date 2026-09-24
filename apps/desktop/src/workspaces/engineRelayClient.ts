@@ -783,8 +783,7 @@ export class EngineRelayClient {
           previousCursor = pageCursor;
           nextCursor = pageCursor;
           fetched += numberField(result, "fetched", "sync.pull");
-          const pageApplied = numberField(result, "applied", "sync.pull");
-          applied += pageApplied;
+          applied += numberField(result, "applied", "sync.pull");
           skipped += numberField(result, "skipped", "sync.pull");
           conflictsOpened += numberField(
             result,
@@ -803,7 +802,7 @@ export class EngineRelayClient {
           for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
           }
-          await materializePage(pageChangedPaths, pageApplied);
+          await materializePage(pageChangedPaths);
           appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
           if (!hasMore) break;
         }

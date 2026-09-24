@@ -14,15 +14,11 @@ export interface RelayMaterializedPath {
   contentKind: "text" | "binary" | "secret";
 }
 
-// Called once for each relay pull page, after the engine applied it.
-// `applied` counts the page's ops the engine applied now. An op it already
-// had, such as this computer's own, is skipped and not counted. The pull
-// commits that page's cursor only after this resolves, so a failed or
-// interrupted disk projection makes the relay offer the same page again on
-// the next pass.
+// Called once for each relay pull page. The pull commits that page's cursor
+// only after this resolves, so a failed or interrupted disk projection makes
+// the relay offer the same page again on the next pass.
 export type MaterializeRelayPullPage = (
   paths: readonly RelayMaterializedPath[],
-  applied: number,
 ) => Promise<void>;
 
 export interface SharingDeclined {

@@ -22,9 +22,10 @@ import {
 // owner's computer keeps this copy in the workspace registry.
 //
 // The copy is never broader than the relay's last answer. A relay that
-// answers nothing leaves the copy in place, and it stands in until a sync
-// pass applies changes. A relay that answers with anything dohc cannot read
-// replaces it with a problem, and the reach check stops every step.
+// answers nothing leaves the copy in place, and it stands in until this
+// computer pulls from the relay. A relay that answers with anything dohc
+// cannot read replaces it with a problem, and the reach check stops every
+// step.
 
 export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
@@ -82,11 +83,12 @@ export type RosterListing =
 
 /**
  * The registry's copy. `version` rises when the listing changes.
- * `listedAtMs` is when the last listing with this answer started, and
- * `pulledAfter` records that a relay sync pass applied changes after it. Copies
- * saved before `listedAtMs` existed lack it.
+ * `pulledAfter` records that this computer started a pull from the relay
+ * after this listing started, so the pull may have brought changes the
+ * listing did not see. It is written before the pull request is sent, and
+ * only the next listing replaces it.
  */
-export type ShareRoster = RosterListing & { version: number; listedAtMs?: number; pulledAfter?: true };
+export type ShareRoster = RosterListing & { version: number; pulledAfter?: true };
 
 const StoredRoster = z.union([
   z.object({ grants: z.array(ListedGrantSchema) }),
@@ -272,14 +274,21 @@ export function reachRosterFor(input: {
 
 interface RosterState {
   timer: ReturnType<typeof setInterval> | null;
+  // When the last listing started, on a clock that never steps backwards.
+  // It only paces listings.
   lastAttemptMs: number | null;
-  // When a relay sync pass last applied changes in this session.
-  lastAppliedMs: number | null;
+  // Pulls this computer started for the workspace in this session, and how
+  // many are still running.
+  pullStarts: number;
+  pullsRunning: number;
+  // A pull started and dohc could not record it. The roster is unknown until
+  // a listing answers.
+  markFailed: boolean;
   // Set while listings get no answer, and cleared only when one answers.
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
-  // A listing the registry has not saved yet, and when it started.
-  unsaved: { listing: RosterListing; listedAtMs: number } | null;
+  // A listing the registry has not saved yet.
+  unsaved: { listing: RosterListing; pulledAfter: boolean } | null;
   running: Promise<void> | null;
   again: boolean;
 }
@@ -289,35 +298,34 @@ interface RosterState {
  * changes a share, when relay sync recovers, and every 10 minutes. The
  * executor asks `forRun` before a run.
  *
- * While listings get no answer, the cached roster stands in only if no relay
- * sync pass has applied changes since that roster was listed. Such a pass can
- * bring an automation from someone whose grant the cached roster does not
- * show, so after one the roster is unknown until a listing answers. A pass
- * that applied nothing brought nobody's changes, so a person whose passes
- * bring nothing new keeps their automations offline. The pull does not say
- * who wrote what it applied, so a person's own changes from another computer
- * count too. The registry records the pass, so a restart does not forget it.
+ * While listings get no answer, the cached roster stands in only if this
+ * computer has not pulled from the relay since that roster was listed. A
+ * pull can bring an automation from someone whose grant the cached roster
+ * does not show, so after one the roster is unknown until a listing answers.
+ * The registry records the pull before its request is sent, so neither a
+ * crash nor a lost response can hide it. The pull does not say who wrote what
+ * it brought, so a person's own changes from another computer count too.
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  saveRoster(workspaceId: string, listing: RosterListing, listedAtMs: number): void;
-  // Records that a sync pass applied changes after the listing that started
-  // at `listedAtMs`.
-  markRosterPulled(workspaceId: string, listedAtMs: number): void;
+  saveRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean): void;
+  // Records that a pull started after the stored listing.
+  markRosterPulled(workspaceId: string): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
   localUserId(): Promise<string | null>;
   logError(workspaceId: string, error: unknown): void;
+  // A clock that never steps backwards, for pacing listings.
   nowMs?: () => number;
 }) {
-  const nowMs = dependencies.nowMs ?? Date.now;
+  const nowMs = dependencies.nowMs ?? (() => performance.now());
   const states = new Map<string, RosterState>();
 
   function stateFor(workspaceId: string): RosterState {
     let state = states.get(workspaceId);
     if (!state) {
       state = {
-        timer: null, lastAttemptMs: null, lastAppliedMs: null, noAnswer: null,
-        unsaved: null, running: null, again: false,
+        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0, markFailed: false,
+        noAnswer: null, unsaved: null, running: null, again: false,
       };
       states.set(workspaceId, state);
     }
@@ -327,28 +335,27 @@ export function createShareRosters(dependencies: {
   function save(workspaceId: string, state: RosterState): void {
     if (!state.unsaved) return;
     try {
-      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.listedAtMs);
+      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.pulledAfter);
       state.unsaved = null;
-      markPulled(workspaceId, state);
     } catch (error) {
       dependencies.logError(workspaceId, error);
     }
   }
 
-  // A pass this session applied changes after the listing started, so they
-  // may be newer than what the listing saw. Changes applied before the
-  // listing started were already on the relay when the listing read it. A copy
-  // with no time counts every change applied this session.
-  function pulledSince(state: RosterState, listedAtMs: number | undefined): boolean {
-    return state.lastAppliedMs !== null && (listedAtMs === undefined || state.lastAppliedMs > listedAtMs);
-  }
-
+  // Record, before its request is sent, that a pull follows the latest
+  // listing.
   function markPulled(workspaceId: string, state: RosterState): void {
+    if (state.unsaved) {
+      state.unsaved.pulledAfter = true;
+      save(workspaceId, state);
+      return;
+    }
     const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
-    if (!stored || stored.pulledAfter || stored.listedAtMs === undefined || !pulledSince(state, stored.listedAtMs)) return;
+    if (!stored || stored.pulledAfter) return;
     try {
-      dependencies.markRosterPulled(workspaceId, stored.listedAtMs);
+      dependencies.markRosterPulled(workspaceId);
     } catch (error) {
+      state.markFailed = true;
       dependencies.logError(workspaceId, error);
     }
   }
@@ -357,17 +364,19 @@ export function createShareRosters(dependencies: {
   // may be missing an editor.
   function stale(workspaceId: string, state: RosterState): boolean {
     if (state.noAnswer === null) return false;
-    if (state.noAnswer.partial) return true;
-    if (state.unsaved) return pulledSince(state, state.unsaved.listedAtMs);
-    const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
-    return stored?.pulledAfter === true || pulledSince(state, stored?.listedAtMs);
+    if (state.noAnswer.partial || state.markFailed) return true;
+    if (state.unsaved) return state.unsaved.pulledAfter;
+    return dependencies.findWorkspace(workspaceId)?.shareRoster?.pulledAfter === true;
   }
 
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
     const workspace = dependencies.findWorkspace(workspaceId);
     if (!workspace?.remote || workspace.shareView) return;
-    const startedMs = nowMs();
-    state.lastAttemptMs = startedMs;
+    state.lastAttemptMs = nowMs();
+    // A pull that runs at any time after this listing starts may bring
+    // changes the listing does not see.
+    const pullStartsBefore = state.pullStarts;
+    const pullRunning = state.pullsRunning > 0;
     let answer: RosterAnswer;
     try {
       answer = await dependencies.listRoster(workspace);
@@ -380,7 +389,8 @@ export function createShareRosters(dependencies: {
       return;
     }
     state.noAnswer = null;
-    state.unsaved = { listing: answer.listing, listedAtMs: startedMs };
+    state.markFailed = false;
+    state.unsaved = { listing: answer.listing, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
   }
 
@@ -466,11 +476,21 @@ export function createShareRosters(dependencies: {
       return (recovered || state.noAnswer !== null) && due(state) ? refresh(workspaceId) : Promise.resolve();
     },
 
-    /** A relay sync pass applied changes, even if the pass then failed. */
-    applied(workspaceId: string): void {
+    /**
+     * A pull from the relay is about to start. Records it durably before it
+     * returns, and returns the function to call when the pull ends.
+     */
+    pullStarting(workspaceId: string): () => void {
       const state = stateFor(workspaceId);
-      state.lastAppliedMs = nowMs();
+      state.pullStarts += 1;
+      state.pullsRunning += 1;
       markPulled(workspaceId, state);
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        state.pullsRunning -= 1;
+      };
     },
 
     forRun,

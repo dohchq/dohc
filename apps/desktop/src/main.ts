@@ -1781,7 +1781,8 @@ function engineForWorkspace(
         projectPendingChatBookmarks(workspace.workspaceId),
       );
     },
-    onRemoteChangesApplied: () => shareRosters.applied(workspace.workspaceId),
+    // Recorded durably before each pull request goes out.
+    pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).

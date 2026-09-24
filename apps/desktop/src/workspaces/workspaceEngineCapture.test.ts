@@ -1831,7 +1831,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     result: T,
     commit: () => Promise<void> = async () => undefined,
   ): Promise<T> {
-    await materializePage(result.fastForwardedPaths, result.fastForwardedPaths.length);
+    await materializePage(result.fastForwardedPaths);
     await commit();
     return result;
   }
