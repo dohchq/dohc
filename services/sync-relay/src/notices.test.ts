@@ -204,6 +204,29 @@ describe("notice list", () => {
     });
   });
 
+  it("refuses a notice to yourself through a share you do not hold", async () => {
+    const { h, storage, shareId } = await sharedTrip();
+    const benShare = await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ben" });
+    const toSelf = (share: string, noticeId: string) =>
+      notice({ kind: "agent-run", recipientUserId: "ana", workspaceId: undefined, shareId: share, noticeId });
+
+    await expectRefused(await post(h, "ana", toSelf(benShare, "probe")));
+    await expectRefused(await post(h, "ana", toSelf("share-none", "missing")));
+    expect((await post(h, "ana", toSelf(shareId, "own"))).status).toBe(200);
+    // A person who opened a public link holds a grant too.
+    seedLinkGrant(storage, { grantId: "link-1", shareId: benShare, secretHash: sha256("secret") });
+    seedDependentGrant(storage, {
+      shareId: benShare, parentGrantId: "link-1", grantId: "from-link-lee", principalUserId: "lee", createdAtMs: clock,
+    });
+    expect((await post(h, "lee", notice({
+      kind: "agent-run", recipientUserId: "lee", workspaceId: undefined, shareId: benShare,
+    }))).status).toBe(200);
+
+    expect(storage.revokeShare(shareId, clock)).toBe(true);
+    await expectRefused(await post(h, "ana", toSelf(shareId, "after")));
+    expect((await pull(h, "ana")).notices.map((row) => row.noticeId)).toEqual(["own"]);
+  });
+
   it("requires a bearer credential and refuses browser cookies", async () => {
     const { h } = await relay();
     expect((await h(request(null, "/sync/notices"))).status).toBe(404);
@@ -614,6 +637,28 @@ describe("pulling changes", () => {
     expect(restarted.notices.map((row) => row.noticeId)).toEqual(["n1", "n2"]);
   });
 
+  it("starts an interrupted whole-list pull over when a tombstone expires before any sweep", async () => {
+    const { h } = await sharedTrip({
+      noticePostRateLimiter: new TokenBucketLimiter(1_000, 1, 10),
+    });
+    for (let index = 0; index < NOTICE_ROWS_PER_SENDER; index += 1) {
+      expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status).toBe(200);
+    }
+    // A computer takes the first page of the whole list, then stops.
+    const first = await pull(h, "ana", undefined, 1);
+    expect(first.notices.map((row) => row.noticeId)).toEqual(["from:owner:n0"]);
+    expect(first.nextCursor).toBe(`1.${NOTICE_ROWS_PER_SENDER}`);
+
+    // n0 leaves to make room, and its tombstone expires with no post to
+    // sweep it before the computer resumes.
+    expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status).toBe(200);
+    clock += NOTICE_REMOVED_RETENTION_MS;
+    const resumed = await pull(h, "ana", first.nextCursor, 200);
+    expect(resumed.replace).toBe(true);
+    expect(resumed.notices.map((row) => row.noticeId)).not.toContain("from:owner:n0");
+    expect(resumed.notices).toHaveLength(NOTICE_ROWS_PER_SENDER);
+  });
+
   it("refuses a cursor it did not issue", async () => {
     const { h } = await relay();
     for (const cursor of ["-1", "1.2.3", "abc", "01"]) {
@@ -675,6 +720,41 @@ describe("notices after access ends", () => {
     expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
     expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
     expect((await pull(h, "ana")).notices.map((row) => row.recipientShareId)).toEqual([shareId, shareId]);
+  });
+
+  it("skips the access digest for a person with no notice through a share", async () => {
+    const { h, storage } = await sharedTrip();
+    await post(h, "owner", notice({ kind: "mention", noticeId: "own" }));
+    await post(h, "owner", notice({ recipientUserId: "ana" }));
+    const digests = vi.spyOn(storage, "listSharesReceivedBy");
+
+    await pull(h, "owner");
+    expect(digests).not.toHaveBeenCalled();
+    await pull(h, "ana");
+    expect(digests).toHaveBeenCalled();
+
+    // Once her only such row is removed, Ana is skipped too.
+    await mark(h, "ana", [{ noticeId: "from:owner:automation-failed:run-1", mark: "dismissed" }]);
+    clock += NOTICE_DISMISSED_RETENTION_MS;
+    stored(storage, "ana", "later");
+    digests.mockClear();
+    await pull(h, "ana");
+    expect(digests).not.toHaveBeenCalled();
+  });
+
+  it("checks a notice placed through a share whose grant ends before the next pull", async () => {
+    const { h, storage } = await sharedTrip();
+    await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "trip" }));
+    const cursor = (await pull(h, "ana")).nextCursor;
+
+    // A grant arrives, a notice comes through it, and the grant ends, all
+    // between two pulls: Ana's grants look as they did at the last check.
+    const budgetShare = await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ana" });
+    expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "budget", target: { path: "budget/q3" } }))).status).toBe(200);
+    expect(storage.revokeShare(budgetShare, clock)).toBe(true);
+
+    const next = await pull(h, "ana", cursor);
+    expect(next.notices.map((row) => [row.noticeId, row.target]).at(-1)).toEqual(["from:owner:budget", null]);
   });
 
   it("checks each other share once when many notices lose access together", async () => {

@@ -109,7 +109,7 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
   if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
   storage.tx(() => {
-    const placement = self ? ownPlacement(input.reach) : sharedPlacement(storage, input);
+    const placement = self ? ownPlacement(storage, input) : sharedPlacement(storage, input);
     const existing = storage.db
       .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
       .get(input.recipientUserId, noticeId);
@@ -140,9 +140,10 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
       input.nowMs,
       input.nowMs + NOTICE_UNREAD_RETENTION_MS,
     );
-    // Your own notice through a share is not checked when posted, so the
-    // next pull checks access again.
-    if (self && placement.recipientShareId !== null) {
+    // A row placed through a share was checked against the grants of this
+    // moment, which a stored digest may not describe, so the next pull
+    // checks access again.
+    if (placement.recipientShareId !== null) {
       storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
         .run(input.recipientUserId);
     }
@@ -174,18 +175,18 @@ export function readNoticeChanges(
     const head = Number(list?.change_seq ?? 0);
     const floor = Number(list?.floor_seq ?? 0);
     const cursor = input.cursor;
+    // Rows past retention that no post has swept yet count as deleted.
+    const deleted = Math.max(floor, Number(storage.db.prepare(
+      `SELECT COALESCE(MAX(change_seq), 0) AS seq FROM sync_relay_notices
+       WHERE recipient_user_id = ? AND expires_at_ms <= ?`,
+    ).get(input.recipientUserId, input.nowMs)?.seq ?? 0));
     let replace: boolean;
     if (cursor === null) {
       replace = true;
     } else if (cursor.snapshotHead !== null) {
-      replace = cursor.snapshotHead > head || cursor.seq > head || floor > cursor.snapshotHead;
+      replace = cursor.snapshotHead > head || cursor.seq > head || deleted > cursor.snapshotHead;
     } else {
-      // Rows past retention that no post has swept yet count as deleted.
-      const expired = Number(storage.db.prepare(
-        `SELECT COALESCE(MAX(change_seq), 0) AS seq FROM sync_relay_notices
-         WHERE recipient_user_id = ? AND expires_at_ms <= ?`,
-      ).get(input.recipientUserId, input.nowMs)?.seq ?? 0);
-      replace = cursor.seq > head || cursor.seq < Math.max(floor, expired);
+      replace = cursor.seq > head || cursor.seq < deleted;
     }
     const since = replace ? 0 : cursor!.seq;
     const snapshotHead = replace ? head : cursor!.snapshotHead;
@@ -235,11 +236,14 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): v
   });
 }
 
-// A post to yourself is placed where you said. Access is judged at pull.
-function ownPlacement(reach: NoticeReach): Placement {
-  return reach.workspaceId !== undefined
-    ? { workspaceId: reach.workspaceId, recipientShareId: null }
-    : { workspaceId: null, recipientShareId: reach.shareId };
+// A post to yourself is placed where you said. A share must be one you
+// hold a current grant on, or the next pull's access check would tell you
+// how someone else's share relates to yours. The target is judged at pull.
+function ownPlacement(storage: StorageContext, input: PostNoticeInput): Placement {
+  const reach = input.reach;
+  if (reach.workspaceId !== undefined) return { workspaceId: reach.workspaceId, recipientShareId: null };
+  if (fileSidesOn(storage, input.senderUserId, reach.shareId) === null) throw relayError("notice_refused");
+  return { workspaceId: null, recipientShareId: reach.shareId };
 }
 
 function sharedPlacement(storage: StorageContext, input: PostNoticeInput): Placement {
@@ -369,6 +373,13 @@ function reachToken(storage: StorageContext, userId: string): string {
 // its target.
 function settleLostReach(storage: StorageContext, recipientUserId: string): void {
   const stale = storage.readTx(() => {
+    // Nothing to check without a live row placed through a share.
+    const throughShare = storage.db.prepare(
+      `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+         WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
+           AND removed_at_ms IS NULL) AS present`,
+    ).get(recipientUserId);
+    if (Number(throughShare?.present) !== 1) return false;
     const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
       .get(recipientUserId);
     return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId);
