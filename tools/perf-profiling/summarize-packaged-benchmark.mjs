@@ -83,16 +83,20 @@ function surfaceSummaries(runs) {
       query: unique(goTo.map(g => g.query)),
       coldOpenToEditableInputPaintedMs: stats(goTo.map(g => g.cold.keydownToPaintedMs)),
       warmOpenToEditableInputPaintedMs: stats(goTo.map(g => g.warm.keydownToPaintedMs)),
-      keystrokeToResultsPaintedMs: stats(goTo.flatMap(g => g.keystrokes.map(k => k.keydownToPaintedMs))),
-      lastKeystrokeToResultsPaintedMs: stats(goTo.map(g => g.keystrokes.at(-1)?.keydownToPaintedMs)),
+      // Each keystroke ends when the input echoes the prefix and the first ranked row contains it in
+      // order. The other rows are not checked, so this is not a full re-ranking time.
+      keystrokeToFirstMatchPaintedMs: stats(goTo.flatMap(g => g.keystrokes.map(k => k.keydownToPaintedMs))),
+      lastKeystrokeToFirstMatchPaintedMs: stats(goTo.map(g => g.keystrokes.at(-1)?.keydownToPaintedMs)),
       finalOptionCounts: unique(goTo.map(g => g.keystrokes.at(-1)?.optionCount)), finalFirstOptions: unique(goTo.map(g => g.firstOption)),
       entranceAnimating: unique(goTo.flatMap(g => [g.cold.observed?.entranceAnimating, g.warm.observed?.entranceAnimating])),
+      openMatchedIn: unique(goTo.flatMap(g => [g.cold.observed?.matchedIn, g.warm.observed?.matchedIn])),
     } : null,
     commandPalette: palette.length ? {
       coldOpenToFirstRowPaintedMs: stats(palette.map(p => p.cold.keydownToPaintedMs)),
       warmOpenToFirstRowPaintedMs: stats(palette.map(p => p.warm.keydownToPaintedMs)),
       optionCounts: unique(palette.map(p => p.cold.optionCount)),
       entranceAnimating: unique(palette.flatMap(p => [p.cold.observed?.entranceAnimating, p.warm.observed?.entranceAnimating])),
+      openMatchedIn: unique(palette.flatMap(p => [p.cold.observed?.matchedIn, p.warm.observed?.matchedIn])),
     } : null,
     search: searches.length ? Object.fromEntries(unique(searches.map(s => s.query)).map(query => {
       const rows = searches.filter(s => s.query === query);
@@ -120,7 +124,7 @@ function surfaceSummaries(runs) {
       rowsRendered: unique(collections.map(c => c.rowsRendered)), loadedRecords: unique(collections.map(c => c.loadedRecords)),
     } : null,
     soak: soaks.length ? soaks.map(soak => ({
-      minutes: soak.minutes, cycles: soak.cycles.length, elapsedMs: soak.elapsedMs, cycleDurationMs: stats(soak.cycles.map(c => c.durationMs)),
+      minutes: soak.minutes, searchQuery: soak.searchQuery ?? null, cycles: soak.cycles.length, elapsedMs: soak.elapsedMs, cycleDurationMs: stats(soak.cycles.map(c => c.durationMs)),
       kinds: Object.fromEntries(unique(soak.samples.flatMap(s => Object.keys(s.kinds))).map(kind => [kind, {
         processCounts: unique(soak.samples.map(s => s.kinds[kind]?.count ?? 0)),
         workingSetBytes: trend(soak.samples.map(s => s.kinds[kind]?.workingSetBytes)),

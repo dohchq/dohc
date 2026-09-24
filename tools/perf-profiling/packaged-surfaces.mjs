@@ -3,12 +3,14 @@ import { createHash } from 'node:crypto';
 // observeSurface, observeSearchSubmit and seededPostThreadId are serialized by Playwright into
 // the renderer. Keep them self-contained: no module-scope references.
 
-// Resolves two animation frames after `target` has `minCount` matches, the first one visible,
-// optionally focused, holding `value`, or with the first `countSelector` element's text containing
-// `firstTextMatches` in order. The predicate runs on DOM mutations, focus changes and every
-// animation frame, so a change without a mutation (an entrance animation's opacity, a focus from an
-// effect) is seen within one frame. Visible means the first frame where no ancestor computes to
-// opacity 0; `entranceAnimating` records whether an animation was still running at that frame.
+// Resolves at the first animation-frame callback after the paint that first shows `target` with
+// `minCount` matches, the first one visible, optionally focused, holding `value`, or with the first
+// `countSelector` element's text containing `firstTextMatches` in order. The predicate runs on DOM
+// mutations, focus changes and every animation frame, so a change without a mutation (an entrance
+// animation's opacity, a focus from an effect) is seen within one frame. A match found between
+// frames waits two frames; a match found inside a frame callback waits one, because that frame
+// paints it. `matchedIn` records which. Visible means the first frame where no ancestor computes
+// to opacity 0; `entranceAnimating` records whether an animation was still running at that frame.
 // `trigger` records the first keydown or mousedown (`triggerKey` filters keydown) seen after
 // installation. `fullCount` adds a second milestone, reached when `target` has that many matches;
 // both milestones share the trigger. When only the second milestone misses the deadline, the
@@ -20,13 +22,13 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
     if (eventName === undefined) { reject(Error(`Unknown trigger: ${trigger}`)); return; }
     let finished = false, loop = null, triggerMs = null, triggerTrusted = null, found = null, entranceAnimating = null;
     const frames = new Set();
-    const first = { matchedMs: null, paintedMs: null }, full = { matchedMs: null, paintedMs: null };
+    const first = { matchedMs: null, matchedIn: null, paintedMs: null }, full = { matchedMs: null, matchedIn: null, paintedMs: null };
     const onTrigger = event => {
       if (triggerMs !== null || (triggerKey !== null && event.key?.toLowerCase() !== triggerKey.toLowerCase())) return;
       triggerMs = performance.now(); triggerTrusted = event.isTrusted;
     };
-    const onFocus = () => check();
-    const observer = new MutationObserver(() => check());
+    const onFocus = () => check('focus');
+    const observer = new MutationObserver(() => check('mutation'));
     const finish = (error, result) => {
       if (finished) return;
       finished = true;
@@ -38,8 +40,8 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
       error ? reject(error) : resolve(result);
     };
     const firstOf = selector => document.querySelector(selector);
-    const result = fullTimedOut => ({ timeOrigin: performance.timeOrigin, installedMs, triggerMs, triggerTrusted, matchedMs: first.matchedMs, paintedMs: first.paintedMs,
-      fullCount, fullMatchedMs: full.matchedMs, fullPaintedMs: full.paintedMs, fullTimedOut, entranceAnimating, matchedCount: found.length,
+    const result = fullTimedOut => ({ timeOrigin: performance.timeOrigin, installedMs, triggerMs, triggerTrusted, matchedMs: first.matchedMs, matchedIn: first.matchedIn, paintedMs: first.paintedMs,
+      fullCount, fullMatchedMs: full.matchedMs, fullMatchedIn: full.matchedIn, fullPaintedMs: full.paintedMs, fullTimedOut, entranceAnimating, matchedCount: found.length,
       count: document.querySelectorAll(countSelector ?? target).length, text: (found[0].textContent ?? '').trim().slice(0, 200),
       firstText: firstOf(countSelector ?? target)?.textContent?.trim().slice(0, 200) ?? null });
     const deadline = setTimeout(() => {
@@ -82,7 +84,7 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
     };
     const fullReached = () => document.querySelectorAll(target).length >= fullCount;
     const complete = () => { if (first.paintedMs !== null && (fullCount === null || full.paintedMs !== null)) finish(null, result(false)); };
-    const afterTwoFrames = (milestone, stillValid) => {
+    const afterPaint = (milestone, source, stillValid) => {
       const step = remaining => {
         const frame = requestAnimationFrame(() => {
           frames.delete(frame);
@@ -95,25 +97,23 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
         });
         frames.add(frame);
       };
-      step(2);
+      milestone.matchedMs = performance.now();
+      milestone.matchedIn = source;
+      step(source === 'frame' ? 1 : 2);
     };
-    const check = () => {
+    const check = source => {
       if (finished) return;
       try {
         if (first.matchedMs === null) {
           found = matches();
           if (!found) return;
-          first.matchedMs = performance.now();
           entranceAnimating = animating(found[0]);
-          afterTwoFrames(first, () => matches() !== null);
+          afterPaint(first, source, () => matches() !== null);
         }
-        if (fullCount !== null && full.matchedMs === null && fullReached()) {
-          full.matchedMs = performance.now();
-          afterTwoFrames(full, fullReached);
-        }
+        if (fullCount !== null && full.matchedMs === null && fullReached()) afterPaint(full, source, fullReached);
       } catch (error) { finish(error); }
     };
-    const frameLoop = () => { loop = null; check(); if (!finished) loop = requestAnimationFrame(frameLoop); };
+    const frameLoop = () => { loop = null; check('frame'); if (!finished) loop = requestAnimationFrame(frameLoop); };
     if (eventName) window.addEventListener(eventName, onTrigger, true);
     window.addEventListener('focusin', onFocus, true);
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
@@ -122,10 +122,12 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
 }
 
 // Install before the query is submitted with Enter. Records the Enter keydown, then the first
-// visible result row and the complete state of the search issued after it, each followed by
-// two animation frames. `debounceFiredBeforeSubmit` is true when search-as-you-type already
-// replaced the search id between installation and Enter. `statesSeen` lists the view states
-// after submit; `sawUpdating` means the settled time includes the renderer's retry backoff.
+// visible result row and the complete state of the search issued after it, each at the first
+// frame callback after the paint that shows it (two frames after a match between frames, one
+// after a match inside a frame callback). `debounceFiredBeforeSubmit` is true when
+// search-as-you-type already replaced the search id between installation and Enter.
+// `statesSeen` lists the view states after submit; `sawUpdating` means the settled time
+// includes the renderer's retry backoff.
 export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
   const installedMs = performance.now();
   return new Promise((resolve, reject) => {
@@ -133,10 +135,11 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
     if (!view() || !document.querySelector('[data-testid="search-input"]')) { reject(Error('Search view is not open')); return; }
     const result = { timeOrigin: performance.timeOrigin, installedMs, searchIdAtInstall: view().dataset.searchId ?? '', submitMs: null, submitTrusted: null,
       stateAtSubmit: null, searchIdAtSubmit: null, debounceFiredBeforeSubmit: null, searchId: null, searchIdChanges: 0, statesSeen: [], sawUpdating: null,
-      firstResultMs: null, firstResultPaintedMs: null, settledMs: null, settledPaintedMs: null, rowsRendered: null, summary: null, limitHit: null, emptyState: null };
+      firstResultMs: null, firstResultMatchedIn: null, firstResultPaintedMs: null, settledMs: null, settledMatchedIn: null, settledPaintedMs: null,
+      rowsRendered: null, summary: null, limitHit: null, emptyState: null };
     let finished = false, settling = false, loop = null;
     const frames = new Set();
-    const observer = new MutationObserver(() => check());
+    const observer = new MutationObserver(() => check('mutation'));
     const finish = (error, value) => {
       if (finished) return;
       finished = true;
@@ -156,13 +159,15 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
     };
-    const twoFrames = done => {
-      const outer = requestAnimationFrame(() => {
-        frames.delete(outer);
-        const inner = requestAnimationFrame(() => { frames.delete(inner); try { done(performance.now()); } catch (error) { finish(error); } });
-        frames.add(inner);
-      });
-      frames.add(outer);
+    const afterPaint = (source, done) => {
+      const step = remaining => {
+        const frame = requestAnimationFrame(() => {
+          frames.delete(frame);
+          try { if (remaining > 1) step(remaining - 1); else done(performance.now()); } catch (error) { finish(error); }
+        });
+        frames.add(frame);
+      };
+      step(source === 'frame' ? 1 : 2);
     };
     const onKeydown = event => {
       if (event.key !== 'Enter' || result.submitMs !== null || !event.target?.matches?.('[data-testid="search-input"]')) return;
@@ -172,7 +177,7 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
       result.searchIdAtSubmit = current?.dataset.searchId ?? '';
       result.debounceFiredBeforeSubmit = result.searchIdAtSubmit !== result.searchIdAtInstall;
     };
-    const check = () => {
+    const check = source => {
       if (finished || settling || result.submitMs === null) return;
       try {
         const current = view();
@@ -184,12 +189,13 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
         if (state && result.statesSeen.at(-1) !== state) result.statesSeen.push(state);
         if (result.firstResultMs === null) {
           const row = current.querySelector('[data-testid="search-result-row"]');
-          if (row && visible(row)) { result.firstResultMs = performance.now(); twoFrames(now => { result.firstResultPaintedMs ??= now; }); }
+          if (row && visible(row)) { result.firstResultMs = performance.now(); result.firstResultMatchedIn = source; afterPaint(source, now => { result.firstResultPaintedMs ??= now; }); }
         }
         if (state !== 'complete') return;
         settling = true;
         result.settledMs = performance.now();
-        twoFrames(now => {
+        result.settledMatchedIn = source;
+        afterPaint(source, now => {
           const settled = view();
           result.settledPaintedMs = now;
           result.sawUpdating = result.statesSeen.includes('updating');
@@ -201,7 +207,7 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
         });
       } catch (error) { finish(error); }
     };
-    const frameLoop = () => { loop = null; check(); if (!finished) loop = requestAnimationFrame(frameLoop); };
+    const frameLoop = () => { loop = null; check('frame'); if (!finished) loop = requestAnimationFrame(frameLoop); };
     window.addEventListener('keydown', onKeydown, true);
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
     frameLoop();

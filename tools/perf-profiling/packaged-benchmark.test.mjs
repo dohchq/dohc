@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
-import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput, runOwnedProcess } from './packaged-process.mjs';
+import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
@@ -204,7 +204,7 @@ test('startup observer propagates the editing refusal', async t => {
 });
 
 const paletteHtml = '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
-test('surface observer sees a keydown-triggered palette on the next frame and paints two frames later', async t => {
+test('surface observer sees a keydown-triggered palette on the next frame and paints one frame later', async t => {
   const p = fakePage(t, '<main></main>');
   const pending = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'p', target: '[data-testid="quick-open"] input', focused: '[data-testid="quick-open"] input', countSelector: '[role="option"]', timeoutMs: 1000 });
   p.frame();
@@ -215,13 +215,13 @@ test('surface observer sees a keydown-triggered palette on the next frame and pa
   assert.equal(p.frames.size, 1, 'only the frame loop is pending: a surface present before the trigger is not a match');
   p.keydown(p.document.body, 'p');
   p.frame();
-  assert.equal(p.frames.size, 2, 'the frame loop matched without a mutation and started the two-frame wait');
-  p.frame(); p.frame();
+  assert.equal(p.frames.size, 2, 'the frame loop matched without a mutation and started the one-frame wait');
+  p.frame();
   const observed = await pending;
   assert.equal(observed.triggerMs, 42);
   assert.equal(observed.triggerTrusted, false);
-  assert.equal(observed.matchedMs, 58);
-  assert.equal(observed.paintedMs, 90);
+  // Matched inside frame N's callback, which paints it; the next callback is after that paint.
+  assert.deepEqual([observed.matchedMs, observed.matchedIn, observed.paintedMs], [58, 'frame', 74]);
   assert.deepEqual([observed.count, observed.matchedCount, observed.firstText, observed.entranceAnimating, observed.fullTimedOut], [2, 1, 'a.md', false, false]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
@@ -261,15 +261,16 @@ test('surface observer carries a first and a full milestone from one trigger and
   await mutations();
   p.frame(); p.frame();
   const observed = await pending;
+  // Both milestones matched between frames through mutations, so each waits two frames.
   assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 42, 42, 74]);
-  assert.deepEqual([observed.count, observed.fullTimedOut], [3, false]);
+  assert.deepEqual([observed.matchedIn, observed.fullMatchedIn, observed.count, observed.fullTimedOut], ['mutation', 'mutation', 3, false]);
   const partial = p.run(observeSurface, { target: 'ol li', fullCount: 10, timeoutMs: 100 });
-  p.frame(); p.frame(); p.frame();
+  p.frame(); p.frame();
   p.step(); p.step();
   const timedOut = await partial;
   assert.equal(timedOut.fullTimedOut, true);
   assert.equal(timedOut.fullPaintedMs, null);
-  assert.notEqual(timedOut.paintedMs, null);
+  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ['frame', 16]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 test('surface observer rejects unknown triggers and a surface that never renders', async t => {
@@ -301,6 +302,7 @@ test('search observer times Enter to the first result row and to the complete st
   assert.equal(observed.submitTrusted, false);
   assert.equal(observed.debounceFiredBeforeSubmit, false);
   assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 58, 42, 74]);
+  assert.deepEqual([observed.firstResultMatchedIn, observed.settledMatchedIn], ['mutation', 'mutation']);
   assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
   assert.deepEqual([[...observed.statesSeen], observed.sawUpdating], [['searching', 'complete'], false]);
   assert.equal(p.frames.size + p.timers.size, 0);
@@ -560,38 +562,34 @@ test('launch before CDP cleans up the owned process and its child, preserving an
     await closeOwnedPackage(unrelated, 100).catch(() => {});
   }
 });
-test('owned process returns stdout on success and rejects a failing exit with its stderr', async () => {
-  assert.equal((await runOwnedProcess(process.execPath, ['-e', 'process.stdout.write("ok")'])).stdout, 'ok');
-  await assert.rejects(runOwnedProcess(process.execPath, ['-e', 'console.error("boom");process.exit(3)']), /exited 3\/null: boom/);
-  await assert.rejects(runOwnedProcess('dohc-no-such-command-executable', []), /failed to start/);
-});
-// A launcher that spawns a worker the way packages/cli/bin/dohc.js does, recording the worker pid.
-async function stoppedTree(run) {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-owned-tree-'));
-  const pidFile = join(root, 'child.pid').replaceAll('\\', '/');
-  const launcher = `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000);`;
-  try {
-    await run(launcher);
-    const childPid = Number(await readFile(pidFile, 'utf8'));
-    assert.ok(childPid > 0);
-    const deadline = performance.now() + 3000;
-    let alive = true;
-    while (alive && performance.now() < deadline) {
-      try { process.kill(childPid, 0); await delay(10); }
-      catch (error) { if (error.code !== 'ESRCH') throw error; alive = false; }
-    }
-    assert.equal(alive, false, 'the worker must stop with its launcher');
-  } finally { await rm(root, { recursive: true, force: true }); }
-}
-test('owned process timeout stops the launcher and its worker', async () => {
-  await stoppedTree(code => assert.rejects(runOwnedProcess(process.execPath, ['-e', code], { timeoutMs: 500 }), /timed out after 500ms/));
-});
-test('owned process cancellation stops the launcher and its worker and refuses later starts', async () => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(Error('cancel seeding')), 500);
-  try { await stoppedTree(code => assert.rejects(runOwnedProcess(process.execPath, ['-e', code], { signal: controller.signal }), /cancel seeding/)); }
-  finally { clearTimeout(timer); }
-  await assert.rejects(runOwnedProcess(process.execPath, ['-e', ''], { signal: controller.signal }), /cancel seeding/);
+// The seed script's process ownership comes from scripts/verification/process.mjs, whose job and
+// process-group behavior scripts/verification/process-group.test.mjs covers. This checks the
+// script's own contract against a stand-in launcher.
+test('chat seed script posts once, replies for the rest, reports the CLI thread id, and fails on a CLI error', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-seed-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls = join(root, 'calls.jsonl');
+  const launcher = join(root, 'fake-dohc.mjs');
+  await writeFile(launcher, `import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, cwd: process.cwd(), stateDir: process.env.DOHC_STATE_DIR }) + '\\n');
+if (args[0] === '--json') console.log(JSON.stringify({ schemaVersion: 1, threadId: 'th_seeded', messageId: 'msg_0', title: args[5] }));
+else if (args[3] === 'Message 3') { console.error('pipe closed'); process.exit(2); }
+else console.log('replied th_seeded msg_' + args[3].slice(8));
+`);
+  const seedScript = resolve('tools/perf-profiling/seed-chat-cli.mjs');
+  const seeded = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '3'], { cwd: root, env: { ...process.env, DOHC_STATE_DIR: 'state-dir' }, encoding: 'utf8', timeout: 60000 });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const result = JSON.parse(seeded.stdout.trim().split(/\r?\n/).at(-1));
+  assert.deepEqual([result.channel, result.title, result.cliThreadId, result.messages], ['general', 'Long history', 'th_seeded', 3]);
+  assert.ok(Number.isFinite(result.seedingObservedMs));
+  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(recorded.map(call => call.args), [['--json', 'chat', 'post', 'general', '--title', 'Long history', 'Message 0'], ['chat', 'reply', 'th_seeded', 'Message 1'], ['chat', 'reply', 'th_seeded', 'Message 2']]);
+  assert.ok(recorded.every(call => call.stateDir === 'state-dir' && resolve(call.cwd) === resolve(root)), 'the workspace cwd and profile reach every CLI call');
+  const failed = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '5'], { cwd: root, env: process.env, encoding: 'utf8', timeout: 60000 });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /pipe closed/);
+  assert.match(spawnSync(process.execPath, [seedScript, launcher, 'Long history', '1'], { encoding: 'utf8', timeout: 60000 }).stderr, /usage/);
 });
 test('CDP shutdown timeout still stops its owned process', async () => {
   const instance = await ownedNode(`console.log('ready');setInterval(()=>{},1000);`);
@@ -657,7 +655,7 @@ test('summary keeps absent timing samples missing and labels diagnostic measurem
 });
 
 test('summary reports each surface scenario from its own runs and keeps unobserved samples missing', async () => {
-  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount, observed: { entranceAnimating: true } });
+  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount, observed: { entranceAnimating: true, matchedIn: 'frame' } });
   const sample = (cycle, renderer, main) => ({ cycle, completedAtMs: 1000 + cycle * 60000, processCount: 5, kinds: { renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 }, main: { count: 1, workingSetBytes: main, privateBytes: main / 2 } } });
   const summary = await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [
     { index: 1, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
@@ -666,17 +664,17 @@ test('summary reports each surface scenario from its own runs and keeps unobserv
         { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, sawUpdating: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
       chatHistory: { seed: { messages: 200, seedingObservedMs: 90000 }, channelOpen: { clickToPostsPaintedMs: 150 }, threadOpen: { clickToFirstCommentPaintedMs: 400, clickToAllCommentsPaintedMs: null, commentRowsRendered: 120 } },
       collection: { records: 500, indexedWaitObservedMs: 800, clickToRowsPaintedMs: 210, rowsRendered: 24, loadedRecords: 100 },
-      soak: { minutes: 2, elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
+      soak: { minutes: 2, searchQuery: 'Performance', elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
     { index: 2, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
       chatHistory: { seed: { messages: 200, seedingObservedMs: 80000 }, channelOpen: { clickToPostsPaintedMs: 130 }, threadOpen: { clickToFirstCommentPaintedMs: 380, clickToAllCommentsPaintedMs: 900, commentRowsRendered: 199 } } },
   ] });
   assert.deepEqual(summary.goTo.query, ['fixture-004242']);
   assert.deepEqual(summary.goTo.coldOpenToEditableInputPaintedMs, { count: 2, p50: 100, p95: 120, max: 120 });
   assert.equal(summary.goTo.warmOpenToEditableInputPaintedMs.max, 40);
-  assert.equal(summary.goTo.keystrokeToResultsPaintedMs.count, 3);
-  assert.deepEqual(summary.goTo.lastKeystrokeToResultsPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
-  assert.deepEqual([summary.goTo.finalOptionCounts, summary.goTo.finalFirstOptions, summary.goTo.entranceAnimating], [[1], ['fixture-004242.txt'], [true]]);
-  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12], entranceAnimating: [true] });
+  assert.equal(summary.goTo.keystrokeToFirstMatchPaintedMs.count, 3);
+  assert.deepEqual(summary.goTo.lastKeystrokeToFirstMatchPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
+  assert.deepEqual([summary.goTo.finalOptionCounts, summary.goTo.finalFirstOptions, summary.goTo.entranceAnimating, summary.goTo.openMatchedIn], [[1], ['fixture-004242.txt'], [true], ['frame']]);
+  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12], entranceAnimating: [true], openMatchedIn: ['frame'] });
   assert.equal(summary.search.fixture.openToInputPaintedMs.p50, 70);
   assert.deepEqual([summary.search.fixture.debounceFiredBeforeSubmitCount, summary.search.fixture.sawUpdatingCount], [1, 1]);
   assert.deepEqual(summary.search.fixture.limitHit, [false]);
@@ -690,5 +688,5 @@ test('summary reports each surface scenario from its own runs and keeps unobserv
   assert.deepEqual(summary.collection, { records: [500], indexedWaitObservedMs: { count: 1, p50: 800, p95: 800, max: 800 }, openToRowsPaintedMs: { count: 1, p50: 210, p95: 210, max: 210 }, rowsRendered: [24], loadedRecords: [100] });
   assert.equal(summary.soak.length, 1);
   assert.deepEqual(summary.soak[0].kinds.renderer, { processCounts: [1], workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 }, privateBytes: { first: 200, last: 220, max: 225, delta: 20 } });
-  assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max], [2, 120000, 55000]);
+  assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max, summary.soak[0].searchQuery], [2, 120000, 55000, 'Performance']);
 });

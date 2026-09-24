@@ -31,22 +31,24 @@ Fixture receipts contain file counts and content/name digests. Other scenarios a
 
 The palette, search, Collection, and soak scenarios launch once per run. `chat-history` launches twice: once to seed,
 then a restart to measure. Each palette, search, chat, and Collection timing starts when the renderer receives the
-trusted keydown or mousedown and ends two animation frames after the DOM predicate holds. The observer checks the
-predicate on every animation frame, so a change without a DOM mutation is seen within one frame. Visible means the
-first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame, and
-`entranceAnimating` records whether it was still running. The harness wall time sits beside each timing in the receipt.
+trusted keydown or mousedown and ends at the first animation-frame callback after the paint that first shows the
+surface: two frames after a match found between frames, one after a match found inside a frame callback.
+`matchedIn` records which. The observer checks the predicate on every animation frame, so a change without a DOM
+mutation is seen within one frame. Visible means the first frame where no ancestor computes to opacity 0; a palette
+entrance animation counts from that frame, and `entranceAnimating` records whether it was still running. The harness
+wall time sits beside each timing in the receipt.
 
-- `--files 5000 --scenario go-to`: Ctrl+P to a focused Go to input, then `fixture-004242` one keystroke at a time until the input echoes the prefix and the first ranked row contains it in order, then a warm reopen. The last row must be `fixture-004242.txt`.
+- `--files 5000 --scenario go-to`: Ctrl+P to a focused Go to input, then `fixture-004242` one keystroke at a time, then a warm reopen. Each keystroke ends when the input echoes the prefix and the first ranked row contains its characters in order. The summary calls this `keystrokeToFirstMatchPaintedMs`; it does not check the other rows, so it is not a full re-ranking time. After the last keystroke the first ranked row must be `fixture-004242.txt`.
 - `--scenario command-palette`: Ctrl+Shift+P to the first command row, then a warm reopen.
 - `--files 5000 --scenario search`: the Search rail button to a focused input, then `fixture` and `fixture 4242.` submitted with Enter, each to its first result row and to the complete state.
 - `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows.
-- `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to, command palette, search, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Its document-open and switch timings are the existing harness wall-clock observations.
+- `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to typing `small`, command palette, search for `Performance`, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Each cycle records its search query. The document-open and switch timings are the existing harness wall-clock observations.
 
 `go-to` and `search` reject `--files` below 4243, because their queries name `fixture-004242`.
 Search waits for the Explorer to list every fixture file before it submits. A sample whose search id changed before Enter is flagged `debounceFiredBeforeSubmit`.
 With an engine capture, search queries the engine index and returns at most 50 results in one batch, so `limitHit` false does not mean the results are complete. `sawUpdating` records whether the view passed through updating, whose retry backoff lands in the settled time.
-Chat seeding runs two Node processes per message, the launcher and the CLI. A timeout or cancellation stops that tree. The receipt hashes `packages/cli` bin, src, and package.json. The thread comment list is not virtualized, so every reply renders.
+Chat seeding runs `seed-chat-cli.mjs` through `scripts/verification/process.mjs`. On Windows that is a job object that kills every descendant when the harness-owned job owner exits, including a CLI worker whose launcher exited abnormally. On POSIX it is a detached process group, which a timeout or interrupt kills. Each message still runs two Node processes, the launcher and the CLI. Output returns only after both pipes close. The receipt hashes `packages/cli` bin, src, and package.json, the seed script, and the runner. The thread comment list is not virtualized, so every reply renders.
 The Collection table is virtualized and pages on demand: `rowsRendered` is the visible window and `loadedRecords` is the first page.
 Soak growth includes allocator and garbage-collector timing. It is not a leak proof.
 A chat lane with a long history has no seeding path outside the product UI or the engine daemon, so the benchmark does not measure it.

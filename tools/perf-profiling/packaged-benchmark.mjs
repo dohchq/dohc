@@ -1,6 +1,7 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
-import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput, runOwnedProcess } from './packaged-process.mjs';
+import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -51,6 +52,9 @@ const engineBinary = join(dirname(binary), 'resources/workspace-engine/dohc-work
 const cli = join(root, 'packages/cli');
 const cliLauncher = join(cli, 'bin/dohc.js');
 const cliHashedPaths = ['bin', 'src', 'package.json'];
+const seedScript = join(dirname(fileURLToPath(import.meta.url)), 'seed-chat-cli.mjs');
+const processRunner = fileURLToPath(new URL('../../scripts/verification', import.meta.url));
+const processRunnerPaths = ['process.mjs', 'windows-job.ps1', 'windows-command.mjs'];
 Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
@@ -66,7 +70,8 @@ Object.assign(receipt, {
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
-  ...(scenario === 'chat-history' ? { cli, cliLauncher, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths) } : {}),
+  ...(scenario === 'chat-history' ? { cli, cliLauncher, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths), seedScript, seedScriptSha256: await sha256(seedScript),
+    processRunner, processRunnerPaths, processRunnerSha256: await sha256Tree(processRunner, processRunnerPaths) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [],
   limits: [
@@ -85,9 +90,10 @@ Object.assign(receipt, {
     'The local updater feed advertises version 0.0.0 and has no downloadable asset; update installation is never requested.',
     'Go to, command palette, search, chat, and collection durations start at the renderer receipt of the trusted keydown or mousedown and end two animation frames after the DOM predicate. They include React commit and layout, not compositor presentation.',
     'The renderer observer evaluates its predicate on every animation frame, on mutations and on focus changes, and reads computed style each frame. Visible means the first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame and entranceAnimating records whether it was still running.',
+    'A painted time is the first animation-frame callback after the paint that first shows the surface: two frames after a match found between frames, one after a match found inside a frame callback. matchedIn records which path matched.',
     'Search submits with Enter after one programmatic fill. Search-as-you-type debounces at 150 ms; a sample whose search id changed before Enter is flagged debounceFiredBeforeSubmit.',
     'With an engine capture, search queries the engine index and returns at most 50 results in one batch, so limitHit false does not mean the results are complete. sawUpdating records whether the view passed through updating, whose retry backoff lands in the settled time.',
-    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Each message runs two Node processes, the launcher and the CLI; timeout or cancellation stops that tree. The thread comment list is not virtualized; every reply renders.',
+    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Seeding runs seed-chat-cli.mjs through scripts/verification/process.mjs: a Windows job object that kills every descendant when the harness-owned job owner exits, or a detached POSIX process group. Each message runs two Node processes, the launcher and the CLI. The thread comment list is not virtualized; every reply renders.',
     'collection seeds Markdown records with pre-minted ids. The table is virtualized and pages on demand: rowsRendered is the visible window and loadedRecords is the first page.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
@@ -501,20 +507,15 @@ async function search(page) {
   for (const [index, query] of SEARCH_QUERIES.entries()) results.push(await searchQuery(page, query, index === 0 ? open : null));
   return results;
 }
-async function seedChatHistory(instance, workspace) {
+async function seedChatHistory(instance, workspace, runDir) {
   const profile = instance.fixture.profile;
   await waitUntil(() => Promise.all(['dohc-cli-endpoint', 'dohc-cli-token'].map(name => stat(join(profile, name)))).then(() => true, () => false), 60000);
-  const cliEnv = { ...env, DOHC_STATE_DIR: profile, NODE_NO_WARNINGS: '1' };
-  const dohc = async args => (await runOwnedProcess(process.execPath, [cliLauncher, ...args], { cwd: workspace.rootPath, env: cliEnv, timeoutMs: 60000, signal: cancellation.signal })).stdout;
-  const started = performance.now();
-  const posted = JSON.parse(await dohc(['--json', 'chat', 'post', 'general', '--title', CHAT_TITLE, 'Message 0']));
-  if (typeof posted.threadId !== 'string') throw Error(`CLI post returned no thread id: ${JSON.stringify(posted)}`);
-  for (let n = 1; n < chatMessages; n++) {
-    await dohc(['chat', 'reply', posted.threadId, `Message ${n}`]);
-    if (n % 50 === 0) console.log(JSON.stringify({ label, phase: 'chat-seed', messages: n + 1 }));
-  }
-  // cliThreadId is the CLI's th_ handle, not the engine id the DOM carries.
-  return { channel: 'general', title: CHAT_TITLE, cliThreadId: posted.threadId, messages: chatMessages, seededThrough: cliLauncher, seedingObservedMs: performance.now() - started };
+  // One owned job (Windows) or process group (POSIX) holds every CLI launcher and worker the
+  // seed script starts. The runner settles after the pipes close and kills the tree on timeout
+  // or interrupt; a failure rejects with the tail of stderr.
+  const { stdout } = await runOwnedCommand(process.execPath, [seedScript, cliLauncher, CHAT_TITLE, String(chatMessages)],
+    { cwd: workspace.rootPath, env: { ...env, DOHC_STATE_DIR: profile, NODE_NO_WARNINGS: '1' }, timeoutMs: chatMessages * 30000, log: join(runDir, 'chat-seed.log') });
+  return { ...JSON.parse(stdout.trim().split(/\r?\n/).at(-1)), seededThrough: seedScript, cliLauncher };
 }
 async function openChatHistory(page, seed) {
   const panel = page.getByTestId('chats-panel');
@@ -561,7 +562,7 @@ async function openCollection(page, folder) {
 async function soak(instance, data) {
   const page = instance.page;
   const sample = async cycle => ({ cycle, ...aggregateByKind(await snapshot(instance.child.pid), instance.child.pid) });
-  const result = data.soak = { minutes: soakMinutes, cycles: [], samples: [await sample(0)], elapsedMs: null };
+  const result = data.soak = { minutes: soakMinutes, searchQuery: SOAK_SEARCH_QUERY, goToQuery: 'small', cycles: [], samples: [await sample(0)], elapsedMs: null };
   const deadline = performance.now() + soakMinutes * 60000;
   while (performance.now() < deadline) {
     cancellation.signal.throwIfAborted();
@@ -575,6 +576,7 @@ async function soak(instance, data) {
     cycle.commandPaletteOpenMs = (await openPalette(page, surfaces.commandPalette, 'first-row')).keydownToPaintedMs;
     await closePalette(page, surfaces.commandPalette);
     await openSearchView(page);
+    cycle.searchQuery = SOAK_SEARCH_QUERY;
     cycle.searchSettledMs = (await searchQuery(page, SOAK_SEARCH_QUERY, null)).submitToSettledMs;
     await page.getByTestId('activity-explorer').click();
     await page.getByTestId('file-tree').waitFor({ timeout: 30000 });
@@ -655,7 +657,7 @@ async function soak(instance, data) {
       continue;
     }
     if (scenario === 'chat-history') {
-      data.chatSeed = await seedChatHistory(fresh, f.workspaces[0]);
+      data.chatSeed = await seedChatHistory(fresh, f.workspaces[0], runDir);
       await json(join(output, 'result.json'), receipt);
       await shutdown(runDir, fresh);
       const restart = await launch(runDir, f, 'restart');
