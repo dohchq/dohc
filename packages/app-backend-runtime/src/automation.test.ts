@@ -7,7 +7,8 @@ import { Worker } from "node:worker_threads";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_LIMITS, createAutomationEvaluator } from "./automation.ts";
 import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject, JsonValue } from "./automation.ts";
-import { evaluateItem, newQuickJS } from "./automation-evaluate.ts";
+import { answerItems, evaluateItem, newQuickJS } from "./automation-evaluate.ts";
+import type { AutomationWorkerReply } from "./automation-protocol.ts";
 
 const threads = vi.hoisted(() => ({ started: 0, terminated: 0 }));
 vi.mock("node:worker_threads", async importOriginal => {
@@ -34,6 +35,19 @@ const nested = (depth: number): JsonValue => {
   return value;
 };
 const tooLarge = { code: "too_large", message: "The record and step results are larger than 256 KiB." };
+const runSpent = { code: "timeout", message: "The formula did not run because the run took longer than 8 s." };
+const readSpent = { code: "timeout", message: "The formula did not run because reading the record and step results took longer than 8 s in all." };
+
+/** Writes a stand-in worker to a temporary file. `handler` is the body of its message listener, given `items`, `spent`, and `reply`. */
+async function standInWorker(handler: string) {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-automation-worker-"));
+  const entryPath = join(directory, "worker.mjs");
+  await writeFile(entryPath, `import { parentPort } from "node:worker_threads";
+    const reply = message => parentPort.postMessage(message);
+    parentPort.on("message", ({ items, spent }) => { ${handler} });
+    reply({ kind: "ready" });`);
+  return { entryPath, [Symbol.asyncDispose]: () => rm(directory, { recursive: true, force: true }) };
+}
 const tooDeep = { code: "too_large", message: "The record and step results nest lists or objects more than 64 levels deep." };
 const evaluator = createAutomationEvaluator();
 afterAll(() => evaluator.close());
@@ -491,28 +505,59 @@ describe("scope preparation", () => {
     } finally { await fresh.close(); }
   });
 
-  it("spends a request's time reading its scope apart from the time its formulas run", async () => {
+  it("runs a request's items until one of its time budgets is spent", () => {
+    const answer = (spent: { prepareMs: number; runMs: number }, count: number, timing: { prepareMs: number; runMs: number }) => {
+      const ran: number[] = [], replies: AutomationWorkerReply[] = [];
+      const items = Array.from({ length: count }, (_, index) => expression(String(index)));
+      answerItems(items, spent, item => {
+        ran.push(Number((item as { source: string }).source));
+        return { result: { ok: true, value: 1 }, ...timing };
+      }, reply => replies.push(reply));
+      return { ran, results: replies.map(reply => reply.kind === "result" ? reply.result : reply) };
+    };
+    // Reading the scope takes 1 s for each formula. It does not count toward the 100 ms the formulas have left to run.
+    const reading = answer({ prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs - 100 }, 10, { prepareMs: 1000, runMs: 1 });
+    expect(reading.ran).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(reading.results).toEqual([...Array.from({ length: 8 }, () => ({ ok: true, value: 1 })), { ok: false, error: readSpent }, { ok: false, error: readSpent }]);
+    // Running takes 50 ms for each formula, so the third starts after the 8 s of running.
+    const running = answer({ prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs - 100 }, 4, { prepareMs: 1, runMs: 50 });
+    expect(running.ran).toEqual([0, 1]);
+    expect(running.results).toEqual([{ ok: true, value: 1 }, { ok: true, value: 1 }, { ok: false, error: runSpent }, { ok: false, error: runSpent }]);
+  });
+
+  it("stops a request's items once the real worker is given a spent budget", async () => {
     const worker = new Worker(fileURLToPath(new URL("../dist/automation-worker.mjs", import.meta.url)));
     try {
       await once(worker, "message");
-      type Reply = { result: unknown; prepareMs: number; runMs: number };
-      const ask = async (input: AutomationScope, count: number, spent: { prepareMs: number; runMs: number }) => {
-        worker.postMessage({ scope: input, items: Array.from({ length: count }, () => expression("record.Rows.length")), spent });
-        const replies: Reply[] = [];
-        for (let index = 0; index < count; index++) replies.push((await once(worker, "message"))[0] as Reply);
-        return replies;
+      const ask = async (spent: { prepareMs: number; runMs: number }) => {
+        worker.postMessage({ scope, items: [expression("1")], spent });
+        return ((await once(worker, "message"))[0] as { result: unknown }).result;
       };
-      // The formulas have 100 ms left to run. Reading the large scope 20 times takes longer than that, and does not count.
-      const large: AutomationScope = { ...scope, record: { Rows: Array.from({ length: 12_000 }, (_, index) => ({ id: `row-${index}` })) } };
-      const replies = await ask(large, 20, { prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs - 100 });
-      expect(replies.map(reply => reply.result)).toEqual(Array.from({ length: 20 }, () => ({ ok: true, value: 12_000 })));
-      expect(replies.reduce((total, reply) => total + reply.prepareMs, 0)).toBeGreaterThan(100);
-      // Each budget, once spent, stops the items after it.
-      expect((await ask(large, 1, { prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs }))[0]!.result).toEqual({ ok: false, error: {
-        code: "timeout", message: "The formula did not run because the run took longer than 8 s." } });
-      expect((await ask(large, 1, { prepareMs: AUTOMATION_LIMITS.prepareRequestMs, runMs: 0 }))[0]!.result).toEqual({ ok: false, error: {
-        code: "timeout", message: "The formula did not run because reading the record and step results took longer than 8 s in all." } });
+      expect(await ask({ prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs })).toEqual({ ok: false, error: runSpent });
+      expect(await ask({ prepareMs: AUTOMATION_LIMITS.prepareRequestMs, runMs: 0 })).toEqual({ ok: false, error: readSpent });
     } finally { await worker.terminate(); }
+  });
+
+  it("carries the time spent reading the scope to a new worker", async () => {
+    // Each item's source is its name, the milliseconds it spent reading the scope, and whether its worker then asks to restart.
+    await using worker = await standInWorker(`for (const item of items) {
+      const [name, prepareMs, restart] = item.source.split(":");
+      reply({ kind: "result", result: { ok: true, value: { name, spent } }, prepareMs: Number(prepareMs), runMs: 1 });
+      if (restart) return reply({ kind: "restart" });
+    }`);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
+    try {
+      const results = await standIn.evaluate(scope, ["a:3000", "b:3000:restart", "c:1000", "d:1000:restart", "e:1000"].map(expression));
+      expect(results).toEqual([
+        { ok: true, value: { name: "a", spent: { prepareMs: 0, runMs: 0 } } },
+        { ok: true, value: { name: "b", spent: { prepareMs: 0, runMs: 0 } } },
+        { ok: true, value: { name: "c", spent: { prepareMs: 6000, runMs: 2 } } },
+        { ok: true, value: { name: "d", spent: { prepareMs: 6000, runMs: 2 } } },
+        // 8 s of reading are spent, so the last item does not start a third worker.
+        { ok: false, error: readSpent },
+      ]);
+      expect(threads.started).toBe(2);
+    } finally { await standIn.close(); }
   });
 
   it("times out reading a scope that finishes after its limit", async () => {
@@ -545,6 +590,18 @@ describe("evaluator lifetime", () => {
     expect(await evaluator.evaluate(scope, [expression("1"), expression("1".repeat(AUTOMATION_LIMITS.sourceBytes + 1))])).toEqual([busy, busy]);
     const oversized = { ...scope, record: { Notes: "x".repeat(AUTOMATION_LIMITS.scopeBytes) } };
     expect(await evaluator.evaluate(oversized, [expression("1"), expression("2")])).toEqual([busy, busy]);
+    // A turned-away request does not read its scope, so invalid input is busy too.
+    const reads: PropertyKey[] = [];
+    const untouched = new Proxy({}, {
+      get: (_target, key) => { reads.push(key); throw new Error("The scope was read."); },
+      has: (_target, key) => { reads.push(key); return false; },
+      ownKeys: () => { reads.push("ownKeys"); return []; },
+      getPrototypeOf: () => { reads.push("getPrototypeOf"); return null; },
+    }) as AutomationScope;
+    expect(await evaluator.evaluate(untouched, [expression("1"), expression("2")])).toEqual([busy, busy]);
+    expect(await evaluator.runCode(untouched, "return {};")).toEqual(busy);
+    expect(reads).toEqual([]);
+    expect(await evaluator.evaluate({ ...scope, now: "not a time", record: { Bad: 1n as unknown as JsonValue } }, [expression("1")])).toEqual([busy]);
     expect(await Promise.all(waiting)).toEqual(Array.from({ length: 16 }, (_, index) => ({ ok: true, value: index })));
     expect(await value("16")).toEqual({ ok: true, value: 16 });
   });
@@ -566,25 +623,18 @@ describe("evaluator lifetime", () => {
   });
 
   it("fails one item for a reply it cannot read, and moves on after a worker asks to restart", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "dohc-automation-worker-"));
-    const entryPath = join(directory, "worker.mjs");
-    // A stand-in worker: "deep" answers with a value too deeply nested to copy, and "restart" asks for a new worker.
-    await writeFile(entryPath, `import { parentPort } from "node:worker_threads";
-      const reply = message => parentPort.postMessage(message);
-      parentPort.on("message", ({ items }) => {
-        for (const item of items) {
-          if (item.source === "deep") {
-            let v = 1;
-            for (let i = 0; i < 3000; i++) v = [v];
-            reply({ kind: "result", result: { ok: true, value: v } });
-          } else if (item.source === "restart") {
-            reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } } });
-            return reply({ kind: "restart" });
-          } else reply({ kind: "result", result: { ok: true, value: item.source } });
-        }
-      });
-      reply({ kind: "ready" });`);
-    const standIn = createAutomationEvaluator({ entryPath });
+    // "deep" answers with a value too deeply nested to copy, and "restart" fails its item and asks for a new worker.
+    await using worker = await standInWorker(`for (const item of items) {
+      if (item.source === "deep") {
+        let v = 1;
+        for (let i = 0; i < 3000; i++) v = [v];
+        reply({ kind: "result", result: { ok: true, value: v } });
+      } else if (item.source === "restart") {
+        reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } } });
+        return reply({ kind: "restart" });
+      } else reply({ kind: "result", result: { ok: true, value: item.source } });
+    }`);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
     try {
       expect(await standIn.evaluate(scope, ["a", "deep", "b", "restart", "c"].map(expression))).toEqual([
         { ok: true, value: "a" },
@@ -594,10 +644,22 @@ describe("evaluator lifetime", () => {
         { ok: true, value: "c" },
       ]);
       expect(threads.started).toBe(2);
-    } finally {
-      await standIn.close();
-      await rm(directory, { recursive: true, force: true });
-    }
+    } finally { await standIn.close(); }
+  });
+
+  it("fails a request's items when its worker restarts before finishing any, and frees the queue", async () => {
+    await using worker = await standInWorker(`reply({ kind: "restart" });`);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
+    try {
+      const stopped = { ok: false, error: { code: "runtime", message: "The evaluator stopped before it ran the formula." } };
+      expect(await standIn.evaluate(scope, [expression("1"), expression("2"), expression("3")])).toEqual([stopped, stopped, stopped]);
+      expect(await standIn.runCode(scope, "return {};")).toEqual({ ok: false, error: { code: "runtime", message: "The evaluator stopped before it ran the code." } });
+      expect(threads.started).toBe(2);
+      // Every request settles, so 16 of them leave room for the next.
+      const requests = await Promise.all(Array.from({ length: 16 }, () => standIn.evaluate(scope, [expression("1")])));
+      expect(requests).toEqual(Array.from({ length: 16 }, () => [stopped]));
+      expect(await standIn.evaluate(scope, [expression("1")])).toEqual([stopped]);
+    } finally { await standIn.close(); }
   });
 
   it("stops an idle worker and starts another when needed", async () => {

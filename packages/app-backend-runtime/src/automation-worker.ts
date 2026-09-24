@@ -1,8 +1,7 @@
 import { parentPort } from "node:worker_threads";
 import type { QuickJSWASMModule } from "quickjs-emscripten";
-import { evaluateItem, jsonDepth, newQuickJS } from "./automation-evaluate.js";
-import type { Evaluated } from "./automation-evaluate.js";
-import { AUTOMATION_LIMITS, failure, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
+import { answerItems, evaluateItem, jsonDepth, newQuickJS } from "./automation-evaluate.js";
+import { AUTOMATION_LIMITS, NOT_JSON, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge } from "./automation-protocol.js";
 import type { AutomationWorkerReply, AutomationWorkerRequest } from "./automation-protocol.js";
 
 const port = parentPort;
@@ -37,31 +36,10 @@ async function answer({ scope, items, spent }: AutomationWorkerRequest): Promise
   try { scopeJson = JSON.stringify(scope); } catch { return reply({ kind: "refused", message: NOT_JSON }); }
   const scopeFailure = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes ? scopeTooLarge()
     : jsonDepth(scopeJson) > SCOPE_DEPTH ? scopeTooDeep() : undefined;
+  if (scopeFailure) return answerItems(items, spent, () => ({ result: scopeFailure, prepareMs: 0, runMs: 0 }), reply);
   // Each request gets its own QuickJS instance and memory, so no request reads memory another used.
   let quickjs: QuickJSWASMModule;
   try { quickjs = await newQuickJS(); } catch { return reply({ kind: "restart" }); }
-  let { prepareMs, runMs } = spent;
-  for (const item of items) {
-    const skipped = scopeFailure ?? notReached(item, { prepareMs, runMs });
-    let evaluated: Evaluated;
-    if (skipped) evaluated = { result: skipped, prepareMs: 0, runMs: 0 };
-    else {
-      const began = performance.now();
-      try {
-        evaluated = evaluateItem(quickjs, scopeJson, item);
-      } catch (error) {
-        // An aborted QuickJS module cannot evaluate again. Report this item and ask for a new worker.
-        reply({
-          kind: "result", prepareMs: 0, runMs: performance.now() - began, result: error instanceof WebAssembly.RuntimeError
-            ? failure("memory", `${subjectOf(item)} used more memory than it is allowed, so it stopped.`)
-            : failure("runtime", `The evaluator failed while it ran ${subjectOf(item).toLowerCase()}.`),
-        });
-        return reply({ kind: "restart" });
-      }
-    }
-    prepareMs += evaluated.prepareMs;
-    runMs += evaluated.runMs;
-    reply({ kind: "result", ...evaluated });
-  }
+  answerItems(items, spent, item => evaluateItem(quickjs, scopeJson, item), reply);
 }
 reply({ kind: "ready" });

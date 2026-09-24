@@ -210,7 +210,16 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       };
       const onMessage = (reply: AutomationWorkerReply) => {
         if (reply.kind === "result") accept(reply.result, reply);
-        else if (reply.kind === "restart") { settle(); void stop(thread); resolve(); }
+        else if (reply.kind === "restart") {
+          settle();
+          void stop(thread);
+          // A worker that asks to restart before it finishes any item would do so again, so its items fail instead.
+          if (received === 0) {
+            spent.runMs += performance.now() - itemStarted;
+            items.forEach((item, offset) => report(offset, failure("runtime", `The evaluator stopped before it ran ${subjectOf(item).toLowerCase()}.`)));
+          }
+          resolve();
+        }
         else if (reply.kind === "refused") { rest(); reject(new Error(reply.message)); }
       };
       // A reply this thread cannot read fails its item. The worker goes on with the next one.
@@ -228,13 +237,14 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
 
   async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
     if (closed) throw new Error("The automation evaluator is closed.");
+    // A full queue answers before the scope is read, so a request it turns away costs nothing.
+    if (queued >= AUTOMATION_LIMITS.queuedRequests) {
+      return items.map(() => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
+    }
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
     const measured = measureScope(scope);
     if (typeof measured === "object") throw new Error(measured.problem);
-    if (queued >= AUTOMATION_LIMITS.queuedRequests) {
-      return items.map(() => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
-    }
     const results = measured === "too_large" ? items.map(scopeTooLarge) : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(tooLarge);
     if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
     queued++;

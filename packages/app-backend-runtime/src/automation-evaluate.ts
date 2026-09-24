@@ -6,8 +6,8 @@ import type { QuickJSWASMModule } from "quickjs-emscripten";
 import { en } from "zod/locales";
 import * as z from "zod/mini";
 import { automationGuest } from "./automation-guest.js";
-import { AUTOMATION_LIMITS, failure, itemLimitMs, subjectOf } from "./automation-protocol.js";
-import type { AutomationError, AutomationOutcome, AutomationTimeSpent, AutomationWorkerItem, CodeStepReturn } from "./automation-protocol.js";
+import { AUTOMATION_LIMITS, failure, itemLimitMs, notReached, subjectOf } from "./automation-protocol.js";
+import type { AutomationError, AutomationOutcome, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
 const GUEST_SOURCE = `(${automationGuest})`;
@@ -161,4 +161,35 @@ export function evaluateItem(quickjs: QuickJSWASMModule, scopeJson: string, item
       } finally { result.value.dispose(); }
     } finally { vm.dispose(); }
   } finally { runtime.dispose(); }
+}
+
+/**
+ * Evaluates one request's items in order and replies after each. An item that starts after either of the request's
+ * time budgets is spent does not run. When `evaluate` throws, the item fails and the worker asks to be replaced.
+ */
+export function answerItems(items: AutomationWorkerItem[], spent: AutomationTimeSpent, evaluate: (item: AutomationWorkerItem) => Evaluated,
+  reply: (message: AutomationWorkerReply) => void): void {
+  let { prepareMs, runMs } = spent;
+  for (const item of items) {
+    const skipped = notReached(item, { prepareMs, runMs });
+    let evaluated: Evaluated;
+    if (skipped) evaluated = { result: skipped, prepareMs: 0, runMs: 0 };
+    else {
+      const began = performance.now();
+      try {
+        evaluated = evaluate(item);
+      } catch (error) {
+        // An aborted QuickJS module cannot evaluate again.
+        reply({
+          kind: "result", prepareMs: 0, runMs: performance.now() - began, result: error instanceof WebAssembly.RuntimeError
+            ? failure("memory", `${subjectOf(item)} used more memory than it is allowed, so it stopped.`)
+            : failure("runtime", `The evaluator failed while it ran ${subjectOf(item).toLowerCase()}.`),
+        });
+        return reply({ kind: "restart" });
+      }
+    }
+    prepareMs += evaluated.prepareMs;
+    runMs += evaluated.runMs;
+    reply({ kind: "result", ...evaluated });
+  }
 }
