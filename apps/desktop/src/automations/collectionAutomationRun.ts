@@ -74,6 +74,9 @@ export type CollectionAutomationRunOutcome =
   // The trigger or a condition did not hold, or the record is gone.
   | { kind: "skipped" }
   | { kind: "failed"; error: string; timedOut: boolean }
+  // The claim's run already failed here; the engine handed it out again
+  // without a Try again, so only its settle is left.
+  | { kind: "failed-before"; error: string }
   // Leave the claim for a later drain: the evaluator is busy, or the engine
   // is not answering.
   | { kind: "wait"; reason: "busy" | "engine" };
@@ -147,7 +150,9 @@ export async function runCollectionAutomation(
   if (current?.compacted) return failed(COMPACTED_RUN_ERROR);
   // The engine handed the claim out again without a Try again, as after a
   // crash before the failure reached it: the run stays failed.
-  if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) return failed(current.outcome.error);
+  if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
+    return { kind: "failed-before", error: current.outcome.error };
+  }
 
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.

@@ -41,6 +41,8 @@ async function world(options: {
   withRecordWrites?: (signal: AbortSignal, events: string[]) => Promise<void>;
   /** The engine gives no answer to settles until this is set false. */
   unanswered?: { settle: boolean };
+  /** The engine refuses the next settle this many times: its recovery took the claim back. */
+  refused?: { settle: number };
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -120,7 +122,15 @@ async function world(options: {
       return claim ? structuredClone(claim) : null;
     },
     settleAutomationClaim: async ({ claimId, state, error }) => {
-      if (options.unanswered?.settle) throw new Error("The workspace engine did not answer.");
+      // The desktop's own words when the engine is down, which read like a refusal and are not one.
+      if (options.unanswered?.settle) throw new Error("The workspace engine is not running.");
+      if (options.refused && options.refused.settle > 0) {
+        options.refused.settle -= 1;
+        const claim = claims.get(claimId)!;
+        claim.state = "pending";
+        pending.push(claim);
+        throw Object.assign(new Error("invalid-input"), { wireError: { code: "INVALID_PARAMS", message: "invalid-input" } });
+      }
       const claim = claims.get(claimId)!;
       claim.state = state;
       if (error === undefined) delete claim.error; else claim.error = error;
@@ -195,11 +205,19 @@ async function world(options: {
 
   let roster: ReachRoster = OWNER;
   let beforeRoster: (() => Promise<void>) | null = null;
+  let rosterCalls = 0;
+  let beforeRead: (() => void) | null = null;
+  let prunes = 0;
   const baseStore = createAutomationRunStore(root);
   let failSaveAt: number | null = null;
   let saves = 0;
   const store: AutomationRunStore = {
     ...baseStore,
+    prune: async (automationId, resumable) => {
+      prunes += 1;
+      wake();
+      await baseStore.prune(automationId, resumable);
+    },
     save: async (run) => {
       saves += 1;
       if (saves === failSaveAt) throw new Error("The disk is full.");
@@ -220,6 +238,9 @@ async function world(options: {
       });
     },
     readText: async (path) => {
+      const hook = beforeRead;
+      beforeRead = null;
+      hook?.();
       try {
         const text = await readFile(join(root, path), "utf8");
         return { text, truncated: false, contentHash: sha256(text) };
@@ -234,6 +255,7 @@ async function world(options: {
     },
     pathExists: (path) => stat(join(root, path)).then(() => true, () => false),
     roster: async () => {
+      rosterCalls += 1;
       const current = roster;
       const hook = beforeRoster;
       beforeRoster = null;
@@ -274,6 +296,9 @@ async function world(options: {
   return {
     root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
     holdsChanged: () => holdsChanged,
+    rosterCalls: () => rosterCalls,
+    prunes: () => prunes,
+    beforeNextRead: (hook: () => void) => { beforeRead = hook; },
     moveRecord: (record: FakeRecord, name: string) => { record.path = `${record.collection}/${name}.md`; },
     addRecord, claim, settledClaim, until, writeAutomations, baseStore,
     requeue: (claim: AutomationClaim) => { pending.push(claim); },
@@ -955,5 +980,92 @@ describe("Collection automations", () => {
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
     await expect(w.baseStore.readReachVerdicts()).resolves.toEqual([]);
+  });
+  it("passes a waiting claim by in later drains until what it waits for clears", async () => {
+    const w = await world({ automations: {
+      Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n",
+    } });
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+    const checked = w.rosterCalls();
+    // Another drain takes the claim again and hands it straight back.
+    w.executor.notifyClaimed();
+    await w.until(() => w.events.filter((event) => event === `released ${claim.claimId}`).length === 2);
+    expect(w.rosterCalls()).toBe(checked);
+    expect(claim).toMatchObject({ state: "pending", attempts: 0 });
+
+    w.setRoster(OWNER);
+    w.executor.rosterChanged();
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task).Seen).toBe(true);
+  });
+
+  it("does not switch an automation off when a pause lands while it reads the file", async () => {
+    const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
+      formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
+    const w = await world({
+      automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })),
+    });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = [w.claim("collection:Tasks#slow", task), w.claim("collection:Tasks#slow", task)];
+    await w.executor.open();
+    for (const claim of first) await w.settledClaim(claim);
+    const paused = Promise.withResolvers<void>();
+    w.beforeNextRead(() => {
+      w.executor.pauseForEngineRestart();
+      paused.resolve();
+    });
+    const third = w.claim("collection:Tasks#slow", task);
+    w.executor.notifyClaimed();
+    await paused.promise;
+    // Closing waits for the stopped drain, then hands the claim back.
+    await w.executor.dispose();
+    expect(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8")).not.toContain("enabled: false");
+    expect(third.state).toBe("pending");
+  });
+
+  it("takes an edited or deleted automation's held step out of the notices", async () => {
+    const spend = "  - id: spend\n    name: Spend\n    when: {field-changed: Status}\n    do: [{add-record: {Amount: 5}, collection: Budget}]\n";
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Trip"])] });
+    await w.executor.open();
+    await w.executor.automationsIn("Trip");
+    w.setRoster(OWNER);
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.holds()).toHaveLength(1);
+    const raised = w.holdsChanged();
+    await w.writeAutomations("Trip", "");
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Trip/automations.yaml" }]);
+    await w.until(() => w.holdsChanged() > raised);
+    expect(w.executor.holds()).toEqual([]);
+  });
+
+  it("trims saved runs after a failure the engine took, as after a done run", async () => {
+    const w = await world({ automations: { Tasks: "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n" } });
+    w.failures.openSession = 1;
+    const claim = w.claim("collection:Tasks#note", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    await w.until(() => w.prunes() === 1);
+    expect(claim.state).toBe("failed");
+  });
+
+  it("drops a settle the engine refused because its recovery took the claim, and leaves the run unsettled", async () => {
+    const refused = { settle: 1 };
+    const w = await world({ refused, automations: { Tasks: "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#note", task);
+    await w.executor.open();
+    // The recovery handed the claim out again; it finishes as done without writing twice.
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.journaled).toHaveLength(1);
+    expect(w.errors.filter((entry) => entry.context.startsWith("settle"))).toEqual([]);
+    // Only the settle the engine took marks the run done and trims.
+    await w.until(() => w.prunes() === 1);
   });
 });
