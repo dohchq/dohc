@@ -48,6 +48,8 @@ async function prepare(host: LocalDatasetHost) {
   const blobs = new Map<string, Uint8Array>();
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
+    if (request.method === "versionedText.list") return { id: request.id, result: { nextAfterPath: null, files: [...sources].map(([path, bytes]) => ({ path, objectId: path,
+      contentKind: "text", sha256: hash(bytes), byteLength: bytes.byteLength, binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
     if (request.method === "versionedText.captureSources") {
       const files = [...params.paths as string[]].sort().map(path => {
         const bytes = sources.get(path)!, sha256 = hash(bytes); blobs.set(sha256, bytes);

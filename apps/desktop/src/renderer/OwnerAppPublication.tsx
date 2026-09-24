@@ -217,7 +217,10 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
       setReactivating(false);
       setPreparedLink(link);
     } catch (error) {
-      if (alive.current && mine === request.current) { cancel(candidate.current); candidate.current = null; setError(ipcErrorMessage(error, "dohc could not prepare this app. Try again.")); }
+      if (alive.current && mine === request.current) {
+        cancel(candidate.current); candidate.current = null;
+        reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(error, "")), () => { if (alive.current) void prepareWith(input, link); });
+      }
     } finally { if (alive.current && mine === request.current) { setBusy(null); setLocalPreparing(false); } }
   };
   const prepare = () => selectedLink ? prepareWith({ action: "prepare", workspaceId: props.workspaceId, appRoot: props.appRoot, shareId: selectedLink.shareId, grantId: selectedLink.grantId }, linkLabel(selectedLink)) : undefined;

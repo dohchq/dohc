@@ -36,6 +36,8 @@ function sourceAdapter(files: Map<string, string>) {
   const blobs = new Map<string, Uint8Array>();
   return new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
+    if (request.method === "versionedText.list") return { id: request.id, result: { nextAfterPath: null, files: [...files].map(([path, text]) => ({ path, objectId: path,
+      contentKind: "text", sha256: hash(text), byteLength: Buffer.byteLength(text), binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
     if (request.method === "versionedText.captureSources") {
       const selected = [...params.paths as string[]].sort().map(path => { const bytes = Buffer.from(files.get(path)!); const sha256 = hash(bytes); blobs.set(sha256, bytes);
         return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" }; });

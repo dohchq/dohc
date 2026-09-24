@@ -22,6 +22,10 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
   const capturePaths: string[][] = [];
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
+    if (request.method === "versionedText.list") {
+      return { id: request.id, result: { nextAfterPath: null, files: [...sources].map(([path, bytes]) => ({ path, objectId: path, contentKind: "text",
+        sha256: hash(bytes), byteLength: bytes.byteLength, binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
+    }
     if (request.method === "versionedText.captureSources") {
       const paths = params.paths as string[];
       capturePaths.push(paths);
@@ -49,6 +53,33 @@ it("refuses retired app-owned backend declarations before compilation", async ()
   const h = harness();
   await expect(h.prepare()).rejects.toThrow(/Invalid app publication declaration/);
   expect(h.compile).not.toHaveBeenCalled();
+});
+
+describe("app without app.publish.json", () => {
+  const page = (h: ReturnType<typeof harness>, files: Record<string, string>) => {
+    h.sources.clear();
+    for (const [path, text] of Object.entries(files)) h.sources.set(path, Buffer.from(text));
+  };
+
+  it("publishes its folder as a static page with no capabilities", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<link rel="stylesheet" href="style.css"><h1>Trip</h1><script src="app.js"></script>',
+      "app/style.css": "h1 { color: red }", "app/app.js": "document.title = 'Trip';", "app/notes.md": "# Notes", "app/dohc.json": "{}",
+      "app/my notes.js": "", "other/index.html": "<p>Other</p>" });
+    const { candidate, files } = await h.prepare();
+    expect(h.capturePaths).toEqual([["app/index.html", "app/style.css", "app/app.js"]]);
+    expect(candidate.entryPath).toBe("app/index.html");
+    expect(candidate.capabilities).toEqual([]);
+    expect(candidate.dependencies).toEqual(["app/app.js", "app/index.html", "app/style.css"]);
+    expect(files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
+  });
+
+  it("names the missing page before capturing anything", async () => {
+    const h = harness();
+    page(h, { "app/style.css": "h1 { color: red }" });
+    await expect(h.prepare()).rejects.toThrow("dohc found no index.html or app.publish.json in app. Add one to publish this app.");
+    expect(h.capturePaths).toEqual([]);
+  });
 });
 
 describe("owner dataset publication", () => {

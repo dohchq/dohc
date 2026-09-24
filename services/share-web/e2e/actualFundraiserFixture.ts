@@ -43,6 +43,10 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
       async resolveDatasetRevision() { return revision; },
       adapter: {
+        async listTextFileMetadata() {
+          return [...sources].map(([path,bytes])=>({path,objectId:path,contentKind:"text" as const,sha256:sha(bytes),byteLength:bytes.byteLength,binarySha256:null,
+            updatedAtMs:1,latestMomentId:"fixture-source",metadataOrigin:"disk",hasYdocMarker:false}));
+        },
         async captureSourceMetadata({workspaceId,versionId,paths}) {
           const files = [...paths].sort().map(path => {
             const bytes=sources.get(path);if(!bytes)throw Error(`Missing captured source ${path}`);

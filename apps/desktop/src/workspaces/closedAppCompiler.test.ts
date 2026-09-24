@@ -166,6 +166,63 @@ describe("closed app compiler", () => {
       file("style.css", `body { background: url('${url}') }`)], bounds })).rejects.toThrow();
   });
 
+  describe("HTML page entry", () => {
+    const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    const page = (html: string, ...others: ReturnType<typeof file>[]) => compileClosedApp({ entryPath: "site/index.html", bounds,
+      inputs: [file("site/index.html", html), ...others] });
+
+    it("rebuilds the page, keeps classic globals shared, and runs module scripts last", async () => {
+      const result = await page(`<!doctype html><html lang="fr"><head><title>Trip</title><link rel="stylesheet" href="style.css">
+        <style>p { margin: 0 }</style><script src="/data.js"></script></head>
+        <body class="trip"><h1>Trip</h1><img alt="Map" src="./map.png"><ol id="stops"></ol><output></output>
+        <script type="application/json" id="seed">{"stop":"Kyoto"}</script>
+        <script>for (const stop of stops) document.getElementById("stops").append(Object.assign(document.createElement("li"), { textContent: stop }));</script>
+        <script type="module">import { count } from "./count.js"; document.querySelector("output").textContent = count();</script>
+        <script nomodule>document.body.dataset.legacy = "ran";</script></body></html>`,
+        file("site/style.css", "h1 { color: red }"), file("site/data.js", "var stops = ['Tokyo'];"),
+        file("site/count.js", "export const count = () => String(document.querySelectorAll('li').length);"),
+        { path: "site/map.png", bytes: png, sha256: hash(png) }, file("site/unused.js", "throw new Error('unused')"));
+      expect(result.files.map(output => output.path)).toEqual(["bundle.css", "bundle.js"]);
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/count.js", "site/data.js", "site/index.html", "site/map.png", "site/style.css"]);
+      expect(new TextDecoder().decode(result.files[0]!.bytes)).toMatch(/h1[^}]*color: red[\s\S]*p[^}]*margin: 0/);
+      const require = createRequire(import.meta.url);
+      const { JSDOM } = require("jsdom") as { JSDOM: new (html: string, options: { runScripts: "outside-only" }) => { window: Window & typeof globalThis } };
+      const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', { runScripts: "outside-only" });
+      try {
+        // Executes a trusted test fixture to prove the published document, not runtime isolation.
+        dom.window.eval(new TextDecoder().decode(result.files[1]!.bytes));
+        const document = dom.window.document;
+        expect(document.documentElement.lang).toBe("fr");
+        expect(document.title).toBe("Trip");
+        expect(document.body.className).toBe("trip");
+        expect(document.getElementById("root")).toBeNull();
+        expect([...document.querySelectorAll("li")].map(item => item.textContent)).toEqual(["Tokyo"]);
+        expect(document.querySelector("output")!.textContent).toBe("1");
+        expect(document.getElementById("seed")!.textContent).toBe('{"stop":"Kyoto"}');
+        expect(document.querySelector("img")!.src).toBe(`data:image/png;base64,${Buffer.from(png).toString("base64")}`);
+        expect(document.body.dataset.legacy).toBeUndefined();
+      } finally { dom.window.close(); }
+    });
+
+    it.each([
+      ['<script src="https://cdn.example.test/app.js"></script>', "site/index.html loads https://cdn.example.test/app.js from outside the app. Save a copy in the app folder and link to that instead."],
+      ['<link rel="stylesheet" href="//fonts.example.test/a.css">', "site/index.html loads //fonts.example.test/a.css from outside the app."],
+      ['<script src="missing.js"></script>', "site/index.html links missing.js, which is not in the app. Add the file or fix the link."],
+      ['<img src="map.svg">', "site/index.html links map.svg, which is not in the app."],
+      ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
+      ['<button onclick="go()">Go</button>', "site/index.html has an onclick attribute. Published apps cannot run inline event handlers. Attach the handler in a script."],
+      ["<script>import('./app.js')</script>", 'A script in site/index.html imports a module. Load it with <script type="module"> instead.'],
+      ["<script>let = ;</script>", "A script in site/index.html is not valid JavaScript"],
+      ['<script type="module">import "./secret.ts"</script>', "site/index.html: App import is outside its declared inputs."],
+    ])("refuses %s in plain words", async (html, message) => {
+      await expect(page(html, file("site/app.js", "export {}"))).rejects.toThrow(message);
+    });
+
+    it("accepts an HTML file only as the entry", async () => {
+      await expect(compileClosedApp({ entryPath: "site/main.js", bounds, inputs: [file("site/main.js", "export {}"), file("site/index.html", "<p>")] })).rejects.toThrow(/Unsupported closed app input type/);
+    });
+  });
+
   it("rejects configuration, unsupported types, mismatched digests and invalid bounds", async () => {
     const input = file("main.ts", "export {};");
     for (const path of ["tsconfig.json", "package.json", "raw.html", "inline.svg", "native.node"]) {

@@ -64,6 +64,12 @@ test("installed compiler runs electron-builder resources after relocation and ch
     assert.deepEqual(result.files.map(file => file.path), ["bundle.css", "bundle.js"]);
     assert.match(Buffer.from(result.files[1].bytes).toString(), /installed/);
     await assert.rejects(compile(request, bounds, AbortSignal.abort()), { reason: "cancelled" });
+    const pageBounds = { ...bounds, maxOutputBytes: 16384 };
+    const page = await compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<link rel="stylesheet" href="style.css"><p>page</p>')), file("style.css", style)] }, pageBounds);
+    assert.deepEqual(page.files.map(file => file.path), ["bundle.css", "bundle.js"]);
+    assert.match(Buffer.from(page.files[1].bytes).toString(), /<p>page<\/p>/);
+    await assert.rejects(compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<script src="missing.js"></script>'))] }, pageBounds),
+      { message: "index.html links missing.js, which is not in the app. Add the file or fix the link." });
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;

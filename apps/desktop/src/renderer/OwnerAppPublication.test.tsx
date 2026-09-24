@@ -514,6 +514,21 @@ describe("owner app publication", () => {
     expect(api.openExternalUrl).not.toHaveBeenCalled();
   });
 
+  it("reports a failed preparation in plain words through the error hook and retries it", async () => {
+    const reason = "trip/index.html loads https://cdn.example.test/app.js from outside the app. Save a copy in the app folder and link to that instead.";
+    api.publishOwnerApp.mockImplementation(request => request.action === "prepare"
+      ? Promise.reject(new Error(`Error invoking remote method 'desktop:publish-owner-app': Error: ${reason}`)) : answer(request));
+    const reportError = vi.fn();
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    await userEvent.setup().selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not prepare this app.", new Error(reason), expect.any(Function)));
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => { (reportError.mock.calls[0]![2] as () => void)(); });
+    await waitFor(() => expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "prepare")).toHaveLength(2));
+  });
+
   it("never opens a launch that resolves after the workspace changed", async () => {
     const pending = deferred<OwnerAppPublicationResult>();
     api.publishOwnerApp.mockImplementation(request => request.action === "launchLocal" ? pending.promise : localList(request));
