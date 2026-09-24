@@ -343,6 +343,9 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     )
     .await;
     assert_eq!(retry["lineage"], "existing");
+    // The settle above wrote the drawing, so its resumed lineage is not ahead
+    // of the file and the reopen has nothing to settle.
+    assert_eq!(retry["unsettled"], false);
     assert_eq!(retry["objectId"], opened["objectId"]);
     assert_eq!(retry["artifactAssets"], opened["artifactAssets"]);
     call(
@@ -1388,6 +1391,8 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         )
     };
     let (opened, initial) = open(78).await;
+    // This open seeded the drawing from its file, so nothing is ahead of it.
+    assert_eq!(opened["unsettled"], false);
     let fold_opened = |update: &[u8]| {
         let doc = Ydoc::wire();
         doc.apply(update).expect("scene update applies");

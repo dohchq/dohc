@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -330,30 +330,49 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await desktop.close();
     desktop = null;
     expect(await diskText(), "the settle landed before the crash").not.toContain(crashed);
+    // Reopen the document by hand after relaunch, so its marks can be watched
+    // from its first frame.
+    await rm(join(temp.rootPath, ".dohc/ui-state.json"), { force: true });
 
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, temp);
-    await expect(page.getByTestId("markdown-editor")).toContainText(crashed, {
-      timeout: 30_000,
+    // Every save mark the document shows, from its first frame. Nothing is
+    // mounted yet, because the restored tab was cleared above.
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as unknown as { __saveMarks: string[] }).__saveMarks = seen;
+      const read = () => {
+        for (const mark of document.querySelectorAll('[data-testid="markdown-save-state"]')) {
+          const state = mark.getAttribute("data-state") ?? "";
+          if (seen.at(-1) !== state) seen.push(state);
+        }
+      };
+      read();
+      new MutationObserver(read).observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["data-state"],
+      });
     });
+    const saveMarks = () =>
+      page.evaluate(() => (window as unknown as { __saveMarks: string[] }).__saveMarks);
+    expect(await saveMarks()).toEqual([]);
+    await openEngineDoc(page, docPath);
+    await expect(page.getByTestId("markdown-editor")).toContainText(crashed);
 
-    // Read the mark before the disk: main reports saved only after it checked
-    // the file, so a mark read first can never outrun the text it vouches for.
-    const saveState = page.getByTestId("markdown-save-state");
-    const savedEarly: string[] = [];
-    await expect
-      .poll(
-        async () => {
-          const state = await saveState.getAttribute("data-state");
-          const disk = await diskText();
-          if (state === "saved" && !disk.includes(crashed)) savedEarly.push(disk);
-          return state === "saved" && disk.includes(crashed);
-        },
-        { timeout: 30_000 },
-      )
-      .toBe(true);
-    expect(savedEarly, "the document read Saved before its file had the text").toEqual([]);
+    // Main reports saved only after it read the file back, so once the mark
+    // says Saved the text is on disk.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+    );
+    expect(await diskText()).toContain(crashed);
+    expect(await saveMarks(), "the document read Saved before its file had the text").toEqual([
+      "saving",
+      "saved",
+    ]);
     expect((await diskText()).match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

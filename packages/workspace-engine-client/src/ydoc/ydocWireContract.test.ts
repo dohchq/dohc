@@ -108,6 +108,7 @@ function openResult(overrides: Record<string, unknown> = {}) {
     contentKind: "richdoc",
     head: "present",
     lineage: "existing",
+    unsettled: false,
     lineageClaimId: null,
     ...overrides,
   };
@@ -185,6 +186,13 @@ describe("ydoc.open result", () => {
   it("Rejects an absent head key instead of assuming the version has the path", () => {
     const { head: _omitted, ...withoutHead } = openResult();
     expect(() => decodeYdocResult(YDOC_METHOD.open, withoutHead)).toThrow(
+      ProtocolShapeError,
+    );
+  });
+
+  it("rejects an absent unsettled key instead of assuming the file has every update", () => {
+    const { unsettled: _omitted, ...withoutUnsettled } = openResult();
+    expect(() => decodeYdocResult(YDOC_METHOD.open, withoutUnsettled)).toThrow(
       ProtocolShapeError,
     );
   });

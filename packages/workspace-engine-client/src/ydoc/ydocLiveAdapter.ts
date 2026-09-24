@@ -594,6 +594,9 @@ export class YdocAdapterSession {
   // of those edits — refusing it would strand them and wedge the lease on an
   // unsettled close.
   lineage: "existing" | "absent" = "existing";
+  // Whether that resumed state holds updates the workspace file may not: a
+  // crash between an edit and its settle, or a remote update drained at open.
+  unsettled = false;
   lineageClaimId: string | null;
 
   private readonly adapter: YdocLiveAdapter;
@@ -1376,6 +1379,7 @@ export class YdocLiveAdapter {
     this.sessions.set(result.sessionId, session);
     session.head = result.head;
     session.lineage = result.lineage;
+    session.unsettled = result.unsettled;
     // `lineage` (durable CRDT state) is not `head` (a snapshot in this
     // version). An ordinary first open of a captured file is lineage-absent
     // and head-present, and that is exactly the seed case below.

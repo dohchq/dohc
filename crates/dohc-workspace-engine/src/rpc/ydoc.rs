@@ -206,6 +206,9 @@ struct YdocOpenResult {
     path: String,
     content_kind: &'static str,
     lineage: &'static str,
+    /// The resumed lineage holds updates its workspace file may not: the client
+    /// settles it before it reports the document saved.
+    unsettled: bool,
     lineage_claim_id: Option<String>,
     /// Whether the ENTERED VERSION has a committed snapshot for this path.
     /// "absent" means the daemon bound an empty doc over a path the version
@@ -921,6 +924,7 @@ impl EngineService {
             } else {
                 "absent"
             },
+            unsettled: state.unsettled,
             lineage_claim_id: state.lineage_claim_id.clone(),
             head: if state.head_blob_sha256.is_some() {
                 "present"

@@ -350,6 +350,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   | "head"
   | "lineage"
+  // Read once, here: the open settles an unsettled lineage itself.
+  | "unsettled"
   | "applyLocalUpdate"
   | "close"
   // Deliberately not handed out. An evict takes a daemon session away without
@@ -1780,7 +1782,8 @@ export function createWorkspaceEngineCapture(
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
     // The first generation's answers to "does the entered version have a
-    // snapshot for this path" and "did the daemon resume durable CRDT state".
+    // snapshot for this path", "did the daemon resume durable CRDT state", and
+    // "does that state hold updates the file may not".
     // Reported out because the absent-head contract (see
     // `WorkspaceEngineCapture.openYDocSession`) is decided by the caller, not
     // here: later generations reopen an already-admitted document.
@@ -1788,6 +1791,7 @@ export function createWorkspaceEngineCapture(
     session: RestartSafeYDocSession;
     head: "present" | "absent";
     lineage: "existing" | "absent";
+    unsettled: boolean;
   }> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -2192,6 +2196,7 @@ export function createWorkspaceEngineCapture(
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
+    const openedUnsettled = current.unsettled;
 
     const restartSafeSession: RestartSafeYDocSession = {
       get nativeOwner() {
@@ -2421,6 +2426,7 @@ export function createWorkspaceEngineCapture(
       session: restartSafeSession,
       head: openedHead,
       lineage: openedLineage,
+      unsettled: openedUnsettled,
     };
   }
 
@@ -3437,7 +3443,7 @@ export function createWorkspaceEngineCapture(
           reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;
-        const { session, head, lineage } = await openRestartSafeRustYDocSession({
+        const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -3494,9 +3500,10 @@ export function createWorkspaceEngineCapture(
         // version fence:
         //
         // - A live entry for the path takes the debt. Opening a document
-        //   settles nothing by itself, so the live session's settle is asked
-        //   for explicitly. An open cannot interleave with a chain task, which
-        //   is what makes the check authoritative.
+        //   settles only a lineage the engine reports unsettled, so the live
+        //   session's settle is asked for explicitly. An open cannot
+        //   interleave with a chain task, which is what makes the check
+        //   authoritative.
         // - A workspace on another version drops it with a trace. Reopening
         //   the captured version here would run outside the fence and could
         //   write the old version's projection over the active one. Nothing
@@ -4267,8 +4274,10 @@ export function createWorkspaceEngineCapture(
         // settle:false close of that dirty lineage would be refused and strand
         // the lease. Read here, on the capture chain, so no version op can land
         // between the version binding above and this check.
+        let absentHeadDisk: AbsentHeadDiskState | null = null;
         if (head === "absent") {
           const disk = await absentHeadDiskState(rootPath, input.path);
+          absentHeadDisk = disk;
           // Three rules, IN THIS ORDER. They used to be tangled into one
           // condition, and the order is the whole correctness argument:
           //
@@ -4380,14 +4389,19 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
-        // A document can open over an outside edit, and a resumed lineage can
-        // be ahead of its file: a crash between an edit and its settle leaves
-        // that edit only in the lineage. Check the file against the head first.
-        // After an outside edit, write nothing and report the error. Otherwise
-        // settle a resumed lineage now, so the document reads Saving… until the
-        // file has its text. The engine answers an unchanged lineage without
-        // writing. Scenes are left out: the daemon seeds a scene itself at open,
-        // so every scene lineage reads as resumed.
+        // The editor's first save state, decided before it can show Saved.
+        //
+        // A document can open over an outside edit: write nothing and report
+        // the error. A lineage the engine calls unsettled holds updates its
+        // file may not (a crash between an edit and its settle, or remote
+        // updates drained at this open): settle it now, and say "settling"
+        // before this open returns, so the editor reads Saving… from its
+        // first frame until the file has the text.
+        const settleOnOpen = (): void => {
+          reportSaveState("settling", 0);
+          // Its outcome reports through the settle channel like any other.
+          void session.settleNow().catch(() => undefined);
+        };
         if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
@@ -4410,9 +4424,18 @@ export function createWorkspaceEngineCapture(
               // no settle token because this report did not come from a settle.
               reportSaveState("error", 0);
             }
-          } else if (lineage === "existing" && session.contentKind !== "scene") {
-            // Its outcome reports through the settle channel like any other.
-            void session.settleNow().catch(() => undefined);
+          } else if (unsettled) {
+            settleOnOpen();
+          }
+        } else if (lineage === "existing") {
+          // A crash-kept draft of a file capture never recorded. Its text is
+          // only in the lineage. Over the empty file New File leaves, settling
+          // writes it. A missing file, or content capture cannot reach, is not
+          // this draft's to overwrite, so the draft stays unsaved and says so.
+          if (absentHeadDisk === "empty") {
+            if (unsettled) settleOnOpen();
+          } else {
+            reportSaveState("error", 0);
           }
         }
         return {

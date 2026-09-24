@@ -453,7 +453,7 @@ fn apply_deferred_base(
             // the base claim's snapshot insert alone.
             tx.execute(
                 "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0, \
-                    seed_source_sha256=NULL, \
+                    settled_update_seq=NULL,seed_source_sha256=NULL, \
                     lineage_claim_status='unclaimed',lineage_claim_id=NULL, \
                     base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL, \
                     base_relay_confirmed_absent=0 \
@@ -2737,7 +2737,7 @@ pub fn apply_ydoc_envelope(
                 // replacement on the base claim's snapshot insert alone.
                 tx.execute(
                     "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,
-                        seed_source_sha256=NULL,
+                        settled_update_seq=NULL,seed_source_sha256=NULL,
                         lineage_claim_status='unclaimed',lineage_claim_id=NULL,
                         base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL,
                         base_relay_confirmed_absent=0

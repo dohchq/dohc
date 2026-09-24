@@ -1676,7 +1676,8 @@ fn replace_base_snapshot(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4,regime='replicated',head_update_seq=0, \
-         head_snapshot_seq=0,last_settled_sha=NULL,seed_source_sha256=NULL, \
+         head_snapshot_seq=0,last_settled_sha=NULL,settled_update_seq=NULL, \
+         seed_source_sha256=NULL, \
          lineage_claim_status='exact', \
          lineage_claim_id=?5,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL, \
          base_origin_id=?6,base_origin_seq=?7,base_relay_seq=?8, \
@@ -1854,7 +1855,8 @@ pub fn replace_lineage_with_successor_in_tx(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4, regime='replicated', head_update_seq=0, \
-         head_snapshot_seq=0, seed_source_sha256=NULL, lineage_claim_status='exact', \
+         head_snapshot_seq=0, settled_update_seq=NULL, seed_source_sha256=NULL, \
+         lineage_claim_status='exact', \
          lineage_claim_id=?5, lineage_parent_claim_id=?6, lineage_epoch_tag=?7, \
          path=?8, last_settled_sha=?9, updated_at_ms=?10 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -2421,7 +2423,8 @@ pub fn close_session(
         // capture/edit into a permanent ConflictStaleTarget.
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
-             last_settled_sha = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4 \
+             last_settled_sha = NULL, settled_update_seq = NULL, seed_source_sha256 = NULL, \
+             updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
         )

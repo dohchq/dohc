@@ -2095,6 +2095,17 @@ CREATE INDEX owner_pending_settlement_binary_blobs
     ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 ";
 
+// The lineage update the workspace file is known to hold: the head_update_seq a
+// settle covered, or NULL when nothing proves it. An open compares it with the
+// head to tell a lineage that is ahead of its file from one that is not. A
+// writer that rewinds the head must clear it; the check refuses one that
+// rewinds below it.
+const V2_YDOC_SETTLED_UPDATE_SEQ_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN settled_update_seq INTEGER
+    CHECK (settled_update_seq IS NULL
+        OR (settled_update_seq >= 0 AND settled_update_seq <= head_update_seq));
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2125,6 +2136,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 4,
         id: "v2-owner-pending-settlements",
         sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: "v2-ydoc-settled-update-seq",
+        sql: V2_YDOC_SETTLED_UPDATE_SEQ_DDL,
         sets_user_version: None,
     },
 ];
@@ -2363,6 +2380,10 @@ mod tests {
                 "v2-owner-pending-settlements",
                 "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
             ),
+            (
+                "v2-ydoc-settled-update-seq",
+                "ff19c6ed0c9ceb9d4fde2fc59e12529c5e428a9ef722d7c4280748e839e1e65a",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2411,7 +2432,9 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 3 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 2
+            }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2436,7 +2459,12 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 1
+            }
+        );
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),

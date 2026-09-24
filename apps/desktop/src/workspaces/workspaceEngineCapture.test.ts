@@ -1221,6 +1221,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
@@ -1270,6 +1271,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -2981,6 +2983,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
+          unsettled: false,
           get artifactAssets() {
             return activeAssets;
           },
@@ -3412,6 +3415,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             return "absent" as const;
           },
           lineage: "absent" as const,
+          unsettled: false,
           evict: async () => {
             evicts += 1;
           },
