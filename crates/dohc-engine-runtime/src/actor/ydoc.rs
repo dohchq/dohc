@@ -2920,6 +2920,9 @@ fn ydoc_close_session_on_store(
     if restore_generation.is_none()
         && !marker.lineage_claim_status.has_claimed_base()
         && marker.head_update_seq > 0
+        && store.read_with(|conn| {
+            dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
+        })?
         && dohc_engine_collab::local_close_is_covered(
             store,
             key,

@@ -1905,16 +1905,22 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
-    // A settle that failed only because something was in the way leaves the
-    // file behind the document: a file lock or a busy store (the
-    // GENERATION's own backoff timer retries those), or the generation itself
-    // going away, as when enabling sync drops it before its settle runs. The
-    // retry dies with the generation, so the debt must outlive it: set on
-    // those failures, cleared by the next settle that reaches disk, and read
-    // at adoption to settle the replacement. A settle refused because the
-    // file changed outside dohc, or because a conflict is open, owes
-    // nothing: settling it again would write the lineage over that change.
-    let settleOwed = false;
+    // Whether the file is behind this session's own edits. Every local update
+    // counts from the moment it is handed to a generation, and a settle
+    // covers the updates counted when it started. The debt is the gap. It
+    // outlives a generation, whose armed settle and retry ladder die with
+    // it, and adoption reads it to settle the replacement. It is counted
+    // from edits rather than from settle failures: a generation can drop
+    // inside its settle delay and report the failure only after adoption
+    // has already looked.
+    //
+    // A settle refused because the file changed outside dohc, or because a
+    // conflict is open, forgives the debt: settling again would write the
+    // lineage over that change.
+    let localUpdatesCounted = 0;
+    let localUpdatesSettled = 0;
+    const settleCovers = new Map<string, number>();
+    const settleOwed = (): boolean => localUpdatesSettled < localUpdatesCounted;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1982,18 +1988,30 @@ export function createWorkspaceEngineCapture(
             // reconnect error, so it is not an error sink: every settle
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
-            onSettleStart: (token) => input.onSettleStart(token, generation),
+            onSettleStart: (token) => {
+              settleCovers.set(`${generation}:${token}`, localUpdatesCounted);
+              input.onSettleStart(token, generation);
+            },
             onSettleError: (error, token) => {
-              // Only a transient refusal or a lost session owes a retry. Any
-              // other refusal, such as the file changing outside dohc, also
-              // cancels a retry owed earlier, so a reopen never writes over it.
-              settleOwed =
-                isTransientEngineCause(error) ||
-                hasRefusalInCauseChain(error, isEngineSessionReconnectError);
+              settleCovers.delete(`${generation}:${token}`);
+              // A transient refusal or a lost session leaves the debt for the
+              // retry or the replacement. Any other refusal, such as the file
+              // changing outside dohc, forgives it.
+              if (
+                !isTransientEngineCause(error) &&
+                !hasRefusalInCauseChain(error, isEngineSessionReconnectError)
+              ) {
+                localUpdatesSettled = localUpdatesCounted;
+              }
               input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {
-              settleOwed = false;
+              const key = `${generation}:${token}`;
+              const covered = settleCovers.get(key);
+              settleCovers.delete(key);
+              if (covered !== undefined) {
+                localUpdatesSettled = Math.max(localUpdatesSettled, covered);
+              }
               return input.onSettled(result, token, generation);
             },
           });
@@ -2022,6 +2040,7 @@ export function createWorkspaceEngineCapture(
       // settle the document sits on "Saving…" for good.
       onReplayArmed?: () => void,
     ): Promise<void> => {
+      let replayArmed = false;
       try {
         let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
@@ -2068,7 +2087,8 @@ export function createWorkspaceEngineCapture(
           doc,
           Y.encodeStateVector(replacement.doc),
         );
-        if (replay.byteLength > 2) {
+        replayArmed = replay.byteLength > 2;
+        if (replayArmed) {
           const journaled = replacement.applyLocalUpdate(replay);
           onReplayArmed?.();
           await journaled;
@@ -2112,7 +2132,7 @@ export function createWorkspaceEngineCapture(
       // lock re-enters the provider's own retry ladder. Failures are
       // reported through the settle channel like any other, so nothing extra
       // to do with the rejection here.
-      if (settleOwed) {
+      if (!replayArmed && settleOwed()) {
         void replacement.settleNow().catch(() => undefined);
       }
     };
@@ -2324,6 +2344,10 @@ export function createWorkspaceEngineCapture(
         void append(async () => {
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
+          // Counted before any generation arms a settle for it, so a settle
+          // that starts afterwards covers it and one that started before
+          // does not.
+          localUpdatesCounted += 1;
           // The renderer has already accepted this update, so the canonical doc
           // — the renderer's truth — records it before anything else may fail.
           // A daemon generation is rebuilt around that text, never instead of

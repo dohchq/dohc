@@ -1068,7 +1068,11 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
 // generation is gone, its settle fails, and the sync pass claims exactly what
 // was recorded. The replacement needs no replay, so the settle the lost
 // generation owed must still run, or the file stays behind the document.
-it("settles a recorded word whose settle was lost with its generation", async () => {
+// The lost generation can report its failed settle before the drop, or only
+// after adoption has already run: its settle waits out a delay, and the drop
+// can arrive first through a session event. Both orders must settle.
+for (const order of ["settle failure first", "drop first"] as const) {
+it(`settles a recorded word whose settle was lost with its generation (${order})`, async () => {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-owed-settle-");
   const loopback = new VersionedLoopbackEngine();
   const client = (): EngineDaemonClient & EngineTransport => ({
@@ -1105,6 +1109,7 @@ it("settles a recorded word whose settle was lost with its generation", async ()
     settledOnClaim = resolve;
   });
   let lostOptions: EngineYdocProviderSessionOptions | undefined;
+  let claimedOpens = 0;
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
@@ -1115,6 +1120,7 @@ it("settles a recorded word whose settle was lost with its generation", async ()
       .update(Y.encodeStateAsUpdate(engineDoc))
       .digest("hex");
     if (unclaimed) lostOptions = options;
+    else claimedOpens += 1;
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
@@ -1180,14 +1186,25 @@ it("settles a recorded word whose settle was lost with its generation", async ()
   const lost = Object.assign(new Error("workspace handle is unavailable"), {
     code: "transport-error",
   });
-  lostOptions?.onSettleError?.(lost, 1);
-  lostOptions?.onSessionError?.(lost);
+  if (order === "settle failure first") {
+    lostOptions?.onSettleError?.(lost, 1);
+    lostOptions?.onSessionError?.(lost);
+  } else {
+    lostOptions?.onSessionError?.(lost);
+    // The lost generation's delayed settle fails only once the rebind has
+    // already adopted the replacement.
+    await expect.poll(() => claimedOpens, { timeout: 5_000 }).toBe(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    lostOptions?.onSettleStart?.(1);
+    lostOptions?.onSettleError?.(lost, 1);
+  }
 
   await expect(claimSettled).resolves.toBe("recorded typed");
   expect(replacements).toEqual([]);
   await session.close({ settle: false });
   await capture.stop();
 });
+}
 
 it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-fork-");

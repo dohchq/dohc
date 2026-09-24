@@ -63,7 +63,7 @@ pub use journal::{
     adopt_join_identity, journal_local_op_in_tx, journal_local_replication_op,
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
     record_share_view_identity, workspace_journals_file_moments_in_tx,
-    workspace_replicates_with_relay_in_tx,
+    workspace_replicates_with_relay, workspace_replicates_with_relay_in_tx,
 };
 pub use live_audit::{
     journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
