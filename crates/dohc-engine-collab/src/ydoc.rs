@@ -1484,9 +1484,11 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
     let mut blocks = Vec::new();
     let mut index = 0usize;
     // Every line that closes a fence, found in one pass when the first fence
-    // opens. Scanning to the end for each unclosed opener made a body of
-    // openers quadratic.
+    // opens, and a cursor past the closers already behind `index`. Openers
+    // only move forward, so the whole body costs one pass. Scanning to the end
+    // for each unclosed opener made a body of openers quadratic.
     let mut closers: Option<Vec<usize>> = None;
+    let mut next_closer = 0usize;
     while index < lines.len() {
         let line = lines[index];
         if line.is_empty() {
@@ -1496,7 +1498,10 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
         if let Some(fence_language) = line.strip_prefix("```") {
             let closers = closers
                 .get_or_insert_with(|| (0..lines.len()).filter(|&at| lines[at] == "```").collect());
-            if let Some(&closer) = closers.get(closers.partition_point(|&at| at <= index)) {
+            while closers.get(next_closer).is_some_and(|&at| at <= index) {
+                next_closer += 1;
+            }
+            if let Some(&closer) = closers.get(next_closer) {
                 blocks.push(MdBlock::CodeBlock {
                     language: fence_language.to_string(),
                     content: lines[index + 1..closer].join("\n"),
@@ -6670,10 +6675,13 @@ fn main() {}
 
     #[test]
     fn a_body_of_unclosed_fences_parses_in_one_pass() {
-        // Each unclosed opener used to rescan every line after it.
-        let body = "```x\n".repeat(200_000);
+        // 5 MB, about the most source one relay projection request carries.
+        // A scan per unclosed opener would compare 5 * 10^11 lines here and
+        // outlast the gate's 25-minute test timeout; one pass takes a second.
+        let openers = 1_000_000;
+        let body = "```x\n".repeat(openers);
         let blocks = parse_markdown_blocks(&body);
-        assert_eq!(blocks.len(), 200_000);
+        assert_eq!(blocks.len(), openers);
         assert!(blocks
             .iter()
             .all(|block| *block == MdBlock::Paragraph("```x".to_owned())));
