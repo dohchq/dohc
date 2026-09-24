@@ -93,3 +93,14 @@ it('caps active lexical output at 2 MiB while allowing a stale historical source
     } finally { doc.destroy() }
   }
 })
+
+it('projects each lexical desktop seed to the bytes of its file', () => {
+  const lexicalPath = new URL('../../../crates/dohc-engine-collab/tests/owner-source/owner-source-lexical.json', import.meta.url)
+  const seeds = JSON.parse(readFileSync(lexicalPath, 'utf8')) as Record<string, { markdown: string; bytes: number[] }>
+  expect(Object.keys(seeds).length).toBeGreaterThan(0)
+  for (const [name, row] of Object.entries(seeds)) {
+    const result = validate({ document: { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: hash('lineage') }, currentPath: 'owner.md', checkpoint: Uint8Array.from(row.bytes) })
+    expect(result.kind, name).toBe('accepted')
+    if (result.kind === 'accepted') expect(result.evidence.projectedMarkdown, name).toBe(row.markdown)
+  }
+})
