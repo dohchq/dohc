@@ -1,18 +1,13 @@
 import {mkdir, writeFile} from "node:fs/promises";
 import {join} from "node:path";
-import {normalizeAbsolutePath} from "@dohc/workspace-core";
 import {selfHostedLiveProfile} from "@dohc/sync-relay/self-host-live-profile";
 import type {ServerOwnerDelivery} from "./desktopEngine";
 import type {CloudCredentials} from "./cloudCredentialStore";
 import type {RegistryEntry} from "./registryStore";
 import {workspaceRemoteMatchesCredentials} from "./chatRelayIdentity";
 import {canonicalRelayUrl} from "./syncCode";
-import {workspacePathKey} from "./workspacePathKey";
 import {OwnerLiveRefusalsResult} from "../ipc/bridgeContract";
 import {z} from "zod";
-
-/** The registry keeps the forward-slash spelling of a root; an operation carries realpath's native spelling. */
-const rootKey = (rootPath: string) => workspacePathKey(normalizeAbsolutePath(rootPath));
 
 export function createServerOwnerConnection(options: {
   stateDir(): string;
@@ -22,8 +17,8 @@ export function createServerOwnerConnection(options: {
   onRefusalsChanged?(workspaceId: string): void;
 }): ServerOwnerDelivery {
   const discovery = new Map<string, {credentials: CloudCredentials; until: number; value: unknown}>();
-  const refusalScan = new Map<string, {credentials: CloudCredentials; rootKey: string; after?: string; seen: boolean; published: boolean}>();
-  const refusalAttempts = new Map<string, {credentials: CloudCredentials; rootKey: string; until: number}>();
+  const refusalScan = new Map<string, {credentials: CloudCredentials; rootPath: string; after?: string; seen: boolean; published: boolean}>();
+  const refusalAttempts = new Map<string, {credentials: CloudCredentials; rootPath: string; until: number}>();
   const eligible = (workspace: RegistryEntry, credentials: CloudCredentials) => !!workspace.remote &&
     !workspace.shareView && !workspace.joinBootstrapPending && workspaceRemoteMatchesCredentials(workspace.remote, credentials);
   return {
@@ -31,7 +26,7 @@ export function createServerOwnerConnection(options: {
       const session = options.credentials(), state = refusalScan.get(workspaceId);
       const workspace = options.workspaces().find(row => row.workspaceId === workspaceId);
       if (!state || !session || session.signal.aborted || state.credentials !== session.value ||
-        !workspace || rootKey(workspace.rootPath) !== state.rootKey || !eligible(workspace, session.value)) {
+        !workspace || workspace.rootPath !== state.rootPath || !eligible(workspace, session.value)) {
         refusalScan.delete(workspaceId); return undefined;
       }
       return state.published;
@@ -57,12 +52,16 @@ export function createServerOwnerConnection(options: {
       if (!session || session.signal.aborted || !eligible(workspace, session.value)) return null;
       const relayUrl = canonicalRelayUrl(session.value.relayUrl ?? "");
       if (!relayUrl) return null;
-      const signal = AbortSignal.any([lifetime, session.signal]), root = rootKey(workspace.rootPath);
+      // The operation carries realpath's spelling of the root. The authority operation has just matched
+      // the registry row against its registered spelling, so the session pins that one and compares it exactly.
+      const rootPath = options.workspaces().find(row => row.workspaceId === workspace.workspaceId)?.rootPath;
+      if (rootPath === undefined) return null;
+      const signal = AbortSignal.any([lifetime, session.signal]);
       const assertCurrent = () => {
         signal.throwIfAborted();
         const current = options.credentials();
         const registered = options.workspaces().find(row => row.workspaceId === workspace.workspaceId);
-        if (!current || current.value !== session.value || !registered || rootKey(registered.rootPath) !== root || !eligible(registered, session.value)) {
+        if (!current || current.value !== session.value || !registered || registered.rootPath !== rootPath || !eligible(registered, session.value)) {
           throw new Error("Owner delivery connection changed.");
         }
       };
@@ -71,12 +70,12 @@ export function createServerOwnerConnection(options: {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]); requestSignal.throwIfAborted();
           const priorAttempt = refusalAttempts.get(workspace.workspaceId);
-          if (priorAttempt?.credentials === session.value && priorAttempt.rootKey === root && priorAttempt.until > Date.now()) return;
+          if (priorAttempt?.credentials === session.value && priorAttempt.rootPath === rootPath && priorAttempt.until > Date.now()) return;
           // The existing serial delivery loop visits one bounded page at most
           // every ten seconds. Failed pages retain the last confirmed state.
-          refusalAttempts.set(workspace.workspaceId, {credentials: session.value, rootKey: root, until: Date.now() + 10_000});
+          refusalAttempts.set(workspace.workspaceId, {credentials: session.value, rootPath, until: Date.now() + 10_000});
           const saved = refusalScan.get(workspace.workspaceId);
-          const state = saved?.credentials === session.value && saved.rootKey === root ? saved : undefined;
+          const state = saved?.credentials === session.value && saved.rootPath === rootPath ? saved : undefined;
           const after = state?.after;
           const suffix = after === undefined ? "" : `&after=${encodeURIComponent(after)}`;
           const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host?refusals=1${suffix}`, {
@@ -93,7 +92,7 @@ export function createServerOwnerConnection(options: {
           const next = value.nextCursor === null ? undefined : value.nextCursor;
           const seen = (state?.seen ?? false) || value.refusals.length > 0;
           const published = next === undefined ? seen : seen || (state?.published ?? false);
-          refusalScan.set(workspace.workspaceId, {credentials: session.value, rootKey: root, after: next, seen: next === undefined ? false : seen, published});
+          refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
         },
         async documents(attempt) {
