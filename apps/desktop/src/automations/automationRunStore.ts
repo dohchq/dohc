@@ -79,6 +79,7 @@ const StoredRunSchema = z.object({
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
+  keySeed: z.string().min(1),
   startedAtMs: z.number(),
   updatedAtMs: z.number(),
   plan: z.array(z.object({ ordinal: z.number().int().nonnegative(), effects: z.array(EffectSchema) })).nullable(),
@@ -106,6 +107,11 @@ export interface StoredRun {
   /** The engine automation id, "collection:<collection path>#<id>". */
   automationId: string;
   definitionHash: string;
+  /**
+   * What the run's idempotency keys and added record ids derive from: the
+   * definition hash, plus the claim's run when a person started it over.
+   */
+  keySeed: string;
   startedAtMs: number;
   updatedAtMs: number;
   /**

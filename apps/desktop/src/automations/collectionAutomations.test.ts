@@ -42,7 +42,7 @@ async function world(options: {
   /** The engine gives no answer to settles until this is set false. */
   unanswered?: { settle: boolean };
   /** The engine refuses the next settle this many times: its recovery took the claim back. */
-  refused?: { settle: number };
+  refused?: { settle: number; stillRunning?: boolean };
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -127,12 +127,15 @@ async function world(options: {
       if (options.refused && options.refused.settle > 0) {
         options.refused.settle -= 1;
         const claim = claims.get(claimId)!;
-        claim.state = "pending";
-        pending.push(claim);
+        if (!options.refused.stillRunning) {
+          claim.state = "pending";
+          pending.push(claim);
+        }
         throw Object.assign(new Error("invalid-input"), { wireError: { code: "INVALID_PARAMS", message: "invalid-input" } });
       }
       const claim = claims.get(claimId)!;
       claim.state = state;
+      claim.updatedAtMs = ++updates;
       if (error === undefined) delete claim.error; else claim.error = error;
       events.push(`settled ${state}`);
       wake();
@@ -146,6 +149,15 @@ async function world(options: {
       return claim;
     },
     listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse() }),
+    // Each automation's failure most recently settled, as the failure notice shows it.
+    listAutomationFailures: async () => {
+      const newest = new Map<string, AutomationClaim>();
+      for (const claim of claims.values()) {
+        const known = newest.get(claim.automationId);
+        if (claim.state === "failed" && (!known || claim.updatedAtMs > known.updatedAtMs)) newest.set(claim.automationId, claim);
+      }
+      return { failures: [...newest.values()].map(({ automationId, claimId }) => ({ automationId, claimId })) };
+    },
     releaseAutomationClaim: async ({ claimId }) => {
       const claim = claims.get(claimId)!;
       if (claim.state !== "running") throw new Error("Automation claim is not running.");
@@ -208,15 +220,18 @@ async function world(options: {
   let rosterCalls = 0;
   let beforeRead: (() => void) | null = null;
   let prunes = 0;
+  let updates = 0;
+  const resumable: Array<ReadonlySet<string> | null> = [];
   const baseStore = createAutomationRunStore(root);
   let failSaveAt: number | null = null;
   let saves = 0;
   const store: AutomationRunStore = {
     ...baseStore,
-    prune: async (automationId, resumable) => {
+    prune: async (automationId, resumableClaims) => {
+      resumable.push(await resumableClaims());
       prunes += 1;
       wake();
-      await baseStore.prune(automationId, resumable);
+      await baseStore.prune(automationId, resumableClaims);
     },
     save: async (run) => {
       saves += 1;
@@ -298,6 +313,7 @@ async function world(options: {
     holdsChanged: () => holdsChanged,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
+    resumable,
     beforeNextRead: (hook: () => void) => { beforeRead = hook; },
     moveRecord: (record: FakeRecord, name: string) => { record.path = `${record.collection}/${name}.md`; },
     addRecord, claim, settledClaim, until, writeAutomations, baseStore,
@@ -1067,5 +1083,67 @@ describe("Collection automations", () => {
     expect(w.errors.filter((entry) => entry.context.startsWith("settle"))).toEqual([]);
     // Only the settle the engine took marks the run done and trims.
     await w.until(() => w.prunes() === 1);
+  });
+  it("keeps the plan of the failure its notice offers, even behind 20 newer runs", async () => {
+    const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n";
+    const w = await world({ automations: { Tasks: note } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failures.openSession = 1;
+    const old = w.claim("collection:Tasks#note", task);
+    await w.executor.open();
+    await w.settledClaim(old);
+    w.failures.openSession = 1;
+    const newer = w.claim("collection:Tasks#note", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(newer);
+    // The older claim is tried again and fails last, so its notice is the current one.
+    w.failures.openSession = 1;
+    await w.executor.retry({ automationId: "collection:Tasks#note", claimId: old.claimId, startOver: false });
+    await w.until(() => old.state === "failed");
+    for (let index = 0; index < 20; index += 1) {
+      const claim = w.claim("collection:Tasks#note", w.addRecord("Tasks", `more-${index}`, { Status: "Done" }));
+      w.executor.notifyClaimed();
+      await w.settledClaim(claim);
+    }
+    await w.until(() => w.resumable.length >= 23);
+    const kept = w.resumable.at(-1)!;
+    expect(kept.has(old.claimId)).toBe(true);
+    expect(kept.has(newer.claimId)).toBe(false);
+  });
+
+  it("asks before starting over a failure whose progress dohc dropped, and refuses one run history no longer shows", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim(TASKS, task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
+    await w.baseStore.save({ ...saved!, plan: null, applied: [], compacted: true });
+
+    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "progress-gone" });
+    expect(claim.state).toBe("failed");
+    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: true }))
+      .resolves.toEqual({ status: "queued" });
+    await w.until(() => claim.state === "done");
+    // The person chose to run it from the start, so its first step ran again.
+    expect(w.fieldsOf(task).Count).toBe(4);
+
+    await expect(w.executor.retry({ automationId: TASKS, claimId: "atc_forgotten", startOver: true }))
+      .resolves.toEqual({ status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." });
+  });
+
+  it("keeps a settle the engine refused while it still holds the claim as running, and says so", async () => {
+    const refused = { settle: 1, stillRunning: true };
+    const w = await world({ refused, automations: { Tasks: "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n" } });
+    const claim = w.claim("collection:Tasks#note", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.errors.some((entry) => entry.context === `settle automation claim "${claim.claimId}"`));
+    expect(claim.state).toBe("running");
+    w.executor.notifyClaimed();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.journaled).toHaveLength(1);
   });
 });

@@ -31,7 +31,6 @@ import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automat
 import {
   runCollectionAutomation,
   runsForClaim,
-  COMPACTED_RUN_ERROR,
   UNREADABLE_RUN_ERROR,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
@@ -85,6 +84,8 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
+  /** Each automation's newest failed claim, the one its failure notice offers to try again. */
+  listAutomationFailures(): Promise<{ failures: Array<{ automationId: string; claimId: string }> }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
   releaseAutomationClaim(input: { claimId: string }): Promise<unknown>;
 }
@@ -175,6 +176,9 @@ export type CollectionAutomationRetry =
   // from the beginning and can repeat what it already did, so the person
   // must choose that.
   | { status: "definition-changed" }
+  // The run failed so long ago that dohc dropped its progress. Running it
+  // again starts from the beginning, and the person must choose that too.
+  | { status: "progress-gone" }
   | { status: "refused"; reason: string };
 
 function errorText(error: unknown): string {
@@ -222,7 +226,7 @@ export class CollectionAutomations {
    * Claims this computer holds whose release or settle the engine has not
    * taken yet. Each drain tries these first, and never runs them again.
    */
-  private readonly owed = new Map<string, ClaimAction>();
+  private readonly owed = new Map<string, { claim: AutomationClaim; action: ClaimAction }>();
   /**
    * Claims handed back to wait, with what they wait for. A drain that the
    * engine serves one of them passes it by until that reason clears, so a
@@ -494,7 +498,7 @@ export class CollectionAutomations {
    * queues the claim, this wakes the drain and asks the failure notices to
    * re-read, because the engine's own wake-up event can be dropped and a
    * repeated retry sends none. `startOver` confirms running a changed
-   * automation from the beginning.
+   * automation, or a run whose progress is gone, from the beginning.
    */
   async retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry> {
     await this.ready();
@@ -506,11 +510,17 @@ export class CollectionAutomations {
     }
     const unsupported = unsupportedReason(automation);
     if (unsupported !== null) return { status: "refused", reason: unsupported };
+    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+    if (listed === null) throw new Error("The workspace engine is not running.");
+    // Without its run history, dohc cannot tell what the run already did.
+    if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
+      return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+    }
     const runs = await runsForClaim(this.options.store, input, automation);
     if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
-    if (runs.done === null && runs.current?.compacted) return { status: "refused", reason: COMPACTED_RUN_ERROR };
-    const startsOver = runs.current === null && runs.changedSince !== null;
-    if (startsOver && !input.startOver) return { status: "definition-changed" };
+    const progressGone = runs.done === null && runs.current?.compacted === true;
+    const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
+    if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
     this.retrying.add(input.claimId);
     this.waitingFor.delete(input.claimId);
     try {
@@ -519,7 +529,7 @@ export class CollectionAutomations {
       if (startsOver) {
         const hash = definitionHash(automation);
         for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
-          if (run.definitionHash === hash || run.superseded) continue;
+          if (run.superseded || (!progressGone && run.definitionHash === hash)) continue;
           await this.options.store.save({ ...run, superseded: true, updatedAtMs: this.nowMs() });
         }
       }
@@ -733,28 +743,28 @@ export class CollectionAutomations {
           continue;
         }
         this.waitingFor.delete(claim.claimId);
-        this.owed.set(claim.claimId, action);
+        this.owed.set(claim.claimId, { claim, action });
         if (!stop.aborted) await this.payOwed((work) => this.withLiveEngine(work), claim.claimId);
       }
     } catch (error) {
       this.options.onError("drain Collection automation claims", error);
     } finally {
-      for (const claim of release) this.owed.set(claim.claimId, { kind: "release" });
+      for (const claim of release) this.owed.set(claim.claimId, { claim, action: { kind: "release" } });
       if (!stop.aborted) await this.payOwed((work) => this.withLiveEngine(work));
     }
   }
 
   /**
    * Sends each owed release and settle, or only the one for `claimId`. The
-   * claim stays owed while the engine gives no answer. An engine that no
-   * longer holds the claim as running took it back, so nothing is owed and
-   * nothing settled.
+   * claim stays owed while the engine gives no answer. When the engine
+   * refuses and its claim list shows the claim no longer running, its
+   * recovery took the claim back, so nothing is owed and nothing settled.
    */
   private async payOwed(
     withEngine: <T>(work: (engine: CollectionAutomationEngine) => Promise<T>) => Promise<T | null>,
     claimId?: string,
   ): Promise<void> {
-    for (const [id, action] of [...this.owed]) {
+    for (const [id, { claim, action }] of [...this.owed]) {
       if (claimId !== undefined && id !== claimId) continue;
       let answered: boolean;
       try {
@@ -771,10 +781,7 @@ export class CollectionAutomations {
           return true;
         })) === true;
       } catch (error) {
-        // The engine refuses a settle or release of a claim this computer
-        // holds only when the claim is no longer running: its recovery took
-        // the claim back first.
-        if (isInvalidInputRefusal(error)) {
+        if (isInvalidInputRefusal(error) && (await this.stillRunning(claim, withEngine)) === false) {
           this.owed.delete(id);
           this.waitingFor.delete(id);
         } else {
@@ -786,6 +793,20 @@ export class CollectionAutomations {
       this.owed.delete(id);
       if (action.kind === "settle" && action.input.state === "failed") this.options.onFailuresChanged();
       if (action.kind === "settle") await action.settled();
+    }
+  }
+
+  /** Whether the engine still holds the claim as running, or null when it cannot say. */
+  private async stillRunning(
+    claim: AutomationClaim,
+    withEngine: <T>(work: (engine: CollectionAutomationEngine) => Promise<T>) => Promise<T | null>,
+  ): Promise<boolean | null> {
+    try {
+      const listed = await withEngine((engine) => engine.listAutomationClaims({ automationId: claim.automationId }));
+      const found = listed?.claims.find((candidate) => candidate.claimId === claim.claimId);
+      return found === undefined ? null : found.state === "running";
+    } catch {
+      return null;
     }
   }
 
@@ -889,18 +910,21 @@ export class CollectionAutomations {
 
   /**
    * Trims the automation's saved runs. A failed run keeps what Try again
-   * needs while run history shows its claim, or while it is the newest
-   * failure, which its notice offers.
+   * needs while run history shows its claim among the newest, or while its
+   * failure notice offers it.
    */
   private async pruneRuns(automationId: string): Promise<void> {
     try {
       await this.options.store.prune(automationId, async () => {
-        const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
-        if (listed === null) return null;
-        const newestFailure = listed.claims.find((claim) => claim.state === "failed");
+        const read = await this.withLiveEngine(async (engine) => ({
+          listed: await engine.listAutomationClaims({ automationId }),
+          failures: await engine.listAutomationFailures(),
+        }));
+        if (read === null) return null;
+        const notice = read.failures.failures.find((failure) => failure.automationId === automationId);
         return new Set([
-          ...listed.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
-          ...(newestFailure ? [newestFailure.claimId] : []),
+          ...read.listed.claims.slice(0, RESUMABLE_FAILURES).map((claim) => claim.claimId),
+          ...(notice ? [notice.claimId] : []),
         ]);
       });
     } catch (error) {
