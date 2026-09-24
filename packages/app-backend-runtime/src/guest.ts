@@ -1,5 +1,8 @@
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { DatabaseSync, constants } from "node:sqlite";
-import { getQuickJS } from "quickjs-emscripten";
+import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC } from "quickjs-emscripten";
+import type { QuickJSWASMModule } from "quickjs-emscripten";
 import { AppBackendRuntimeError, boundedText } from "./protocol.js";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
@@ -91,6 +94,24 @@ export function authorize(
   });
 }
 
+const MiB = 1024 * 1024, WASM_PAGE_BYTES = 64 * 1024;
+let quickjsCode: Promise<WebAssembly.Module> | undefined;
+const compiledQuickJS = () => quickjsCode ??= readFile(createRequire(createRequire(import.meta.url).resolve("quickjs-emscripten"))
+  .resolve("@jitl/quickjs-wasmfile-release-sync/wasm")).then(bytes => WebAssembly.compile(bytes));
+
+/**
+ * A QuickJS instance with a new memory, so no operation reads memory that an earlier one freed.
+ * QuickJS's own memory limit cannot count allocations in this build, so the memory's fixed size is the limit.
+ */
+async function newQuickJS(memoryBytes: number): Promise<{module: QuickJSWASMModule; exhausted(): boolean}> {
+  const pages = memoryBytes / WASM_PAGE_BYTES, memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+  let exhausted = false;
+  // The memory starts at its limit, so QuickJS's allocator asks it to grow only when an operation needs more.
+  memory.grow = () => { exhausted = true; throw new RangeError("The app operation memory is full."); };
+  const module = await newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmModule: await compiledQuickJS(), wasmMemory: memory }));
+  return { module, exhausted: () => exhausted };
+}
+
 // The trusted caller owns the transaction and clears authorization before host metadata writes.
 export async function evaluate(db: DatabaseSync, request: GuestRequest, options: GuestOptions = {}): Promise<{resultJson: string; attachedFileIds: string[]}> {
   if(options.persistentConnection && !persistentRowidTables.has(db)) {
@@ -103,9 +124,18 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
     persistentRowidTables.set(db,tables);
   }
   authorize(db, request, options);
-  const engine = await getQuickJS();
-  const runtime = engine.newRuntime();
-  runtime.setMemoryLimit(request.limits.memoryBytes);
+  const quickjs = await newQuickJS(request.limits.memoryBytes);
+  try { return run(quickjs.module, db, request, options); }
+  catch (error) {
+    if (quickjs.exhausted() && !(error instanceof AppBackendRuntimeError)) {
+      throw new Error(`App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`);
+    }
+    throw error;
+  }
+}
+
+function run(quickjs: QuickJSWASMModule, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
+  const runtime = quickjs.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
   runtime.setInterruptHandler(() => performance.now() >= deadline);

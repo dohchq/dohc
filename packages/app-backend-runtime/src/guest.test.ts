@@ -6,7 +6,7 @@ import { DEFAULT_LIMITS } from "./protocol.ts";
 
 function request(body: string, overrides: Partial<GuestRequest> = {}): GuestRequest {
   return {
-    tables: ["items"], source: `globalThis.operations = { run(ctx) { ${body} } };`,
+    tables: ["items"], source: `globalThis.operations = { run(ctx, input) { ${body} } };`,
     operation: "run", callerJson: '{"kind":"owner"}', inputJson: "null",
     nowMs: 1000, requestId: "request-1", secret: "", readOnly: false,
     files: [], limits: { ...DEFAULT_LIMITS }, ...overrides,
@@ -75,6 +75,70 @@ describe("reusable guest evaluator", () => {
     await withDatabase(async db => {
       await expect(evaluate(db, request("ctx.refuse('full', 'No spaces remain.');"), { persistentConnection: true }))
         .rejects.toMatchObject({ name: "AppBackendRuntimeError", refusal: { code: "full", message: "No spaces remain." } });
+      expect((await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson).toBe('"next"');
+    });
+  });
+});
+
+describe("guest memory", () => {
+  const marker = "dohc-marker-4111111111111111";
+  // Fills memory with a record: many copies of its text, then a large buffer of its bytes.
+  const plant = `const notes = ctx.db.query('SELECT value FROM items')[0].value;
+    const copies = []; for (let i = 0; i < 4000; i++) copies.push(notes + i);
+    const bytes = new Uint8Array(4 << 20); for (let i = 0; i < ${marker.length}; i++) bytes[i] = notes.charCodeAt(i);
+    for (let filled = ${marker.length}; filled < bytes.length; filled *= 2) bytes.copyWithin(filled, 0, filled);
+    return copies.length;`;
+  // The search holds each byte of the marker plus one, so the marker exists only in memory another operation wrote.
+  const shifted = String.fromCharCode(...[...marker].map(char => char.charCodeAt(0) + 1));
+  const find = `(bytes => { const m = ${JSON.stringify(shifted)}, first = m.charCodeAt(0) - 1;
+    for (let i = bytes.indexOf(first); i >= 0; i = bytes.indexOf(first, i + 1)) {
+      let j = 1; while (j < m.length && bytes[i + j] === m.charCodeAt(j) - 1) j++;
+      if (j === m.length) return true;
+    }
+    return false; })`;
+  const size = 8 << 20;
+  // Every way QuickJS hands out buffer memory: new, resized, grown, transferred, and copied.
+  const probes = [
+    `new Uint8Array(new ArrayBuffer(${size}))`,
+    `new Uint8Array(${size})`,
+    `new Uint8Array(new Float64Array(${size / 8}).buffer)`,
+    `(() => { const b = new ArrayBuffer(16, { maxByteLength: ${size} }); b.resize(${size}); return new Uint8Array(b); })()`,
+    `(() => { const b = new ArrayBuffer(16, { maxByteLength: ${size} }); const view = new Uint8Array(b); b.resize(${size}); return view; })()`,
+    `new Uint8Array(new ArrayBuffer(16).transfer(${size}))`,
+    `new Uint8Array(new ArrayBuffer(16).transferToFixedLength(${size}))`,
+    `new Uint8Array(new ArrayBuffer(16, { maxByteLength: ${size} }).transfer(${size}))`,
+    `new Uint8Array(new ArrayBuffer(${size / 2}).slice(0))`,
+    `new Uint8Array(new SharedArrayBuffer(${size}))`,
+    `(() => { const b = new SharedArrayBuffer(16, { maxByteLength: ${size} }); b.grow(${size}); return new Uint8Array(b); })()`,
+  ];
+
+  it.each(probes)("keeps a record an earlier operation read out of a later operation's buffer: %s", async probe => {
+    await withDatabase(async db => {
+      db.prepare("INSERT INTO items VALUES(1, ?)").run(marker.repeat(40));
+      expect((await evaluate(db, request(plant), { persistentConnection: true })).resultJson).toBe("4000");
+      // The later operation cannot read items, so the record can reach it only through memory.
+      const later = request(`return ${find}(${probe});`, { tables: ["dohc_receipts"], readOnly: true });
+      expect((await evaluate(db, later, { persistentConnection: true })).resultJson).toBe("false");
+    });
+  });
+
+  it("stops an operation at its memory limit, however it allocates, and runs the next one", async () => {
+    await withDatabase(async db => {
+      const many = (count: number) => `const held = []; for (let i = 0; i < ${count}; i++) held.push(new Uint8Array(1 << 20)); return held.length;`;
+      const strings = "const held = []; for (let i = 0; i < 64; i++) held.push('x'.repeat(1 << 20) + i); return held.length;";
+      for (const body of [many(64), strings, "return new Uint8Array(64 << 20).length;", "return new Uint8Array(2 ** 30).length;"]) {
+        await expect(evaluate(db, request(body), { persistentConnection: true }))
+          .rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+      }
+      // QuickJS uses part of the memory, so an operation holds most of its limit.
+      expect((await evaluate(db, request(many(16)), { persistentConnection: true })).resultJson).toBe("16");
+      const lowered = { limits: { ...DEFAULT_LIMITS, memoryBytes: 16 << 20 } };
+      await expect(evaluate(db, request(many(16), lowered), { persistentConnection: true }))
+        .rejects.toThrow("App operation needed more than its 16 MiB memory limit, so it stopped.");
+      // An operation that runs out of memory can still refuse, and one that recovers returns normally.
+      await expect(evaluate(db, request(`try { ${many(64)} } catch { ctx.refuse('full', 'No memory.'); }`), { persistentConnection: true }))
+        .rejects.toMatchObject({ refusal: { code: "full", message: "No memory." } });
+      expect((await evaluate(db, request(`try { ${many(64)} } catch { return 'recovered'; }`), { persistentConnection: true })).resultJson).toBe('"recovered"');
       expect((await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson).toBe('"next"');
     });
   });

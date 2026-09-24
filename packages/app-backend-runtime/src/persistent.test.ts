@@ -157,6 +157,15 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("stops an operation at its memory limit and keeps serving the dataset",async()=>{
+    await fixture(async({open})=>{
+      const worker=await open();
+      const hoard="globalThis.operations={run(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}";
+      await expect(worker.prepare({...operation(),source:hoard})).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+      expect((await worker.prepare(operation(initial,{id:1,value:"after"}))).result).toEqual([{id:1,value:"after"}]);
+    });
+  });
+
   it("replays committed changesets without evaluating source and refuses out-of-order events",async()=>{
     await fixture(async({open})=>{
       const writer=await open(),recovered=await open();
