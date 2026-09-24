@@ -274,6 +274,7 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  noticesChanged: "desktop:notices-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",

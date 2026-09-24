@@ -13,6 +13,11 @@ import {
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import {
+  NOTICE_BODY_MAX_CHARS,
+  NOTICE_ID_MAX_CHARS,
+  NOTICE_TITLE_MAX_CHARS,
+} from "@dohc/workspace-contracts/relay";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -5831,6 +5836,59 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Notices sent to a person. "account" rows come from the signed-in account's
+// notice list on the relay and reach all of that person's computers. "local"
+// rows stay on this computer: nobody is signed in, the workspace does not sync
+// through the signed-in server, or the server has no notice list. Dismissed
+// rows are not listed.
+export const NoticeStoreName = z.enum(["local", "account"]);
+const NOTICE_TARGET_FIELD = z.string().min(1).max(1_024).optional();
+export const NoticeRow = z.object({
+  store: NoticeStoreName,
+  noticeId: z.string().min(1).max(NOTICE_ID_MAX_CHARS),
+  kind: z.string().min(1).max(64),
+  workspaceId: z.string().min(1).max(1_024).nullable(),
+  recipientShareId: z.string().min(1).max(128).nullable(),
+  senderKind: z.enum(["person", "agent", "automation"]).nullable(),
+  senderLabel: z.string().min(1).max(40).nullable(),
+  title: z.string().min(1).max(NOTICE_TITLE_MAX_CHARS * 2),
+  body: z.string().max(NOTICE_BODY_MAX_CHARS * 2),
+  target: z.object({
+    path: NOTICE_TARGET_FIELD,
+    record: NOTICE_TARGET_FIELD,
+    thread: NOTICE_TARGET_FIELD,
+    message: NOTICE_TARGET_FIELD,
+    share: NOTICE_TARGET_FIELD,
+    automation: NOTICE_TARGET_FIELD,
+    run: NOTICE_TARGET_FIELD,
+  }),
+  createdAtMs: z.number().int().nonnegative(),
+  readAtMs: z.number().int().nonnegative().nullable(),
+});
+export type NoticeRow = z.infer<typeof NoticeRow>;
+export const NoticeRef = z.object({
+  store: NoticeStoreName,
+  noticeId: z.string().min(1).max(NOTICE_ID_MAX_CHARS),
+});
+export type NoticeRef = z.infer<typeof NoticeRef>;
+export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+export const NoticesChangedEvent = z.undefined();
+
+export const noticeOperations = {
+  listNotices: {
+    channel: "desktop:list-notices",
+    payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
+  },
+  readNotice: {
+    channel: "desktop:read-notice",
+    payload: NoticeRef, guard: "trusted-sender",
+  },
+  dismissNotice: {
+    channel: "desktop:dismiss-notice",
+    payload: NoticeRef, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
 // engine capture, reusing its store) and STREAMS remote CRDT deltas back over
@@ -6070,7 +6128,8 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
-    OperationBridge<typeof workspaceSearchOperations> {
+    OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof noticeOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6512,6 +6571,9 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the notices listNotices returns changed. A poke, not the
+  // rows. Returns an unsubscribe function.
+  onNoticesChanged(listener: () => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

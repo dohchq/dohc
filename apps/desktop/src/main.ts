@@ -100,6 +100,7 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -205,11 +206,13 @@ import {
 } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
+  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
+import { createNoticeStore, type NoticeAccount, type NoticeStore } from "./notices/noticeStore";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -764,6 +767,7 @@ const credentialSessionCache =
     if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
       .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
+    if (snapshot.credentials) void noticeStore().sync();
   });
 async function refreshCredentialCache(): Promise<void> {
   try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
@@ -793,6 +797,48 @@ function clearCachedCredentials(): void {
     }
   }
 }
+
+// Notices sent to the signed-in person, and this computer's own. The store
+// pulls after each sync pass, at sign-in, and when a window gains focus.
+let cachedNoticeStore: NoticeStore | null = null;
+function noticeAccount(credentials: CloudSessionCredentials | null): NoticeAccount | null {
+  if (!credentials?.relayUrl) return null;
+  return {
+    key: chatShareSessionKey(credentials)!,
+    userId: credentials.userId,
+    relay: {
+      baseUrl: credentials.relayUrl,
+      token: credentials.token,
+      fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+    },
+  };
+}
+function noticeStore(): NoticeStore {
+  cachedNoticeStore ??= createNoticeStore({
+    directory: join(stateDir(), "notices"),
+    currentAccount: async () => {
+      await warmCredentialCache();
+      return noticeAccount(cachedCredentials);
+    },
+    accountForWorkspace: async (workspaceId) => {
+      await warmCredentialCache();
+      const workspace = findWorkspace(workspaceId);
+      if (!workspace) return null;
+      const author = workspace.shareView
+        ? resolveShareViewRelayAuthorId(workspace.shareView, cachedCredentials)
+        : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials);
+      return author === undefined ? null : noticeAccount(cachedCredentials);
+    },
+    installId: localReactorFallbackId,
+    onChanged: () => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send(CHANNELS.noticesChanged);
+      }
+    },
+  });
+  return cachedNoticeStore;
+}
+app.on("browser-window-focus", () => void noticeStore().sync());
 
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   const publicStatus = ShareHandoffStatus.parse(status);
@@ -1749,10 +1795,12 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: () =>
-      withWorkspaceAttachmentAsync(workspace, () =>
+    afterSuccessfulPull: () => {
+      void noticeStore().sync();
+      return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
-      ),
+      );
+    },
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
@@ -4686,6 +4734,12 @@ function registerIpcHandlers(): void {
       console.error("[desktop] workspace search activity:", error);
     },
   }));
+
+  registerOperations(operationBoundary, noticeOperations, {
+    listNotices: async () => ({ notices: await noticeStore().list() }),
+    readNotice: (input) => noticeStore().mark(input, "read"),
+    dismissNotice: (input) => noticeStore().mark(input, "dismissed"),
+  });
 
   workspaceEngineIpc.registerYDoc();
 
