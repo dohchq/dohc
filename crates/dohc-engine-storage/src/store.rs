@@ -301,12 +301,13 @@ impl EngineStore {
     }
 
     /// Open and placed displacements, and kept ones whose bytes could not be
-    /// read: the rows a replay resolves or inspects again.
+    /// read: the rows a replay resolves or inspects again, newest first.
     pub fn list_unsettled_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
         materialize::list_unsettled_displacements(&self.conn)
     }
 
-    /// The open and placed displacements of one path, from any job.
+    /// The open and placed displacements of one path, from any job, newest
+    /// first.
     pub fn list_unsettled_displacements_for_path(
         &self,
         workspace_id: &str,
@@ -315,7 +316,7 @@ impl EngineStore {
         materialize::list_unsettled_displacements_for_path(&self.conn, workspace_id, path)
     }
 
-    /// Every displacement of one job, in any state.
+    /// Every displacement of one job, in any state, newest first.
     pub fn list_displacements_for_job(
         &self,
         job_id: &str,

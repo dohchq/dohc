@@ -544,14 +544,30 @@ fn row_to_displacement(row: &rusqlite::Row<'_>) -> rusqlite::Result<Displacement
     })
 }
 
+/// Which rows come first.
+#[derive(Clone, Copy)]
+enum Order {
+    /// For evidence: in the order the outside changes happened.
+    OldestFirst,
+    /// For recovery: the last file moved off a path held its newest bytes, so
+    /// it goes back first and an older displaced file then finds the name
+    /// taken instead of taking it.
+    NewestFirst,
+}
+
 fn query_displacements(
     conn: &Connection,
     filter: &str,
+    order: Order,
     params: impl rusqlite::Params,
 ) -> Result<Vec<Displacement>, StorageError> {
+    let direction = match order {
+        Order::OldestFirst => "ASC",
+        Order::NewestFirst => "DESC",
+    };
     let sql = format!(
         "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
-         WHERE {filter} ORDER BY displacement_id"
+         WHERE {filter} ORDER BY displacement_id {direction}"
     );
     let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
     let rows = stmt
@@ -631,7 +647,7 @@ pub(crate) fn resolve_displacement(
     tx.commit().map_err(StorageError::persist)
 }
 
-/// Rows a replay must look at, oldest first: every open or placed row, and
+/// Rows a replay must look at, newest first: every open or placed row, and
 /// every kept row whose bytes could not be read.
 pub(crate) fn list_unsettled_displacements(
     conn: &Connection,
@@ -639,11 +655,12 @@ pub(crate) fn list_unsettled_displacements(
     query_displacements(
         conn,
         "state IN ('open', 'placed') OR (state = 'kept' AND displaced_sha256 IS NULL)",
+        Order::NewestFirst,
         [],
     )
 }
 
-/// Open and placed rows for one path, from any job, oldest first. An empty
+/// Open and placed rows for one path, from any job, newest first. An empty
 /// `workspace_id` on either side matches every workspace.
 pub(crate) fn list_unsettled_displacements_for_path(
     conn: &Connection,
@@ -654,16 +671,17 @@ pub(crate) fn list_unsettled_displacements_for_path(
         conn,
         "state IN ('open', 'placed') AND target_path = ?2 \
          AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
+        Order::NewestFirst,
         [workspace_id, path],
     )
 }
 
-/// Every row of one job, in any state, oldest first.
+/// Every row of one job, in any state, newest first.
 pub(crate) fn list_displacements_for_job(
     conn: &Connection,
     job_id: &str,
 ) -> Result<Vec<Displacement>, StorageError> {
-    query_displacements(conn, "job_id = ?1", [job_id])
+    query_displacements(conn, "job_id = ?1", Order::NewestFirst, [job_id])
 }
 
 /// Kept rows for one workspace, oldest first. They are the outside changes the
@@ -672,7 +690,12 @@ pub(crate) fn list_kept_displacements(
     conn: &Connection,
     workspace_id: &str,
 ) -> Result<Vec<Displacement>, StorageError> {
-    query_displacements(conn, "state = 'kept' AND workspace_id = ?1", [workspace_id])
+    query_displacements(
+        conn,
+        "state = 'kept' AND workspace_id = ?1",
+        Order::OldestFirst,
+        [workspace_id],
+    )
 }
 
 /// Whether an open row names `path`: a replace moved that path aside and

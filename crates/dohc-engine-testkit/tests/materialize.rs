@@ -2138,3 +2138,118 @@ fn a_failed_conflict_copy_keeps_the_jobs_content() {
     assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OURS));
     assert_eq!(job_status(&store), JobStatus::Conflict);
 }
+
+const NEWER: &[u8] = b"a newer save that landed while dohc moved its own content aside";
+
+/// Two outside saves during one replace: OUTSIDE before dohc moves the
+/// preimage aside, NEWER before it moves its own content aside to put
+/// OUTSIDE back. The process can stop right after the second move, and the
+/// put-back of a displaced file can stay locked.
+struct TwoSaves {
+    displaces: AtomicU32,
+    crash_after_second_move: bool,
+    lock_put_backs: bool,
+}
+
+impl TwoSaves {
+    fn new(crash_after_second_move: bool, lock_put_backs: bool) -> Self {
+        TwoSaves {
+            displaces: AtomicU32::new(0),
+            crash_after_second_move,
+            lock_put_backs,
+        }
+    }
+}
+
+impl AtomicReplacer for TwoSaves {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        let n = self.displaces.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => std::fs::write(target, OUTSIDE).expect("first outside save"),
+            1 => std::fs::write(target, NEWER).expect("newer outside save"),
+            _ => {}
+        }
+        StdReplacer.displace(target, displaced)?;
+        if n == 1 && self.crash_after_second_move {
+            panic!("the process stops right after moving the newer save aside");
+        }
+        Ok(())
+    }
+
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        if self.lock_put_backs && incoming.to_string_lossy().ends_with(".displaced") {
+            return Err(transient_lock_error());
+        }
+        StdReplacer.place(incoming, target)
+    }
+}
+
+/// After the newer save, the older outside change stays displaced under a
+/// kept row, and the job conflicts.
+fn assert_newer_save_shown(sc: &Scratch, store: &EngineStore) {
+    assert_eq!(
+        read(sc, "a.md").as_deref(),
+        Some(NEWER),
+        "the newest save is at its path"
+    );
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(read(sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
+    assert_eq!(displaced_files(sc), vec![kept[0].displaced_name.clone()]);
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("unsettled")
+            .is_empty()
+    );
+    assert_eq!(job_status(store), JobStatus::Conflict);
+}
+
+/// Crash between moving the newer save aside and putting it back. The name
+/// is empty and two rows name the path; recovery returns the newest file.
+#[test]
+fn a_crash_after_moving_a_newer_save_aside_returns_the_newer_save() {
+    let sc = Scratch::new("crash-after-aside");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let replacer = TwoSaves::new(true, false);
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain(&store, &sc, &replacer, &NoFaults)
+        }));
+        assert!(stopped.is_err(), "the process stopped mid-replace");
+        assert!(!sc.target("a.md").exists(), "the name is empty");
+        assert_eq!(displaced_files(&sc).len(), 2);
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    drain(&store, &sc, &StdReplacer, &NoFaults);
+    assert_newer_save_shown(&sc, &store);
+}
+
+/// The put-back of the newer save stays locked past its tries. The next run
+/// returns the newer save, not the older outside change.
+#[test]
+fn a_locked_put_back_of_a_newer_save_returns_it_on_the_next_run() {
+    let sc = Scratch::new("locked-put-back");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    run_pending_jobs(
+        &store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &TwoSaves::new(false, true),
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
+    )
+    .expect_err("the put-back stays locked");
+    assert!(!sc.target("a.md").exists(), "the name is empty");
+
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_newer_save_shown(&sc, &store);
+}

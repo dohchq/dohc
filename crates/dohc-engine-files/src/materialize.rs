@@ -50,8 +50,10 @@
 //!   where capture records it like any outside edit, and the job conflicts.
 //!   The file stays displaced, with its row `kept` as evidence, only when a
 //!   program created the target meanwhile.
-//! - Replay resolves every unfinished row first, including rows of other jobs
-//!   for the same path. A write that stopped before `placed` gets the
+//! - Replay resolves every unfinished row first, newest first, including rows
+//!   of other jobs for the same path. The last file moved off a path held its
+//!   newest bytes, so it goes back first, and an older displaced file then
+//!   finds the name taken and stays displaced. A write that stopped before `placed` gets the
 //!   displaced file back. A `placed` row is judged like a finished replace and
 //!   never brings back a file the store holds. A file a replace could not
 //!   return is tried again whenever the actor is asked to confirm that path is
@@ -1295,13 +1297,14 @@ fn displace_target(
         ));
     }
     let preimage = Preimage::Present(expected.to_owned());
+    let mut reads = TargetReads::default();
     let attempt = retry_while_locked(
         target,
         target,
         options.backoff,
         MAX_REPLACE_ATTEMPTS,
         || {
-            if !preimage_matches(&preimage, &read_current_no_follow(target)?) {
+            if reads.check(target, &preimage)? != TargetHolds::Expected {
                 return Ok(Attempt::Done(Some(false)));
             }
             if content.is_some() {
@@ -1327,6 +1330,50 @@ fn displace_target(
         options.now_ms,
     )?;
     outcome
+}
+
+/// What a retry loop's check found at the target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetHolds {
+    Nothing,
+    Expected,
+    Other,
+}
+
+/// The last read of a target in one retry loop: its size, its modification
+/// time, and what it held. A retry reads and hashes the target again only when
+/// the size or time changed, so a locked large file is not hashed on every
+/// try. A change the size and time miss is still caught, because whatever
+/// the loop moves is read and judged again after the move.
+#[derive(Default)]
+struct TargetReads {
+    last: Option<((u64, Option<std::time::SystemTime>), TargetHolds)>,
+}
+
+impl TargetReads {
+    fn check(
+        &mut self,
+        target: &Path,
+        expected: &Preimage,
+    ) -> Result<TargetHolds, MaterializeError> {
+        let stamp = std::fs::symlink_metadata(target)
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok()));
+        if let (Some(stamp), Some((last, holds))) = (stamp, self.last)
+            && stamp == last
+        {
+            return Ok(holds);
+        }
+        let holds = match read_current_no_follow(target)? {
+            CurrentTarget::Absent => TargetHolds::Nothing,
+            current if preimage_matches(expected, &current) => TargetHolds::Expected,
+            _ => TargetHolds::Other,
+        };
+        if let Some(stamp) = stamp {
+            self.last = Some((stamp, holds));
+        }
+        Ok(holds)
+    }
 }
 
 /// One try of moving `target` to `displaced`. `Done(false)` when nothing was
@@ -1498,7 +1545,10 @@ fn swap_back(
         && !matches!(aside.inspect(store)?, Inspected::Known | Inspected::Missing)
     {
         // Someone else's file landed between the check and the move. Put it
-        // back where it was; the displaced file stays displaced.
+        // back where it was; the displaced file stays displaced. Its row is
+        // kept first, so a put-back that fails leaves only the newer file's
+        // open row, which the next recovery returns.
+        keep_moved(store)?;
         let back = if return_displaced(target, aside, options)? {
             DisplacementResolution::Discard
         } else {
@@ -1507,7 +1557,6 @@ fn swap_back(
             }
         };
         store.resolve_displacement(aside.displacement_id, back, None, options.now_ms)?;
-        keep_moved(store)?;
         return Ok(true);
     }
     let returned = return_displaced(target, moved, options)?;
@@ -1581,11 +1630,14 @@ fn move_aside(
         content_sha256: spec.content_sha256,
     };
     let ours = Preimage::Present(content.to_owned());
+    let mut reads = TargetReads::default();
     let attempt = retry_while_locked(target, target, options.backoff, RETURN_ATTEMPTS, || {
-        match read_current_no_follow(target) {
-            Ok(CurrentTarget::Absent) => return Ok(Attempt::Done(Some(false))),
-            Ok(current) if preimage_matches(&ours, &current) => {}
-            Ok(_) | Err(MaterializeError::SymlinkTarget) => return Ok(Attempt::Done(None)),
+        match reads.check(target, &ours) {
+            Ok(TargetHolds::Nothing) => return Ok(Attempt::Done(Some(false))),
+            Ok(TargetHolds::Expected) => {}
+            Ok(TargetHolds::Other) | Err(MaterializeError::SymlinkTarget) => {
+                return Ok(Attempt::Done(None));
+            }
             Err(err) => return Err(err),
         }
         displace_attempt(options.replacer, target, &aside.path).map(|attempt| match attempt {
@@ -1943,6 +1995,8 @@ fn recover_job_displacements(
             rows.push(row);
         }
     }
+    // Newest first: the last file moved off the path held its newest bytes.
+    rows.sort_by_key(|row| std::cmp::Reverse(row.displacement_id));
     let mut kept = false;
     for row in rows {
         let unsettled = row.state != DisplacementState::Kept || row.displaced_sha256.is_none();
@@ -3388,6 +3442,39 @@ mod tests {
             "a byte-range-locked read must keep the FileLocked contract"
         );
         drop(holder);
+    }
+
+    /// A retry loop reads and hashes the target again only when its size or
+    /// modification time changed. Same size and time, new bytes: the cached
+    /// answer stands (the later judgment of what moved catches that case).
+    #[test]
+    fn a_retry_rereads_the_target_only_when_its_size_or_time_changed() {
+        let scratch = Scratch::new("target-reads");
+        let target = scratch.root.join("a.md");
+        std::fs::write(&target, b"expected").expect("write");
+        let when = std::fs::metadata(&target)
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+        let expected = Preimage::Present(hex_sha256(b"expected"));
+        let mut reads = TargetReads::default();
+        assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Expected);
+
+        std::fs::write(&target, b"EXPECTED").expect("same size");
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.set_modified(when))
+            .expect("restore mtime");
+        assert!(
+            reads.check(&target, &expected).expect("check") == TargetHolds::Expected,
+            "an unchanged size and time skips the read"
+        );
+
+        std::fs::write(&target, b"longer content").expect("new size");
+        assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Other);
+        std::fs::remove_file(&target).expect("remove");
+        assert!(reads.check(&target, &expected).expect("check") == TargetHolds::Nothing);
     }
 
     /// The no-replace rename claims an empty name and refuses an occupied
