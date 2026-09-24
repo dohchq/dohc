@@ -1,3 +1,4 @@
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CrashReportSource } from "../ipc/bridgeContract";
 
@@ -141,10 +142,12 @@ export function createCrashScrubber(roots: readonly string[], platform: NodeJS.P
       return [trimmed, trimmed.replace(/\\/g, "/"), pathToFileURL(trimmed).href];
     })
     .sort((left, right) => right.length - left.length);
+  // A root ends at a separator, so a sibling such as `dohc-notes` is not
+  // dohc's own folder.
   const rootPattern = spellings.length === 0
     ? null
     : new RegExp(
-        `(?:${spellings.map(escapeRegExp).join("|")})((?:[\\\\/][^\\s'"()<>|]*)?)`,
+        `(?:${spellings.map(escapeRegExp).join("|")})(?![\\w.-])((?:[\\\\/][^\\s'"()<>|]*)?)`,
         platform === "win32" ? "gi" : "g",
       );
   return (text) => {
@@ -154,20 +157,40 @@ export function createCrashScrubber(roots: readonly string[], platform: NodeJS.P
     result = result
       // URLs, including file:// and dohc's own schemes, which carry paths.
       .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"()<>]*/gi, "<url>")
+      // Node's network errors name the host after the error code, or after
+      // the call when no code is given.
+      .replace(/\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)(\s+)[^\s,;'"()<>]+/g, "$1$2<host>")
+      .replace(/\b(getaddrinfo|connect)(\s+)(?![A-Z][A-Z_]*\b)(?=[^\s,;'"()<>]*[.:])[^\s,;'"()<>]+/g, "$1$2<host>")
+      .replace(/\b(attempted address:?\s*)[^\s,;'"()<>]+/gi, "$1<host>")
       .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>")
-      // A quote that opens after a word character is an apostrophe.
+      // A quote that opens after a word character is an apostrophe, and so
+      // is one inside a quoted value that a letter follows. The second rule
+      // is bounded so a line of unclosed quotes stays linear.
       .replace(/(?<!\w)"[^"\n]*"(?!\w)/g, "\"…\"")
       .replace(/(?<!\w)'[^'\n]*'(?!\w)/g, "'…'")
+      .replace(/(?<!\w)'(?:[^'\n]|'(?=\w)){1,500}'(?!\w)/g, "'…'")
       .replace(/(?<!\w)`[^`\n]*`(?!\w)/g, "`…`")
       // Windows drive and UNC paths run to the next quote or bracket, since
-      // their folder names can hold spaces.
-      .replace(/(?:\b[A-Za-z]:[\\/]|\\\\(?=[^\\\s]))[^\n\r'"()<>|]*/g, "<path>")
+      // their folder names can hold spaces and apostrophes.
+      .replace(/(?:\b[A-Za-z]:[\\/]|\\\\(?=[^\\\s]))(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
       // POSIX paths with at least two parts, not inside a word or a dohc path.
-      .replace(/(?<![\w.:~/<>-])\/(?:[^\s/'"()<>|]+\/)+[^\n\r'"()<>|]*/g, "<path>")
+      .replace(/(?<![\w.:/<>-])\/(?:[^\s/'"()<>|]+\/)+(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
       .replace(/\b(bearer|basic)\s+[^\s'"]+/gi, "$1 <redacted>")
-      .replace(/\b(token|secret|password|passphrase|authorization|cookie|signature|api[_-]?key)(\s*[=:]\s*)[^\s,;&'"]+/gi, "$1$2<redacted>")
+      .replace(/\b([\w-]*(?:token|secret|password|passphrase|authorization|cookie|signature|api[_-]?key))(\s*[=:]\s*)[^\s,;&'"]+/gi, "$1$2<redacted>")
+      // A JSON Web Token: its header always starts `{"`, which is `eyJ`.
+      .replace(/\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, "<redacted>")
       .replace(/(?<![\w+=-])(?=[\w+=-]*\d)[\w+=-]{32,}/g, "<redacted>")
+      .replace(/(?<![\w:])(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/gi, "<ip>")
       .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>");
     return result;
   };
+}
+
+/**
+ * dohc's own folder: the checkout in development, or the installed app. A
+ * packaged build's code sits under its resources folder, whose parent also
+ * holds the executable on every platform, including a macOS app's Contents.
+ */
+export function crashReportRoot(app: { isPackaged: boolean; appPath: string; resourcesPath: string }): string {
+  return app.isPackaged ? dirname(app.resourcesPath) : resolve(app.appPath, "../..");
 }

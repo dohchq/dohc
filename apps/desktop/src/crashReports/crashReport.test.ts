@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   CRASH_EVENT_MAX_CHARS,
+  crashReportRoot,
   crashReportText,
   createCrashScrubber,
   formatCrashEvent,
@@ -59,12 +60,61 @@ describe("crash report scrubbing", () => {
     expect(scrub("fetch https://relay.example.test/sync?token=abc failed")).toBe("fetch <url> failed");
     expect(scrub("dohc-file://ws-1/notes/plan.md")).toBe("<url>");
     expect(scrub("signed in as sam@example.test")).toBe("signed in as <email>");
-    expect(scrub("connect ECONNREFUSED 192.168.1.20:443")).toBe("connect ECONNREFUSED <ip>:443");
+    expect(scrub("listening on 192.168.1.20")).toBe("listening on <ip>");
     expect(scrub("Bearer abc.def")).toBe("Bearer <redacted>");
     expect(scrub("Authorization: Bearer abc.def")).toBe("Authorization: <redacted> <redacted>");
     expect(scrub("password=hunter2 next")).toBe("password=<redacted> next");
     expect(scrub("session 5f0c3e4a9b8d7c6e5f4a3b2c1d0e9f8a7b6c ended")).toBe("session <redacted> ended");
     expect(scrub("workspace 0d2f7b9e-8a5c-4d3e-9f1a-2b6c8e0d4a7f closed")).toBe("workspace <redacted> closed");
+  });
+
+  it("removes the host from Node's network errors", () => {
+    expect(scrub("getaddrinfo ENOTFOUND sync.acme-corp.internal")).toBe("getaddrinfo ENOTFOUND <host>");
+    expect(scrub("getaddrinfo EAI_AGAIN sync.acme-corp.internal")).toBe("getaddrinfo EAI_AGAIN <host>");
+    expect(scrub("connect ECONNREFUSED 10.0.0.5:443")).toBe("connect ECONNREFUSED <host>");
+    expect(scrub("connect ECONNREFUSED ::1:443")).toBe("connect ECONNREFUSED <host>");
+    expect(scrub("connect ETIMEDOUT sync.acme-corp.internal:443")).toBe("connect ETIMEDOUT <host>");
+    expect(scrub("getaddrinfo sync.acme-corp.internal")).toBe("getaddrinfo <host>");
+    expect(scrub("Connect Timeout Error (attempted address: sync.acme-corp.internal:443, timeout: 10000ms)"))
+      .toBe("Connect Timeout Error (attempted address: <host>, timeout: 10000ms)");
+    // Ordinary words after "connect" stay.
+    expect(scrub("dohc could not connect to the server")).toBe("dohc could not connect to the server");
+  });
+
+  it("removes IPv6 addresses", () => {
+    expect(scrub("listening on fe80::1ff:fe23:4567:890a")).toBe("listening on <ip>");
+    expect(scrub("peer 2001:db8::7 closed")).toBe("peer <ip> closed");
+    expect(scrub("bound to [::1]:4000")).toBe("bound to [<ip>]:4000");
+  });
+
+  it("does not take a sibling of dohc's folder for dohc's own", () => {
+    const programs = resolve("dohc-install", "Programs");
+    const own = createCrashScrubber([join(programs, "dohc")], process.platform);
+    expect(own(`at x (${join(programs, "dohcx", "other.js")}:1:1)`)).toBe("at x (<path>)");
+    expect(own(`at x (${join(programs, "dohc-notes", "secret.md")}:1:1)`)).toBe("at x (<path>)");
+    expect(own(`at x (${join(programs, "dohc", "resources", "app.asar")}:1:1)`)).toBe("at x (<dohc>/resources/app.asar:1:1)");
+    const checkout = createCrashScrubber(["/home/sam/dev/dohc"], "linux");
+    expect(checkout("read /home/sam/dev/dohc-notes/secret.md")).toBe("read <path>");
+    expect(checkout("at x (/home/sam/dev/dohc/apps/desktop/out/main/index.js:3:1)"))
+      .toBe("at x (<dohc>/apps/desktop/out/main/index.js:3:1)");
+  });
+
+  it("removes a home-relative path", () => {
+    expect(scrub("open ~/Documents/Trip plans/budget.md")).toBe("open ~<path>");
+  });
+
+  it("removes every kind of named token, and a JSON Web Token", () => {
+    expect(scrub("access_token=abcdef12 next")).toBe("access_token=<redacted> next");
+    expect(scrub("refresh_token=short1")).toBe("refresh_token=<redacted>");
+    expect(scrub("x-api-key: k1")).toBe("x-api-key: <redacted>");
+    expect(scrub("got eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.c2ln from the relay")).toBe("got <redacted> from the relay");
+  });
+
+  it("removes a quoted or bare path that holds an apostrophe", () => {
+    expect(scrub("open 'C:\\Users\\sam\\Ice's notes.md' failed")).toBe("open '…' failed");
+    expect(scrub("open C:\\Users\\sam\\Ice's notes.md")).toBe("open <path>");
+    expect(scrub("open '/home/sam/Ice's notes.md'")).toBe("open '…'");
+    expect(scrub("rename 'Ice's notes' to 'Plans'")).toBe("rename '…' to '…'");
   });
 
   it("keeps ordinary code words and version numbers", () => {
@@ -123,6 +173,19 @@ describe("crash report formatting", () => {
       .toContain("Error: a value of type object");
     expect(formatCrashEvent({ kind: "main-exception", error: "lost C:\\Users\\sam\\notes.md", origin: "uncaughtException" }, FACTS, scrub))
       .toContain("Error: lost <path>");
+  });
+
+  it("uses the folder that holds a packaged build's code, on macOS too", () => {
+    expect(crashReportRoot({
+      isPackaged: true,
+      appPath: "/Applications/dohc.app/Contents/Resources/app.asar",
+      resourcesPath: "/Applications/dohc.app/Contents/Resources",
+    }).replace(/\\/g, "/")).toBe("/Applications/dohc.app/Contents");
+    const mac = createCrashScrubber(["/Applications/dohc.app/Contents"], "darwin");
+    expect(mac("at open (/Applications/dohc.app/Contents/Resources/app.asar/out/main/index.js:4:2)"))
+      .toBe("at open (<dohc>/Resources/app.asar/out/main/index.js:4:2)");
+    expect(crashReportRoot({ isPackaged: false, appPath: join(INSTALL, "apps", "desktop"), resourcesPath: "unused" }))
+      .toBe(INSTALL);
   });
 
   it("bounds one problem and puts a header on the report", () => {

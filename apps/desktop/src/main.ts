@@ -90,7 +90,7 @@ import {
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { release as osRelease, type as osType } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
@@ -383,7 +383,7 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { installCrashCapture } from "./crashReports/crashCapture";
-import { createCrashScrubber } from "./crashReports/crashReport";
+import { createCrashScrubber, crashReportRoot } from "./crashReports/crashReport";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
@@ -414,9 +414,8 @@ const crashReports = createCrashReportStore({
     electron: process.versions.electron ?? "unknown",
     uptimeSeconds: Math.round(process.uptime()),
   }),
-  // dohc's own files: the install folder, or the checkout in development.
   scrub: createCrashScrubber(
-    [app.isPackaged ? dirname(process.execPath) : resolve(app.getAppPath(), "../..")],
+    [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
     process.platform,
   ),
   onChanged: () => {

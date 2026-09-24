@@ -555,6 +555,26 @@ describe("desktop engine restart coordination", () => {
     } finally { held.resolve(); await started; await waiting; await f.close(error); }
   });
 
+  it("records one crash problem per engine crash, then the final verdict", async () => {
+    const f = fixture();
+    const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await f.engine.start();
+      const record = vi.mocked(f.dependencies.recordEngineProblem);
+      f.options().onFailure!(exit, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(attempt, false);
+      f.options().onFailure!(verdict, true);
+      expect(record.mock.calls).toEqual([[exit, "restarting"], [verdict, "stopped"]]);
+      // A launch ends the crash, so the next failure is a new problem.
+      f.options().onLaunch!();
+      f.options().onFailure!(exit, false);
+      expect(record).toHaveBeenCalledTimes(3);
+      expect(record).toHaveBeenLastCalledWith(exit, "restarting");
+    } finally { await f.close(); }
+  });
+
   it("reads quitting state on terminal failure and fails only the prepared restart set", async () => {
     const f = fixture();
     const workspace = await f.addWorkspace("workspace");

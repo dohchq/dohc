@@ -87,6 +87,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   } = dependencies;
 
   let rustEngineDaemon: EngineDaemonLifecycle | null = null;
+  // A failure since the engine last launched is already in the crash report.
+  let engineProblemRecorded = false;
   let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
   let rustEngineRelayClient: EngineRelayClient | null = null;
   let rustEngineSessionSource: RelayConfiguredDaemonClientSource | null = null;
@@ -398,7 +400,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           // counts and wedge budgets, which tell a developer or an agent exactly
           // which limit was hit. It goes to the log in full.
           console.error("[desktop] Rust engine daemon:", error);
-          if (!isQuitting()) recordEngineProblem(error, terminal ? "stopped" : "restarting");
+          // One problem per crash: the first failure, not each restart
+          // attempt after it, then the final verdict if restarts run out.
+          if (!isQuitting() && (terminal || !engineProblemRecorded)) {
+            recordEngineProblem(error, terminal ? "stopped" : "restarting");
+            if (!terminal) engineProblemRecorded = true;
+          }
           if (terminal && !isQuitting()) {
             // The dialog is for the user, so it says what broke and what to do
             // instead — no internal names, one instruction per sentence
@@ -433,6 +440,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         // staleness window. Scope-free: the lost event could have belonged to
         // any open workspace.
         onLaunch: () => {
+          engineProblemRecorded = false;
           startOwnerHost();
           startOwnerDelivery();
           for (const runtimes of restartingPluginRuntimes) {
