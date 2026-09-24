@@ -2941,6 +2941,15 @@ export const StartSitePreviewResult = z.object({
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
 
+// What a start answers: the preview, or that another surface replaced this
+// start with a newer one before it finished. The newer start's preview then
+// arrives as a SitePreviewReplacedEvent.
+export const StartSitePreviewAnswer = z.union([
+  StartSitePreviewResult,
+  z.object({ replaced: z.literal(true) }).strict(),
+]);
+export type StartSitePreviewAnswer = z.infer<typeof StartSitePreviewAnswer>;
+
 // Another surface started the app's preview again. The surface named here
 // shows `preview` from now on, or nothing when no preview runs.
 export const SitePreviewReplacedEvent = z.object({
@@ -6317,7 +6326,7 @@ export interface DohcDesktopBridge
   ): Promise<ImportToDatabaseResult>;
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
-  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewAnswer>;
   getSitePreviewLogs(
     payload: GetSitePreviewLogsPayload,
   ): Promise<GetSitePreviewLogsResult>;

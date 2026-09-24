@@ -232,7 +232,6 @@ import {
   parsePluginWebAppTabPath,
   appViewId,
   clearPluginView,
-  isActiveViewShown,
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
@@ -254,7 +253,8 @@ import {
   toggleChats,
   toggleFolderExpanded,
   togglePinned,
-  toggleSidebar,
+  toggleSidebarOnRail,
+  VIEW_IDS,
   type ActivityViewId,
   type EditorGroup,
   type WorkbenchState,
@@ -1177,17 +1177,24 @@ export function DesktopWorkspaceShell(props: {
     ],
     [pinnedRoots, railPluginViews, railViews],
   );
-  // A view the sidebar stopped showing, hidden or unpinned, leaves no
-  // selection behind, and the side panel never shows it, even when toggled
-  // open. Until the settings arrive the selection stands, so a restart keeps
-  // the view that was open.
-  const sidePanelOpen =
-    wb.sidebarVisible &&
-    (!props.userSettings || isActiveViewShown(wb.activeView, railOrder));
+  const railOrderRef = useRef(railOrder);
+  railOrderRef.current = railOrder;
+  // When the person hides the selected view or unpins the selected app, the
+  // selection moves to a view on the rail. Only a change to the rail does
+  // this: a link or command that opens a hidden view keeps it open. Until
+  // the settings arrive the selection stands, so a restart keeps the view
+  // that was open.
+  const railKey = railOrder.join("\0");
+  const settingsLoaded = props.userSettings !== null;
   useEffect(() => {
-    if (!props.userSettings) return;
-    mutateWb((state) => keepActiveViewShown(state, railOrder));
-  }, [mutateWb, props.userSettings, railOrder, wb.activeView, wb.sidebarVisible]);
+    if (!settingsLoaded) return;
+    mutateWb((state) => keepActiveViewShown(state, railOrderRef.current));
+  }, [mutateWb, railKey, settingsLoaded]);
+  // Toggling the side panel open shows a view on the rail, never a hidden one.
+  const toggleSidePanel = useCallback(
+    () => mutateWb((state) => toggleSidebarOnRail(state, railOrderRef.current)),
+    [mutateWb],
+  );
 
   // A pin is a personal setting. Main applies each pin to the file as it is
   // now, so two quick pins both land; the root hears the save through the
@@ -3599,7 +3606,7 @@ export function DesktopWorkspaceShell(props: {
         mutateWb(toggleChats);
       } else if (key === "b") {
         event.preventDefault();
-        mutateWb(toggleSidebar);
+        toggleSidePanel();
       } else if (key === "w") {
         // CommandOrControl+W closes the tab. Close Window keeps the separate
         // CommandOrControl+Shift+W native accelerator.
@@ -3618,6 +3625,7 @@ export function DesktopWorkspaceShell(props: {
     mutateWb,
     openSettings,
     reportShellError,
+    toggleSidePanel,
     undoForEditor,
   ]);
 
@@ -3689,7 +3697,7 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "toggle-sidebar",
         label: "Toggle sidebar",
-        run: () => mutateWb(toggleSidebar),
+        run: toggleSidePanel,
       },
       {
         id: "close-tab",
@@ -3720,8 +3728,8 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle chats panel",
         run: () => mutateWb(toggleChats),
       },
-      // The views the sidebar shows; a hidden view has no command either.
-      ...railViews.map((view) => ({
+      // Every view of dohc's, hidden from the rail or not: a command opens it.
+      ...VIEW_IDS.map((view) => ({
         id: `show-${view}`,
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
@@ -3836,10 +3844,10 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
-      railViews,
       railPluginViews,
       pinnedApps,
       pluginCommandItems,
+      toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -4577,7 +4585,7 @@ export function DesktopWorkspaceShell(props: {
         agentActive={agentActive}
         primarySidebar={{
           visible: wb.sidebarVisible,
-          onToggle: () => mutateWb(toggleSidebar),
+          onToggle: toggleSidePanel,
         }}
         chatsSidebar={{
           visible: wb.chatsVisible,
@@ -4853,7 +4861,7 @@ export function DesktopWorkspaceShell(props: {
         >
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
-        {sidePanelOpen ? (
+        {wb.sidebarVisible ? (
           <SidePanel
             title={sidePanelTitle}
             width={wb.sidebarWidth}

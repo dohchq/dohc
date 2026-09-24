@@ -1112,7 +1112,13 @@ describe("an app preview shown by more than one surface", () => {
     // A start waits here when a test holds it.
     let gate: Promise<void> = Promise.resolve();
     let failNext = false;
-    const prepare = vi.fn(async () => async (): Promise<SitePreviewExecution<Result>> => {
+    let failNextPrepare = false;
+    const prepare = vi.fn(async (_isCurrent: () => boolean) => {
+      if (failNextPrepare) {
+        failNextPrepare = false;
+        throw new Error("no build script");
+      }
+      return async (): Promise<SitePreviewExecution<Result>> => {
       await gate;
       if (failNext) {
         failNext = false;
@@ -1121,9 +1127,12 @@ describe("an app preview shown by more than one surface", () => {
       const handle = fakeStaticHandle(`http://127.0.0.1:${4200 + handles.length}/`);
       handles.push(handle);
       return { handle, result: { logs: [], mode: "" } };
+      };
     });
     const current = new Map<number, boolean>();
-    const show = (
+    // What a surface is answered: its preview, or that a newer start
+    // replaced its own.
+    const answer = (
       holderId: string,
       input: { mode?: string; restart?: boolean; senderId?: number } = {},
     ) => {
@@ -1140,6 +1149,11 @@ describe("an app preview shown by more than one surface", () => {
         prepare,
       });
     };
+    const show = async (...args: Parameters<typeof answer>) => {
+      const shown = await answer(...args);
+      if ("replaced" in shown) throw new Error("A newer start replaced this one.");
+      return shown;
+    };
     const hide = (holderId: string) =>
       lifecycle.release({
         getActiveWorkspaceId: () => "workspace-1",
@@ -1154,9 +1168,10 @@ describe("an app preview shown by more than one surface", () => {
       lifecycle.cancelSender(senderId);
     };
     return {
-      lifecycle, handles, prepare, show, hide, close, notifyReplaced,
+      lifecycle, handles, prepare, answer, show, hide, close, notifyReplaced,
       hold: (value: Promise<void>) => { gate = value; },
       failNextStart: () => { failNext = true; },
+      failNextPrepare: () => { failNextPrepare = true; },
     };
   }
 
@@ -1244,6 +1259,63 @@ describe("an app preview shown by more than one surface", () => {
     await s.hide("tab");
     await s.hide("pin");
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+  });
+
+  it("answers a start another surface replaced as replaced, then moves that surface to the newer one", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const tab = s.answer("tab", { mode: "dev", senderId: 1 });
+    await vi.waitFor(() => expect(s.prepare).toHaveBeenCalledOnce());
+    const pin = s.show("pin", { mode: "build", restart: true, senderId: 2 });
+    release.resolve();
+    await expect(tab).resolves.toEqual({ replaced: true });
+    const built = await pin;
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      generation: built.generation,
+      preview: built,
+    }));
+    // Whether the tab's start was cancelled or ran first, only the newer
+    // preview is left running.
+    for (const handle of s.handles) {
+      if (handle.url === built.url) expect(handle.stop).not.toHaveBeenCalled();
+      else expect(handle.stop).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("tells the others what still runs when a restart fails before stopping it", async () => {
+    const s = surfaces();
+    const shown = await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    s.failNextPrepare();
+    await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("no build script");
+    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      preview: expect.objectContaining({ url: shown.url }),
+    }));
+  });
+
+  it("gives preparation a lifetime check that holds while any surface holding the start does", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    asked.catch(() => undefined);
+    const joined = s.show("pin", { senderId: 2 });
+    joined.catch(() => undefined);
+    await vi.waitFor(() => expect(s.prepare).toHaveBeenCalledOnce());
+    const isCurrent = s.prepare.mock.calls[0]![0];
+    expect(isCurrent()).toBe(true);
+    s.close(1);
+    // Execution asks this after a build finishes; the pinned panel still
+    // holds the start.
+    expect(isCurrent()).toBe(true);
+    s.close(2);
+    expect(isCurrent()).toBe(false);
+    release.resolve();
+    await expect(joined).rejects.toThrow(START_CANCELLED_MESSAGE);
   });
 
   it("keeps a shared start alive when the window that asked first closes", async () => {

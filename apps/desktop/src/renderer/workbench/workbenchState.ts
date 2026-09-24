@@ -113,9 +113,11 @@ export function isActiveViewShown(
 }
 
 /**
- * Moves the selection off a view the sidebar no longer shows: one of dohc's
- * views the person hid, or an app they unpinned. The first view on the rail
- * takes its place, and with none the side panel stays closed.
+ * Moves the selection off a view the person just took off the rail: one of
+ * dohc's views they hid, or an app they unpinned. The first view on the rail
+ * takes its place, and with none the side panel closes. A view that a link or
+ * command opens stays open even when the rail hides it; only a change to the
+ * rail runs this.
  */
 export function keepActiveViewShown(
   state: WorkbenchState,
@@ -125,6 +127,20 @@ export function keepActiveViewShown(
   const [first] = rail;
   if (first !== undefined) return { ...state, activeView: first };
   return state.sidebarVisible ? { ...state, sidebarVisible: false } : state;
+}
+
+/**
+ * Opens or closes the side panel. Opening shows the selected view when the
+ * rail shows it, and otherwise the first view on the rail; with an empty
+ * rail nothing opens.
+ */
+export function toggleSidebarOnRail(
+  state: WorkbenchState,
+  rail: readonly ActivityViewId[],
+): WorkbenchState {
+  if (state.sidebarVisible) return { ...state, sidebarVisible: false };
+  const opened = keepActiveViewShown({ ...state, sidebarVisible: true }, rail);
+  return opened.sidebarVisible ? opened : state;
 }
 // Reserved for dohc's own tabs. A workspace file path is never spelled this
 // way, so a persisted tab carrying it is always one of the kinds below.

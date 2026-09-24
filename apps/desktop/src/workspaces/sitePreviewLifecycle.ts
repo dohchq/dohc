@@ -90,6 +90,9 @@ export type SitePreviewExecution<T extends { logs: SiteLogEntry[] }> = {
 
 type StartedPreview<T> = T & { url: string; exited: boolean };
 export type HeldPreview<T> = StartedPreview<T> & { generation: number };
+// The answer to a start another surface replaced with a newer one before it
+// finished. The newer start's preview reaches every surface when it settles.
+export type ReplacedStart = { replaced: true };
 
 // One surface showing an app's preview, in the window it lives in.
 type PreviewHolder = { senderId: number; isCurrent: () => boolean };
@@ -105,8 +108,10 @@ type PreviewHold<T> = {
   holders: Map<string, PreviewHolder>;
   // The holders this generation's start answers directly.
   answered: Set<string>;
-  answer: Promise<HeldPreview<T>>;
+  answer: Promise<HeldPreview<T> | ReplacedStart>;
   state: "starting" | "ready" | "failed";
+  // A newer start replaced this one before it finished.
+  replaced: boolean;
 };
 
 // What a surface that did not ask for a new start is told: the preview it now
@@ -132,6 +137,9 @@ export function createSitePreviewLifecycle<
 }) {
   const startLanes = new Map<string, Promise<void>>();
   const holds = new Map<string, PreviewHold<T>>();
+  // The last preview each app's start produced, replaced or not, so a failed
+  // restart can tell surfaces what still runs.
+  const lastStarted = new Map<string, HeldPreview<T>>();
   const activePreviews = new Map<string, PreviewRecord>();
   const pendingStarts = new Set<PendingStart>();
   const pendingBySender = new Map<number, Set<PendingStart>>();
@@ -377,7 +385,9 @@ export function createSitePreviewLifecycle<
     workspaceId: string;
     siteRoot: string;
     isCurrent: () => boolean;
-    prepare: () => Promise<
+    // Gets the start's own lifetime check, which execution must use: for a
+    // shared start, it holds while any surface holding the preview does.
+    prepare: (isCurrent: () => boolean) => Promise<
       (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
     >;
   }): Promise<StartedPreview<T>> {
@@ -396,7 +406,7 @@ export function createSitePreviewLifecycle<
 
     try {
       requireCurrent();
-      const execute = await startInput.prepare();
+      const execute = await startInput.prepare(isCurrent);
       requireCurrent();
       supersedeOlderStarts(pending);
       pending.phase = "queued";
@@ -469,10 +479,10 @@ export function createSitePreviewLifecycle<
     mode: string;
     restart: boolean;
     isCurrent: () => boolean;
-    prepare: () => Promise<
+    prepare: (isCurrent: () => boolean) => Promise<
       (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
     >;
-  }): Promise<HeldPreview<T>> {
+  }): Promise<HeldPreview<T> | ReplacedStart> {
     const key = previewKey(acquireInput.workspaceId, acquireInput.siteRoot);
     const holder: PreviewHolder = {
       senderId: acquireInput.senderId,
@@ -489,7 +499,9 @@ export function createSitePreviewLifecycle<
       held.answered.add(acquireInput.holderId);
       return held.answer;
     }
-    // Every surface that showed the app follows the new start.
+    // Every surface that showed the app follows the new start. A start still
+    // running for them answers that it was replaced, not that it failed.
+    if (held?.state === "starting") held.replaced = true;
     const holders = new Map(held?.holders);
     holders.set(acquireInput.holderId, holder);
     const generation = ++lastGeneration;
@@ -507,19 +519,37 @@ export function createSitePreviewLifecycle<
       mode: acquireInput.mode,
       holders,
       answered: new Set([acquireInput.holderId]),
-      answer: started.then((preview) => ({ ...preview, generation })),
+      answer: started.then(
+        (started): HeldPreview<T> | ReplacedStart => {
+          const preview = { ...started, generation };
+          lastStarted.set(key, preview);
+          return hold.replaced ? { replaced: true } : preview;
+        },
+        (error: unknown): ReplacedStart => {
+          if (hold.replaced) return { replaced: true };
+          throw error;
+        },
+      ),
       state: "starting",
+      replaced: false,
     };
     holds.set(key, hold);
     hold.answer.then(
-      (preview) => {
+      (answer) => {
         hold.state = "ready";
-        tellOthers(key, hold, preview);
+        if (!("replaced" in answer)) tellOthers(key, hold, answer);
       },
       () => {
         hold.state = "failed";
-        // The old preview may be gone: a start stops it before it runs.
-        if (activePreviews.get(key)?.state !== "running") tellOthers(key, hold, null);
+        // Tell the others what still runs: the start may have stopped the
+        // old preview, or failed before it could.
+        const running = activePreviews.get(key);
+        const last = lastStarted.get(key);
+        tellOthers(
+          key,
+          hold,
+          running?.state === "running" && last?.url === running.handle.url ? last : null,
+        );
       },
     );
     return hold.answer;

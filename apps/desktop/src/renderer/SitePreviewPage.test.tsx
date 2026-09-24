@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   SitePreviewReplacedEvent,
+  StartSitePreviewAnswer,
   GetSitePreviewLogsResult,
   SitePackageInfo,
   SitePackagePayload,
@@ -54,7 +55,7 @@ const workspaceSettingsResult = {
 const bridgeMock = {
   getSitePackage: vi.fn(async (_payload: SitePackagePayload): Promise<SitePackageInfo | null> => site),
   getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
-  startSitePreview: vi.fn(async (_payload: { holderId: string }): Promise<StartSitePreviewResult> => ({
+  startSitePreview: vi.fn(async (_payload: { holderId: string }): Promise<StartSitePreviewAnswer> => ({
     siteRoot: "report",
     mode: "static" as const,
     url: "http://127.0.0.1:49152/",
@@ -157,12 +158,52 @@ describe("SitePreviewPage", () => {
     expect(screen.getByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
   });
 
+  it("keeps starting, with no error, when another surface replaced its start, then follows the newer one", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({ replaced: true });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    expect(await screen.findByText("Starting static preview…")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-error")).toBeNull();
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 4,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:49184/", logs: [], exited: false, generation: 4 },
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49184");
+    expect(screen.queryByText("Starting static preview…")).toBeNull();
+  });
+
+  it("does not remember the mode of an answer a newer preview already replaced", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, kind: "package", scripts: { dev: "vite" } });
+    const own = deferred<StartSitePreviewAnswer>();
+    bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledOnce());
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    // The pinned panel builds the app before this tab's dev start answers.
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 5,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:49185/", logs: [], exited: false, generation: 5 },
+    });
+    await act(async () => {
+      own.resolve({ siteRoot: "report", mode: "dev", url: "http://127.0.0.1:49183/", logs: [], exited: false, generation: 3 });
+      await own.promise;
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49185");
+    expect(window.localStorage.getItem("dohc.site-preview-mode.v1:ws-sites:report")).not.toBe("dev");
+  });
+
   it("never paints its own older answer over a newer preview another surface started", async () => {
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
     await screen.findByTestId("site-preview-frame");
     const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
-    const own = deferred<StartSitePreviewResult>();
+    const own = deferred<StartSitePreviewAnswer>();
     bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
     await user.click(screen.getByTestId("site-preview-options"));
     await user.click(screen.getByTestId("site-preview-static"));

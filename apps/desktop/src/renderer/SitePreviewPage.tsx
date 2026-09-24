@@ -357,6 +357,8 @@ export function SitePreviewPage(props: {
         }
         generationRef.current = event.generation;
         showPreview(event.preview);
+        // A start of this surface that the newer one replaced ends here.
+        setRunningMode(null);
       }),
     [holderId, props.siteRoot, props.workspaceId, showPreview],
   );
@@ -370,6 +372,9 @@ export function SitePreviewPage(props: {
       request === previewStartRequestRef.current &&
       requestContext === siteContextRef.current;
     const generationAtStart = generationRef.current;
+    // Another surface replaced this start with a newer one; this surface
+    // keeps saying it is starting until that one arrives.
+    let replaced = false;
     logsRequestRef.current += 1;
     setLogsOpen(false);
     setPreviewLogs([]);
@@ -385,9 +390,14 @@ export function SitePreviewPage(props: {
         restart,
       });
       if (!isCurrent()) return;
-      rememberMode(props.workspaceId, props.siteRoot, mode);
-      // A newer start another surface made is already on screen.
+      if ("replaced" in result) {
+        replaced = true;
+        return null;
+      }
+      // A newer start another surface made is already on screen, and its
+      // mode is the one to open next time.
       if (result.generation < generationRef.current) return result;
+      rememberMode(props.workspaceId, props.siteRoot, mode);
       generationRef.current = result.generation;
       showPreview(result);
       return result;
@@ -402,7 +412,7 @@ export function SitePreviewPage(props: {
       );
       return null;
     } finally {
-      if (isCurrent()) setRunningMode(null);
+      if (isCurrent() && !replaced) setRunningMode(null);
     }
   }, [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext]);
 

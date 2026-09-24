@@ -6,10 +6,9 @@ import { pinnedAppInitial, usePinnedApps } from "./pinnedApps";
 import {
   appViewId,
   defaultWorkbenchState,
-  isActiveViewShown,
   keepActiveViewShown,
   pluginViewId,
-  toggleSidebar,
+  toggleSidebarOnRail,
   parseAppViewId,
   parseUiState,
   serializeUiState,
@@ -52,14 +51,21 @@ describe("sidebar views", () => {
     expect(keepActiveViewShown(onPlugin, [])).toBe(onPlugin);
   });
 
-  it("keeps the side panel closed when the rail shows nothing, even after a toggle", () => {
+  it("opens the side panel on a view the rail shows, and nothing when the rail is empty", () => {
     const onSearch = setView(defaultWorkbenchState(), "search");
     const closed = keepActiveViewShown(onSearch, []);
     expect(closed).toMatchObject({ activeView: "search", sidebarVisible: false });
     expect(keepActiveViewShown(closed, [])).toBe(closed);
-    const toggled = toggleSidebar(closed);
-    expect(isActiveViewShown(toggled.activeView, [])).toBe(false);
-    expect(keepActiveViewShown(toggled, []).sidebarVisible).toBe(false);
+    expect(toggleSidebarOnRail(closed, [])).toBe(closed);
+    // A hidden view the person opened earlier does not come back with the
+    // toggle; the first view on the rail does.
+    expect(toggleSidebarOnRail(closed, ["sites", "explorer"])).toMatchObject({
+      activeView: "sites",
+      sidebarVisible: true,
+    });
+    expect(toggleSidebarOnRail({ ...closed, activeView: "explorer" }, ["sites", "explorer"]))
+      .toMatchObject({ activeView: "explorer", sidebarVisible: true });
+    expect(toggleSidebarOnRail(onSearch, ["sites"]).sidebarVisible).toBe(false);
   });
 
   it("keeps a pinned app selected across a restart", () => {

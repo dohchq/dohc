@@ -16918,6 +16918,48 @@ describe("workbench render cost", () => {
 });
 
 describe("apps pinned to the sidebar", () => {
+  it("opens a view hidden from the rail from a command, and moves off it only when the rail changes", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const withSidebar = (hidden: typeof VIEW_IDS[number][], zoomLevel = 0) => ({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
+        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden },
+      },
+      source: "stored" as const,
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shellWith = (userSettings: ReturnType<typeof withSidebar>) => (
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={userSettings}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shellWith(withSidebar(["history"])));
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-history")).toBeNull();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("View: History"));
+    const panel = await screen.findByTestId("side-panel");
+    expect(within(panel).getByText("History")).toBeTruthy();
+
+    // Another settings change leaves the hidden view open.
+    view.rerender(shellWith(withSidebar(["history"], 1)));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+
+    // Hiding one more view changes the rail, so the selection moves to it.
+    view.rerender(shellWith(withSidebar(["history", "explorer"])));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
+  });
+
   it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const settings = {
