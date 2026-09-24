@@ -1235,7 +1235,7 @@ mod tests {
         assert!(
             refused
                 .message
-                .starts_with("migrated-by-newer-build: the store completed migration "),
+                .starts_with("migrated-by-newer-build: a newer build ran migration "),
             "{}",
             refused.message
         );

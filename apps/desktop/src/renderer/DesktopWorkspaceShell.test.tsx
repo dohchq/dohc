@@ -7093,7 +7093,7 @@ describe("engine store recovery", () => {
     },
     {
       cause: "migrated-by-newer-build" as const,
-      detail: "the store completed migration 5 (from-a-newer-build), which this build does not define",
+      detail: "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
       sentence: "A newer version of dohc updated this workspace's data store.",
     },
   ])("stops the workspace on $cause instead of offering the rebuild", async ({

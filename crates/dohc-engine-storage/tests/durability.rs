@@ -11,6 +11,7 @@ use dohc_engine_storage::{
     enqueue_job, hex_sha256, load_valid_backup,
 };
 use dohc_test_scratch::ScratchDir;
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OptionalExtension};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -390,9 +391,20 @@ fn unsupported_fingerprint_open_is_refused_and_preserves_evidence() {
     assert!(bundle.evidence.iter().any(|e| e == "engine.db"));
 }
 
+/// The rows a newer build's migration commits: its table and a completed
+/// ledger row after the last one this build defines.
+const NEWER_BUILD_MIGRATION: &str = "
+    BEGIN;
+    CREATE TABLE from_a_newer_build (x INTEGER);
+    INSERT INTO engine_migrations
+        (ordinal, id, checksum, engine_build, protocol_version,
+         transactional, started_at, completed_at, integrity_ok)
+    SELECT MAX(ordinal) + 1, 'from-a-newer-build', 'newer', 'newer', 1, 1, 2, 2, 1
+    FROM engine_migrations;
+    COMMIT;";
+
 /// A store a newer build migrated stops this build before any write, so a
-/// newer build still opens it. The newer build's migration is written as the
-/// rows it would commit: its table and a completed ledger row after the last.
+/// newer build still opens it.
 #[test]
 fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     let scratch = Scratch::new("newer-build-fence");
@@ -403,17 +415,8 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     }
     {
         let conn = Connection::open(&db).expect("raw");
-        conn.execute_batch(
-            "BEGIN;
-             CREATE TABLE from_a_newer_build (x INTEGER);
-             INSERT INTO engine_migrations
-                 (ordinal, id, checksum, engine_build, protocol_version,
-                  transactional, started_at, completed_at, integrity_ok)
-             SELECT MAX(ordinal) + 1, 'from-a-newer-build', 'newer', 'newer', 1, 1, 2, 2, 1
-             FROM engine_migrations;
-             COMMIT;",
-        )
-        .expect("a newer build migrates");
+        conn.execute_batch(NEWER_BUILD_MIGRATION)
+            .expect("a newer build migrates");
         conn.close().expect("close");
     }
     let wal = scratch.sub("engine.db-wal");
@@ -433,6 +436,77 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     assert!(
         std::fs::metadata(&wal).map_or(true, |wal| wal.len() == 0),
         "no WAL frames left behind"
+    );
+}
+
+/// A newer build that also stamps another schema version is still a newer
+/// build. Its store needs an update, never the rebuild that an unsupported
+/// fingerprint offers.
+#[test]
+fn a_newer_build_that_restamps_the_schema_version_is_named_as_newer() {
+    let scratch = Scratch::new("newer-build-version");
+    let db = scratch.db_path();
+    drop(EngineStore::open(&db, 1).expect("open"));
+    {
+        let conn = Connection::open(&db).expect("raw");
+        conn.execute_batch(NEWER_BUILD_MIGRATION)
+            .expect("a newer build migrates");
+        conn.pragma_update(None, "user_version", 3)
+            .expect("and stamps its own version");
+        conn.close().expect("close");
+    }
+    let before = std::fs::read(&db).expect("read before");
+
+    for refused in [
+        EngineStore::open(&db, 2).unwrap_err(),
+        EngineStore::open_read_only(&db).unwrap_err(),
+    ] {
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+    }
+    assert_eq!(
+        std::fs::read(&db).expect("read after"),
+        before,
+        "refused store left byte-identical"
+    );
+}
+
+/// A newer build that crashed leaves its last commit in the WAL. Refusing
+/// its store must not checkpoint that commit into engine.db: both files stay
+/// byte-identical, so no frame is lost or moved.
+#[test]
+fn refusing_a_newer_store_leaves_its_wal_frames_in_place() {
+    let scratch = Scratch::new("newer-build-wal");
+    let db = scratch.db_path();
+    let wal = scratch.sub("engine.db-wal");
+    drop(EngineStore::open(&db, 1).expect("open"));
+    {
+        let conn = Connection::open(&db).expect("raw");
+        // The newer build crashes, so nothing checkpoints its commit.
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .expect("no checkpoint on close");
+        conn.execute_batch(NEWER_BUILD_MIGRATION)
+            .expect("a newer build migrates");
+        conn.close().expect("close");
+    }
+    let wal_before = std::fs::read(&wal).expect("the newer build's WAL");
+    assert!(
+        !wal_before.is_empty(),
+        "the newer build's commit is in the WAL"
+    );
+    let before = std::fs::read(&db).expect("read before");
+
+    let refused = EngineStore::open(&db, 2).unwrap_err();
+    assert_eq!(refused.code(), "migrated-by-newer-build");
+
+    assert_eq!(
+        std::fs::read(&db).expect("read after"),
+        before,
+        "engine.db left byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&wal).expect("the WAL after"),
+        wal_before,
+        "the WAL keeps every frame"
     );
 }
 

@@ -6,7 +6,8 @@
 //! same runner.
 //!
 //! Before the runner, the open ritual refuses a store whose ledger holds a
-//! completed migration this list does not define: a newer build migrated it.
+//! migration this list does not define, completed or not: a newer build ran
+//! it.
 //!
 //! The runner walks the list in order. A migration whose completed ledger row
 //! matches this build's checksum is skipped; a completed row with a different
@@ -2207,41 +2208,42 @@ fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError
     Ok(())
 }
 
-/// Refuse a store that completed a migration `migrations` does not define.
-/// A newer build ran it, and this build cannot know what it changed, so
-/// running against the store could damage it. Reads only: the open ritual
-/// calls this before any persistent pragma, so a refused file stays
-/// byte-identical.
-pub(crate) fn refuse_store_from_newer_build(
+/// The refusal for a store a newer build migrated, or `None`. The ledger must
+/// be this engine's, which the baseline row proves, and hold a row
+/// `migrations` does not define. A newer build wrote that row, whether or not
+/// its migration completed, and this build cannot know what it changed.
+/// Reads only, so the open ritual asks before it writes anything.
+pub(crate) fn newer_build_refusal(
     conn: &Connection,
     migrations: &[Migration],
-) -> Result<(), StorageError> {
-    let mut completed = match conn.prepare(
-        "SELECT ordinal, id FROM engine_migrations \
-         WHERE completed_at IS NOT NULL ORDER BY ordinal",
-    ) {
+) -> rusqlite::Result<Option<StorageError>> {
+    let mut ledger = match conn
+        .prepare("SELECT ordinal, id FROM engine_migrations ORDER BY ordinal")
+    {
         Ok(statement) => statement,
         // No ledger, no newer migration. The open's validation judges the
         // rest of the file.
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
-            return Ok(());
+            return Ok(None);
         }
-        Err(other) => return Err(StorageError::corrupt(other)),
+        Err(other) => return Err(other),
     };
-    let rows = completed
+    let rows = ledger
         .query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(StorageError::corrupt)?;
-    for row in rows {
-        let (ordinal, id) = row.map_err(StorageError::corrupt)?;
-        if !migrations.iter().any(|migration| migration.id == id) {
-            // The id reaches the desktop's technical details; bound it.
-            let id = id.chars().take(64).collect();
-            return Err(StorageError::MigratedByNewerBuild { ordinal, id });
-        }
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !rows.iter().any(|(_, id)| id == BASELINE_MIGRATION_ID) {
+        return Ok(None);
     }
-    Ok(())
+    Ok(rows
+        .into_iter()
+        .find(|(_, id)| !migrations.iter().any(|migration| migration.id == id))
+        .map(|(ordinal, id)| StorageError::MigratedByNewerBuild {
+            ordinal,
+            // The id reaches the desktop's technical details; bound it.
+            id: id.chars().take(64).collect(),
+        }))
 }
 
 /// Run every pending migration in `migrations` (ordered) against `conn`,
@@ -2542,16 +2544,64 @@ mod tests {
         });
         run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("the newer build migrates");
 
-        refuse_store_from_newer_build(&conn, &newer).expect("the newer build opens its store");
-        let refused = refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)
-            .expect_err("a shorter list refuses the store");
+        assert!(
+            newer_build_refusal(&conn, &newer)
+                .expect("read ledger")
+                .is_none(),
+            "the newer build opens its store"
+        );
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("a shorter list refuses the store");
         assert_eq!(refused.code(), "migrated-by-newer-build");
         assert_eq!(
             refused.to_string(),
             format!(
-                "the store completed migration {} (from-a-newer-build), which this build does not define",
+                "a newer build ran migration {} (from-a-newer-build), which this build does not define",
                 BASELINE_MIGRATIONS.len()
             )
+        );
+    }
+
+    /// A newer build's migration that stopped before it completed can still
+    /// have changed the store. Its started row alone refuses the store.
+    #[test]
+    fn a_newer_builds_unfinished_migration_refuses_the_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("migrate");
+        conn.execute(
+            "INSERT INTO engine_migrations \
+             (ordinal, id, checksum, engine_build, protocol_version, transactional, started_at) \
+             VALUES (?1, 'from-a-newer-build', 'newer', 'newer', 1, 0, 2)",
+            [BASELINE_MIGRATIONS.len() as i64],
+        )
+        .expect("a newer build starts a migration and stops");
+
+        let refused = newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+            .expect("read ledger")
+            .expect("the started row refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+    }
+
+    /// Only this engine's ledger names a newer build. A table with the same
+    /// name but no baseline row belongs to something else, and the open's own
+    /// checks classify it.
+    #[test]
+    fn a_ledger_without_the_baseline_row_names_no_newer_build() {
+        let dir = tempdir();
+        let conn = open_bare(&dir.join("engine.db"));
+        conn.execute_batch(
+            "CREATE TABLE engine_migrations (ordinal INTEGER, id TEXT);
+             INSERT INTO engine_migrations VALUES (0, 'someone-elses-migration');",
+        )
+        .expect("a foreign ledger");
+        assert!(
+            newer_build_refusal(&conn, BASELINE_MIGRATIONS)
+                .expect("read ledger")
+                .is_none()
         );
     }
 

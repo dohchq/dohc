@@ -3702,7 +3702,7 @@ describe("sync status IPC contract", () => {
       historyCaptureFailed: true,
       engineStoreRefused: "migrated-by-newer-build",
       engineStoreRefusedDetail:
-        "the store completed migration 5 (from-a-newer-build), which this build does not define",
+        "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
     });
     expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
     expect(engineStoreRefusalRecovery("migrated-by-newer-build")).toBe("update");

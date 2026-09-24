@@ -5,19 +5,18 @@
 //!
 //! 1. Reject a non-empty file too small to hold a SQLite header, before the
 //!    connection is opened at all ([`reject_undersized_database`]).
-//! 2. Open the connection.
+//! 2. Open the connection with checkpoint-on-close off, so closing it on a
+//!    refused store never folds a WAL that another build left into the file.
 //! 3. Apply *session-scoped* pragmas only (`busy_timeout`, `foreign_keys`) —
 //!    these live on the connection, not the file.
 //! 4. Classify the fingerprint from read-only queries (`user_version`, table
-//!    presence). A v1/foreign store is rejected here, before any byte of the
-//!    file is touched.
-//! 5. Read the ledger's completed migrations. A store that completed one this
-//!    build does not define was migrated by a newer build and is rejected
-//!    here, still untouched.
-//! 6. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
-//!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the migration
-//!    ledger (`migration.rs`), then validate the required tables and
-//!    `quick_check`.
+//!    presence, the migration ledger). A v1/foreign store, or one whose ledger
+//!    holds a migration a newer build ran, is rejected here, before any byte
+//!    of the file is touched.
+//! 5. Only for an accepted (fresh or v2) store: turn checkpoint-on-close back
+//!    on, apply the *persistent* pragmas (`journal_mode = WAL`,
+//!    `synchronous = NORMAL`), then run the migration ledger
+//!    (`migration.rs`), then validate the required tables and `quick_check`.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
@@ -26,8 +25,9 @@ use crate::limits::{
 };
 use crate::migration::{
     BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome,
-    refuse_store_from_newer_build, run_migrations,
+    newer_build_refusal, run_migrations,
 };
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
@@ -193,6 +193,11 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
+    // The last connection to close a WAL database checkpoints it. A build
+    // that crashed can leave its commits in the WAL, and refusing its store
+    // must not fold them into engine.db.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .map_err(StorageError::corrupt)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
@@ -200,9 +205,11 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
-    refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)?;
 
-    // Step 4: the store is ours — the file-mutating pragmas are now safe.
+    // Step 4: the store is ours — closing may checkpoint again, and the
+    // file-mutating pragmas are now safe.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
+        .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
@@ -238,7 +245,6 @@ pub(crate) fn open_engine_db_read_only(path: &Path) -> Result<OpenedEngineDb, St
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
         return Err(StorageError::StateCorrupt { source: None });
     }
-    refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)?;
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     Ok(OpenedEngineDb {
@@ -314,7 +320,13 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
         .map_err(StorageError::corrupt)?;
 
     match version {
-        ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
+        // A store a newer build migrated needs that build. This build cannot
+        // know what the newer migration changed, so it must not run here.
+        ENGINE_SCHEMA_VERSION => match newer_build_refusal(conn, BASELINE_MIGRATIONS) {
+            Ok(None) => Ok(Disposition::ExistingV2),
+            Ok(Some(refused)) => Err(refused),
+            Err(err) => Err(StorageError::corrupt(err)),
+        },
         0 => {
             // Either a brand-new empty file or a non-empty foreign database that
             // never stamped a version. Refuse to init over the latter — any user
@@ -334,14 +346,20 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
             // Distinguish by a read-only integrity probe: a store that fails
             // `quick_check` is classified corrupt regardless of the version it
             // claims. (A genuine foreign db passes the probe.)
-            if probe_integrity_ok(conn) {
-                Err(StorageError::UnsupportedFingerprint {
-                    found: other,
-                    expected: ENGINE_SCHEMA_VERSION,
-                })
-            } else {
-                Err(StorageError::StateCorrupt { source: None })
+            if !probe_integrity_ok(conn) {
+                return Err(StorageError::StateCorrupt { source: None });
             }
+            // A newer build that stamps another version is still a newer
+            // build: its store needs an update, not the rebuild an unsupported
+            // fingerprint offers. A ledger this build cannot read proves
+            // nothing, so it leaves the fingerprint refusal as it was.
+            if let Ok(Some(refused)) = newer_build_refusal(conn, BASELINE_MIGRATIONS) {
+                return Err(refused);
+            }
+            Err(StorageError::UnsupportedFingerprint {
+                found: other,
+                expected: ENGINE_SCHEMA_VERSION,
+            })
         }
     }
 }

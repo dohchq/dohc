@@ -56,10 +56,10 @@ pub enum StorageError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// The store completed a migration this build does not define, so a newer
-    /// build migrated it. Refused before any byte of the file changes; a
-    /// build that defines every completed migration opens it.
-    #[error("the store completed migration {ordinal} ({id}), which this build does not define")]
+    /// The store's ledger holds a migration this build does not define,
+    /// completed or not, so a newer build ran it. Refused before any byte of
+    /// the file changes; a build that defines every ledger migration opens it.
+    #[error("a newer build ran migration {ordinal} ({id}), which this build does not define")]
     MigratedByNewerBuild { ordinal: i64, id: String },
 
     /// A backup operation failed (copy, manifest write, or restore-test). The
