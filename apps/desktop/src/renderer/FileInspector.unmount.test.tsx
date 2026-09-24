@@ -29,6 +29,7 @@ import {
   stubEditorGlobals,
   stubScrollSpy,
   findSourceEditor,
+  findEnabledMarkdownEditToggle,
   toggleSourceOnce,
 } from "./FileInspector.editor-fixture";
 import {
@@ -88,23 +89,6 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // surfaces carry it: the source CodeMirror host in FileInspector and the
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
-// The edit toggle is `disabled={readOnly || opening}`, and a click on a
-// disabled button does nothing and does not retry. A click fired the moment the
-// button exists is therefore dropped whenever the open has not answered yet,
-// and the wait for the source surface then times out on a toggle that never
-// happened. Clicking a mode toggle more than once is not a fix — the modes
-// cycle — so the enabled button is the thing to wait for.
-async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
-  return await waitFor(() => {
-    const toggle = screen.getByTestId("markdown-edit-toggle");
-    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
-    }
-    return toggle;
-  });
-}
 
 // The P1 trap: typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to

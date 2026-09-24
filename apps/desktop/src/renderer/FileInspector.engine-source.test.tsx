@@ -25,6 +25,7 @@ import {
   stubEditorGlobals,
   stubScrollSpy,
   findSourceEditor,
+  findEnabledMarkdownEditToggle,
   toggleSourceOnce,
   type CodeEditorTestHost,
 } from "./FileInspector.editor-fixture";
@@ -3034,8 +3035,7 @@ describe("engine markdown source view", () => {
       });
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("view-markdown");
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.click(await findEnabledMarkdownEditToggle());
       await user.type(
         await screen.findByTestId("markdown-editor"),
         "typed",
@@ -3170,8 +3170,7 @@ describe("engine markdown source view", () => {
           onSaveStateChange={(state) => states.push(state)}
         />,
       );
-      await screen.findByTestId("view-markdown");
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.click(await findEnabledMarkdownEditToggle());
       const sourceEditor = await findSourceEditor();
       await user.type(await textEditorContent(sourceEditor), "held");
       expect(states.at(-1)).toBe("saving");
