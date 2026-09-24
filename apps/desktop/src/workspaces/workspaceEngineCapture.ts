@@ -811,6 +811,21 @@ function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
   return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
+// Whether a claimed lineage holds every item of the history this session
+// recorded. A re-seeded lineage or another object's history starts from other
+// client ids, so it cannot cover what this session recorded.
+function claimCoversRecordedHistory(
+  claimed: Y.Doc,
+  recorded: Uint8Array | null,
+): boolean {
+  if (recorded === null) return false;
+  const claimedClocks = Y.decodeStateVector(Y.encodeStateVector(claimed));
+  for (const [client, clock] of Y.decodeStateVector(recorded)) {
+    if ((claimedClocks.get(client) ?? 0) < clock) return false;
+  }
+  return true;
+}
+
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -1800,6 +1815,12 @@ export function createWorkspaceEngineCapture(
     };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
+    // The object this session opened, and the part of its history the engine
+    // has recorded. A claim made while the session's generation was gone must
+    // name this object and cover this history before main keeps the document
+    // under it.
+    let sessionObjectId: string | undefined;
+    let recordedStateVector: Uint8Array | null = null;
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1874,12 +1895,15 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
-    // A file-locked settle failure means the engine holds a durably pending
-    // write and the GENERATION's own backoff timer is retrying it. That timer
-    // dies with the generation, so the fact it existed must outlive it:
-    // set on a file-locked refusal, cleared by the next settle that reaches
-    // disk, and read at adoption to re-arm the retry on the replacement.
-    let lockedSettlePending = false;
+    // A failed settle leaves the file behind the document. A file-locked
+    // refusal is retried by the GENERATION's own backoff timer, and any other
+    // failure waits for the next edit, but both die with the generation. The
+    // debt must outlive it: set on a settle failure, cleared by the next
+    // settle that reaches disk, and read at adoption to settle the
+    // replacement. Enabling sync is one such loss: it drops the generation
+    // before its settle can run, and when the engine already recorded every
+    // edit the replacement needs no replay to arm a settle of its own.
+    let settleOwed = false;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1916,6 +1940,10 @@ export function createWorkspaceEngineCapture(
             versionId: input.versionId,
             path: input.path,
             seedAbsentLineage,
+            // A reopen must find the object this session opened. If the path
+            // now names another object, refuse rather than replay this
+            // document into it.
+            ...(sessionObjectId ? { expectedObjectId: sessionObjectId } : {}),
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -1945,11 +1973,11 @@ export function createWorkspaceEngineCapture(
             onSessionError: requestReconnect,
             onSettleStart: (token) => input.onSettleStart(token, generation),
             onSettleError: (error, token) => {
-              if (isFileLockedRefusal(error)) lockedSettlePending = true;
+              settleOwed = true;
               input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {
-              lockedSettlePending = false;
+              settleOwed = false;
               return input.onSettled(result, token, generation);
             },
           });
@@ -1991,12 +2019,15 @@ export function createWorkspaceEngineCapture(
         const promotedSameLineage =
           canonicalLineageClaimId === null &&
           replacementClaimId !== null &&
-          (replacement.lineageOriginatedHere === true ||
-            isExactYDocClaimPromotion(doc, replacementClaimId));
+          (isExactYDocClaimPromotion(doc, replacementClaimId) ||
+            (replacement.lineageOriginatedHere === true &&
+              replacement.objectId === sessionObjectId &&
+              claimCoversRecordedHistory(replacement.doc, recordedStateVector)));
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
+          recordedStateVector = Y.encodeStateVector(replacement.doc);
           current = replacement;
           input.onLineageReplaced?.(
             Y.encodeStateAsUpdate(replacement.doc),
@@ -2044,6 +2075,7 @@ export function createWorkspaceEngineCapture(
           }
         }
         canonicalLineageClaimId = replacementClaimId;
+        recordedStateVector = Y.encodeStateVector(doc);
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
         try {
@@ -2055,17 +2087,16 @@ export function createWorkspaceEngineCapture(
         throw error;
       }
       markAlive();
-      // A pending locked settle survives the rebind: the failed
-      // generation's retry timer died with it, and when the replacement
-      // needed no replay (the daemon's CRDT already holds the edit) nothing
-      // above armed a settle — releasing the lock later would leave the
-      // artifact stale until an unrelated edit. Ask the replacement to
-      // settle: unchanged content routes through the engine's idempotent
-      // branch, which replays the pending write, and a still-held lock
-      // re-enters the provider's own retry ladder. Failures are reported
-      // through the settle channel like any other, so nothing extra to do
-      // with the rejection here.
-      if (lockedSettlePending) {
+      // A settle the failed generation owed survives the rebind: its retry
+      // died with it, and when the replacement needed no replay (the engine
+      // already holds the edit) nothing above armed a settle, which would
+      // leave the artifact stale until an unrelated edit. Ask the
+      // replacement to settle: unchanged content routes through the engine's
+      // idempotent branch, which replays the pending write, and a still-held
+      // lock re-enters the provider's own retry ladder. Failures are
+      // reported through the settle channel like any other, so nothing extra
+      // to do with the rejection here.
+      if (settleOwed) {
         void replacement.settleNow().catch(() => undefined);
       }
     };
@@ -2181,6 +2212,8 @@ export function createWorkspaceEngineCapture(
     current = await openGeneration(true);
     canonicalDoc = current.doc;
     canonicalLineageClaimId = current.lineageClaimId ?? null;
+    sessionObjectId = current.objectId;
+    recordedStateVector = Y.encodeStateVector(canonicalDoc);
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -2281,6 +2314,7 @@ export function createWorkspaceEngineCapture(
             armed();
             await journaled;
             Y.applyUpdate(doc, update);
+            recordedStateVector = Y.encodeStateVector(doc);
             // A successful record can promote a local-only lineage. Retain
             // the durable claim now; later deltas change the full-state hash.
             if (

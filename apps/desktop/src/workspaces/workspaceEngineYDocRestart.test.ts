@@ -813,6 +813,8 @@ async function typeIntoLostGeneration(input: {
   base: string;
   claimedState: (base: Uint8Array) => Uint8Array;
   originatedHere: boolean;
+  // The object the path names after the generation is lost.
+  claimedObjectId?: string;
   edit: (text: Y.Text) => void;
 }) {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-claim-typing-");
@@ -846,16 +848,28 @@ async function typeIntoLostGeneration(input: {
   const claimId = createHash("sha256").update(claimedUpdate).digest("hex");
   const claimedRecords: Uint8Array[] = [];
   const claimedDocs: Y.Doc[] = [];
+  const reopenObjectIds: Array<string | undefined> = [];
+  const claimedObjectId = input.claimedObjectId ?? "original-object";
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
     const unclaimed = options.transport === unclaimedClient;
+    if (!unclaimed) {
+      reopenObjectIds.push(options.expectedObjectId);
+      if (
+        options.expectedObjectId !== undefined &&
+        options.expectedObjectId !== claimedObjectId
+      ) {
+        throw new Error("ydoc-object-changed");
+      }
+    }
     const doc = new Y.Doc();
     Y.applyUpdate(doc, unclaimed ? baseUpdate : claimedUpdate);
     if (!unclaimed) claimedDocs.push(doc);
     return {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: unclaimed ? "original-object" : claimedObjectId,
       lineageClaimId: unclaimed ? null : claimId,
       lineageOriginatedHere: !unclaimed && input.originatedHere,
       contentKind: "plaintext",
@@ -915,9 +929,13 @@ async function typeIntoLostGeneration(input: {
   const before = Y.encodeStateVector(rendererDoc);
   input.edit(rendererDoc.getText("plainText"));
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
-  const settled = await session.settleNow();
+  const settled = await session.settleNow().then(
+    (value) => value,
+    (error: unknown) => ({ refused: error }),
+  );
   return {
     settled,
+    reopenObjectIds,
     session,
     openedDoc,
     claimId,
@@ -979,6 +997,177 @@ it("replaces the document when a foreign fork claims it while the generation is 
   expect(typed.claimedRecords).toEqual([]);
   expect(typed.claimedTexts()).toEqual(["bcdef"]);
   await typed.close();
+});
+
+// The unclaimed lineage was pruned while the generation was gone, and another
+// open re-seeded the file as a fresh history with new client ids and claimed
+// it here. The engine made that claim, but it does not hold this session's
+// history, so replaying into it would double the text.
+it("replaces the document when this device claimed a re-seeded history", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "recorded",
+    claimedState: () => {
+      const reseeded = new Y.Doc();
+      reseeded.getText("plainText").insert(0, "recorded");
+      return Y.encodeStateAsUpdate(reseeded);
+    },
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.settled).toMatchObject({ content: "recorded" });
+  expect(typed.replacements).toEqual(["recorded"]);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.claimedTexts()).toEqual(["recorded"]);
+  await typed.close();
+});
+
+// The object was renamed away while the generation was gone, and another
+// document this device claimed moved onto the path. The reopen names the
+// object this session opened, so it is refused rather than merged.
+it("refuses to reopen onto another object that moved onto the path", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "old document",
+    claimedObjectId: "other-object",
+    claimedState: () => {
+      const other = new Y.Doc();
+      other.getText("plainText").insert(0, "different document");
+      return Y.encodeStateAsUpdate(other);
+    },
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.reopenObjectIds[0]).toBe("original-object");
+  expect(typed.settled).toMatchObject({ refused: expect.any(Error) });
+  expect(typed.replacements).toEqual([]);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.session.doc.getText("plainText").toString()).toBe("old document typed");
+});
+
+// The session recorded a word, and sync turned on before its settle ran. The
+// generation is gone, its settle fails, and the sync pass claims exactly what
+// was recorded. The replacement needs no replay, so the settle the lost
+// generation owed must still run, or the file stays behind the document.
+it("settles a recorded word whose settle was lost with its generation", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-owed-settle-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "owed-settle" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  // What the engine holds for this lineage.
+  const engineDoc = new Y.Doc();
+  engineDoc.getText("plainText").insert(0, "recorded");
+  let recorded!: () => void;
+  const wordRecorded = new Promise<void>((resolve) => {
+    recorded = resolve;
+  });
+  let settledOnClaim!: (content: string) => void;
+  const claimSettled = new Promise<string>((resolve) => {
+    settledOnClaim = resolve;
+  });
+  let lostOptions: EngineYdocProviderSessionOptions | undefined;
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(engineDoc));
+    const claimId = createHash("sha256")
+      .update(Y.encodeStateAsUpdate(engineDoc))
+      .digest("hex");
+    if (unclaimed) lostOptions = options;
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: "original-object",
+      lineageClaimId: unclaimed ? null : claimId,
+      lineageOriginatedHere: !unclaimed,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+        Y.applyUpdate(engineDoc, update);
+        recorded();
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        if (!unclaimed) settledOnClaim(markdown);
+        return {
+          momentId: "owed-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "owed-settle",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert("recorded".length, " typed");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  await wordRecorded;
+
+  // Sync turns on: the binding closes and the generation's own settle fails.
+  currentClient = claimedClient;
+  const lost = Object.assign(new Error("workspace handle is unavailable"), {
+    code: "transport-error",
+  });
+  lostOptions?.onSettleError?.(lost, 1);
+  lostOptions?.onSessionError?.(lost);
+
+  await expect(claimSettled).resolves.toBe("recorded typed");
+  expect(replacements).toEqual([]);
+  await session.close({ settle: false });
+  await capture.stop();
 });
 
 it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {

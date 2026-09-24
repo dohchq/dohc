@@ -622,8 +622,8 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
 }
 
 // Enrolment leaves a lineage alone while a session holds it: claiming under
-// the session would turn its next record into a stale write. Closing the
-// session claims it, even when the session never settled.
+// the session would turn its next record into a stale write. A close that
+// settles the lineage then claims it for the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes() {
     let relay = FakeRelay::start(RelayState::default());
@@ -682,7 +682,7 @@ async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes(
         &handle,
         &mut id,
         "ydoc.close",
-        json!({ "sessionId": session_id, "settle": false }),
+        json!({ "sessionId": session_id, "settle": true }),
     )
     .await;
     call(

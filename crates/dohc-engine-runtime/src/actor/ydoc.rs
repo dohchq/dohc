@@ -2860,25 +2860,6 @@ fn ydoc_close_session_on_store(
             record_facts: Vec::new(),
         });
     };
-    // The enrolment sweep leaves a lineage alone while a session holds it. If
-    // the workspace now replicates, this close originates it; a local-only
-    // close would prune it and keep the document off the relay.
-    if restore_generation.is_none()
-        && !marker.lineage_claim_status.has_claimed_base()
-        && marker.head_update_seq > 0
-    {
-        match store.write_with(faults, |tx| {
-            dohc_engine_sync::originate_closing_ydoc_base_in_tx(tx, key, now_ms)
-        })? {
-            TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
-                eprintln!("engine: {declined}");
-            }
-            TxnOutcome::Committed(_) => {}
-            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
-        }
-        marker = dohc_engine_collab::read_marker(store, key)?
-            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
-    }
     // Richdoc settles like plaintext now, so the local-only close follows the
     // same workspace-file artifact rule (close_session refuses a dirty local
     // prune either way, and persists every replicated lineage internally).
@@ -2931,6 +2912,33 @@ fn ydoc_close_session_on_store(
     } else {
         None
     };
+    // The enrolment sweep leaves a lineage alone while a session holds it. If
+    // the workspace now replicates and the file already holds the head, this
+    // close claims the lineage: a local-only close would prune it and keep
+    // the document off the relay. A dirty close claims nothing, so it still
+    // refuses below instead of compacting text the file does not have.
+    if restore_generation.is_none()
+        && !marker.lineage_claim_status.has_claimed_base()
+        && marker.head_update_seq > 0
+        && dohc_engine_collab::local_close_is_covered(
+            store,
+            key,
+            &marker,
+            authoritative_projection.as_ref(),
+        )?
+    {
+        match store.write_with(faults, |tx| {
+            dohc_engine_sync::originate_closing_ydoc_base_in_tx(tx, key, now_ms)
+        })? {
+            TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
+                eprintln!("engine: {declined}");
+            }
+            TxnOutcome::Committed(_) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        marker = dohc_engine_collab::read_marker(store, key)?
+            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    }
     let outcome = match dohc_engine_collab::close_session(
         store,
         key,

@@ -120,8 +120,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
 
 /// Originate the lineage a closing session held, when the sweep left it for
 /// that session. A local-only close prunes the lineage, so this is the last
-/// point its history can reach the relay. Reads the path the way the sweep
-/// does.
+/// point its history can reach the relay. The file's current path comes
+/// from its snapshot. A deleted file has none, and a claim would let peers
+/// bring it back, so it originates nothing.
 pub fn originate_closing_ydoc_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
@@ -129,13 +130,16 @@ pub fn originate_closing_ydoc_base_in_tx(
 ) -> Result<BaseOrigination, SyncError> {
     let path: Option<String> = tx
         .query_row(
-            "SELECT COALESCE(s.path,d.path)              FROM ydoc_docs d LEFT JOIN snapshots s                ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id               AND s.object_id=d.object_id              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3                AND d.lineage_claim_status = 'unclaimed'",
+            "SELECT s.path FROM ydoc_docs d JOIN snapshots s \
+             ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+             AND s.object_id=d.object_id \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+             AND d.lineage_claim_status = 'unclaimed'",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
         .optional()
-        .map_err(SyncError::corrupt)?
-        .flatten();
+        .map_err(SyncError::corrupt)?;
     match path {
         Some(path) => originate_ydoc_base_in_tx(tx, key, &path, None, None, now_ms),
         None => Ok(BaseOrigination::NothingToDo),
@@ -1517,7 +1521,8 @@ mod tests {
         match store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
-                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','local',-1)",
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',-1)",
                     [],
                 )
                 .map_err(SyncError::persist)?;
@@ -1598,16 +1603,37 @@ mod tests {
     fn a_closing_session_originates_the_lineage_the_sweep_left_to_it() {
         let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "closing-plan",
+            "moment-closing",
+            "typed while open",
+            "capture",
+            2,
+        );
         let key = DocKey::new("ws", "main", "closing-plan").expect("key");
         let doc = Ydoc::wire();
         let update = doc.plaintext_insert(0, "typed while open");
         record_unsettled_ydoc(&mut store, &key, &update, Some("closing-plan.md"), None);
+        // A file deleted while its session stayed open has no snapshot left.
+        let deleted = DocKey::new("ws", "main", "deleted-plan").expect("key");
+        let deleted_update = Ydoc::wire().plaintext_insert(0, "gone");
+        record_unsettled_ydoc(
+            &mut store,
+            &deleted,
+            &deleted_update,
+            Some("deleted-plan.md"),
+            None,
+        );
         let leases = dohc_engine_collab::LeaseRegistry::new();
         let _lease = leases.acquire(&key).expect("open session lease");
+        let _deleted_lease = leases.acquire(&deleted).expect("open session lease");
         match store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
-                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','local',-1)",
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','local',-1)",
                     [],
                 )
                 .map_err(SyncError::persist)?;
@@ -1639,6 +1665,22 @@ mod tests {
             .collect();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0]["path"], "closing-plan.md");
+
+        let deleted_outcome = match store
+            .write_with(&NoFaults, |tx| {
+                originate_closing_ydoc_base_in_tx(tx, &deleted, 1_002)
+            })
+            .expect("deleted close origination")
+        {
+            dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+            dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+        };
+        assert_eq!(deleted_outcome, BaseOrigination::NothingToDo);
+        assert_eq!(
+            claim_status(&store, "deleted-plan").0,
+            "unclaimed",
+            "a deleted file must not reach peers through its closing session"
+        );
     }
 
     #[test]

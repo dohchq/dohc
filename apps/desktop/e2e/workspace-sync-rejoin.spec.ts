@@ -14,6 +14,7 @@ import {
 import { enrollWorkspaceKeyEnvelope } from "../src/workspaces/workspaceKeyEnvelopeEnrollment";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
+import { withEngineDb } from "./helpers/engineDb";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -973,6 +974,23 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
       await expect
         .poll(readSyncedAt(page, workspaceId), { timeout: 60_000 })
         .not.toBeNull();
+      // Enabling sync dropped the editor's engine session, and nothing has
+      // reopened it, so the sweep claimed the lineage with no session holding
+      // it. The words below must stay in the document under that claim.
+      expect(
+        withEngineDb(temp.rootPath, (db) => {
+          const row = db
+            .prepare(
+              "SELECT d.lineage_claim_status AS status FROM ydoc_docs d " +
+                "JOIN snapshots s ON s.workspace_id=d.workspace_id " +
+                "AND s.version_id=d.version_id AND s.object_id=d.object_id " +
+                "WHERE s.path=?",
+            )
+            .get(path) as { status: string } | undefined;
+          return row?.status ?? null;
+        }),
+        "the sync pass must have claimed the lineage while no session held it",
+      ).toBe("exact");
       for (let index = 0; index < 5; index += 1) await typeWord();
     }
 

@@ -2171,6 +2171,117 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     assert_eq!(base_ops_in_log(&db), 1, "and close emits no second base");
 }
 
+// Enrolment leaves an open lineage to its session. Closing that session
+// claims the lineage only once the file holds the head: a dirty close keeps
+// refusing, so a lineage is never compacted ahead of a stale file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_an_open_lineage_after_enrolment_claims_it_once_the_file_holds_it() {
+    const WS: &str = "ws-close-after-enrolment";
+    const PATH: &str = "notes/open.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_identity(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "seed\n").expect("seed disk");
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            150,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "typed while open ");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            None,
+            state.lineage_claim_id.clone(),
+            false,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("record before enrolment");
+    // Sync turns on while the session holds the lineage.
+    enable_sync(&db, WS);
+
+    let dirty = handle
+        .ydoc_close_session(
+            key.clone(),
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(
+            dirty,
+            Err(RuntimeError::Collab(
+                dohc_engine_collab::CollabError::UnsettledClose
+            ))
+        ),
+        "a dirty close must refuse, not claim: {dirty:?}"
+    );
+    assert_eq!(marker_state(&db, &key), (Regime::LocalOnly, false));
+    assert_eq!(base_ops_in_log(&db), 0);
+
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
+            state.head_blob_sha256.clone(),
+            "close-after-enrolment".to_owned(),
+            Arc::new(()),
+            400,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("settle");
+    handle
+        .ydoc_close_session(
+            key.clone(),
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("clean close");
+    supervisor.close(&db).expect("close actor");
+
+    assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
+    assert_eq!(
+        base_ops_in_log(&db),
+        1,
+        "the clean close claims the lineage once"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() {
     const WS: &str = "ws-rollback-closed-lineage";
