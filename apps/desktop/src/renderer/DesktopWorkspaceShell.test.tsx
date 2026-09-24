@@ -15880,6 +15880,12 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 // distinction between recovery (dot, no save promise) and savable-dirty
 // (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
+  // Most tests capture a draft before the shell mounts, and the draft store
+  // reads the platform from the bridge. `renderShell` replaces this stub.
+  beforeEach(() => {
+    vi.stubGlobal("dohcDesktop", { platform: "linux" });
+  });
+
   it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(

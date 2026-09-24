@@ -612,7 +612,7 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
   // sees it (secret), where the write-side classifier would say "ignored"
   // and wave it through the floor.
-  return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
+  return classifyEngineFilePathForRead(normalizedPath, process.platform).kind === "secret";
 }
 
 // The secret floor decided on both spellings of a resolved path. The name the

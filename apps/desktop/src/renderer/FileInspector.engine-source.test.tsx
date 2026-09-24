@@ -293,8 +293,8 @@ describe("engine markdown source view", () => {
 
   it("does not relabel an older set-aside edit as part of this deletion", async () => {
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
-    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
     vi.stubGlobal("dohcDesktop", bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
 

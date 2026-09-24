@@ -1262,8 +1262,8 @@ export async function collectZipEntries(
       access: "read",
     });
     if (
-      classifyEngineFilePathForRead(validated.normalized).kind === "secret" ||
-      classifyEngineFilePathForRead(realRelative).kind === "secret"
+      classifyEngineFilePathForRead(validated.normalized, process.platform).kind === "secret" ||
+      classifyEngineFilePathForRead(realRelative, process.platform).kind === "secret"
     ) {
       throw new Error(
         `Secret files never leave the workspace in an export: ${validated.normalized}`,
@@ -1335,7 +1335,7 @@ export async function collectZipEntries(
       } else if (dirent.isFile()) {
         // Secret-classified files (.env family) stay out of archives —
         // including inside mounted shares (read-aware classification).
-        if (classifyEngineFilePathForRead(relPath).kind === "secret") continue;
+        if (classifyEngineFilePathForRead(relPath, process.platform).kind === "secret") continue;
         await add(join(dir, dirent.name), archivePath);
       }
     }

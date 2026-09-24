@@ -177,7 +177,7 @@ export function createWorkspaceFilesIpc<
         );
       }
       selectedPath = validated.normalized;
-      if (classifyEngineFilePathForRead(selectedPath).kind === "secret") {
+      if (classifyEngineFilePathForRead(selectedPath, process.platform).kind === "secret") {
         throw new Error(
           `Secret files never leave the workspace in an export: ${selectedPath}`,
         );
@@ -199,7 +199,7 @@ export function createWorkspaceFilesIpc<
     const entries: ZipEntry[] = [];
     let totalBytes = 0;
     for (const file of selected) {
-      if (classifyEngineFilePathForRead(file.path).kind === "secret") continue;
+      if (classifyEngineFilePathForRead(file.path, process.platform).kind === "secret") continue;
       const read = await shareViewFiles.read(input.target, {
         kind: "asset",
         path: file.path,

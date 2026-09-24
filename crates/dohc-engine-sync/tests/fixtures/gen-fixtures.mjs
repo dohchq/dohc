@@ -117,7 +117,7 @@ const vectors = inputs.map(([path, rustClaimed]) => ({
   path,
   rustClaimed,
   write: classifyEngineFilePath(path).kind,
-  read: classifyEngineFilePathForRead(path).kind,
+  read: classifyEngineFilePathForRead(path, process.platform).kind,
 }));
 
 // The selector's VERSION dimension, asked of the same oracle. The share

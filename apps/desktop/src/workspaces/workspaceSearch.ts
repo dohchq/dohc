@@ -209,7 +209,7 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // Secret-floor backstop: even if a user include glob out-votes the
   // CLI exclusions, a secret-classified path never crosses to the renderer.
   // Read-aware: a mounted shared-with-me/<label>/.env classifies secret too.
-  if (classifyEngineFilePathForRead(validated.normalized).kind === "secret") return [];
+  if (classifyEngineFilePathForRead(validated.normalized, process.platform).kind === "secret") return [];
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
   const line = rawLine.replace(/\r?\n$/, "");
   const lineBytes = Buffer.from(line, "utf8");
