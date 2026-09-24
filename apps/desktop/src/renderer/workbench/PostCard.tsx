@@ -1,4 +1,5 @@
 import { AgentBadge } from "./AgentBadge";
+import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime } from "../time";
@@ -183,6 +184,9 @@ export function PostCard(props: {
               </span>
               {isAgent ? (
                 <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
+              ) : null}
+              {message?.authorKind === "automation" ? (
+                <AutomationBadge testIdPrefix="chats-post" author={message} viewerAuthorId={props.data.viewerAuthorId} />
               ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">

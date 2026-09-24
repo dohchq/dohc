@@ -1,5 +1,6 @@
 import { EMOJI_DATA } from "../editor/emojiData";
 import { AgentBadge } from "./AgentBadge";
+import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
@@ -855,6 +856,14 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   {chatAuthorLabel(message)}
                 </span>
                 {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
+                {message.authorKind === "automation" ? (
+                  <AutomationBadge
+                    testIdPrefix={props.testIdPrefix}
+                    author={message}
+                    viewerAuthorId={props.reactionControls?.viewerAuthorId}
+                    onOpenPath={props.onOpenPath}
+                  />
+                ) : null}
                 <time
                   dateTime={time.iso}
                   title={time.iso}
