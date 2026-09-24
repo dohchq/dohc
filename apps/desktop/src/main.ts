@@ -89,7 +89,8 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { release as osRelease, type as osType } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
@@ -100,6 +101,7 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  crashReportOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -380,6 +382,9 @@ import {
   type CliRunMessageLink,
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+import { installCrashCapture } from "./crashReports/crashCapture";
+import { createCrashScrubber } from "./crashReports/crashReport";
+import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
   registerShareHandoffProtocol,
@@ -392,6 +397,40 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+// Crashes are recorded on this computer before anything else can crash. A
+// report leaves only when the person clicks Send report and confirms, and
+// only to the report server this build names.
+const crashReports = createCrashReportStore({
+  path: join(stateDir(), "crash-report.json"),
+  endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL),
+  facts: () => ({
+    atMs: Date.now(),
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+    packaged: app.isPackaged,
+    system: `${osType()} ${osRelease()}`,
+    arch: process.arch,
+    electron: process.versions.electron ?? "unknown",
+    uptimeSeconds: Math.round(process.uptime()),
+  }),
+  // dohc's own files: the install folder, or the checkout in development.
+  scrub: createCrashScrubber(
+    [app.isPackaged ? dirname(process.execPath) : resolve(app.getAppPath(), "../..")],
+    process.platform,
+  ),
+  onChanged: () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
+    }
+  },
+});
+installCrashCapture({
+  process,
+  app,
+  isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
+  record: (event) => crashReports.record(event),
+});
 
 const shareHandoffIntentSlot = createShareHandoffIntentSlot();
 registerShareHandoffProtocol(app, process);
@@ -3219,6 +3258,7 @@ const desktopEngine = createDesktopEngine({
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
+  recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
 });
@@ -4639,6 +4679,12 @@ function registerIpcHandlers(): void {
   windowIpc.registerWindowControls();
 
   settingsIpc.registerWorkspaceUiStateIpcHandlers();
+
+  registerOperations(operationBoundary, crashReportOperations, {
+    readCrashReport: () => crashReports.read(),
+    dismissCrashReport: ({ revision }) => crashReports.dismiss(revision),
+    sendCrashReport: async ({ revision }) => await crashReports.send(revision),
+  });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,

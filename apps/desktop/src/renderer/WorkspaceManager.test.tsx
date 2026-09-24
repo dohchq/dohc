@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReadCrashReportResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
@@ -39,6 +40,10 @@ const bridge = {
   // The notice dock the connection surfaces raise their failures into.
   getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
   onUpdateState: vi.fn(() => () => undefined),
+  readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({ report: null, sendTo: null })),
+  sendCrashReport: vi.fn(async () => undefined),
+  dismissCrashReport: vi.fn(async () => undefined),
+  onCrashReportChanged: vi.fn(() => () => undefined),
   windowRole: "workspace",
   platform: "linux",
 };
@@ -300,6 +305,28 @@ describe("workspace manager", () => {
       ),
     );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("shows a crash report and sends it only after the person confirms", async () => {
+    const user = userEvent.setup();
+    const text = "dohc crash report\n\nProcess: window";
+    bridge.readCrashReport.mockResolvedValueOnce({
+      report: { revision: 1, source: "window", problems: 1, atMs: 1_000, text },
+      sendTo: "reports.example.test",
+    });
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+
+    expect((await screen.findByTestId("crash-report-toast")).textContent).toContain(
+      "A dohc window stopped unexpectedly",
+    );
+    await user.click(screen.getByTestId("crash-report-toast-send"));
+    expect((await screen.findByTestId("crash-report-send-text")).textContent).toBe(text);
+    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("crash-report-send-confirm"));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({ revision: 1 }));
+    // The report is gone, and the manager says it went.
+    await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
   });
 
   it("reads like a desktop app, not a marketing page", async () => {

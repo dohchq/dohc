@@ -5821,6 +5821,51 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Crash reports. Main keeps each crash on this computer as plain text and
+// sends nothing on its own: a report leaves only after the person clicks
+// Send report, reads it, and confirms. One report holds the problems recorded
+// since the last send or dismiss.
+export const CrashReportSource = z.enum(["main", "window", "gpu", "utility", "engine"]);
+export type CrashReportSource = z.infer<typeof CrashReportSource>;
+// Five problems of at most 6,000 characters each, with the header.
+export const CRASH_REPORT_MAX_CHARS = 32_768;
+const CRASH_REPORT_REVISION = z.number().int().positive();
+export const CrashReportView = z.object({
+  // Names the text the person read. Send sends exactly that text, and
+  // dismiss leaves any newer problem in place.
+  revision: CRASH_REPORT_REVISION,
+  // Where the newest problem happened. The notice names it.
+  source: CrashReportSource,
+  problems: z.number().int().positive(),
+  atMs: z.number().int().nonnegative(),
+  text: z.string().min(1).max(CRASH_REPORT_MAX_CHARS),
+});
+export type CrashReportView = z.infer<typeof CrashReportView>;
+export const ReadCrashReportResult = z.object({
+  report: CrashReportView.nullable(),
+  // The host a sent report goes to. Null when this build has no report
+  // server, so the notice offers only Copy report.
+  sendTo: z.string().min(1).max(255).nullable(),
+});
+export type ReadCrashReportResult = z.infer<typeof ReadCrashReportResult>;
+export const CrashReportRevisionPayload = z.object({ revision: CRASH_REPORT_REVISION });
+export const CrashReportChangedEvent = z.undefined();
+
+export const crashReportOperations = {
+  readCrashReport: {
+    channel: "desktop:read-crash-report",
+    payload: z.object({}), result: ReadCrashReportResult, guard: "trusted-sender",
+  },
+  dismissCrashReport: {
+    channel: "desktop:dismiss-crash-report",
+    payload: CrashReportRevisionPayload, guard: "trusted-sender",
+  },
+  sendCrashReport: {
+    channel: "desktop:send-crash-report",
+    payload: CrashReportRevisionPayload, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
 // engine capture, reusing its store) and STREAMS remote CRDT deltas back over
@@ -6060,7 +6105,8 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
-    OperationBridge<typeof workspaceSearchOperations> {
+    OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof crashReportOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6502,6 +6548,9 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the crash report changed. A poke, not the report; the
+  // subscriber reads it again. Returns an unsubscribe function.
+  onCrashReportChanged(listener: () => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

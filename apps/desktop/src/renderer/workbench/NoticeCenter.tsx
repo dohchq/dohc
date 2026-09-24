@@ -38,6 +38,7 @@ type Notice = {
   timeMs?: number;
   // A report a person can paste: shown as a copy control on the row.
   copyText?: string;
+  copyLabel?: string;
   Icon: typeof Bell;
 };
 
@@ -52,6 +53,16 @@ export interface WorkspaceErrorNotice {
   atMs: number;
   canRetry: boolean;
   seen: boolean;
+}
+
+// The crash report main keeps on this computer. `text` is the whole report,
+// what Copy report copies and what Send report shows before it sends.
+export interface CrashReportNotice {
+  revision: number;
+  title: string;
+  body: string;
+  text: string;
+  atMs: number;
 }
 
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
@@ -252,6 +263,11 @@ export function NoticeCenter(props: {
     automationId: string,
     generation: number,
   ) => void;
+  // A crash report waiting on this computer. Send report is absent when this
+  // build has no report server; the shell owns the dialog it opens.
+  crashReport?: CrashReportNotice | null;
+  onSendCrashReport?: () => void;
+  onDismissCrashReport?: () => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -279,6 +295,13 @@ export function NoticeCenter(props: {
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const toggleRef = useRef<HTMLButtonElement | null>(null);
+
+  // Closing the toast keeps the row. A newer problem is a new revision, so
+  // its toast shows again.
+  const [closedCrashRevision, setClosedCrashRevision] = useState<number | null>(null);
+  const crashReport = props.crashReport ?? null;
+  const crashToastVisible =
+    crashReport !== null && crashReport.revision !== closedCrashRevision;
 
   const readyUpdateKey =
     updateState?.status === "ready"
@@ -457,6 +480,23 @@ export function NoticeCenter(props: {
             }
           : {}),
         Icon: GitPullRequestArrow,
+      });
+    }
+
+    if (crashReport) {
+      next.push({
+        id: "crash-report",
+        tone: "danger",
+        title: crashReport.title,
+        body: crashReport.body,
+        ...(props.onSendCrashReport
+          ? { action: { label: "Send report", onClick: props.onSendCrashReport } }
+          : {}),
+        ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
+        timeMs: crashReport.atMs,
+        copyText: crashReport.text,
+        copyLabel: "Copy report",
+        Icon: AlertTriangle,
       });
     }
 
@@ -703,6 +743,9 @@ export function NoticeCenter(props: {
     return next;
   }, [
     agentNotifications,
+    crashReport,
+    props.onSendCrashReport,
+    props.onDismissCrashReport,
     props.agentActive,
     props.automationFailures,
     props.conflictSummaries,
@@ -882,6 +925,44 @@ export function NoticeCenter(props: {
               </button>
             </div>
           ) : null}
+          {crashToastVisible && crashReport ? (
+            <div
+              data-testid="crash-report-toast"
+              role="alert"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {crashReport.title}
+              </span>
+              {props.onSendCrashReport ? (
+                <button
+                  type="button"
+                  data-testid="crash-report-toast-send"
+                  onClick={props.onSendCrashReport}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  Send report
+                </button>
+              ) : null}
+              <CopyDetailsButton
+                key={crashReport.revision}
+                iconOnly
+                label="Copy report"
+                data-testid="crash-report-toast-copy"
+                details={() => crashReport.text}
+              />
+              {/* Closing ends the announcement; the row stays in Notices. */}
+              <button
+                type="button"
+                aria-label="Close crash report notice"
+                onClick={() => setClosedCrashRevision(crashReport.revision)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
           {updateToastVisible ? (
             <div
               data-testid="update-toast"
@@ -1015,7 +1096,7 @@ export function NoticeCenter(props: {
                       {notice.copyText !== undefined ? (
                         <CopyDetailsButton
                           iconOnly
-                          label="Copy error details"
+                          label={notice.copyLabel ?? "Copy error details"}
                           data-testid={`notice-${notice.id}-copy`}
                           details={() => notice.copyText ?? ""}
                         />
