@@ -1761,9 +1761,10 @@ describe("MarkdownEditor focus", () => {
     return { ref, view };
   }
 
-  // jsdom's focus() parks the document selection on the focused element
-  // itself after the focus event. Chromium's Tab leaves no selection at all,
-  // so each case clears it and dispatches the focus event again.
+  // jsdom's focus() collapses the document selection to (editor, 0) after the
+  // focus event. When Tab focuses this editor in Chromium, the Selection API
+  // usually reports no range, so this clears the selection and dispatches the
+  // focus event again.
   function focusByKeyboard(editor: HTMLElement) {
     editor.focus();
     document.getSelection()?.removeAllRanges();
@@ -1785,7 +1786,25 @@ describe("MarkdownEditor focus", () => {
     }
   });
 
-  it("leaves a caret placed by a click where it is", async () => {
+  it("writes a caret when focus leaves the DOM caret at the editor root", async () => {
+    const { view } = mount("Body text");
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      editor.focus();
+      expect(document.getSelection()?.anchorNode).toBe(editor);
+
+      fireEvent.focus(editor);
+
+      const paragraph = editor.querySelector("p");
+      const anchor = document.getSelection()?.anchorNode ?? null;
+      expect(paragraph?.contains(anchor)).toBe(true);
+      expect(selectionTextOffset(editor)).toBe(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it("keeps a caret that is already inside the content", async () => {
     const { view } = mount("Body text");
     try {
       const editor = await screen.findByTestId("markdown-editor");
@@ -1802,6 +1821,28 @@ describe("MarkdownEditor focus", () => {
       fireEvent.focus(editor);
 
       expect(selectionTextOffset(editor)).toBe(4);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it("reads a caret the browser moved before Enter runs", async () => {
+    const { view } = mount("# Heading\n\nBody text");
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      focusByKeyboard(editor);
+      const text = editor.querySelector("p")?.firstChild;
+      if (!(text instanceof Text)) throw new Error("expected paragraph text");
+      // A click moved the caret, and selectionchange has not arrived yet.
+      document.getSelection()?.collapse(text, text.length);
+
+      fireEvent.keyDown(editor, { key: "Enter", keyCode: 13 });
+
+      expect(editor.querySelector("h1")?.textContent).toBe("Heading");
+      expect(Array.from(editor.querySelectorAll("p"), (p) => p.textContent)).toEqual([
+        "Body text",
+        "",
+      ]);
     } finally {
       view.unmount();
     }
