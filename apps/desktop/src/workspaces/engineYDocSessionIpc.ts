@@ -144,14 +144,15 @@ export interface LiveDocumentEdit {
   workspaceId: string;
   /** Validated and normalized; resolved again to the path sessions use. */
   path: string;
-  /** The update that makes the edit against the document's current state, or null for no change. */
-  change(current: Y.Doc): Uint8Array | null;
+  /** The update that makes the edit against `state`, the document's encoded current state, or null for no change. */
+  change(state: Uint8Array): Promise<Uint8Array | null>;
   origin: LiveDocumentEditOrigin;
 }
 
 /** Main-side reads and edits of live documents, for doors other than the editor. */
 export interface LiveDocumentSessions {
-  readDocument(input: { workspaceId: string; path: string }): Promise<{ path: string; doc: Y.Doc | null }>;
+  /** `state` is the encoded Y.Doc an open editor holds, or null when none holds it. */
+  readDocument(input: { workspaceId: string; path: string }): Promise<{ path: string; state: Uint8Array | null }>;
   editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }>;
 }
 
@@ -695,13 +696,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   /**
    * A live document for a main-side door, such as the CLI socket that MCP
-   * also uses. The editor session that holds the document answers with a
-   * copy of its Y.Doc; `doc` is null when no editor holds it, and the caller
+   * also uses. The editor session that holds the document answers with its
+   * encoded Y.Doc; `state` is null when no editor holds it, and the caller
    * reads the settled file at `path`.
    */
   async readDocument(
     input: { workspaceId: string; path: string },
-  ): Promise<{ path: string; doc: Y.Doc | null }> {
+  ): Promise<{ path: string; state: Uint8Array | null }> {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
@@ -710,10 +711,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const held = this.#isSharedView(authority.workspace)
         ? undefined
         : this.#owner.documentSession(authority.workspace.attachmentId, path);
-      if (!held) return { path, doc: null };
-      const doc = new Y.Doc();
-      Y.applyUpdate(doc, Y.encodeStateAsUpdate(held.session.provider.doc));
-      return { path, doc };
+      return { path, state: held ? Y.encodeStateAsUpdate(held.session.provider.doc) : null };
     } finally {
       authority.release();
     }
@@ -751,11 +749,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         return { path, changed };
       } catch (error) {
         if (!(error instanceof LiveDocumentOwnedError)) throw error;
-        // An editor opened the document first. Its session takes the edit
-        // once it is open.
-        const opened = this.#owner.documentSession(attachment, path);
-        if (!opened) throw new Error(`dohc is opening ${path}. Try again.`);
-        return { path, changed: await this.#editHeld(opened, path, input) };
+        throw new Error(`${path} opened in an editor as dohc began the edit, and nothing changed. Try again.`);
       }
     } finally {
       authority.release();
@@ -779,11 +773,20 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<boolean> {
-    held.assertCurrent();
     const owned = held.session;
-    if (owned.deleted) throw new Error(`${path} was deleted.`);
-    if (owned.ownerHandoff) throw new Error(`dohc is handing ${path} to its live session. Try again.`);
-    return await applyDocumentEdit(owned.provider, path, input, owned.show);
+    // Checked again once the edit is computed: an update computed against one
+    // lineage must not land on its replacement.
+    const assertSame = (): void => {
+      try {
+        held.assertCurrent();
+      } catch {
+        throw new Error(`${path} changed hands while dohc prepared the edit, and nothing changed. Read it again, then retry.`);
+      }
+      if (owned.deleted) throw new Error(`${path} was deleted.`);
+      if (owned.ownerHandoff) throw new Error(`dohc is handing ${path} to its live session, and nothing changed. Try again.`);
+    };
+    assertSame();
+    return await applyDocumentEdit(owned.provider, path, input, { assertSame, show: owned.show });
   }
 
   async #editUnheld(
@@ -803,14 +806,28 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       // Nothing else reads this session's doc before it closes.
       onRemoteUpdate: () => undefined,
     });
+    let changed: boolean;
     try {
       if (provider.contentKind !== "richdoc") {
         throw new Error(`${path} is not a Markdown document.`);
       }
-      return await applyDocumentEdit(provider, path, input, () => undefined);
-    } finally {
-      await provider.close();
+      changed = await applyDocumentEdit(provider, path, input, {
+        assertSame: () => undefined,
+        show: () => undefined,
+      });
+    } catch (error) {
+      await provider.close().catch((closeError: unknown) => {
+        this.#onError(`[desktop] engine Y.Doc close after a refused edit failed for ${path}:`, closeError);
+      });
+      throw error;
     }
+    // The edit is applied and saved. A failed release leaves the session to
+    // the capture's own recovery; reporting it as a failed edit would bring a
+    // retry that applies the edit twice.
+    await provider.close().catch((closeError: unknown) => {
+      this.#onError(`[desktop] engine Y.Doc close after an edit failed for ${path}:`, closeError);
+    });
+    return changed;
   }
 
   existingOwner(binding: LiveObjectBinding) {
@@ -1038,23 +1055,25 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
 // Journals one main-side edit on a live document session and settles it, so
 // the edit is in the engine and the file when the caller hears back. The
-// update is computed against the session's own doc and reaches the editor as
-// a remote update, which merges with anything the person typed meanwhile.
+// update is computed off this thread against the session's state and reaches
+// the editor as a remote update, which merges with anything the person typed
+// meanwhile.
 async function applyDocumentEdit(
   provider: EngineYDocSessionProvider,
   path: string,
   input: LiveDocumentEdit,
-  show: (update: Uint8Array) => void,
+  session: { assertSame(): void; show(update: Uint8Array): void },
 ): Promise<boolean> {
   const settleNow = provider.settleNow;
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
-  const update = input.change(provider.doc);
+  const update = await input.change(Y.encodeStateAsUpdate(provider.doc));
   if (update === null) return false;
+  session.assertSame();
   let armed = false;
   provider.applyLocalUpdate(update, () => {
     armed = true;
   }, input.origin);
-  show(update);
+  session.show(update);
   try {
     await settleNow.call(provider);
   } catch (error) {

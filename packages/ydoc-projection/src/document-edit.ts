@@ -7,7 +7,6 @@ import {
   frontmatterYaml,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
-  getDohcYDocPlainText,
   markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
@@ -22,6 +21,9 @@ import {
 // Each top-level block is written as Markdown on its own and the blocks are
 // joined with a blank line. That keeps every block's place in the text known,
 // which is what lets an edit touch only its own blocks.
+//
+// These functions take and return encoded Y.Doc state, so a worker can run
+// them away from the thread that holds the live document.
 
 const BLOCK_SEPARATOR = '\n\n'
 
@@ -31,46 +33,52 @@ export interface DocumentEdit {
   replacement: string
 }
 
-interface RichLayout {
-  kind: 'rich'
+interface Layout {
   frontmatter: string
   fragment: Y.XmlFragment
+  /** The fragment's top-level elements, and the block each one reads as. */
+  elements: Y.XmlElement[]
   blocks: ProseMirrorNode[]
   /** Each block's Markdown and where it sits in the body. */
   chunks: Array<{ markdown: string; start: number; end: number }>
   body: string
 }
 
-type Layout =
-  | { kind: 'plain-text'; frontmatter: string; text: Y.Text; body: string }
-  | RichLayout
+/** The document in `state` as the Markdown an edit matches against. */
+export function documentMarkdown(state: Uint8Array): string {
+  return withDoc(state, (doc) => markdownOfLayout(layoutOf(doc)))
+}
 
-/** The document as the Markdown an edit matches against. */
-export function documentMarkdown(doc: Y.Doc): string {
-  return withCopy(doc, (copy) => {
-    const layout = layoutOf(copy)
-    return layout.frontmatter + layout.body
-  })
+/** A settled Markdown file as the Markdown an edit to it would match against. */
+export function settledDocumentMarkdown(markdown: string): string {
+  const doc = markdownToYDoc(markdown)
+  try {
+    return markdownOfLayout(layoutOf(doc))
+  } finally {
+    doc.destroy()
+  }
 }
 
 /**
- * The Y.Doc update that applies `edit` to `doc`, or null when the edit
- * changes nothing. `doc` itself is not changed. Throws when the edit cannot
- * apply; the message says what to do instead.
+ * The Y.Doc update that applies `edit` to the document in `state`, or null
+ * when the edit changes nothing. Throws when the edit cannot apply; the
+ * message says what to do instead.
  */
-export function documentEditUpdate(doc: Y.Doc, edit: DocumentEdit): Uint8Array | null {
-  return withCopy(doc, (copy) => {
-    const change = planEdit(layoutOf(copy), edit)
+export function documentEditUpdate(state: Uint8Array, edit: DocumentEdit): Uint8Array | null {
+  return withDoc(state, (doc) => {
+    // Reading the document can delete elements the schema refuses. That
+    // happens before the edit starts recording, so the update never carries it.
+    const change = planEdit(layoutOf(doc), edit)
     if (!change) return null
     let update: Uint8Array | null = null
     const record = (next: Uint8Array): void => {
       update = update === null ? next : Y.mergeUpdates([update, next])
     }
-    copy.on('update', record)
+    doc.on('update', record)
     try {
-      copy.transact(() => change(copy))
+      doc.transact(() => change(doc))
     } finally {
-      copy.off('update', record)
+      doc.off('update', record)
     }
     return update
   })
@@ -81,7 +89,7 @@ export function documentEditUpdate(doc: Y.Doc, edit: DocumentEdit): Uint8Array |
  * the body only: frontmatter would reach the Y.Doc as body blocks, so it is
  * refused.
  */
-export function documentCreateUpdate(doc: Y.Doc, markdown: string): Uint8Array | null {
+export function documentCreateUpdate(state: Uint8Array, markdown: string): Uint8Array | null {
   const parsed = markdownToYDoc(markdown)
   try {
     if (Object.keys(getDohcYDocFrontmatter(parsed)).length > 0) {
@@ -90,19 +98,16 @@ export function documentCreateUpdate(doc: Y.Doc, markdown: string): Uint8Array |
   } finally {
     parsed.destroy()
   }
-  return documentEditUpdate(doc, { replacement: markdown })
+  return documentEditUpdate(state, { replacement: markdown })
 }
 
-// Reading a Y.Doc as ProseMirror can delete elements the schema refuses. That
-// happens on a copy, before the edit starts recording, so neither the caller's
-// document nor the returned update carries it.
-function withCopy<T>(doc: Y.Doc, read: (copy: Y.Doc) => T): T {
-  const copy = new Y.Doc()
+function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {
+  const doc = new Y.Doc()
   try {
-    Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc))
-    return read(copy)
+    Y.applyUpdate(doc, state)
+    return read(doc)
   } finally {
-    copy.destroy()
+    doc.destroy()
   }
 }
 
@@ -111,13 +116,20 @@ function layoutOf(doc: Y.Doc): Layout {
   const frontmatter = Object.keys(values).length > 0
     ? `---\n${frontmatterYaml(values)}---\n\n`
     : ''
-  const text = getDohcYDocPlainText(doc)
-  if (text) return { kind: 'plain-text', frontmatter, text, body: text.toString() }
   const fragment = getDohcYDocBodyFragment(doc)
   const blocks: ProseMirrorNode[] = []
   yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema())
     .forEach((block) => { blocks.push(block) })
-  const chunks: RichLayout['chunks'] = []
+  // Read after the conversion, which deletes what the schema refuses.
+  const elements = fragment.toArray()
+  if (
+    elements.length !== blocks.length ||
+    elements.some((element, index) =>
+      !(element instanceof Y.XmlElement) || element.nodeName !== blocks[index]!.type.name)
+  ) {
+    throw new Error('dohc could not read the blocks of this document.')
+  }
+  const chunks: Layout['chunks'] = []
   let start = 0
   for (const block of blocks) {
     const markdown = blockMarkdown(block)
@@ -125,7 +137,11 @@ function layoutOf(doc: Y.Doc): Layout {
     start += markdown.length + BLOCK_SEPARATOR.length
   }
   const body = chunks.map((chunk) => chunk.markdown).join(BLOCK_SEPARATOR)
-  return { kind: 'rich', frontmatter, fragment, blocks, chunks, body }
+  return { frontmatter, fragment, elements: elements as Y.XmlElement[], blocks, chunks, body }
+}
+
+function markdownOfLayout(layout: Layout): string {
+  return layout.frontmatter + layout.body
 }
 
 function blockMarkdown(block: ProseMirrorNode): string {
@@ -136,36 +152,20 @@ function blockMarkdown(block: ProseMirrorNode): string {
 function planEdit(layout: Layout, edit: DocumentEdit): ((doc: Y.Doc) => void) | null {
   const replacement = edit.replacement.replaceAll('\r\n', '\n')
   if (edit.find === undefined) {
-    return replacement.trim() === '' ? null : planAppend(layout, replacement)
+    if (replacement.trim() === '') return null
+    // New blocks follow the last block with text, ahead of any empty
+    // paragraph the person's cursor may sit in.
+    let lastWithText = layout.chunks.length - 1
+    while (lastWithText >= 0 && layout.chunks[lastWithText]!.markdown === '') lastWithText -= 1
+    return blockChange(layout, lastWithText + 1, lastWithText, replacement)
   }
   const find = edit.find.replaceAll('\r\n', '\n')
-  const at = uniqueMatch(layout.frontmatter + layout.body, find) - layout.frontmatter.length
+  const at = uniqueMatch(markdownOfLayout(layout), find) - layout.frontmatter.length
   if (at < 0) {
     throw new Error("The text is in the document's frontmatter. Document edits change the body only.")
   }
   if (find === replacement) return null
-  if (layout.kind === 'plain-text') {
-    const { text } = layout
-    return () => {
-      text.delete(at, find.length)
-      if (replacement) text.insert(at, replacement)
-    }
-  }
   return planBlockEdit(layout, at, at + find.length, replacement)
-}
-
-function planAppend(layout: Layout, replacement: string): (doc: Y.Doc) => void {
-  if (layout.kind === 'plain-text') {
-    const { text, body } = layout
-    const separator = body === '' || body.endsWith('\n') ? '' : '\n'
-    return () => text.insert(body.length, separator + replacement)
-  }
-  // New blocks follow the last block with text, ahead of any empty paragraph
-  // the person's cursor may sit in. A document of empty paragraphs takes the
-  // new text in their place.
-  const last = [...layout.chunks].reverse().find((chunk) => chunk.markdown !== '')
-  if (!last) return blockChange(layout, 0, layout.blocks.length - 1, replacement)
-  return planBlockEdit(layout, last.end, last.end, BLOCK_SEPARATOR + replacement)
 }
 
 function uniqueMatch(markdown: string, find: string): number {
@@ -184,10 +184,10 @@ function uniqueMatch(markdown: string, find: string): number {
 }
 
 // Rewrites the blocks that the body range [start, end) touches, counting a
-// block that only meets the range at one edge. A nonempty body always has a
-// block at or beside any range in it.
+// block that only meets the range at one edge. A match in a nonempty body
+// always has a block at or beside it.
 function planBlockEdit(
-  layout: RichLayout,
+  layout: Layout,
   start: number,
   end: number,
   replacement: string,
@@ -201,11 +201,14 @@ function planBlockEdit(
   return blockChange(layout, first, last, markdown)
 }
 
-// Replaces blocks first..last with `markdown`, then lets y-prosemirror change
-// the Y.Doc into that document. Blocks before and after the range are the
-// Y.Doc's own, so it finds them unchanged and leaves them alone.
+// Replaces blocks first..last with the blocks `markdown` parses to; with
+// last < first it inserts them before block `first`. y-prosemirror then
+// changes the Y.Doc into that document. Every block outside the range is
+// mapped to its own element, so y-prosemirror passes over it without
+// comparing it, and a block whose Markdown reads back a little differently
+// is never rewritten.
 function blockChange(
-  layout: RichLayout,
+  layout: Layout,
   first: number,
   last: number,
   markdown: string,
@@ -226,7 +229,11 @@ function blockChange(
     null,
     blocks.length > 0 ? blocks : [schema.nodes.paragraph!.create()],
   )
+  const mapping = new Map<Y.XmlElement, ProseMirrorNode>()
+  layout.elements.forEach((element, index) => {
+    if (index < first || index > last) mapping.set(element, layout.blocks[index]!)
+  })
   return (doc) => {
-    updateYFragment(doc, layout.fragment, target, { mapping: new Map(), isOMark: new Map() })
+    updateYFragment(doc, layout.fragment, target, { mapping, isOMark: new Map() })
   }
 }

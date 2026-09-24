@@ -516,11 +516,12 @@ function collectionWriteAuthor(
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
-// Provenance for a document edit. A person's edit is this device's, like
-// their typing. An agent's edit is an agent's on behalf of the local owner,
-// recorded under the name the agent gave itself, or under no name.
-function documentEditOrigin(actor: CliActor, agent: string | undefined): LiveDocumentEditOrigin {
-  if (actor === "human") return { attribution: { actorKind: "human" } };
+// Provenance for a document edit, derived here. A person types in the
+// editor, so every edit through this socket is an agent's on behalf of the
+// local owner, recorded under the name the agent gave itself or under none.
+// Any process holding the socket token could otherwise claim the person's
+// typing.
+function documentEditOrigin(agent: string | undefined): LiveDocumentEditOrigin {
   return {
     ...(agent === undefined ? {} : { actorOriginId: agent }),
     attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
@@ -1957,8 +1958,11 @@ async function dispatch(
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
       const { actor, agent, find, replacement } = request.args;
-      if (agent !== undefined && actor !== "agent") {
-        return { ok: false as const, reason: "only an agent edit carries an agent name" };
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
       }
       const validated = validateUserWritePath(request.args.path);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
@@ -1966,7 +1970,7 @@ async function dispatch(
         const outcome = await documents.edit({
           path: validated.normalized,
           edit: { find, replacement },
-          origin: documentEditOrigin(actor, agent),
+          origin: documentEditOrigin(agent),
         });
         return { ok: true as const, ...outcome };
       } catch (error) {
@@ -1978,8 +1982,11 @@ async function dispatch(
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
       const { actor, agent, markdown } = request.args;
-      if (agent !== undefined && actor !== "agent") {
-        return { ok: false as const, reason: "only an agent edit carries an agent name" };
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
       }
       // A new file, so the stricter materialization rules apply.
       const validated = validateUserMaterializePath(request.args.path);
@@ -1993,7 +2000,7 @@ async function dispatch(
           ...(await documents.create({
             path: validated.normalized,
             markdown,
-            origin: documentEditOrigin(actor, agent),
+            origin: documentEditOrigin(agent),
           })),
         };
       } catch (error) {

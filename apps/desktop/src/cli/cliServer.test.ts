@@ -1363,16 +1363,8 @@ describe("CLI socket server", () => {
       path: "notes/plan.md",
       replacement: "Appended.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-    await expect(invoke("documentEdit", {
-      cwd: workspaceRoot,
-      actor: "human",
-      path: "notes/plan.md",
-      find: "Final.",
-      replacement: "Done.",
-    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-
-    // An agent that names itself is recorded under that name; one that does
-    // not stays an agent with no name; a person's edit is this device's.
+    // An agent that names itself is recorded under that name, and one that
+    // does not stays an agent with no name.
     const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
     expect(edits).toEqual([
       {
@@ -1384,11 +1376,6 @@ describe("CLI socket server", () => {
         path: "notes/plan.md",
         edit: { find: undefined, replacement: "Appended." },
         origin: { attribution: agent },
-      },
-      {
-        path: "notes/plan.md",
-        edit: { find: "Final.", replacement: "Done." },
-        origin: { attribution: { actorKind: "human" } },
       },
     ]);
   });
@@ -1422,6 +1409,15 @@ describe("CLI socket server", () => {
     })).resolves.toEqual({
       ok: false,
       reason: "a document path ends in .md or .markdown: notes/board.excalidraw",
+    });
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "human",
+      path: "notes/other.md",
+      markdown: "x",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"",
     });
     expect(creates).toEqual([{
       path: "notes/new.md",
@@ -1490,13 +1486,20 @@ describe("CLI socket server", () => {
         throw new Error("must not be reached");
       },
     };
-    await expect(invoke("documentEdit", {
-      cwd: workspaceRoot,
-      actor: "human",
-      agent: "claude-code",
-      path: "notes/plan.md",
-      replacement: "x",
-    })).resolves.toEqual({ ok: false, reason: "only an agent edit carries an agent name" });
+    // A person types in the editor. A request claiming to be their edit could
+    // come from any process holding the socket token.
+    for (const agent of [undefined, "claude-code"]) {
+      await expect(invoke("documentEdit", {
+        cwd: workspaceRoot,
+        actor: "human",
+        ...(agent === undefined ? {} : { agent }),
+        path: "notes/plan.md",
+        replacement: "x",
+      })).resolves.toEqual({
+        ok: false,
+        reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+      });
+    }
     await expect(invoke("documentRead", {
       cwd: workspaceRoot,
       actor: "agent",

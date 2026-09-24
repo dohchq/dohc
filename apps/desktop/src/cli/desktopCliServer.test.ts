@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createDesktopCliServer } from "./desktopCliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
@@ -79,9 +80,10 @@ function fixture(rootPath = resolve("cli-workspace")) {
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     withEngineAdapter: async () => null,
     liveDocuments: {
-      readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, doc: null })),
+      readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, state: null })),
       editDocument: vi.fn<Dependencies["liveDocuments"]["editDocument"]>(async ({ path }) => ({ path, changed: false })),
     },
+    documentProjection: directDocumentProjection,
     chatWrites,
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
@@ -258,9 +260,9 @@ describe("desktop CLI workspace context", () => {
     try {
       await writeFile(join(root, "notes.md"), "# Notes\n\n* settled item\n");
       const f = fixture(root);
-      const held = markdownToYDoc("# Notes\n\nLive text.");
+      const held = Y.encodeStateAsUpdate(markdownToYDoc("# Notes\n\nLive text."));
       const read = vi.mocked(f.dependencies.liveDocuments.readDocument);
-      read.mockResolvedValueOnce({ path: "notes.md", doc: held });
+      read.mockResolvedValueOnce({ path: "notes.md", state: held });
       const context = await f.create().openCliWorkspace(f.workspace);
       expect(await context.documents!.read("notes.md"))
         .toEqual({ path: "notes.md", markdown: "# Notes\n\nLive text." });
@@ -276,7 +278,7 @@ describe("desktop CLI workspace context", () => {
     }
   });
 
-  it("hands a document edit to the live sessions as an update against their doc", async () => {
+  it("hands a document edit to the live sessions as an update against their state", async () => {
     const f = fixture();
     const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
     const context = await f.create().openCliWorkspace(f.workspace);
@@ -285,8 +287,11 @@ describe("desktop CLI workspace context", () => {
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
-    Y.applyUpdate(current, input.change(current)!);
-    expect(documentMarkdown(current)).toBe("Final plan.");
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current)))!);
+    expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
+    // A refusal from the projection reaches the caller.
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan."))))
+      .rejects.toThrow("not in the document");
   });
 
   it("creates a document as an empty file, then writes its text through the live session", async () => {
@@ -300,7 +305,7 @@ describe("desktop CLI workspace context", () => {
         // The file is on disk, empty, before the text goes to its session.
         expect(await readFile(join(root, input.path), "utf8")).toBe("");
         const doc = new Y.Doc();
-        const update = input.change(doc);
+        const update = await input.change(Y.encodeStateAsUpdate(doc));
         if (update) Y.applyUpdate(doc, update);
         created.set(input.path, doc);
         return { path: input.path, changed: update !== null };
@@ -310,7 +315,7 @@ describe("desktop CLI workspace context", () => {
 
       await expect(context.documents!.create({ path: "notes/new.md", markdown: "# New\n\nFirst line.", origin }))
         .resolves.toEqual({ path: "notes/new.md" });
-      expect(documentMarkdown(created.get("notes/new.md")!)).toBe("# New\n\nFirst line.");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(created.get("notes/new.md")!))).toBe("# New\n\nFirst line.");
       expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
 
       await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))

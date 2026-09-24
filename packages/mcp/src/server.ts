@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { documentAgentNameSchema } from "@dohc/cli/protocol";
+import { documentAgentNameSchema, documentEditTextSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -234,8 +234,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
         path: z.string().min(1).max(4096),
-        find: z.string().min(1).max(256 * 1024).optional(),
-        replacement: z.string().max(256 * 1024),
+        find: documentEditTextSchema.min(1).optional(),
+        replacement: documentEditTextSchema,
       },
     },
     async (args) => text(await editDocument(ctx, args, agentName())),
@@ -248,7 +248,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         "Create a Markdown document at a path that does not exist yet. `markdown` is its body text, without frontmatter. dohc writes it the way a person types into a new file, so later changes go through dohc_edit_document.",
       inputSchema: {
         path: z.string().min(1).max(4096),
-        markdown: z.string().max(256 * 1024).optional(),
+        markdown: documentEditTextSchema.optional(),
       },
     },
     async (args) => text(await createDocument(ctx, args, agentName())),
