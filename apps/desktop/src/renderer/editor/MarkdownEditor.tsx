@@ -21,7 +21,7 @@ import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -120,6 +120,7 @@ import {
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
+import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
@@ -323,8 +324,9 @@ function BubbleButton(props: {
 }
 
 // The bubble menu's contents. The editor does not re-render React on each
-// transaction, so the toolbar reads the marks under the selection from the
-// editor's state; a render-time read showed the previous selection's marks.
+// transaction, so the toolbar reads the block and marks under the selection
+// from the editor's state; a render-time read showed the previous
+// selection's. selectionFormat keeps that read cheap on every keystroke.
 export function SelectionToolbar(props: {
   editor: Editor;
   onOpenLink: (state: LinkMenuState) => void;
@@ -332,19 +334,11 @@ export function SelectionToolbar(props: {
   const { editor } = props;
   const active = useEditorState({
     editor,
-    selector: ({ editor: current }) => ({
-      bold: current.isActive("bold"),
-      italic: current.isActive("italic"),
-      underline: current.isActive("underline"),
-      strike: current.isActive("strike"),
-      code: current.isActive("code"),
-      highlight: current.isActive("highlight"),
-      link: current.isActive("link"),
-    }),
+    selector: ({ editor: current }) => selectionFormat(current.state),
   });
   return (
     <>
-      <TurnIntoMenu editor={editor} />
+      <TurnIntoMenu editor={editor} activeId={active.block} />
       <span className="dohc-bubble-menu__divider" aria-hidden="true" />
       <BubbleButton
         label="Bold"
@@ -1132,10 +1126,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => {
-              const { selection } = instance.state;
-              return selection instanceof TextSelection && !selection.empty;
-            }}
+            shouldShow={({ editor: instance }) =>
+              hasFormattableSelection(instance.state.selection)
+            }
           >
             <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>

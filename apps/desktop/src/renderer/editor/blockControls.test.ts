@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { createElement } from "react";
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -18,7 +17,6 @@ import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
 import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import {
-  activeTurnIntoId,
   BlockMenu,
   blockDragSlice,
   copyBlockAsMarkdown,
@@ -32,6 +30,7 @@ import {
   topLevelBlockPos,
   TurnIntoMenu,
   turnBlockInto,
+  turnIntoIdAt,
   TURN_INTO_ENTRIES,
 } from "./blockControls";
 
@@ -362,7 +361,7 @@ describe("blockControls turn into", () => {
 // The bubble menu's turn-into dropdown (blockControls.tsx's TurnIntoMenu)
 // doesn't get handed a block position the way the block context menu does —
 // it derives one from the current text selection via topLevelBlockPos, and
-// reads the active entry via activeTurnIntoId. These tests exercise that
+// reads the active entry via turnIntoIdAt. These tests exercise that
 // same command-level path (resolve pos from selection -> turnBlockInto),
 // rather than re-testing turnBlockInto's own per-id branches above.
 describe("blockControls turn-into dropdown (bubble menu) command path", () => {
@@ -371,7 +370,7 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const shadow = host.attachShadow({ mode: "open" });
-    const view = render(createElement(TurnIntoMenu, { editor }), {
+    const view = render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }), {
       container: shadow as unknown as HTMLElement,
     });
 
@@ -403,13 +402,13 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
   it("reports the active turn-into entry for the block the selection sits in", () => {
     const editor = track(makeEditor("# Heading"));
     editor.commands.setTextSelection(3);
-    expect(activeTurnIntoId(editor)).toBe("heading-1");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("heading-1");
   });
 
   it("reports paragraph as the default active entry for plain text", () => {
     const editor = track(makeEditor("Just text"));
     editor.commands.setTextSelection(3);
-    expect(activeTurnIntoId(editor)).toBe("paragraph");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("paragraph");
   });
 
   it("converts paragraph -> heading using the position resolved from selection", () => {
@@ -421,7 +420,7 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
     const first = editor.getJSON().content?.[0];
     expect(first?.type).toBe("heading");
     expect(first?.attrs?.level).toBe(2);
-    expect(activeTurnIntoId(editor)).toBe("heading-2");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("heading-2");
   });
 
   it("converts heading -> todo list using the position resolved from selection", () => {
@@ -432,7 +431,7 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
     turnBlockInto(editor, pos!, "task-list");
     const list = editor.getJSON().content?.[0];
     expect(list?.type).toBe("taskList");
-    expect(activeTurnIntoId(editor)).toBe("task-list");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("task-list");
   });
 
   it("keeps TURN_INTO_ENTRIES' labels/order identical to the block menu's turn-into section", () => {
@@ -477,7 +476,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
   it("opens a listbox with every turn-into option and the resolved placement/max height", () => {
     const editor = track(makeEditor("Hello world"));
     editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor }));
+    render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
 
     fireEvent.click(screen.getByTitle("Turn into"));
     const listbox = screen.getByRole("listbox", { name: "turn into" });
@@ -490,24 +489,10 @@ describe("TurnIntoMenu dropdown rendering", () => {
     }
   });
 
-  it("follows the selection into another block without a parent render", () => {
-    const editor = track(makeEditor("# Heading\n\nText"));
-    editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor }));
-    expect(screen.getByTitle("Turn into").textContent).toContain("Heading 1");
-
-    const [, paragraph] = topLevelBlocks(editor);
-    act(() => {
-      editor.commands.setTextSelection(paragraph.pos + 2);
-    });
-
-    expect(screen.getByTitle("Turn into").textContent).toContain("Text");
-  });
-
   it("converts the selection's block when an option is clicked", () => {
     const editor = track(makeEditor("Some text"));
     editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor }));
+    render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
 
     fireEvent.click(screen.getByTitle("Turn into"));
     const listbox = screen.getByRole("listbox", { name: "turn into" });
@@ -522,7 +507,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
   it("closes on Escape", async () => {
     const editor = track(makeEditor("Hello"));
     editor.commands.setTextSelection(3);
-    const { container } = render(createElement(TurnIntoMenu, { editor }));
+    const { container } = render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
     container.append(editor.view.dom);
     // jsdom has no Range geometry for TipTap's post-focus scrolling.
     editor.view.setProps({ handleScrollToSelection: () => true });
