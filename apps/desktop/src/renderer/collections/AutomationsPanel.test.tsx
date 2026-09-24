@@ -6,16 +6,27 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
+  ListAutomationTargetsResult,
   RetryCollectionAutomationResult,
   UndoCollectionAutomationRunResult,
   WriteCollectionAutomationsPayload,
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
+import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { AutomationsPanel, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
 
 const HASH = "a".repeat(64);
+const FIELDS: FieldDefinition[] = [
+  { name: "Title", type: "text" },
+  { name: "Status", type: "select", options: ["Doing", "Done"] },
+  { name: "Finished on", type: "date" },
+  { name: "Points", type: "number" },
+];
+// The builder checks formulas a moment after typing stops; a loaded machine
+// can take longer than the default wait.
+const SLOW = { timeout: 10_000 };
 const stamp: Automation = {
   id: "stamp",
   name: "Stamp the finish date",
@@ -73,6 +84,19 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
       ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0 })),
     confirmCollectionAutomationStep: vi.fn(async () => ({ status: "confirmed" as const })),
+    listAutomationTargets: vi.fn(async (): Promise<ListAutomationTargetsResult> => ({ collections: [
+      { path: "Tasks", name: "Tasks", stopped: null },
+      { path: "Log", name: "Log", stopped: null },
+      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget." },
+    ] })),
+    getCollection: vi.fn(async ({ collectionPath }: { collectionPath: string }) => ({
+      path: collectionPath, status: "valid", reasons: [], recordCount: 0,
+      schema: { name: null, description: null, views: [], fields: collectionPath === "Log" ? [{ name: "Entry", type: "text" }] : [] },
+    })),
+    // The evaluator names a syntax error only for a formula that ends in "==".
+    checkAutomationFormulas: vi.fn(async ({ formulas }: { formulas: string[] }) => ({
+      problems: formulas.map((formula) => (formula.trim().endsWith("==") ? "Unexpected end of input." : null)),
+    })),
     onAutomationFailuresChanged: vi.fn(() => () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
   };
@@ -82,6 +106,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
 
 function Panel(props: {
   workspaceId?: string;
+  fields?: FieldDefinition[];
   focus?: { automationId: string; seq: number } | null;
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
@@ -95,6 +120,7 @@ function Panel(props: {
       workspaceId={workspaceId}
       collectionPath="Tasks"
       automations={automations}
+      fields={props.fields ?? FIELDS}
       focus={props.focus ?? null}
       onClose={() => undefined}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
@@ -328,5 +354,89 @@ describe("an automation's runs", () => {
       workspaceId: "ws-1", automationId: "collection:Tasks#stamp", claimId: "atc_failed",
     });
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change. 1 field changed since then."));
+  });
+});
+
+describe("the builder", () => {
+  it("makes \"when Status becomes Done, set Finished on to today\" in a few choices", async () => {
+    const { written } = makeBridge({ status: "missing" });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "New automation" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to, kind of value" }), "value");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]).toMatchObject({
+      expectedContentHash: null,
+      reformat: false,
+      automations: [{
+        id: "when-status-becomes-done-set-finished-on-to-today",
+        name: "When Status becomes Done, set Finished on to today",
+        enabled: true,
+        when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+        if: null,
+        do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null }],
+      }],
+    });
+    // Back in the list, with the new automation in it.
+    expect(await screen.findByTestId("automation-when-status-becomes-done-set-finished-on-to-today")).toBeTruthy();
+  });
+
+  it("edits an automation's conditions as rows and keeps steps it cannot edit", async () => {
+    const find = { kind: "find" as const, condition: 'record.Status == "Doing"', collection: null, as: "open" };
+    const edited: Automation = { ...stamp, if: 'record.Points == 3', do: [...stamp.do, find] };
+    const { written } = makeBridge(read([summary(edited)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+
+    expect((screen.getByRole("combobox", { name: "Condition" }) as HTMLSelectElement).value).toBe("rows");
+    expect((screen.getByRole("spinbutton", { name: "Condition 1, value" }) as HTMLInputElement).value).toBe("3");
+    expect(screen.getByTestId("builder-step-1").textContent).toContain('find records where record.Status == "Doing"');
+    await user.clear(screen.getByRole("spinbutton", { name: "Condition 1, value" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Condition 1, value" }), "5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations).toEqual([{ ...edited, if: "record.Points == 5" }]);
+  });
+
+  it("shows a formula's syntax error beside it and does not save until it is fixed", async () => {
+    const { written, bridge } = makeBridge(read([summary(stamp)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Condition" }), "formula");
+    await user.type(screen.getByRole("textbox", { name: "Condition formula" }), "record.Points ==");
+    expect(await screen.findByText("This formula has a syntax error. Unexpected end of input.", undefined, SLOW)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(written).toEqual([]);
+
+    await user.type(screen.getByRole("textbox", { name: "Condition formula" }), " 3");
+    await waitFor(() => expect(bridge.checkAutomationFormulas).toHaveBeenLastCalledWith({ workspaceId: "ws-1", formulas: ["record.Points == 3"] }), SLOW);
+    await waitFor(() => expect(screen.queryByText(/syntax error/)).toBeNull(), SLOW);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.if).toBe("record.Points == 3");
+  });
+
+  it("says when a field is not in the Collection, and offers only Collections a step can reach", async () => {
+    const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null }] };
+    const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null };
+    makeBridge(read([summary({ ...missing, do: [...missing.do, budget] }, { cannotRun: "Done on is not a field in Tasks." })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+
+    expect(screen.getAllByText("Done on is not a field in Tasks.").length).toBeGreaterThan(0);
+    const collection = screen.getByRole("combobox", { name: "Step 2, Collection" }) as HTMLSelectElement;
+    expect(await screen.findByText("ana@dohc.test cannot edit Budget.")).toBeTruthy();
+    expect([...collection.options].map((option) => option.textContent)).toEqual(["Tasks", "Budget", "Log"]);
+    await user.selectOptions(collection, "Log");
+    await user.click(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Add field" }));
+    expect(await screen.findByRole("option", { name: "Entry" })).toBeTruthy();
+    expect(screen.queryByText("ana@dohc.test cannot edit Budget.")).toBeNull();
   });
 });

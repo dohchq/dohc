@@ -462,6 +462,7 @@ export function CollectionPage({
       workspaceId={workspaceId}
       collectionPath={collectionPath}
       automations={automations}
+      fields={schema.fields}
       focus={panelFocus}
       onClose={closeAutomations}
       onOpenFile={onOpenFile}

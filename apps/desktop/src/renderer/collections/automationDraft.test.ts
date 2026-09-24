@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import {
+  conditionFormula,
+  conditionRows,
+  idFor,
+  literalFor,
+  newAutomation,
+  valueKindOf,
+  valueKindsFor,
+} from "./automationDraft";
+import { automationSentence, sentenceText } from "./automationSentence";
+
+describe("Only if as rows", () => {
+  it("writes rows as one expression and reads that expression back as the same rows", () => {
+    const rows = [
+      { field: "Status", operator: "is" as const, value: "Done" },
+      { field: "Finished on", operator: "is-not" as const, value: null },
+      { field: "Tags", operator: "contains" as const, value: "urgent" },
+      { field: "Points", operator: "is" as const, value: 3 },
+    ];
+    const expression = conditionFormula(rows);
+    expect(expression).toBe(
+      'record.Status == "Done" && record["Finished on"] != null && contains(record.Tags, "urgent") && record.Points == 3',
+    );
+    expect(conditionRows(expression)).toEqual(rows);
+  });
+
+  it("keeps any other expression a formula", () => {
+    expect(conditionRows('record.Points > 3')).toBeNull();
+    expect(conditionRows('record.Status == "Done" || record.Status == "Shipped"')).toBeNull();
+    expect(conditionRows('record.Status == "Done" && ')).toBeNull();
+    expect(conditionRows("")).toEqual([]);
+  });
+});
+
+describe("values in the builder", () => {
+  it("offers today and now only for dates, and any value only where a trigger can take it", () => {
+    expect(valueKindsFor("date", false)).toEqual(["today", "now", "value", "empty", "formula"]);
+    expect(valueKindsFor("select", true)).toEqual(["any", "value", "empty", "formula"]);
+    expect(valueKindOf({ kind: "formula", expression: " today() " })).toBe("today");
+    expect(valueKindOf({ kind: "formula", expression: "dateAdd(today(), 3, \"days\")" })).toBe("formula");
+    expect(valueKindOf({ kind: "literal", value: null })).toBe("empty");
+    expect(valueKindOf(null)).toBe("any");
+  });
+
+  it("stores what was typed as the field's type stores it", () => {
+    expect(literalFor("number", "12.5")).toEqual({ kind: "literal", value: 12.5 });
+    expect(literalFor("number", "")).toEqual({ kind: "literal", value: null });
+    expect(literalFor("checkbox", "true")).toEqual({ kind: "literal", value: true });
+    expect(literalFor("multi-select", "a, b ,")).toEqual({ kind: "literal", value: ["a", "b"] });
+    expect(literalFor("text", "Done")).toEqual({ kind: "literal", value: "Done" });
+  });
+});
+
+describe("a new automation", () => {
+  it("starts a few choices away from the finish-date example", () => {
+    const automation = newAutomation([
+      { name: "Title", type: "text" },
+      { name: "Status", type: "select", options: ["Doing", "Done"] },
+      { name: "Finished on", type: "date" },
+    ]);
+    expect(sentenceText(automationSentence(automation))).toBe("When Status changes, set Finished on to today");
+  });
+
+  it("takes an id from its name that no other automation has", () => {
+    expect(idFor("Stamp the finish date!", new Set())).toBe("stamp-the-finish-date");
+    expect(idFor("Stamp the finish date", new Set(["stamp-the-finish-date"]))).toBe("stamp-the-finish-date-2");
+    expect(idFor("✨", new Set())).toBe("automation");
+    expect(idFor("x".repeat(80), new Set()).length).toBe(64);
+  });
+});

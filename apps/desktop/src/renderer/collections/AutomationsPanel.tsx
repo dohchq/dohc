@@ -1,5 +1,6 @@
-import { AlertTriangle, ArrowLeft, CheckCircle2, CircleDashed, Clock, FileCode2, Info, MoreHorizontal, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, CircleDashed, Clock, FileCode2, MoreHorizontal, Plus, X } from "lucide-react";
+import type { FieldDefinition } from "@dohc/workspace-contracts";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ListCollectionAutomationsResult, WriteCollectionAutomationsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
@@ -7,14 +8,16 @@ import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { IconButton, SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
+import { AutomationBuilder } from "./AutomationBuilder";
 import { AutomationRuns } from "./AutomationRuns";
+import { newAutomation } from "./automationDraft";
+import { Sentence, StatusLine } from "./AutomationParts";
 import {
   automationSentence,
   collectionName,
   sentenceText,
   type Automation,
   type AutomationsFile,
-  type SentencePart,
   type ValidAutomationSummary,
 } from "./automationSentence";
 import { useAutomationRetry } from "./useAutomationRetry";
@@ -100,30 +103,6 @@ async function restoreAutomation(
   } catch (error) {
     onError(`dohc could not put "${automation.name}" back.`, error, again);
   }
-}
-
-function Sentence({ parts }: { parts: readonly SentencePart[] }) {
-  return (
-    <>
-      {parts.map((part, index) =>
-        part.kind === "code" ? (
-          <code key={index} className="rounded bg-panel-2 px-1 font-mono text-[11px] text-ink">{part.text}</code>
-        ) : (
-          <span key={index}>{part.text}</span>
-        ),
-      )}
-    </>
-  );
-}
-
-function StatusLine(props: { tone: "muted" | "warning" | "danger"; icon: typeof Info; label: string; children: ReactNode }) {
-  const color = props.tone === "danger" ? "text-danger" : props.tone === "warning" ? "text-warning" : "text-subtle";
-  return (
-    <div className="mt-1 flex items-start gap-1.5 text-[12px] leading-snug text-muted">
-      <props.icon size={12} aria-label={props.label} className={`mt-0.5 shrink-0 ${color}`} />
-      <div className="min-w-0 flex-1">{props.children}</div>
-    </div>
-  );
 }
 
 function ReachStatus(props: {
@@ -324,6 +303,8 @@ export function AutomationsPanel(props: {
   workspaceId: string;
   collectionPath: string;
   automations: ReturnType<typeof useCollectionAutomations>;
+  /** This Collection's fields, for the builder. */
+  fields: readonly FieldDefinition[];
   /** A notice asked to open one automation's runs; `seq` rises with each ask. */
   focus: { automationId: string; seq: number } | null;
   onClose: () => void;
@@ -344,6 +325,8 @@ export function AutomationsPanel(props: {
     returnFocusTo.current = automationId;
     setRunsOf({ automationId, name });
   };
+  // The automation the builder edits, or a new one with an empty id.
+  const [editing, setEditing] = useState<{ automation: Automation; cannotRun: string | null } | null>(null);
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
   // Rises when the workspace or Collection changes, or the panel closes: a
@@ -370,6 +353,7 @@ export function AutomationsPanel(props: {
       ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
       : undefined;
     const name = summary?.valid ? summary.automation.name : (props.focus.automationId.split("#").at(-1) ?? "");
+    setEditing(null);
     setRunsOf({ automationId: props.focus.automationId, name });
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
@@ -512,15 +496,45 @@ export function AutomationsPanel(props: {
     );
   };
 
-  const header = runsOf ? (
+  // The builder saves the automation it edits in place, or adds a new one
+  // at the end, and goes back to the list once the file has it.
+  const saveEdited = (automation: Automation) => {
+    const replacing = editing?.automation.id ?? "";
+    save(
+      (automations) => replacing === ""
+        ? [...automations, automation]
+        : automations.map((entry) => (entry.id === replacing ? automation : entry)),
+      () => setEditing(null),
+    );
+  };
+  const startNew = () => setEditing({ automation: newAutomation(props.fields), cannotRun: null });
+
+  const title = editing ? (editing.automation.id === "" ? "New automation" : editing.automation.name) : runsOf?.name ?? null;
+  const header = title !== null ? (
     <>
-      <IconButton ref={backButton} aria-label="Back to automations" title="Back to automations" onClick={() => setRunsOf(null)}>
+      <IconButton
+        ref={backButton}
+        aria-label="Back to automations"
+        title="Back to automations"
+        onClick={() => {
+          setEditing(null);
+          setRunsOf(null);
+        }}
+      >
         <ArrowLeft size={14} aria-hidden />
       </IconButton>
-      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{runsOf.name}</span>
+      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{title}</span>
     </>
   ) : (
-    <span className="flex-1" />
+    <>
+      <span className="flex-1" />
+      {/* An empty list offers New automation in its own place. */}
+      {editable !== null && count > 0 && count < MAX_AUTOMATIONS ? (
+        <IconButton aria-label="New automation" title="New automation" onClick={startNew}>
+          <Plus size={14} aria-hidden />
+        </IconButton>
+      ) : null}
+    </>
   );
 
   return (
@@ -541,7 +555,21 @@ export function AutomationsPanel(props: {
         </IconButton>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {runsOf ? (
+        {editing ? (
+          <AutomationBuilder
+            key={editing.automation.id}
+            workspaceId={workspaceId}
+            collectionPath={collectionPath}
+            fields={props.fields}
+            automation={editing.automation}
+            cannotRun={editing.cannotRun}
+            takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
+            saving={saving}
+            onSave={saveEdited}
+            onCancel={() => setEditing(null)}
+            onError={onError}
+          />
+        ) : runsOf ? (
           <AutomationRuns
             workspaceId={workspaceId}
             automationId={runsOf.automationId}
@@ -561,7 +589,13 @@ export function AutomationsPanel(props: {
             <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
           </div>
         ) : file.status === "missing" || file.automations.length === 0 ? (
-          <p className="m-0 px-3 py-4 text-[12px] text-muted">No automations in this Collection yet.</p>
+          <div className="flex flex-col items-start gap-2 px-3 py-4">
+            <p className="m-0 text-[12px] text-muted">No automations in this Collection yet.</p>
+            <SecondaryButton size="compact" className="flex items-center gap-1" onClick={startNew}>
+              <Plus size={12} aria-hidden />
+              New automation
+            </SecondaryButton>
+          </div>
         ) : (
           <>
             {holdsUnreadable ? (
@@ -602,7 +636,14 @@ export function AutomationsPanel(props: {
                       />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="m-0 truncate text-[13px] font-medium text-ink">{entry.automation.name}</p>
+                      <button
+                        type="button"
+                        disabled={editable === null}
+                        onClick={() => setEditing({ automation: entry.automation, cannotRun: entry.cannotRun })}
+                        className="block max-w-full truncate rounded text-left text-[13px] font-medium text-ink hover:underline disabled:no-underline"
+                      >
+                        {entry.automation.name}
+                      </button>
                       <p className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted" title={sentenceText(automationSentence(entry.automation))}>
                         <Sentence parts={automationSentence(entry.automation)} />
                       </p>
@@ -619,6 +660,7 @@ export function AutomationsPanel(props: {
                     <RowMenu
                       label={`${entry.automation.name} actions`}
                       items={[
+                        { label: "Edit", onSelect: () => setEditing({ automation: entry.automation, cannotRun: entry.cannotRun }), disabled: editable === null },
                         { label: "Runs", onSelect: () => openRuns(entry.automationId, entry.automation.name) },
                         { label: "Duplicate", onSelect: () => duplicate(entry.automation), disabled: editable === null || saving || count >= MAX_AUTOMATIONS },
                         { label: "Delete", onSelect: () => remove(entry.automation), disabled: editable === null || saving },

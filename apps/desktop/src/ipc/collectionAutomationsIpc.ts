@@ -3,7 +3,9 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
+  CheckAutomationFormulasPayload,
   ConfirmCollectionAutomationStepPayload,
+  ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
@@ -12,7 +14,9 @@ import {
   RetryCollectionAutomationPayload,
   UndoCollectionAutomationRunPayload,
   WriteCollectionAutomationsPayload,
+  type CheckAutomationFormulasResult,
   type ConfirmCollectionAutomationStepResult,
+  type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
@@ -56,6 +60,8 @@ export function registerCollectionAutomationsIpc<
   showItemInFolder(path: string): void;
   /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
+  /** Each formula's syntax error, or null, from the evaluator the runs use. */
+  checkFormulas(sources: readonly string[]): Promise<Array<string | null>>;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
@@ -103,6 +109,25 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.undo(input, async (relativePath) => {
         await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
       }));
+  });
+
+  registerHandler(CHANNELS.listAutomationTargets, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationTargetsPayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationTargetsResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : { collections: await operation.state.collectionAutomations.targetsFor(input.collectionPath) });
+  });
+
+  // Checking a formula reads nothing in the workspace, but it answers only
+  // the window that has the workspace open, like every other automations call.
+  registerHandler(CHANNELS.checkAutomationFormulas, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CheckAutomationFormulasPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckAutomationFormulasResult> =>
+      ({ problems: await dependencies.checkFormulas(input.formulas) }));
   });
 
   registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {

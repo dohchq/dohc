@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationEvaluator, AutomationOutcome, JsonValue } from "@dohc/app-backend-runtime/automation";
 import { deferred } from "../testing/deferred";
-import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
+import { createAutomationFormulaEvaluator, formulaSyntaxProblems } from "./automationEvaluatorHost";
 
 const scope = { trigger: { kind: "record-added" }, person: null, now: "2026-09-25T09:30:00.000+08:00" };
 const formula = [{ kind: "expression" as const, source: "1" }];
@@ -39,5 +39,18 @@ describe("the shared formula evaluator", () => {
   it("answers busy when the evaluator's own queue is full", async () => {
     const evaluator = createAutomationFormulaEvaluator(fake(async () => [{ ok: false, error: { code: "busy", message: "Full." } }])).forWorkspace("trip");
     await expect(evaluator.evaluate("collection:Tasks#a", scope, formula)).resolves.toBe("busy");
+  });
+
+  it("names only syntax errors when the builder checks formulas, through the real evaluator", async () => {
+    const evaluator = createAutomationFormulaEvaluator();
+    try {
+      const problems = await formulaSyntaxProblems(evaluator, ['record.Status == "Done"', "record.Status ==", "missing.field"], scope.now);
+      expect(problems[0]).toBeNull();
+      expect(problems[1]).toEqual(expect.any(String));
+      // A name the empty scope lacks fails at run time, not as syntax.
+      expect(problems[2]).toBeNull();
+    } finally {
+      await evaluator.close();
+    }
   });
 });

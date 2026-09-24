@@ -33,6 +33,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     writeText,
     showItemInFolder: () => undefined,
     deletePath: async () => undefined,
+    checkFormulas: async (sources) => sources.map(() => null),
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
