@@ -57,7 +57,8 @@ Pushing a tag does not start a release.
 The publish job creates the release as a draft at the dispatched commit and uploads every file to it.
 Its last step publishes the draft, and GitHub then creates the version's tag.
 Updaters never read a draft.
-If a publish job stops before its last step, delete the draft release before you dispatch again.
+A dispatch stops before packaging if its version already has a tag or a release, published or draft.
+Then bump the version, or delete the draft that a stopped run left, and dispatch again.
 To build a nightly, dispatch `Desktop Release` from `main` with `channel=nightly`.
 A push to `main` starts no release.
 A second dispatch on the same channel waits for the running one to finish.

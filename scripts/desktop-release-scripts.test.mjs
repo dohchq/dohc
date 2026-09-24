@@ -358,6 +358,25 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
 
+  // The release action reuses a release that has the same tag and turns it
+  // back into a draft. Nothing is packaged for a version that already has a
+  // tag or a release, published or draft.
+  const unusedVersion = indentedSection(jobs, 2, "unused-version");
+  assert.match(unusedVersion, /^ {4}needs: preflight$/m);
+  assert.match(unusedVersion, /^ {6}contents: write$/m, "only push access lists draft releases");
+  const refuseUsedVersion = stepBlock(unusedVersion, "Refuse a version that has a tag or release");
+  assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
+  assert.match(refuseUsedVersion, /select\(\.tag_name == env\.TAG\)/);
+  assert.match(refuseUsedVersion, /git\/matching-refs\/tags\/\$\{TAG\}/);
+  for (const found of [/== \*published\*/, /== \*draft\*/, /-n "\$tag"/]) {
+    assert.match(refuseUsedVersion, found);
+  }
+  assert.match(
+    indentedSection(jobs, 2, "build"),
+    /^ {6}- unused-version$/m,
+    "packaging waits for the version check",
+  );
+
   // A cancelled or failed publish must leave only a draft, which updaters
   // never read. The release becomes visible in the job's last step.
   const publishSteps = stepBlocks(indentedSection(jobs, 2, "publish"));

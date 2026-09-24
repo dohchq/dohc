@@ -106,9 +106,52 @@ jobs:
       - name: Desktop tests
         run: pnpm test:desktop
 
+  # The release action reuses an existing release with the same tag, published
+  # or draft, and turns it back into a draft while it uploads. A dispatch must
+  # therefore use a version that has no tag and no release. This is its own job
+  # because only a token with push access lists draft releases, and preflight
+  # runs pnpm install.
+  unused-version:
+    name: Refuse a used version
+    needs: preflight
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Refuse a version that has a tag or release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Both queries list matches, so an API failure stops the job
+          # instead of reading as "unused".
+          releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.TAG) | if .draft then "draft" else "published" end')"
+          tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${TAG}" \
+            --jq '.[] | select(.ref == "refs/tags/" + env.TAG) | .ref')"
+          if [[ "$releases" == *published* ]]; then
+            echo "::error::Version ${VERSION} is already published as ${TAG}. Bump the version, then dispatch again."
+            exit 1
+          fi
+          if [[ "$releases" == *draft* ]]; then
+            echo "::error::Version ${VERSION} has a draft release, ${TAG}, left by an earlier run. Delete that draft or bump the version, then dispatch again."
+            exit 1
+          fi
+          if [[ -n "$tag" ]]; then
+            echo "::error::Version ${VERSION} already has the tag ${TAG}. Bump the version, then dispatch again."
+            exit 1
+          fi
+          echo "Version ${VERSION} has no tag or release."
+
   build:
     name: Package ${{ matrix.label }}
-    needs: preflight
+    needs:
+      - preflight
+      - unused-version
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
