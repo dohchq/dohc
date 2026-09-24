@@ -1,4 +1,5 @@
 use dohc_engine_collab::DocKey;
+use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_markdown_path};
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
@@ -98,7 +99,21 @@ enum MomentAuthor {
         #[serde(rename = "grantId")]
         grant_id: String,
     },
+    /// A named share recipient's direct write to a Collection's own files,
+    /// minted by the relay under `relay:collection-file:<grantId>`.
+    #[serde(rename = "named")]
+    Named {
+        #[serde(rename = "userId")]
+        user_id: String,
+        #[serde(rename = "grantId")]
+        grant_id: String,
+        #[serde(rename = "grantGeneration")]
+        grant_generation: i64,
+    },
 }
+
+const COLLECTION_FILE_ORIGIN_PREFIX: &str = "relay:collection-file:";
+const AUTOMATIONS_FILENAME: &str = "automations.yaml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContentKind {
@@ -255,6 +270,7 @@ pub fn apply_moment_envelope_detailed(
                 reason: "public moment author requires a relay collection origin",
             });
         }
+        verify_named_author(tx, envelope, &payload)?;
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
@@ -1120,6 +1136,16 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             } => [principal_id, grant_id]
                 .iter()
                 .any(|v| v.is_empty() || v.len() > 500),
+            MomentAuthor::Named {
+                user_id,
+                grant_id,
+                grant_generation,
+            } => {
+                [user_id, grant_id]
+                    .iter()
+                    .any(|v| v.is_empty() || v.len() > 500)
+                    || *grant_generation < 1
+            }
         })
     {
         return Err(SyncError::InvalidInput {
@@ -1140,6 +1166,80 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
     }
     validate_every_path_field(payload)?;
     Ok(())
+}
+
+/// The owner's own check on the direct lane (ADR 0013). A named author and
+/// the relay's `relay:collection-file:<grantId>` origin travel only together,
+/// with the same grant, and write only a Collection's own files.
+fn verify_named_author(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<(), SyncError> {
+    let lane_grant = envelope
+        .origin_id
+        .strip_prefix(COLLECTION_FILE_ORIGIN_PREFIX);
+    let author_grant = match &payload.author {
+        Some(MomentAuthor::Named { grant_id, .. }) => Some(grant_id.as_str()),
+        _ => None,
+    };
+    match (lane_grant, author_grant) {
+        (None, None) => return Ok(()),
+        (Some(lane), Some(author)) if lane == author => {}
+        _ => {
+            return Err(SyncError::InvalidInput {
+                reason: "named moment author requires its grant's relay collection-file origin",
+            });
+        }
+    }
+    if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
+        return Err(SyncError::InvalidInput {
+            reason: "named moment author may write only a Collection's own files",
+        });
+    }
+    Ok(())
+}
+
+/// An in-place text write to `<C>/collection.yaml`, or to `<C>/automations.yaml`
+/// beside it, or the creation of a record directly inside a folder that holds
+/// `collection.yaml`. A new Collection's `collection.yaml` therefore has to
+/// arrive before its records.
+fn writes_collection_own_file(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    let path = payload.path.as_str();
+    let Some((folder, file_name)) = path.rsplit_once('/') else {
+        return Ok(false);
+    };
+    let in_place = |side: Option<&str>| side.is_none_or(|side| side == path);
+    if payload.operation != "write"
+        || payload.payload_after_path != path
+        || !in_place(payload.payload_before_path.as_deref())
+        || !in_place(payload.before_path.as_deref())
+        || payload.conflict_id.is_some()
+        || payload.conflict_effect_index.is_some()
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(false);
+    }
+    let folder_holds_schema = || {
+        select_snapshot_by_path(
+            tx,
+            workspace_id,
+            &payload.version_id,
+            &format!("{folder}/{COLLECTION_SCHEMA_FILENAME}"),
+        )
+        .map(|schema| schema.is_some())
+    };
+    let creates = matches!(payload.before_present.as_str(), "absent" | "null");
+    Ok(match file_name {
+        COLLECTION_SCHEMA_FILENAME => true,
+        AUTOMATIONS_FILENAME => folder_holds_schema()?,
+        _ => creates && is_collection_markdown_path(path) && folder_holds_schema()?,
+    })
 }
 
 fn validate_payload_bounds(payload: &MomentAppendPayload) -> Result<(), SyncError> {
