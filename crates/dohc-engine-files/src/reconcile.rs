@@ -231,6 +231,7 @@ pub struct ReconcileController {
     degraded_epoch: u64,
     identical_degraded_count: usize,
     quarantined_paths: Vec<String>,
+    deferred_paths: Vec<String>,
 }
 
 impl Default for ReconcileController {
@@ -253,6 +254,7 @@ impl ReconcileController {
             degraded_epoch: 0,
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
+            deferred_paths: Vec::new(),
         }
     }
 
@@ -286,6 +288,7 @@ impl ReconcileController {
             degraded_epoch: 0,
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
+            deferred_paths: Vec::new(),
         }
     }
 
@@ -307,6 +310,12 @@ impl ReconcileController {
     /// Whether the committed manifest still tracks an exact normalized path.
     pub fn tracks_path(&self, path: &str) -> bool {
         self.manifest.get(path).is_some()
+    }
+
+    /// Paths the last acknowledged run deferred to a live document session.
+    /// Every full scan offers them again until one captures them.
+    pub fn deferred_paths(&self) -> &[String] {
+        &self.deferred_paths
     }
 
     /// Bounded last-known degraded paths retained by the retry quarantine.
@@ -461,6 +470,7 @@ impl ReconcileController {
         if plan.ops.is_empty() && result.not_owned_paths.is_empty() {
             self.generation = plan.to_generation;
             self.outstanding = false;
+            self.deferred_paths = result.deferred_paths.clone();
             self.update_degraded_retry_state(plan, &result.failed_applies);
             return Ok(());
         }
@@ -532,6 +542,7 @@ impl ReconcileController {
         self.manifest = next;
         self.generation = plan.to_generation;
         self.outstanding = false;
+        self.deferred_paths = result.deferred_paths.clone();
         self.update_degraded_retry_state(plan, &result.failed_applies);
         Ok(())
     }
@@ -776,6 +787,7 @@ mod ack_receipt_tests {
             captured: Vec::new(),
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
+            deferred_paths: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
         }
@@ -814,6 +826,7 @@ mod ack_receipt_tests {
             captured: Vec::new(),
             not_owned_paths: vec!["over-cap.md".to_owned()],
             failed_applies: Vec::new(),
+            deferred_paths: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
         };

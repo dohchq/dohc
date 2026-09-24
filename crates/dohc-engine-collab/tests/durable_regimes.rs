@@ -3426,6 +3426,27 @@ fn a_lease_is_exclusive_and_releases_on_drop() {
 }
 
 #[test]
+fn every_release_moves_the_release_generation_for_all_scoped_views() {
+    let registry = LeaseRegistry::new();
+    let scoped = registry.scoped(std::path::Path::new("root-a"));
+    let before = registry.release_generation();
+
+    let lease = scoped.acquire(&test_key()).expect("scoped lease");
+    assert_eq!(
+        registry.release_generation(),
+        before,
+        "acquiring releases nothing"
+    );
+    lease.release();
+    assert_eq!(registry.release_generation(), before + 1);
+    assert_eq!(scoped.release_generation(), before + 1);
+
+    // Drop releases too.
+    drop(registry.acquire(&test_key()).expect("unscoped lease"));
+    assert_eq!(scoped.release_generation(), before + 2);
+}
+
+#[test]
 fn leases_are_process_local_per_registry() {
     // Exclusivity is PROCESS-LOCAL, per-registry (mirrors the TS module-global
     // reservation set): two independent registries can each grant a lease for the
