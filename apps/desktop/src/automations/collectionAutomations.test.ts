@@ -33,6 +33,14 @@ const editor = (email: string, paths: string[]): RosterGrant => ({
 
 interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc }
 
+// Every field these tests name. A field a Collection lacks keeps its
+// automation off, so each test Collection defines them all.
+const FIELDS = [
+  "Status", "Count", "Note", "Title", "Mark", "X", "Seen", "Amount", "Points", "Swept", "Checked",
+  "Project", "Finished on", "A", "B", "C", "D", "E",
+];
+const SCHEMA = `fields:\n${FIELDS.map((field) => `  ${field}:\n    type: text\n`).join("")}`;
+
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 async function world(options: {
@@ -50,7 +58,7 @@ async function world(options: {
   const collections = options.collections ?? ["Tasks"];
   for (const collection of collections) {
     await mkdir(join(root, collection), { recursive: true });
-    await writeFile(join(root, collection, "collection.yaml"), "fields: []\n");
+    await writeFile(join(root, collection, "collection.yaml"), SCHEMA);
   }
   const writeAutomations = async (collection: string, body: string) =>
     await writeFile(join(root, collection, "automations.yaml"), `version: 1\nautomations:\n${body}`);
@@ -1061,6 +1069,29 @@ describe("Collection automations", () => {
     w.claims.get(claim.claimId)!.error = "chain-stopped";
     const [run] = await w.executor.runs("collection:Tasks#stamp");
     expect(run).toMatchObject({ state: "failed", chainStopped: true, undone: false, writes: [] });
+  });
+
+  it("keeps an automation that names a field its Collection lacks off, says why, and runs it once the field exists", async () => {
+    const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Done on: '=today()'}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    await w.executor.open();
+    const listed = await w.executor.automationsIn("Tasks");
+    expect(listed.status === "read" && listed.automations[0]).toMatchObject({ cannotRun: "Done on is not a field in Tasks." });
+    expect(w.subscriptions.has("collection:Tasks#done")).toBe(false);
+    // A claim made before the field went away fails with the reason, without writing.
+    const early = w.claim("collection:Tasks#done", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(early);
+    expect(early).toMatchObject({ state: "failed", error: "Done on is not a field in Tasks." });
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done" });
+
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), `${SCHEMA}  Done on:\n    type: text\n`);
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/collection.yaml" }]);
+    await w.until(() => w.subscriptions.has("collection:Tasks#done"));
+    const claim = w.claim("collection:Tasks#done", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task)["Done on"]).toBe(localIsoTime(claim.createdAtMs).slice(0, 10));
   });
 
   it("keeps counting timeouts across a restart", async () => {

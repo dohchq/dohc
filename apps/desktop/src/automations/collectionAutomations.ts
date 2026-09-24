@@ -8,7 +8,8 @@ import {
   type AutomationEntry,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
-import type { CollectionListResult } from "@dohc/workspace-contracts/collection";
+import { COLLECTION_SCHEMA_FILENAME, type CollectionListResult } from "@dohc/workspace-contracts/collection";
+import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
@@ -21,6 +22,7 @@ import {
   collectionAutomationId,
   COLLECTION_AUTOMATION_PREFIX,
   definitionHash,
+  fieldsNamedBy,
   parseCollectionAutomationId,
   reachStepsOf,
   subscriptionFor,
@@ -138,8 +140,11 @@ export type CollectionAutomationSummary =
       automationId: string;
       automation: Automation;
       definitionHash: string;
-      /** Why dohc cannot run it yet, or null. */
-      unsupported: string | null;
+      /**
+       * Why dohc does not run it now, or null: a trigger or step dohc cannot
+       * run yet, or a field its Collection does not have.
+       */
+      cannotRun: string | null;
       /** Each step's reach in step order, or why dohc cannot check who can edit yet. */
       reach: { kind: "checked"; steps: CollectionAutomationStepReach[] } | { kind: "waiting"; reason: string };
       /** Its newest run on this computer, or null when it has not run here. */
@@ -262,6 +267,11 @@ export class CollectionAutomations {
   private collections = new Set<string>();
   /** Collections that hold an automations.yaml, with what it says. */
   private readonly files = new Map<string, IndexedFile>();
+  /**
+   * The field names of each Collection an automation names, or null when
+   * its collection.yaml cannot be read.
+   */
+  private readonly schemaFields = new Map<string, ReadonlySet<string> | null>();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -366,6 +376,7 @@ export class CollectionAutomations {
     if (folders.size === 0 || this.opened === null) return;
     void this.enqueue(async () => {
       for (const folder of folders) {
+        this.schemaFields.delete(folder);
         if (await this.options.pathExists(`${folder}/collection.yaml`)) {
           this.collections.add(folder);
           await this.readFile(folder);
@@ -374,6 +385,7 @@ export class CollectionAutomations {
           this.files.delete(folder);
         }
       }
+      await this.readNamedSchemas();
       await this.reconcile(false);
       // An edited or removed automation's held steps leave the notices.
       this.publishHolds();
@@ -455,7 +467,7 @@ export class CollectionAutomations {
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
     const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
-    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupportedReason(entry.automation) === null
+    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && this.cannotRun(collectionPath, entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
       : []);
     // Without a roster, the reason is the same for every step: dohc cannot
@@ -480,7 +492,7 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, unsupported: unsupportedReason(automation),
+        valid: true as const, automationId, automation, definitionHash: hash, cannotRun: this.cannotRun(collectionPath, automation),
         lastRun: lastRuns.get(automationId) ?? null,
       };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
@@ -624,12 +636,14 @@ export class CollectionAutomations {
     await this.ready();
     const parsed = parseCollectionAutomationId(input.automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
-    if (automation === null) return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
+    if (parsed === null || automation === null) {
+      return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
+    }
     if (!automation.enabled) {
       return { status: "refused", reason: `"${automation.name}" is switched off. Switch it on, then try again.` };
     }
-    const unsupported = unsupportedReason(automation);
-    if (unsupported !== null) return { status: "refused", reason: unsupported };
+    const cannotRun = this.cannotRun(parsed.collectionPath, automation);
+    if (cannotRun !== null) return { status: "refused", reason: cannotRun };
     // The guard is taken before the first read and held to the end, so an
     // Undo of the same run cannot start between this check and the retry.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
@@ -751,7 +765,43 @@ export class CollectionAutomations {
     if (listed === null) throw new Error("The workspace engine is not running.");
     this.collections = new Set(listed.collections.map((collection) => collection.path));
     this.files.clear();
+    this.schemaFields.clear();
     for (const path of this.collections) await this.readFile(path);
+    await this.readNamedSchemas();
+  }
+
+  /** Reads the field names of every Collection an automation names that the index lacks. */
+  private async readNamedSchemas(): Promise<void> {
+    for (const [collectionPath, indexed] of this.files) {
+      if (indexed.file.status !== "read") continue;
+      for (const entry of indexed.file.entries) {
+        if (entry.status !== "valid") continue;
+        for (const { collection } of fieldsNamedBy(entry.automation, collectionPath)) {
+          if (this.schemaFields.has(collection)) continue;
+          const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
+          const parsed = read === null || read.truncated ? null : parseCollectionSchema(read.text);
+          this.schemaFields.set(
+            collection,
+            parsed?.status === "valid" ? new Set(parsed.schema.fields.map((field) => field.name)) : null,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Why dohc does not run an automation now, or null. A field its
+   * Collection does not have keeps it off until someone fixes the file or
+   * the Collection: a write would add a field nobody defined.
+   */
+  private cannotRun(collectionPath: string, automation: Automation): string | null {
+    const unsupported = unsupportedReason(automation);
+    if (unsupported !== null) return unsupported;
+    for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
+      const fields = this.schemaFields.get(collection);
+      if (fields && !fields.has(field)) return `${field} is not a field in ${collectionNamed(collection).name}.`;
+    }
+    return null;
   }
 
   private async readFile(collectionPath: string): Promise<void> {
@@ -784,7 +834,7 @@ export class CollectionAutomations {
     for (const [collectionPath, indexed] of this.files) {
       if (indexed.file.status !== "read") continue;
       for (const entry of indexed.file.entries) {
-        if (entry.status !== "valid" || unsupportedReason(entry.automation) !== null) continue;
+        if (entry.status !== "valid" || this.cannotRun(collectionPath, entry.automation) !== null) continue;
         const automationId = collectionAutomationId(collectionPath, entry.automation.id);
         automations.push({ automationId, collectionPath, automation: entry.automation });
       }
@@ -1027,9 +1077,10 @@ export class CollectionAutomations {
       }
       return { kind: "settle", input: { state: "done" }, settled: async () => undefined };
     }
-    // A claim this version cannot run fails with the reason the panel shows,
-    // so it reaches the failure notice and a later version's Try again runs it.
-    const unsupported = unsupportedReason(automation);
+    // A claim this version cannot run, or that names a field its Collection
+    // lacks, fails with the reason the panel shows, so it reaches the failure
+    // notice and Try again runs it once that is fixed.
+    const unsupported = this.cannotRun(id.collectionPath, automation);
     if (unsupported !== null) {
       return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
     }
