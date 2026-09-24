@@ -38,6 +38,17 @@ export interface NoticeAccount {
   relay: SyncRelayConnection;
 }
 
+// One signed-in session, read from one credential snapshot, so the account
+// and every reach come from the same credentials. Once `isCurrent` turns
+// false, nothing more is queued or sent for the session.
+export interface NoticeSession {
+  account: NoticeAccount;
+  // How this session reaches this computer's workspace on its relay, or
+  // null when the workspace does not sync through it.
+  reachFor(workspaceId: string): NoticeReach | null;
+  isCurrent(): boolean;
+}
+
 export interface PostNoticeInput {
   // This computer's workspace id.
   workspaceId: string;
@@ -141,8 +152,9 @@ type OutboxMark = z.infer<typeof OutboxMark>;
 
 // An account's rows as the relay last served them, dismissed rows kept as
 // tombstones, the pull cursor, and the outbox. The outbox holds your own
-// posts until a finished pull shows them, and one mark per notice until
-// the relay accepts it. Nothing waiting in it is ever dropped for space.
+// posts until a finished pull shows them, and one mark per notice until the
+// relay accepts it. Unsent posts are capped at the relay's list size, oldest
+// dropped first.
 const AccountFile = z.object({
   version: z.literal(1),
   cursor: z.string().max(64).nullable(),
@@ -169,10 +181,13 @@ const RelayPage = z.object({
 });
 
 class RelayRefusal extends Error {
-  constructor(readonly reason: "invalid" | "refused" | "rate-limited" | "routes-missing") {
+  constructor(readonly reason: "invalid" | "refused" | "rate-limited" | "list-full" | "routes-missing") {
     super(reason);
   }
 }
+
+// The signed-in session changed before a notice was queued or sent.
+class SessionChanged extends Error {}
 
 /**
  * Notices sent to a person, kept in main under `directory`: one file for this
@@ -184,15 +199,15 @@ class RelayRefusal extends Error {
  */
 export function createNoticeStore(deps: {
   directory: string;
-  currentAccount(): Promise<NoticeAccount | null>;
-  // How the signed-in account reaches this computer's workspace on its
-  // relay, or null when the workspace does not sync through it.
-  reachFor(workspaceId: string): Promise<NoticeReach | null>;
+  // The signed-in session, or null when nobody is signed in to a relay.
+  session(): Promise<NoticeSession | null>;
   installId(): string;
   onChanged(): void;
   nowMs?: () => number;
+  outboxPostLimit?: number;
 }): NoticeStore {
   const nowMs = deps.nowMs ?? Date.now;
+  const outboxPostLimit = deps.outboxPostLimit ?? NOTICE_LIST_ROW_LIMIT;
   let localFile: LocalFile | null = null;
   const accountFiles = new Map<string, AccountFile>();
 
@@ -271,7 +286,7 @@ export function createNoticeStore(deps: {
 
   const saveAccount = (account: NoticeAccount, file: AccountFile) => save(accountFileName(account), file);
 
-  // Only cached relay rows age out. The outbox is never trimmed.
+  // Only cached relay rows age out; the outbox has its own limit.
   function pruneAccount(file: AccountFile): boolean {
     const kept = retained(file.rows, NOTICE_LIST_ROW_LIMIT, nowMs());
     if (kept === file.rows) return false;
@@ -298,10 +313,11 @@ export function createNoticeStore(deps: {
     return true;
   }
 
-  async function relay(account: NoticeAccount, path: string, body?: unknown): Promise<Response> {
+  async function relay(session: NoticeSession, path: string, body?: unknown): Promise<Response> {
+    if (!session.isCurrent()) throw new SessionChanged();
     const refusal = (reason: RelayRefusal["reason"]) => () => new RelayRefusal(reason);
     return relayRequest({
-      relay: account.relay,
+      relay: session.account.relay,
       path,
       init: body === undefined ? undefined : {
         method: "POST",
@@ -313,6 +329,7 @@ export function createNoticeStore(deps: {
         400: refusal("invalid"),
         403: refusal("refused"),
         404: refusal("routes-missing"),
+        409: refusal("list-full"),
         429: refusal("rate-limited"),
       },
       label: "Notices",
@@ -354,14 +371,16 @@ export function createNoticeStore(deps: {
 
   // Sends waiting posts one at a time. A refused post is dropped; anything
   // else leaves the rest waiting for the next pass.
-  async function sendPosts(account: NoticeAccount): Promise<"done" | "routes-missing"> {
+  async function sendPosts(session: NoticeSession): Promise<"done" | "routes-missing"> {
+    const account = session.account;
     for (;;) {
       const post = await locked(async () => (await loadAccount(account)).posts.find((waiting) => !waiting.sent));
       if (!post) return "done";
       let accepted = true;
       try {
-        await relay(account, "/sync/notices", post.request);
+        await relay(session, "/sync/notices", post.request);
       } catch (error) {
+        if (error instanceof SessionChanged) throw error;
         if (!(error instanceof RelayRefusal) || error.reason === "rate-limited") {
           console.warn("[notices] a notice could not be sent; the next pass tries again", error);
           return "done";
@@ -379,16 +398,23 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function sendMarks(account: NoticeAccount): Promise<"done" | "routes-missing"> {
+  // A mark for one of your posts waits until the relay has accepted the
+  // post, or the relay would answer for a row it does not hold yet.
+  async function sendMarks(session: NoticeSession): Promise<"done" | "routes-missing"> {
+    const account = session.account;
     for (;;) {
-      const batch = await locked(async () =>
-        (await loadAccount(account)).marks.slice(0, NOTICE_MARKS_PER_REQUEST));
+      const batch = await locked(async () => {
+        const file = await loadAccount(account);
+        const unsent = new Set(file.posts.filter((post) => !post.sent).map((post) => post.request.noticeId));
+        return file.marks.filter((waiting) => !unsent.has(waiting.noticeId)).slice(0, NOTICE_MARKS_PER_REQUEST);
+      });
       if (batch.length === 0) return "done";
       try {
-        await relay(account, "/sync/notices/marks", {
+        await relay(session, "/sync/notices/marks", {
           marks: batch.map(({ noticeId, mark }) => ({ noticeId, mark })),
         });
       } catch (error) {
+        if (error instanceof SessionChanged) throw error;
         if (error instanceof RelayRefusal && error.reason === "routes-missing") return "routes-missing";
         if (!(error instanceof RelayRefusal) || error.reason === "rate-limited") {
           console.warn("[notices] marks could not be sent; the next pass tries again", error);
@@ -412,9 +438,10 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function syncAccount(account: NoticeAccount): Promise<void> {
-    if (await sendPosts(account) === "routes-missing") return await noteRoutesMissing(account);
-    if (await sendMarks(account) === "routes-missing") return await noteRoutesMissing(account);
+  async function syncAccount(session: NoticeSession): Promise<void> {
+    const account = session.account;
+    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(account);
+    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(account);
 
     let changed = false;
     for (let more = true; more;) {
@@ -422,7 +449,7 @@ export function createNoticeStore(deps: {
       const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
       let page: z.infer<typeof RelayPage>;
       try {
-        page = RelayPage.parse(await (await relay(account, `/sync/notices?${query}`)).json());
+        page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
       } catch (error) {
         if (error instanceof RelayRefusal && error.reason === "routes-missing") {
           return await noteRoutesMissing(account);
@@ -466,8 +493,8 @@ export function createNoticeStore(deps: {
         do {
           again = false;
           try {
-            const account = await deps.currentAccount();
-            if (account) await syncAccount(account);
+            const session = await deps.session();
+            if (session) await syncAccount(session);
             const pruned = await locked(async () => {
               const local = await loadLocal();
               if (!pruneLocal(local)) return false;
@@ -476,7 +503,9 @@ export function createNoticeStore(deps: {
             });
             if (pruned) deps.onChanged();
           } catch (error) {
-            console.warn("[notices] sync failed; the next pass tries again", error);
+            // A pass for a session that ended stops; the next pass uses the new one.
+            if (error instanceof SessionChanged) again = true;
+            else console.warn("[notices] sync failed; the next pass tries again", error);
           }
         } while (again);
       } finally {
@@ -495,38 +524,52 @@ export function createNoticeStore(deps: {
       body: input.body,
       target: input.target ?? {},
     });
-    const account = await deps.currentAccount();
-    const reach = account ? await deps.reachFor(input.workspaceId) : null;
-    const request = (recipientUserId: string, to: NoticeReach): PostNoticeRequest => ({
+    // A session that changes while the notice is placed is read again.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await postOnce(input.recipientUserId, content);
+      } catch (error) {
+        if (!(error instanceof SessionChanged)) throw error;
+        if (attempt === 3) throw new NoticeNotSentError("Your server session changed. Try again.");
+      }
+    }
+  }
+
+  async function postOnce(recipientUserId: string | undefined, content: NoticeContent): Promise<void> {
+    const session = await deps.session();
+    const reach = session?.reachFor(content.workspaceId) ?? null;
+    const request = (recipient: string, to: NoticeReach): PostNoticeRequest => ({
       ...to,
       noticeId: content.noticeId,
-      recipientUserId,
+      recipientUserId: recipient,
       kind: content.kind,
       title: content.title,
       body: content.body,
       target: content.target,
       originInstallId: deps.installId(),
     });
-    if (input.recipientUserId !== undefined && input.recipientUserId !== account?.userId) {
-      if (!account || !reach) {
+    if (recipientUserId !== undefined && recipientUserId !== session?.account.userId) {
+      if (!session || !reach) {
         throw new NoticeNotSentError(
           "Notices reach other people through a server. Sync this workspace with an up-to-date server first.",
         );
       }
-      return await postToAnotherPerson(account, request(input.recipientUserId, reach));
+      return await postToAnotherPerson(session, request(recipientUserId, reach));
     }
     const createdAtMs = nowMs();
     const queued = await locked(async () => {
+      if (session && !session.isCurrent()) throw new SessionChanged();
       const local = await loadLocal();
       // A notice kept on this computer stays here.
       if (local.rows.some((row) => row.noticeId === content.noticeId)) return false;
-      const file = account && reach ? await loadAccount(account) : null;
-      if (account && reach && file && !file.routesMissing) {
+      const file = session && reach ? await loadAccount(session.account) : null;
+      if (session && reach && file && !file.routesMissing) {
         const known = file.rows.some((row) => row.noticeId === content.noticeId) ||
           file.posts.some((post) => post.request.noticeId === content.noticeId);
         if (known) return false;
-        file.posts.push({ request: request(account.userId, reach), createdAtMs, sent: false });
-        await saveAccount(account, file);
+        dropOldestUnsent(file);
+        file.posts.push({ request: request(session.account.userId, reach), createdAtMs, sent: false });
+        await saveAccount(session.account, file);
         return true;
       }
       addLocal(local, content, createdAtMs);
@@ -535,27 +578,40 @@ export function createNoticeStore(deps: {
     });
     if (!queued) return;
     deps.onChanged();
-    if (account && reach) void sync();
+    if (session && reach) void sync();
+  }
+
+  // Makes room for one more unsent post. The oldest unsent posts go, with
+  // any marks waiting on them.
+  function dropOldestUnsent(file: AccountFile): void {
+    const unsent = file.posts.filter((post) => !post.sent);
+    if (unsent.length < outboxPostLimit) return;
+    const dropped = new Set(unsent.slice(0, unsent.length - outboxPostLimit + 1));
+    const droppedIds = new Set([...dropped].map((post) => post.request.noticeId));
+    file.posts = file.posts.filter((post) => !dropped.has(post));
+    file.marks = file.marks.filter((waiting) => !droppedIds.has(waiting.noticeId));
   }
 
   // Sent at once rather than queued, so the caller learns whether the
   // relay accepted it.
-  async function postToAnotherPerson(account: NoticeAccount, request: PostNoticeRequest): Promise<void> {
-    if (await locked(async () => (await loadAccount(account)).routesMissing)) {
+  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest): Promise<void> {
+    if (await locked(async () => (await loadAccount(session.account)).routesMissing)) {
       throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
     }
     try {
-      await relay(account, "/sync/notices", request);
+      await relay(session, "/sync/notices", request);
     } catch (error) {
       if (!(error instanceof RelayRefusal)) throw error;
       switch (error.reason) {
         case "routes-missing":
-          await noteRoutesMissing(account);
+          await noteRoutesMissing(session.account);
           throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
         case "refused":
           throw new NoticeNotSentError("This person can't open what the notice points to.");
         case "rate-limited":
           throw new NoticeNotSentError("Too many notices went to other people. Wait a minute, then try again.");
+        case "list-full":
+          throw new NoticeNotSentError("This person has too many unread notices to get this one.");
         case "invalid":
           throw error;
       }
@@ -563,7 +619,7 @@ export function createNoticeStore(deps: {
   }
 
   async function list(): Promise<NoticeRow[]> {
-    const account = await deps.currentAccount();
+    const account = (await deps.session())?.account ?? null;
     return await locked(async () => {
       const local = await loadLocal();
       if (pruneLocal(local)) await saveLocal(local);
@@ -616,10 +672,10 @@ export function createNoticeStore(deps: {
   }
 
   async function mark(ref: NoticeRef, mark: NoticeMark): Promise<void> {
-    const account = ref.store === "account" ? await deps.currentAccount() : null;
-    if (ref.store === "account" && !account) return;
+    const session = ref.store === "account" ? await deps.session() : null;
+    if (ref.store === "account" && !session) return;
     const changed = await locked(async () => {
-      if (!account) {
+      if (!session) {
         const file = await loadLocal();
         const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
         if (!row || row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) return false;
@@ -628,7 +684,9 @@ export function createNoticeStore(deps: {
         await saveLocal(file);
         return true;
       }
-      const file = await loadAccount(account);
+      // A mark from a list shown for an account that is no longer signed in.
+      if (!session.isCurrent()) return false;
+      const file = await loadAccount(session.account);
       const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
       const post = file.posts.find((waiting) => waiting.request.noticeId === ref.noticeId);
       if ((!row && !post) || row?.dismissedAtMs != null || (mark === "read" && row?.readAtMs != null)) return false;
@@ -638,12 +696,12 @@ export function createNoticeStore(deps: {
       if (mark === "dismissed" && post && !post.sent) {
         file.posts = file.posts.filter((waiting) => waiting !== post);
       }
-      await saveAccount(account, file);
+      await saveAccount(session.account, file);
       return true;
     });
     if (!changed) return;
     deps.onChanged();
-    if (account) void sync();
+    if (session) void sync();
   }
 
   return { postNotice, list, mark, sync };

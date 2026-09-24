@@ -212,7 +212,7 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
-import { createNoticeStore, type NoticeAccount, type NoticeStore } from "./notices/noticeStore";
+import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -801,39 +801,41 @@ function clearCachedCredentials(): void {
 // Notices sent to the signed-in person, and this computer's own. The store
 // pulls after each sync pass, at sign-in, and when a window gains focus.
 let cachedNoticeStore: NoticeStore | null = null;
-function noticeAccount(credentials: CloudSessionCredentials | null): NoticeAccount | null {
+// The signed-in session from one credential snapshot: the account and every
+// reach read the same credentials, and the session stops being current as
+// soon as the credentials change.
+async function noticeSession(): Promise<NoticeSession | null> {
+  await warmCredentialCache();
+  const { credentials, generation } = credentialSessionCache.snapshot();
   if (!credentials?.relayUrl) return null;
   return {
-    key: chatShareSessionKey(credentials)!,
-    userId: credentials.userId,
-    relay: {
-      baseUrl: credentials.relayUrl,
-      token: credentials.token,
-      fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+    account: {
+      key: chatShareSessionKey(credentials)!,
+      userId: credentials.userId,
+      relay: {
+        baseUrl: credentials.relayUrl,
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+      },
+    },
+    isCurrent: () => credentialSessionCache.snapshot().generation === generation,
+    // An owned workspace is named; a share view is reached through its share.
+    reachFor: (workspaceId) => {
+      const workspace = findWorkspace(workspaceId);
+      if (!workspace) return null;
+      if (workspace.shareView) {
+        return resolveShareViewRelayAuthorId(workspace.shareView, credentials) === undefined
+          ? null
+          : { shareId: workspace.shareView.shareId };
+      }
+      return resolveWorkspaceRelayAuthorId(workspace, credentials) === undefined ? null : { workspaceId };
     },
   };
 }
 function noticeStore(): NoticeStore {
   cachedNoticeStore ??= createNoticeStore({
     directory: join(stateDir(), "notices"),
-    currentAccount: async () => {
-      await warmCredentialCache();
-      return noticeAccount(cachedCredentials);
-    },
-    // An owned workspace is named; a share view is reached through its share.
-    reachFor: async (workspaceId) => {
-      await warmCredentialCache();
-      const workspace = findWorkspace(workspaceId);
-      if (!workspace) return null;
-      if (workspace.shareView) {
-        return resolveShareViewRelayAuthorId(workspace.shareView, cachedCredentials) === undefined
-          ? null
-          : { shareId: workspace.shareView.shareId };
-      }
-      return resolveWorkspaceRelayAuthorId(workspace, cachedCredentials) === undefined
-        ? null
-        : { workspaceId };
-    },
+    session: noticeSession,
     installId: localReactorFallbackId,
     onChanged: () => {
       for (const window of BrowserWindow.getAllWindows()) {
