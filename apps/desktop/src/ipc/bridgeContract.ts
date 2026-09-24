@@ -12,6 +12,12 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
+import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type {
+  CollectionAutomationRetry,
+  CollectionAutomationRun,
+  CollectionAutomationsFile,
+} from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
   NOTICE_BODY_MAX_CHARS,
@@ -5158,6 +5164,66 @@ export type DismissAutomationFailurePayload = z.infer<
   typeof DismissAutomationFailurePayload
 >;
 
+// ---- Collection automations (the ⚡ panel) ----
+// Main parses and writes automations.yaml, so the renderer never loads the
+// file contract. A shared view holds no executor, so it answers
+// "unavailable": its automations run on the owner's computer.
+const COLLECTION_AUTOMATION_ID = z.string().min(1).max(4096);
+
+export const ListCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
+export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
+
+export const ListCollectionAutomationRunsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+});
+export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
+export type ListCollectionAutomationRunsResult = { runs: CollectionAutomationRun[] };
+
+// Try again for a failed run. `startOver` confirms running an automation
+// that changed since the run began from its first step.
+export const RetryCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+  startOver: z.boolean(),
+});
+export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
+export type RetryCollectionAutomationResult = CollectionAutomationRetry;
+
+// A current editor allows a step that became reachable only because an
+// editor left. `seq` names the hold the person saw.
+export const ConfirmCollectionAutomationStepPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+  step: z.number().int().nonnegative().max(10_000),
+  seq: z.number().int().nonnegative(),
+});
+export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
+export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
+
+// Replaces the file's automations with these, over the content the panel
+// read (null when the file did not exist).
+export const WriteCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH.nullable(),
+  automations: z.array(z.record(z.string(), z.unknown())).max(50),
+});
+export type WriteCollectionAutomationsPayload = z.infer<typeof WriteCollectionAutomationsPayload>;
+export type WriteCollectionAutomationsResult =
+  | { status: "written"; contentHash: string }
+  | { status: "conflict" }
+  // The file has entries dohc cannot read; it has to be fixed by hand.
+  | { status: "unreadable" }
+  | { status: "refused"; diagnostics: AutomationDiagnostic[] }
+  | { status: "unavailable" };
+
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
@@ -6420,6 +6486,12 @@ export interface DohcDesktopBridge
   dismissAutomationFailure(
     payload: DismissAutomationFailurePayload,
   ): Promise<void>;
+  // Collection automations, for the ⚡ panel.
+  listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
+  listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
+  retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
+  confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
+  writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,

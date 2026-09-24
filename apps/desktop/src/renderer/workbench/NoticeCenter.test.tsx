@@ -74,6 +74,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
+      {...(props.automationFailures ? { automationFailures: props.automationFailures } : {})}
     />
   );
 }
@@ -115,6 +116,28 @@ function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotificat
     ...overrides,
   };
 }
+
+describe("automation failure notices", () => {
+  it("sends a Collection automation's failure to its automations.yaml, not to a plugin's source", async () => {
+    renderNotices({
+      automationFailures: [
+        { automationId: "collection:Projects/Tasks#finished-date", claimId: "atc_1", chainStopped: false,
+          error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1 },
+        { automationId: "collection:Projects/Tasks#nudge", claimId: "atc_2", chainStopped: true,
+          error: "chain-stopped", updatedAtMs: 6_000, generation: 2 },
+      ],
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const failed = await screen.findByTestId("notice-automation-failure-collection:Projects/Tasks#finished-date");
+    expect(failed.textContent).toContain('Automation "finished-date" failed');
+    expect(failed.textContent).toContain(
+      "ana@dohc.test cannot edit Budget. Open Projects/Tasks/automations.yaml to fix the automation.",
+    );
+    const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
+    expect(stopped.textContent).toContain('"nudge" did not run. Open Projects/Tasks/automations.yaml to shorten the chain.');
+    expect(document.body.textContent).not.toContain("plugin's source");
+  });
+});
 
 describe("update toast", () => {
   it("shows the machine's message when an update becomes ready, and dismisses", async () => {

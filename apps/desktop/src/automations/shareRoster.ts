@@ -315,6 +315,8 @@ export function createShareRosters(dependencies: {
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
   localUserId(): Promise<string | null>;
   logError(workspaceId: string, error: unknown): void;
+  /** A listing answered, so claims waiting to check who can edit can run. */
+  onListed?(workspaceId: string): void;
   // A clock that never steps backwards, for pacing listings.
   nowMs?: () => number;
 }) {
@@ -395,6 +397,7 @@ export function createShareRosters(dependencies: {
     state.noAnswer = null;
     state.unsaved = { listing: answer.listing, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
+    dependencies.onListed?.(workspaceId);
   }
 
   // A request made while a listing runs gets one more listing after it, so a
