@@ -120,21 +120,6 @@ test("History lists the first document of a new workspace while it is open", asy
     const rootPath = join(temp.rootPath, "my-notes");
     const workspace = await activeWorkspace(page, rootPath);
 
-    // Every capture health change notifies, and a pause stays reported until
-    // the next health poll, so reading the status on each notice sees it.
-    await page.evaluate((workspaceId) => {
-      const api = window.dohcDesktop;
-      if (!api) throw new Error("Desktop bridge is unavailable");
-      const pauses: string[] = [];
-      Object.assign(window, { historyPauses: pauses });
-      api.onWorkspaceActivity((event) => {
-        if (event.workspaceId !== workspaceId) return;
-        void api.getSyncStatus({ workspaceId }).then((status) => {
-          if (status.historyCaptureFailed) pauses.push(new Date().toISOString());
-        });
-      });
-    }, workspace.workspaceId);
-
     await page.keyboard.press("Control+n");
     await page.getByRole("textbox", { name: "File name" }).fill("trip/plan");
     await page.keyboard.press("Enter");
@@ -145,14 +130,38 @@ test("History lists the first document of a new workspace while it is open", asy
       .poll(() => readFile(join(rootPath, "trip/plan.md"), "utf8").catch(() => ""))
       .toContain("one budget.");
 
+    // A History page runs an explicit capture flush first. It answers
+    // "updating" until capture settles, and paused capture never settles, so
+    // a page that lists the document while its editor still holds it shows
+    // the editor did not pause capture. The status the Notices read agrees.
+    // The status alone is not enough: it changes only on a health poll every
+    // few seconds, which a quick run can finish before.
+    await expect
+      .poll(() =>
+        page.evaluate(async (workspaceId) => {
+          const api = window.dohcDesktop;
+          if (!api) throw new Error("Desktop bridge is unavailable");
+          const history = await api.listEngineMoments({ workspaceId });
+          if ("status" in history) return history.status;
+          return history.moments.some((moment) => moment.path === "trip/plan.md")
+            ? "listed"
+            : "not listed";
+        }, workspace.workspaceId),
+      )
+      .toBe("listed");
+    await expect(editor).toBeVisible();
+    const status = await page.evaluate((workspaceId) => {
+      const api = window.dohcDesktop;
+      if (!api) throw new Error("Desktop bridge is unavailable");
+      return api.getSyncStatus({ workspaceId });
+    }, workspace.workspaceId);
+    expect(status.historyCaptureFailed ?? false).toBe(false);
+
     await openHistoryView(page);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path="trip/plan.md"]').first(),
     ).toContainText("Edited plan.md");
     await expect(editor).toBeVisible();
-    expect(
-      await page.evaluate(() => (window as unknown as { historyPauses: string[] }).historyPauses),
-    ).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

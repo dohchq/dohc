@@ -612,9 +612,7 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
-            Err(error) if !claim_foreign_head && held_as_new_file(&error) => {
-                Ok(DomainIngest::HeldAsNewFile)
-            }
+            Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -652,9 +650,7 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
-            Err(error) if !claim_foreign_head && held_as_new_file(&error) => {
-                Ok(DomainIngest::HeldAsNewFile)
-            }
+            Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -870,17 +866,18 @@ enum DomainIngest {
     /// The head belongs to another writer and this observation was not a
     /// disk transition capture witnessed, so nothing was written.
     ForeignHead,
-    /// A live session holds a file capture has not seen before and the store
-    /// has no head for; the session's settle records it.
+    /// A live session holds a file the store has no head for; the session's
+    /// settle records it.
     HeldAsNewFile,
 }
 
 /// The store refuses to capture a path whose document a live session holds.
-/// For a file capture sees for the first time and the store has no head for,
-/// that is not a failure: the session owns the content and its settle creates
-/// the head, so capture waits for the lease instead of degrading the layer
-/// while someone has the new file open. Every other refusal stays a failure,
-/// so disk text nothing records keeps the layer unsettled.
+/// For a file the store has no head for, that is not a failure: the session
+/// owns the content and its settle creates the head, so capture waits for the
+/// lease instead of degrading the layer while someone has the new file open.
+/// That holds whether capture sees the file for the first time or saw an
+/// earlier file at the path whose head was since deleted. Every other refusal
+/// stays a failure, so disk text nothing records keeps the layer unsettled.
 fn held_as_new_file(error: &RuntimeError) -> bool {
     matches!(
         error,
