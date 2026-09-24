@@ -106,8 +106,8 @@ function startBudgetWatch():void {
 let appCharged=0n;
 function budgeted<T>(kind:bigint, budget:bigint, run:()=>T):T {
   startBudgetWatch();
-  // A dataset check may report nothing until it ends, so it tells the host its budget.
-  if(kind===DATASET_CHECK) progress(step,Number(budget/1000n));
+  // A dataset check may report nothing until it ends, so every report during it names its budget.
+  if(kind===DATASET_CHECK) {checkBudgetMs=Number(budget/1000n);progress(step);}
   const start=cpuMicros();
   Atomics.add(budgetState,GENERATION,1n);
   Atomics.store(budgetState,KIND,kind);
@@ -118,7 +118,7 @@ function budgeted<T>(kind:bigint, budget:bigint, run:()=>T):T {
     Atomics.store(budgetState,ARMED,0n);
     Atomics.add(budgetState,GENERATION,1n);
     if(kind===APP_CODE) appCharged+=cpuMicros()-start;
-    else progress(step);
+    else {checkBudgetMs=undefined;progress(step);}
   };
   let result:T;
   try {result=run();} catch(error) {disarm();throw error;}
@@ -318,10 +318,12 @@ const send=(reply:PersistentReply|PersistentProgress)=>parentPort ? (parentPort.
 let activeId:number|undefined;
 let batching=false;
 let step="";
+// The CPU budget of the dataset check running now. The host lets its step stay quiet long enough to use it.
+let checkBudgetMs:number|undefined;
 // Reports the step this command starts, so the host can tell slow work from a stopped worker.
-function progress(next:string, cpuBudgetMs?:number):void {
+function progress(next:string):void {
   step=next;
-  if(activeId!==undefined) send({id:activeId,progress:next,...(cpuBudgetMs===undefined ? {} : {cpuBudgetMs})});
+  if(activeId!==undefined) send({id:activeId,progress:next,...(checkBudgetMs===undefined ? {} : {cpuBudgetMs:checkBudgetMs})});
 }
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }

@@ -466,6 +466,35 @@ describe("persistent dataset worker",()=>{
     });
   },60_000);
 
+  it("keeps a dataset check's quiet window through its row reports",async()=>{
+    await fixture(async({root,open})=>{
+      const uniqueSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);";
+      const writer=await open({schemaSql:uniqueSchema});
+      const filled=await writer.finalize(event(await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("INSERT INTO items SELECT x, 'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n)");return 1}}`})));
+      const checkpointPath=join(root,"filled.sqlite");await writer.snapshot(checkpointPath);
+      // Swapping two unique values replays through the shadow copy, which rebuilds every row.
+      const swap=event(await writer.prepare({...operation(filled),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("UPDATE items SET value='temp' WHERE id=1");ctx.db.execute("UPDATE items SET value='v1' WHERE id=2");ctx.db.execute("UPDATE items SET value='v2' WHERE id=1");return 1}}`}),filled);
+      await writer.finalize(swap);
+      const reports:{progress:string;cpuBudgetMs?:number}[]=[];
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",message=>{
+          const report=message as {progress?:unknown;cpuBudgetMs?:number};
+          if(typeof report.progress==="string") reports.push({progress:report.progress,cpuBudgetMs:report.cpuBudgetMs});
+          options.onMessage(message);
+        });
+        child.on("error",options.onError);child.on("close",options.onExit);
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      await (await open({schemaSql:uniqueSchema,checkpointPath,cursor:filled},launch)).apply(swap);
+      const rebuilding=reports.filter(report=>report.progress==="rebuilding the dataset from the replay copy");
+      // The step starts, its check starts, rows 1,000 and 2,000 report, and the check ends.
+      expect(rebuilding.map(report=>report.cpuBudgetMs===undefined)).toEqual([true,false,false,false,true]);
+    });
+  },60_000);
+
   it("does not charge the app for time its worker spends stopped inside app code",async()=>{
     // Windows has no stop signal. PowerShell compiles its calls before the
     // operation starts, so each later request lands in milliseconds.
