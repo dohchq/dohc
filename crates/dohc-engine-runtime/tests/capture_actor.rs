@@ -1284,3 +1284,332 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
 
     supervisor.close(&db).expect("close actor");
 }
+
+const CRASH_PATH: &str = "notes/plan.md";
+const CRASH_SEED: &str = "# Plan\n\nThree nights.";
+
+/// A document whose file holds `settled` and whose Y.Doc journal also holds
+/// `typed`, which never reached the file: the state a crash inside the settle
+/// window leaves. No session holds the document afterwards.
+struct CrashKeptTyping {
+    scratch: ScratchDir,
+    db: std::path::PathBuf,
+    supervisor: WorkspaceSupervisor,
+    handle: dohc_engine_runtime::ActorHandle,
+    key: dohc_engine_collab::DocKey,
+    workspace_id: &'static str,
+}
+
+async fn capture_crash_file(
+    handle: &dohc_engine_runtime::ActorHandle,
+    workspace_id: &str,
+    text: &str,
+    now_ms: i64,
+) {
+    handle
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: CRASH_PATH.to_owned(),
+                text: text.to_owned(),
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture the file");
+}
+
+async fn crash_kept_typing(
+    workspace_id: &'static str,
+    replicating: bool,
+    settled: &str,
+    typed: &str,
+) -> CrashKeptTyping {
+    use dohc_engine_collab::{ContentKind, Regime, Ydoc};
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    if replicating {
+        initialize_replicating_workspace_for(&db, workspace_id);
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(CRASH_PATH), CRASH_SEED).expect("seed disk");
+    capture_crash_file(&handle, workspace_id, CRASH_SEED, 10).await;
+    let opened = handle
+        .ydoc_open_state(
+            workspace_id.to_owned(),
+            20,
+            true,
+            None,
+            "main".to_owned(),
+            CRASH_PATH.to_owned(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open the document");
+    let key = opened.key.clone();
+    let doc = Ydoc::wire();
+    let record = |update: Vec<u8>, claim: Option<String>, seed: bool, now_ms: i64| {
+        handle.ydoc_record_update(
+            key.clone(),
+            CRASH_PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            update,
+            None,
+            None,
+            claim,
+            seed,
+            seed.then(|| opened.owner_seed_source.clone()).flatten(),
+            None,
+            now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+    };
+    let seeded = record(
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, CRASH_SEED)
+            .expect("seed"),
+        None,
+        true,
+        30,
+    )
+    .await
+    .expect("record the seed");
+    let claim = seeded.lineage_claim_id;
+    record(
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, settled)
+            .expect("first edit"),
+        claim.clone(),
+        false,
+        40,
+    )
+    .await
+    .expect("record the first edit");
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            CRASH_PATH.to_owned(),
+            ContentKind::Richdoc,
+            claim.clone(),
+            opened.head_blob_sha256.clone(),
+            "session-before-crash".to_owned(),
+            Arc::new(()),
+            50,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("settle the first edit");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(CRASH_PATH)).expect("disk"),
+        settled
+    );
+    record(
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, typed)
+            .expect("typing"),
+        claim,
+        false,
+        60,
+    )
+    .await
+    .expect("record the typing the crash keeps");
+    CrashKeptTyping {
+        scratch,
+        db,
+        supervisor,
+        handle,
+        key,
+        workspace_id,
+    }
+}
+
+impl CrashKeptTyping {
+    async fn outside_edit(&self, text: &str) {
+        std::fs::write(self.scratch.path().join(CRASH_PATH), text).expect("outside edit");
+        capture_crash_file(&self.handle, self.workspace_id, text, 70).await;
+    }
+
+    /// Reopen the document, then settle it the way closing its tab does.
+    /// Returns what the editor shows and what the file then holds.
+    async fn reopen_and_close(&self) -> (String, String) {
+        use dohc_engine_collab::{ContentKind, Ydoc};
+        let reopened = self
+            .handle
+            .ydoc_open_state(
+                self.workspace_id.to_owned(),
+                80,
+                true,
+                None,
+                "main".to_owned(),
+                CRASH_PATH.to_owned(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("reopen the document");
+        assert!(reopened.lineage_existing);
+        let editor = Ydoc::wire();
+        editor.apply(&reopened.initial_update).expect("apply");
+        let shown = editor
+            .project(ContentKind::Richdoc)
+            .expect("project")
+            .content;
+        self.handle
+            .ydoc_settle(
+                self.scratch.path().to_path_buf(),
+                self.key.clone(),
+                CRASH_PATH.to_owned(),
+                ContentKind::Richdoc,
+                reopened.lineage_claim_id.clone(),
+                reopened.head_blob_sha256.clone(),
+                "session-after-crash".to_owned(),
+                Arc::new(()),
+                90,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("settle on close");
+        let disk = std::fs::read_to_string(self.scratch.path().join(CRASH_PATH)).expect("disk");
+        (shown, disk)
+    }
+
+    fn history(&self) -> Vec<String> {
+        let store = EngineStore::open(&self.db, 9_000).expect("open store");
+        store
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT b.text FROM moments m \
+                     JOIN blobs b ON b.sha256=m.payload_after_blob_sha256 \
+                     WHERE m.workspace_id=?1 AND m.path=?2 ORDER BY m.moment_order",
+                )?;
+                statement
+                    .query_map([self.workspace_id, CRASH_PATH], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()
+            })
+            .expect("read history")
+    }
+
+    fn local_op_kinds(&self) -> Vec<String> {
+        let store = EngineStore::open(&self.db, 9_001).expect("open store");
+        store
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT op_kind FROM replication_log WHERE imported=0 ORDER BY origin_seq",
+                )?;
+                statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()
+            })
+            .expect("read local ops")
+    }
+}
+
+fn initialize_replicating_workspace_for(db: &Path, workspace_id: &str) {
+    let mut store = EngineStore::open(db, 1).expect("open store");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, 'origin-local', 'epoch-local', 'stream-local', 1)",
+                [workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES (?1, 'origin-local', 0)",
+                [workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed sync state");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outside_edit_to_a_closed_document_keeps_the_typing_a_crash_left_unsaved() {
+    let fixture = crash_kept_typing(
+        "ws-crash-outside-merge",
+        false,
+        "# Plan\n\nThree nights. BEFORE",
+        "# Plan\n\nThree nights. BEFORE TYPED",
+    )
+    .await;
+    // An outside editor appends a paragraph and ends the file with a newline.
+    fixture
+        .outside_edit("# Plan\n\nThree nights. BEFORE\n\nOUTSIDE\n")
+        .await;
+    assert_eq!(
+        fixture.history().last().map(String::as_str),
+        Some("# Plan\n\nThree nights. BEFORE\n\nOUTSIDE\n"),
+        "History records the outside edit as its own entry"
+    );
+    let (shown, disk) = fixture.reopen_and_close().await;
+    assert_eq!(shown, "# Plan\n\nThree nights. BEFORE TYPED\n\nOUTSIDE");
+    assert_eq!(disk, shown, "closing writes both texts to the file");
+    fixture.supervisor.close(&fixture.db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_overlapping_outside_edit_keeps_the_typing_and_leaves_its_text_in_history() {
+    let fixture = crash_kept_typing(
+        "ws-crash-outside-overlap",
+        false,
+        "# Plan\n\nThree nights.",
+        "# Plan\n\nThree nights. TYPED",
+    )
+    .await;
+    fixture.outside_edit("# Plan\n\nFour nights.").await;
+    let (shown, disk) = fixture.reopen_and_close().await;
+    assert_eq!(shown, "# Plan\n\nThree nights. TYPED");
+    assert_eq!(disk, shown);
+    let history = fixture.history();
+    assert!(
+        history.iter().any(|text| text == "# Plan\n\nFour nights."),
+        "the outside version stays reachable in History: {history:?}"
+    );
+    fixture.supervisor.close(&fixture.db).expect("close actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_synced_document_rebases_its_unsaved_typing_after_the_outside_edit() {
+    let fixture = crash_kept_typing(
+        "ws-crash-outside-synced",
+        true,
+        "# Plan\n\nThree nights. BEFORE",
+        "# Plan\n\nThree nights. BEFORE TYPED",
+    )
+    .await;
+    let before = fixture.local_op_kinds().len();
+    fixture
+        .outside_edit("# Plan\n\nThree nights. BEFORE\n\nOUTSIDE")
+        .await;
+    // A peer must meet the file's moment on a lineage that projects it, and
+    // only then the typing rebased onto it.
+    assert_eq!(
+        fixture.local_op_kinds()[before..],
+        ["ydoc.update", "moment.append", "ydoc.update"]
+    );
+    let (shown, disk) = fixture.reopen_and_close().await;
+    assert_eq!(shown, "# Plan\n\nThree nights. BEFORE TYPED\n\nOUTSIDE");
+    assert_eq!(disk, shown);
+    fixture.supervisor.close(&fixture.db).expect("close actor");
+}

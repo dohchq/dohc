@@ -444,6 +444,7 @@ fn capture_ingest_in_tx(
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let mut admitted = false;
+    let mut rebased_typing = None;
     let result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -482,15 +483,9 @@ fn capture_ingest_in_tx(
             None => true,
         };
         if has_ydoc_state {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            rebased_typing = dohc_engine_sync::reconcile_captured_head_in_tx(
                 tx,
-                &input.workspace_id,
-                &input.version_id,
-                &result.snapshot.object_id,
-                dohc_engine_sync::ResultingHead::Text {
-                    path: &result.snapshot.path,
-                    text: &result.snapshot.text,
-                },
+                &result,
                 actor_origin_id.as_deref(),
                 input.now_ms,
             )?;
@@ -538,6 +533,9 @@ fn capture_ingest_in_tx(
         ),
     }
     .map_err(RuntimeError::from)?;
+    if let Some(rebased_typing) = rebased_typing {
+        rebased_typing.journal_in_tx(tx, input.now_ms)?;
+    }
     Ok(result)
 }
 

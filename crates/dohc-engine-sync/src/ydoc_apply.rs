@@ -1640,6 +1640,184 @@ pub fn reconcile_local_resulting_head_in_tx(
     }
 }
 
+/// Typing a crash left in a closed lineage: text the lineage holds that the
+/// file did not have before the capture.
+struct UnsettledTyping {
+    base: String,
+    typed: String,
+}
+
+fn unsettled_typing_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    before_sha256: Option<&str>,
+) -> Result<Option<UnsettledTyping>, SyncError> {
+    let Some((marker, doc)) = complete.state.as_ref() else {
+        return Ok(None);
+    };
+    let has_content = marker.lineage_claim_status.has_claimed_base()
+        || marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0;
+    if marker.content_kind == ContentKind::Scene || !has_content {
+        return Ok(None);
+    }
+    let typed = project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?.content;
+    if before_sha256 == Some(hex_sha256(typed.as_bytes()).as_str()) {
+        return Ok(None);
+    }
+    let base: String = match before_sha256 {
+        Some(sha) => tx
+            .query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(SyncError::corrupt)?
+            .ok_or_else(|| local_corruption("the captured head's previous text is missing"))?,
+        None => String::new(),
+    };
+    // Projection normalizes Markdown the parser reads differently (bullet
+    // markers, a trailing newline). A lineage that only renders its base
+    // differently holds no typing.
+    let rendered_base = dohc_engine_collab::Ydoc::wire();
+    rendered_base
+        .rewrite_content_to_markdown(marker.content_kind, &base)
+        .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+    let rendered = |doc: &dohc_engine_collab::Ydoc| {
+        doc.project(marker.content_kind)
+            .map(|projection| projection.content)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))
+    };
+    if rendered(&rendered_base)? == rendered(doc)? {
+        return Ok(None);
+    }
+    Ok(Some(UnsettledTyping { base, typed }))
+}
+
+/// The `ydoc.update` a synced lineage owes its peers after the capture's
+/// moment. A peer applies that moment only on a lineage that projects it, so
+/// the rebased typing must follow it in the journal.
+#[must_use = "journal the rebased typing after the capture's moment"]
+pub struct RebasedTypingJournal {
+    key: DocKey,
+    path: String,
+    content_kind: ContentKind,
+    update_sha: String,
+    lineage_claim_id: String,
+}
+
+impl RebasedTypingJournal {
+    pub fn journal_in_tx(
+        self,
+        tx: &rusqlite::Transaction<'_>,
+        now_ms: i64,
+    ) -> Result<(), SyncError> {
+        crate::journal::journal_local_op_in_tx(
+            tx,
+            &self.key.workspace_id,
+            "ydoc.update",
+            &crate::ydoc_update_payload(
+                &self.key,
+                &self.path,
+                self.content_kind,
+                &self.update_sha,
+                &self.lineage_claim_id,
+                None,
+                None,
+                false,
+            ),
+            now_ms,
+        )?;
+        Ok(())
+    }
+}
+
+/// Reconcile a captured file with its closed lineage.
+///
+/// A crash inside the settle window leaves typing in the lineage that the
+/// file never received. Folding the captured text over it would discard that
+/// typing without a trace. Instead the typing is merged with the captured
+/// text, or kept over it where both changed the same lines. The captured text
+/// stays in History as the capture's moment, the lineage's settle expectation
+/// moves to it, and the next settle writes the result to the file.
+pub fn reconcile_captured_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    captured: &dohc_engine_domain::WriteResult,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<RebasedTypingJournal>, SyncError> {
+    let head = &captured.snapshot;
+    let (path, text) = (head.path.as_str(), head.text.as_str());
+    let key = DocKey::new(&head.workspace_id, &head.version_id, &head.object_id).map_err(|_| {
+        SyncError::InvalidInput {
+            reason: "Y.Doc lineage coordinates are invalid",
+        }
+    })?;
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    let before_sha256 = if captured.deduped {
+        Some(head.blob_sha256.as_str())
+    } else {
+        captured.moment.before_blob_sha256.as_deref()
+    };
+    let Some(unsettled) = unsettled_typing_in_tx(tx, &complete, before_sha256)? else {
+        fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, actor_origin_id, now_ms, true)?;
+        return Ok(None);
+    };
+    let Some((marker, doc)) = complete.state.as_ref() else {
+        return Err(local_corruption("unsettled Y.Doc lineage has no state"));
+    };
+    let target = match dohc_engine_domain::merge_markdown(&unsettled.base, &unsettled.typed, text) {
+        dohc_engine_domain::MarkdownMergeResult::Merged(merged) => merged,
+        dohc_engine_domain::MarkdownMergeResult::Conflict => unsettled.typed.clone(),
+    };
+    let synced = marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+        && crate::journal::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)?;
+    if synced {
+        // Peers must first reach the captured text, as for any closed lineage.
+        fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, actor_origin_id, now_ms, true)?;
+        if target == text {
+            return Ok(None);
+        }
+    } else {
+        ensure_adopted_owner_binding_unchanged(tx, &key, Some(path))?;
+        require_unfenced_lineage(tx, &key)?;
+        settle_ydoc_marker_to_text(tx, &key, path, text, now_ms)?;
+        if target == unsettled.typed {
+            return Ok(None);
+        }
+    }
+    let update = doc
+        .rewrite_content_to_markdown(marker.content_kind, &target)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "the content kind does not support a Markdown rebase",
+        })?;
+    if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+        return Err(SyncError::BlobTooLarge {
+            constraint: "MAX_YDOC_UPDATE_BYTES (unsaved typing rebase)",
+            limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+            observed_bytes: update.len(),
+        });
+    }
+    // The typing is the person's, not the capture actor's.
+    let outcome = dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, now_ms)
+        .map_err(|error| {
+            map_collab_payload_error(error, "unsaved typing rebase could not be appended")
+        })?;
+    if !synced || outcome.deduped {
+        return Ok(None);
+    }
+    let lineage_claim_id = marker
+        .lineage_claim_id
+        .clone()
+        .ok_or_else(|| local_corruption("exact Y.Doc lineage has no claim id"))?;
+    Ok(Some(RebasedTypingJournal {
+        key,
+        path: path.to_owned(),
+        content_kind: marker.content_kind,
+        update_sha: hex_sha256(&update),
+        lineage_claim_id,
+    }))
+}
+
 /// Finalize an imported file mutation without creating a second CRDT edit.
 /// A text mutation must follow its origin's ordered Y.Doc rewrite; if that
 /// rewrite is not present yet, the envelope remains unacknowledged.

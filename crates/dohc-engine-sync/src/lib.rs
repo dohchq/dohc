@@ -103,14 +103,15 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    AlwaysLive, LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainCleanup,
-    YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
+    AlwaysLive, LeaseProbe, NoLiveLeases, RebasedTypingJournal, ResultingHead, YdocApplyResult,
+    YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
     complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
     drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
     ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
     open_sync_conflict_for_object, project_and_write_in_tx, project_ydoc_with_store,
-    reconcile_imported_resulting_head_in_tx, reconcile_local_resulting_head_in_tx,
-    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    reconcile_captured_head_in_tx, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
+    validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
