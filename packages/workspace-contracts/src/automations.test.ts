@@ -622,8 +622,7 @@ describe("values, conditions, and templates", () => {
   it.each([
     ["record.return / 2", "a keyword used as a property"],
     ["record.in / 2", "the in keyword used as a property"],
-    ["record?.of / 2", "of after optional chaining"],
-    ["record?.return / 2", "a keyword after optional chaining"],
+    ["(record?.of) / 2", "a parenthesized optional property"],
     ["record.Done ?.5 : 1 / 2", "a conditional before a number"],
     ["a?.b / 2", "an optional property"],
     [" {valueOf(){return 4}} / 2", "an object literal"],
@@ -878,6 +877,16 @@ const AUTOMATION_CASES: AutomationCase[] = [
     expected: [{ code: "number-not-finite", path: at("/do/0/set/X") }],
   },
   {
+    name: "of after optional chaining, before a division",
+    item: withStep("notify: '{record?.of / 2} and {b / c}'\nto: [user_ana]"),
+    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+  },
+  {
+    name: "a keyword after optional chaining, before a division",
+    item: withStep("notify: '{record?.return / 2}'\nto: [user_ana]"),
+    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+  },
+  {
     name: "an unclosed template expression",
     item: withStep('notify: "Hi {record.Name"\nto: [user_ana]'),
     expected: [{ code: "invalid-template", path: at("/do/0/notify") }],
@@ -1009,6 +1018,17 @@ describe("automations.yaml diagnostics", () => {
       diagnostics: [{ code: "unknown-property", path: "/automations/1/extra" }],
       raw: expect.any(Map),
     });
+  });
+
+  it("turns off only the automation whose optional property needs parentheses", () => {
+    const parsed = entries(
+      automationsFile(
+        withStep("notify: '{record?.of / 2}'\nto: [user_ana]"),
+        withStep("notify: '{(record?.of) / 2}'\nto: [user_ana]").replace("id: a", "id: b"),
+      ),
+    );
+    expect(parsed.map((entry) => entry.status)).toEqual(["invalid", "valid"]);
+    expect(automationTextParts("{record?.of / 2}")).toBeNull();
   });
 
   it("turns off a later automation that reuses an id", () => {

@@ -1,4 +1,4 @@
-import { Parser, tokenizer, tokTypes, type TokenType } from "acorn";
+import { parseExpressionAt, tokenizer, tokTypes } from "acorn";
 import {
   CORE_SCHEMA,
   defineMappingTag,
@@ -50,7 +50,11 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //   brace. The text after `{` must parse as one JavaScript expression,
 //   followed by `}`, so a "}" inside the expression's strings, template
 //   literals, regular expressions, or object literals does not end it. To
-//   start a message with "=", write `{"="}`.
+//   start a message with "=", write `{"="}`. The parser, acorn 8.18, reads
+//   "/" after a keyword-named property that follows "?." as a regular
+//   expression, so `{record?.of / 2}` needs parentheses:
+//   `{(record?.of) / 2}`. Without them the automation turns off with
+//   `optional-chain-needs-parentheses`.
 // - All other text, such as a name or a reference, cannot start with "=".
 //
 // The writer quotes every formula. Quote a formula you write by hand when it
@@ -269,6 +273,8 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "unexpected-formula-marker",
   "number-not-finite",
   "invalid-template",
+  // `{record?.of / 2}`: write `{(record?.of) / 2}`.
+  "optional-chain-needs-parentheses",
   "invalid-path",
   "reserved-field-name",
   "invalid-binding-name",
@@ -538,8 +544,9 @@ function readCondition(value: unknown, path: string, issues: Issues): string | n
 
 function readTemplate(value: unknown, path: string, issues: Issues): string | null {
   const text = readText(value, path, MAX_AUTOMATION_TEXT_LENGTH, issues);
-  if (text !== null && automationTextParts(text) === null) {
-    issues.push({ code: "invalid-template", path });
+  const split = text === null ? null : splitTemplate(text);
+  if (typeof split === "string") {
+    issues.push({ code: split, path });
     return null;
   }
   return text;
@@ -1067,51 +1074,41 @@ export function parseAutomationsFile(text: string): AutomationsFileParseResult {
   return loaded.status === "read" ? { status: "read", entries: readEntries(loaded.list) } : loaded;
 }
 
-// acorn reads the word after "." as a property name, but not the word after
-// "?.". acorn 8.18 therefore reads "record?.of / 2" as "record?.of" and then
-// a regular expression, and refuses "record?.return / 2". This parser also
-// reads the word after "?." as a property name, through updateContext, the
-// hook acorn plugins such as acorn-jsx override. acorn's typings leave these
-// members out.
-interface TokenState {
-  type: TokenType;
-  exprAllowed: boolean;
+type TemplateProblem = "invalid-template" | "optional-chain-needs-parentheses";
+
+// acorn 8.18 reads a "/" after a keyword-named property that follows "?.",
+// as in "record?.of / 2", as the start of a regular expression. The text
+// up to where parsing stopped holds that pattern when this is the cause.
+const OPTIONAL_PROPERTY_BEFORE_DIVISION = /\?\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*\s*\/(?![/*])/u;
+
+function templateProblem(source: string, start: number, stop: number): TemplateProblem {
+  return OPTIONAL_PROPERTY_BEFORE_DIVISION.test(source.slice(start, stop + 1))
+    ? "optional-chain-needs-parentheses"
+    : "invalid-template";
 }
-const ExpressionParser = Parser.extend((Base) => {
-  const { updateContext } = Base.prototype as unknown as {
-    updateContext(this: TokenState, prevType: TokenType): void;
-  };
-  return class extends Base {
-    updateContext(this: TokenState, prevType: TokenType): void {
-      if (prevType === tokTypes.questionDot && (this.type === tokTypes.name || this.type.keyword)) {
-        this.exprAllowed = false;
-      } else {
-        updateContext.call(this, prevType);
-      }
-    }
-  };
-});
 
 // The index of the "}" that ends the JavaScript expression starting at
-// `start`, or -1. acorn parses one expression in expression context, so a
-// "}" inside a string, template literal, regular expression, or object
-// literal does not end it. Its tokenizer then reads the next token, skipping
-// spaces and comments; that token must be "}".
-function expressionEnd(source: string, start: number): number {
+// `start`, or the problem that stops one ending. acorn parses one expression
+// in expression context, so a "}" inside a string, template literal, regular
+// expression, or object literal does not end it. Its tokenizer then reads
+// the next token, skipping spaces and comments; that token must be "}".
+function expressionEnd(source: string, start: number): number | TemplateProblem {
+  let end: number;
   try {
-    const { end } = ExpressionParser.parseExpressionAt(source, start, { ecmaVersion: "latest" });
+    end = parseExpressionAt(source, start, { ecmaVersion: "latest" }).end;
+  } catch (error) {
+    const stop = error instanceof SyntaxError && "pos" in error && typeof error.pos === "number" ? error.pos : start;
+    return templateProblem(source, start, stop);
+  }
+  try {
     const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
-    return next.type === tokTypes.braceR ? end + next.start : -1;
+    return next.type === tokTypes.braceR ? end + next.start : templateProblem(source, start, end + next.start);
   } catch {
-    return -1;
+    return "invalid-template";
   }
 }
 
-/**
- * Splits a message template into text and expressions, or returns null when
- * a brace is unmatched or an expression is empty.
- */
-export function automationTextParts(template: string): AutomationTextPart[] | null {
+function splitTemplate(template: string): AutomationTextPart[] | TemplateProblem {
   const parts: AutomationTextPart[] = [];
   let text = "";
   let index = 0;
@@ -1122,22 +1119,30 @@ export function automationTextParts(template: string): AutomationTextPart[] | nu
       index += 2;
       continue;
     }
-    if (char === "}") return null;
+    if (char === "}") return "invalid-template";
     if (char !== "{") {
       text += char;
       index += 1;
       continue;
     }
     const end = expressionEnd(template, index + 1);
-    const expression = end === -1 ? "" : template.slice(index + 1, end);
-    if (expression.trim().length === 0) return null;
+    if (typeof end === "string") return end;
     if (text.length > 0) parts.push({ kind: "text", text });
-    parts.push({ kind: "expression", expression });
+    parts.push({ kind: "expression", expression: template.slice(index + 1, end) });
     text = "";
     index = end + 1;
   }
   if (text.length > 0) parts.push({ kind: "text", text });
   return parts;
+}
+
+/**
+ * Splits a message template into text and expressions, or returns null when
+ * a brace is unmatched or an expression does not parse.
+ */
+export function automationTextParts(template: string): AutomationTextPart[] | null {
+  const split = splitTemplate(template);
+  return typeof split === "string" ? null : split;
 }
 
 // The writer builds Maps so keys keep the order written here, and a field
