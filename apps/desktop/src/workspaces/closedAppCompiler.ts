@@ -6,7 +6,7 @@ import { join, posix } from "node:path";
 import { parse } from "acorn";
 import * as esbuild from "esbuild";
 import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
-import { compileClosedAppPage, pageNamespace } from "./closedAppPage.ts";
+import { compileClosedAppPage, documentWrite, pageInput, pageNamespace, pageStyles } from "./closedAppPage.ts";
 
 export interface ClosedAppInput {
   path: string;
@@ -18,7 +18,8 @@ export interface ClosedAppBuildRequest {
   inputs: readonly ClosedAppInput[];
   /** Bare imports resolve only through this explicit captured map. */
   packageMap?: Readonly<Record<string, string>>;
-  bounds: { maxInputFiles: number; maxInputBytes: number; maxOutputBytes: number };
+  /** maxOutputFileBytes bounds each output file and defaults to maxOutputBytes. */
+  bounds: { maxInputFiles: number; maxInputBytes: number; maxOutputBytes: number; maxOutputFileBytes?: number };
 }
 export interface ClosedAppFileIdentity { path: string; sha256: string; byteLength: number }
 export interface ClosedAppBuild {
@@ -59,7 +60,7 @@ function loaderFor(path: string): esbuild.Loader {
   throw new Error("Unsupported closed app input type.");
 }
 
-function assertStaticModuleSyntax(source: string): void {
+function assertStaticModuleSyntax(source: string): ReturnType<typeof parse> {
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
   const pending: unknown[] = [ast];
   while (pending.length) {
@@ -80,12 +81,19 @@ function assertStaticModuleSyntax(source: string): void {
       else if (child && typeof child === "object") pending.push(child);
     }
   }
+  return ast;
 }
 
-async function assertScript(source: string, loader: esbuild.Loader): Promise<void> {
+/** A page's module code runs after the loader builds the page, so it cannot write the document either. */
+async function assertScript(source: string, loader: esbuild.Loader, pageLabel?: string): Promise<void> {
   const transformed = await esbuild.transform(source, { loader, target: "es2022", tsconfigRaw, ...scriptOptions, sourcemap: false, legalComments: "none", logLevel: "silent" });
-  assertStaticModuleSyntax(transformed.code);
+  const ast = assertStaticModuleSyntax(transformed.code);
+  const write = pageLabel && documentWrite(ast);
+  if (write) throw new Error(`${pageLabel} calls ${write}. Published apps cannot write markup into the page. Add the elements with DOM methods instead.`);
 }
+
+const size = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+const acceptedTypes = new Set([...scriptLoaders.keys(), ".json", ".css", ...passiveExtensions]);
 
 /** A #fragment or a passive data URL written in a stylesheet stays as written. */
 function writtenAsIs(imported: { kind: string; path: string; external?: boolean }): boolean {
@@ -116,7 +124,8 @@ async function compilerIdentity(): Promise<ClosedAppBuild["compiler"]> {
 /** Compile captured bytes only. The caller owns source authority and process resource enforcement. */
 export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<ClosedAppBuild> {
   const { maxInputFiles, maxInputBytes, maxOutputBytes } = request.bounds;
-  for (const bound of [maxInputFiles, maxInputBytes, maxOutputBytes]) {
+  const maxOutputFileBytes = request.bounds.maxOutputFileBytes ?? maxOutputBytes;
+  for (const bound of [maxInputFiles, maxInputBytes, maxOutputBytes, maxOutputFileBytes]) {
     if (!Number.isSafeInteger(bound) || bound < 1) throw new Error("Invalid app compiler bound.");
   }
   if (!Array.isArray(request.inputs) || request.inputs.length === 0 || request.inputs.length > maxInputFiles) throw new Error("App input file bound exceeded.");
@@ -165,7 +174,10 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
           if (args.kind === "entry-point") return { path: canonicalPath(args.path), namespace };
           const inPage = args.namespace === pageNamespace;
           const importer = inPage ? entry : args.importer;
-          if (page && args.namespace === namespace && args.importer === entry && page.inline.has(args.path)) return { path: args.path, namespace: pageNamespace };
+          // Only the generated entry and page stylesheet name inline sources and resolved files; page code cannot.
+          const generated = page && ((args.namespace === namespace && args.importer === entry) || (inPage && args.importer === pageStyles));
+          if (generated && page.inline.has(args.path)) return { path: args.path, namespace: pageNamespace };
+          if (generated && args.path.startsWith(pageInput) && inputs.has(args.path.slice(pageInput.length))) return { path: args.path.slice(pageInput.length), namespace };
           if (args.namespace !== namespace && !inPage) return { errors: [{ text: `${importer} imports ${args.path}, which is outside the app.` }] };
           // CSS names files by URL: a bare name is relative to the stylesheet, and #fragment points into the document.
           const css = args.kind === "url-token" || args.kind === "import-rule" || args.kind === "composes-from";
@@ -176,19 +188,20 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
           }
           const specifier = css ? args.path.split(/[?#]/, 1)[0]! : args.path;
           const relative = specifier.startsWith(".") || (css && !/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/)/.test(specifier));
-          let path: string | undefined;
-          if (relative) {
-            let decoded = specifier;
-            try { if (css) decoded = decodeURIComponent(specifier); } catch { /* reported below */ }
-            const directory = inPage ? page!.base : posix.dirname(args.importer);
-            const resolved = posix.normalize(posix.join(directory, decoded));
-            if (/^[A-Za-z0-9_@./-]+$/.test(resolved) && !resolved.startsWith("../") && resolved !== "..") path = resolved;
-          } else if (!css) path = packages.get(specifier);
-          if (!path || !inputs.has(path)) {
-            return { errors: [{ text: relative ? `${importer} imports ${args.path}, which is not in the app.`
-              : css ? `${importer} loads ${args.path} from outside the app. Save a copy in the app folder and link to that instead.`
+          if (!relative) {
+            const path = css ? undefined : packages.get(specifier);
+            if (path && inputs.has(path)) return { path, namespace };
+            return { errors: [{ text: css ? `${importer} loads ${args.path} from outside the app. Save a copy in the app folder and link to that instead.`
               : `${importer} imports the package ${args.path}, which app.publish.json does not map.` }] };
           }
+          let decoded = specifier;
+          try { if (css) decoded = decodeURIComponent(specifier); } catch { /* reported below as a missing file */ }
+          const path = posix.normalize(posix.join(inPage ? page!.base : posix.dirname(args.importer), decoded));
+          const refuse = (text: string) => ({ errors: [{ text: `${importer} imports ${args.path}${text}` }] });
+          if (path === ".." || path.startsWith("../")) return refuse(", which is outside the workspace.");
+          if (!/^[A-Za-z0-9_@./-]+$/.test(path)) return refuse(". Rename it using only letters, digits, and _ @ . / -, then publish again.");
+          if (!acceptedTypes.has(extension(path))) return refuse(`. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not ${extension(path) || "files without a type"}.`);
+          if (!inputs.has(path)) return refuse(", which is not in the app. Add the file, or list it in app.publish.json.");
           return { path, namespace };
         });
         build.onLoad({ filter: /.*/, namespace }, async args => {
@@ -196,13 +209,13 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
           const file = inputs.get(args.path);
           if (!file) return { errors: [{ text: "App source is unavailable." }] };
           const loader = loaderFor(file.path);
-          if (scriptLoaders.has(extension(file.path))) await assertScript(text(file.bytes), loader);
+          if (scriptLoaders.has(extension(file.path))) await assertScript(text(file.bytes), loader, page ? file.path : undefined);
           return { contents: file.bytes, loader };
         });
         build.onLoad({ filter: /.*/, namespace: pageNamespace }, async args => {
           const inline = page?.inline.get(args.path);
           if (!inline) return { errors: [{ text: "App source is unavailable." }] };
-          if (inline.loader === "js") await assertScript(inline.contents, "js");
+          if (inline.loader === "js") await assertScript(inline.contents, "js", `A module script in ${entry}`);
           return inline;
         });
       } }],
@@ -210,20 +223,28 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
     // Inline page modules derive from the entry, which the lock already names.
     const known = (key: string) => key.startsWith(namespace + ":") ? inputs.has(key.slice(namespace.length + 1))
       : !!page && key.startsWith(pageNamespace + ":") && page.inline.has(key.slice(pageNamespace.length + 1));
-    const locked = new Set(page?.used);
+    const locked = new Set(page?.used.keys());
     for (const [key, input] of Object.entries(result.metafile.inputs)) {
       if (!known(key)) throw new Error("App compiler used an undeclared input.");
       for (const imported of input.imports) if (imported.external ? !writtenAsIs(imported) : !known(imported.path)) throw new Error("App compiler retained an external import.");
       if (key.startsWith(namespace + ":")) locked.add(key.slice(namespace.length + 1));
     }
     const dependencyLock = [...locked].sort().map(path => ({ path, sha256: inputs.get(path)!.sha256, byteLength: inputs.get(path)!.bytes.byteLength }));
-    let outputBytes = 0;
     const outputs = [...result.outputFiles.map(file => ({ path: posix.basename(file.path.replaceAll("\\", "/")), bytes: file.contents })),
       ...(page ? [{ path: "page.json", bytes: new TextEncoder().encode(JSON.stringify(page.page)) }] : [])];
+    const outputBytes = outputs.reduce((total, output) => total + output.bytes.byteLength, 0);
+    const oversized = outputs.find(output => output.bytes.byteLength > maxOutputFileBytes);
+    if (outputBytes > maxOutputBytes || oversized) {
+      const image = page && [...page.images].sort((a, b) => b[1] - a[1])[0];
+      const largestImage = image ? ` The largest image is ${image[0]} (${size(image[1])}). Use smaller images.` : "";
+      if (oversized?.path === "page.json" && image) {
+        throw new Error(`${entry} is ${size(oversized.bytes.byteLength)} once its images are embedded. A published page can be at most ${size(maxOutputFileBytes)}.${largestImage}`);
+      }
+      const [bytes, limit] = oversized ? [oversized.bytes.byteLength, maxOutputFileBytes] : [outputBytes, maxOutputBytes];
+      throw new Error(`The built app is ${size(bytes)}. A published app can be at most ${size(limit)}.${largestImage || " Remove files and dependencies the app does not use."}`);
+    }
     const files = outputs.map(({ path, bytes }) => {
       if (path !== "bundle.js" && path !== "bundle.css" && path !== "page.json") throw new Error("Unexpected app compiler output.");
-      outputBytes += bytes.byteLength;
-      if (outputBytes > maxOutputBytes) throw new Error("App output byte bound exceeded.");
       return { path, bytes, sha256: sha256(bytes), byteLength: bytes.byteLength, contentType: APP_BUNDLE_CONTENT_TYPES[path]! };
     }).sort((a, b) => a.path < b.path ? -1 : 1);
     const passiveDigests = new Set([...inputs.values()].filter(file => passiveExtensions.has(extension(file.path))).map(file => file.sha256));

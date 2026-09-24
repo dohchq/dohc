@@ -118,6 +118,22 @@ describe("app without app.publish.json", () => {
     page(h, { "app/index.html": '<img alt="Map" src="my%20map.png">', "app/my map.png": "png" });
     await expect(h.prepare()).rejects.toThrow("app/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again.");
   });
+
+  it("includes every type the compiler accepts, and leaves out build configuration and installed packages", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<script type="module" src="main.ts"></script>', "app/main.ts": "import data from './data.json'; document.title = data.title;",
+      "app/data.json": '{"title":"Trip"}', "app/package.json": "{}", "app/tsconfig.json": "{}", "app/dohc.json": "{}",
+      "app/node_modules/x/index.js": "", "app/.cache/x.js": "" });
+    const { candidate } = await h.prepare();
+    expect(h.capturePaths).toEqual([["app/index.html", "app/data.json", "app/main.ts"]]);
+    expect(candidate.dependencies).toEqual(["app/data.json", "app/index.html", "app/main.ts"]);
+  });
+
+  it("names a linked file of a type the compiler does not take", async () => {
+    const h = harness();
+    page(h, { "app/index.html": '<script type="module" src="main.ts"></script>', "app/main.ts": "import './notes.yaml';", "app/notes.yaml": "a: 1" });
+    await expect(h.prepare()).rejects.toThrow("app/main.ts imports ./notes.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml.");
+  });
 });
 
 describe("owner dataset publication", () => {

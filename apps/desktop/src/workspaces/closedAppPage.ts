@@ -1,34 +1,42 @@
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
-import { defaultTreeAdapter, parse as parseHtml, serialize, type DefaultTreeAdapterTypes } from "parse5";
-import type { AppPage } from "@dohc/app-browser/document";
+import { defaultTreeAdapter, parse as parseHtml, type DefaultTreeAdapterTypes } from "parse5";
+import { APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, APP_PAGE_MODULES_GLOBAL, type AppPage, type AppPageAttribute, type AppPageElement, type AppPageNode, type AppPageValue } from "@dohc/app-browser/document";
 
 type Element = DefaultTreeAdapterTypes.Element;
-type ParentNode = DefaultTreeAdapterTypes.ParentNode;
+type Node = DefaultTreeAdapterTypes.ChildNode;
 
-/** esbuild namespace for a page's inline styles and module scripts. */
+/** esbuild namespace for a page's inline styles, module scripts, and the stylesheet that imports them all. */
 export const pageNamespace = "dohc-app-page";
+/** The page's stylesheets in document order, with their media conditions. */
+export const pageStyles = "dohc-page:styles.css";
+/** Resolved captured files the entry and the page stylesheet import, never user code. */
+export const pageInput = "dohc-input:";
 
 /** An HTML entry compiled into a page record, plus the module source esbuild bundles into bundle.js and bundle.css. */
 export interface ClosedAppPage {
   page: AppPage;
-  /** The page's stylesheets and module scripts, in document order. */
+  /** The entry module: imports the page stylesheet and hands each module script to the loader, unevaluated. */
   module: string;
-  /** Inline style and module script bodies, keyed by the specifiers `module` imports. */
+  /** Inline style and module script bodies, and the page stylesheet, by specifier. */
   inline: ReadonlyMap<string, { contents: string; loader: "css" | "js" }>;
-  /** The directory a page's inline modules resolve their imports from. */
+  /** The directory inline modules and styles resolve their imports from. */
   base: string;
-  /** Captured files the page uses outside esbuild: classic scripts and embedded images. */
-  used: ReadonlySet<string>;
+  /** Captured files the page uses outside esbuild: classic scripts and embedded images, with their sizes. */
+  used: ReadonlyMap<string, number>;
+  /** Embedded images by path. */
+  images: ReadonlyMap<string, number>;
 }
 
-const htmlNamespace = "http://www.w3.org/1999/xhtml";
+const spaces = { html: "http://www.w3.org/1999/xhtml", svg: "http://www.w3.org/2000/svg", math: "http://www.w3.org/1998/Math/MathML" };
+const attributeSpaces: Record<string, "xlink" | "xml" | "xmlns"> = {
+  "http://www.w3.org/1999/xlink": "xlink", "http://www.w3.org/XML/1998/namespace": "xml", "http://www.w3.org/2000/xmlns/": "xmlns" };
 const imageTypes = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"], [".avif", "image/avif"]]);
 const javascriptType = /^(?:text\/(?:javascript|ecmascript|jscript|x-javascript|x-ecmascript)|application\/(?:javascript|ecmascript))$/i;
-const attributeName = /^[A-Za-z_][A-Za-z0-9_.:-]*$/;
+const remote = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/;
 const publishableName = /^[A-Za-z0-9_@./-]+$/;
 const text = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-const attribute = (element: Element, name: string) => element.attrs.find(attr => attr.name === name)?.value;
+const attribute = (element: Element, name: string) => element.attrs.find(attr => attr.name === name && !attr.namespace)?.value;
 const textOf = (element: Element) => element.childNodes.map(child => defaultTreeAdapter.isTextNode(child) ? child.value : "").join("");
 const extension = (path: string) => posix.extname(path).toLowerCase();
 const kinds = {
@@ -46,7 +54,31 @@ function scriptKind(element: Element): "classic" | "module" | "skip" | null {
   return attribute(element, "nomodule") === undefined ? "classic" : "skip";
 }
 
-/** A classic script runs as written; the build only checks that it parses and loads no module. */
+/**
+ * A published page builds its document from a script, so document.write
+ * cannot place markup where the script stands. Returns the call it finds.
+ */
+export function documentWrite(program: unknown): string | null {
+  const pending: unknown[] = [program];
+  while (pending.length) {
+    const node = pending.pop() as Record<string, unknown> | null;
+    if (!node || typeof node !== "object") continue;
+    if (node.type === "MemberExpression" && !node.computed) {
+      const object = node.object as { type?: string; name?: string; property?: { name?: string } };
+      const name = (node.property as { name?: string }).name;
+      const isDocument = (object.type === "Identifier" && object.name === "document") ||
+        (object.type === "MemberExpression" && object.property?.name === "document");
+      if (isDocument && (name === "write" || name === "writeln")) return `document.${name}`;
+    }
+    for (const child of Object.values(node)) {
+      if (Array.isArray(child)) for (const item of child) pending.push(item);
+      else if (child && typeof child === "object") pending.push(child);
+    }
+  }
+  return null;
+}
+
+/** A classic script runs as written; the build only checks that it parses, loads no module, and does not write the document. */
 function classicScript(source: string, label: string): string {
   let program;
   try { program = parseScript(source, { ecmaVersion: "latest", sourceType: "script" }); }
@@ -61,6 +93,8 @@ function classicScript(source: string, label: string): string {
       else pending.push(child);
     }
   }
+  const write = documentWrite(program);
+  if (write) throw new Error(`${label} calls ${write}. Published apps cannot write markup where a script stands. Add the elements with DOM methods instead.`);
   return source;
 }
 
@@ -85,27 +119,52 @@ function srcset(value: string): Array<{ url: string; descriptor: string }> {
   return candidates;
 }
 
+/** Joins value parts, merging adjacent text, and keeps a plain string when no image is embedded. */
+function joined(parts: Array<string | number>): AppPageValue {
+  const merged: Array<string | number> = [];
+  for (const part of parts) {
+    if (typeof part === "string" && typeof merged.at(-1) === "string") merged[merged.length - 1] += part;
+    else if (part !== "") merged.push(part);
+  }
+  return merged.every(part => typeof part === "string") ? merged.join("") : merged;
+}
+
 /** Compiles captured bytes only. Remote scripts and stylesheets stay out, as they do for script entries. */
 export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, { bytes: Uint8Array }>): ClosedAppPage {
   const document = parseHtml(text(inputs.get(entry)!.bytes));
-  const scripts: string[] = [], deferred: Array<string | null> = [], imports: string[] = [], used = new Set<string>();
+  const scripts: string[] = [], modules: string[] = [], styles: string[] = [], images: string[] = [];
+  const imageIndex = new Map<string, number>(), used = new Map<string, number>(), embedded = new Map<string, number>();
   const inline = new Map<string, { contents: string; loader: "css" | "js" }>();
-  let title: string | null = null, base = posix.dirname(entry), bundleQueued = false;
-  // Template content is inert until app code clones it: resolve its resources, but run nothing from it.
-  const inert = new Set<Element>();
-  const elements = (parent: ParentNode, inTemplate: boolean): Element[] => parent.childNodes.flatMap(node => {
-    if (!defaultTreeAdapter.isElementNode(node)) return [];
-    if (inTemplate) inert.add(node);
-    const content = node.namespaceURI === htmlNamespace && "content" in node ? (node as DefaultTreeAdapterTypes.Template).content : null;
-    return [node, ...elements(content ?? node, inTemplate || content !== null)];
-  });
-  // The synthetic entry module imports from the entry's own directory.
-  const fromEntry = (path: string) => `./${posix.relative(posix.dirname(entry), path)}`;
   const outside = (value: string) => `${entry} loads ${value} from outside the app. Save a copy in the app folder and link to that instead.`;
+  const root = document.childNodes.find(defaultTreeAdapter.isElementNode);
+  const head = root?.childNodes.find((node): node is Element => defaultTreeAdapter.isElementNode(node) && node.tagName === "head");
+  const body = root?.childNodes.find((node): node is Element => defaultTreeAdapter.isElementNode(node) && node.tagName === "body");
+  if (!root || !head || !body) throw new Error(`${entry} uses <frameset>. Published apps need a page with a <body>.`);
+
+  // The first <base href> outside template content sets the page's base address.
+  const findBase = (parent: Element): Element | undefined => {
+    for (const node of parent.childNodes) {
+      if (!defaultTreeAdapter.isElementNode(node) || node.namespaceURI !== spaces.html || node.tagName === "template") continue;
+      if (node.tagName === "base" && attribute(node, "href") !== undefined) return node;
+      const found = findBase(node);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const baseElement = findBase(root);
+  let base = posix.dirname(entry);
+  if (baseElement) {
+    const href = attribute(baseElement, "href")!.trim();
+    if (remote.test(href)) throw new Error(`${entry} sets its base address to ${href}. Remove the <base> element so the page's links point into the app.`);
+    const resolved = posix.normalize(posix.join(href.startsWith("/") ? posix.dirname(entry) : base, href.endsWith("/") ? href : posix.dirname(`${href}x`)));
+    if (resolved === ".." || resolved.startsWith("../")) throw new Error(outside(href));
+    base = resolved;
+  }
+
   /** Resolves a local reference to a captured input, or refuses it with the file and the reason. */
   const local = (reference: string, kind: keyof typeof kinds): string => {
     const value = reference.trim();
-    if (/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/.test(value)) throw new Error(outside(value));
+    if (remote.test(value)) throw new Error(outside(value));
     let decoded: string;
     try { decoded = decodeURIComponent(value.split(/[?#]/, 1)[0]!); } catch { throw new Error(`${entry} links ${value}, which is not a valid file address.`); }
     const path = posix.normalize(posix.join(decoded.startsWith("/") ? posix.dirname(entry) : base, decoded));
@@ -114,100 +173,160 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     const expected = kinds[kind];
     if (!(expected.test as readonly string[]).includes(extension(path))) throw new Error(`${entry} links ${value} as ${expected.words}. Use ${expected.allowed} file instead.`);
     if (!inputs.has(path)) throw new Error(`${entry} links ${value}, which is not in the app. Add the file or fix the link.`);
+    used.set(path, inputs.get(path)!.bytes.byteLength);
     return path;
   };
-  /** A remote, data, blob, or fragment image stays as written; a local one becomes a data URL. */
-  const image = (value: string): string => {
+  /** A remote, data, blob, or fragment image stays as written; a local one is embedded once and referenced by number. */
+  const image = (value: string): string | number => {
     if (/^(?:https?:|data:|blob:|#|\/\/)/i.test(value.trim()) || value.trim() === "") return value;
     const path = local(value, "image");
-    used.add(path);
-    return `data:${imageTypes.get(extension(path))};base64,${Buffer.from(inputs.get(path)!.bytes).toString("base64")}`;
+    if (!imageIndex.has(path)) {
+      imageIndex.set(path, images.length);
+      embedded.set(path, inputs.get(path)!.bytes.byteLength);
+      images.push(`data:${imageTypes.get(extension(path))};base64,${Buffer.from(inputs.get(path)!.bytes).toString("base64")}`);
+    }
+    return imageIndex.get(path)!;
   };
-  const refuseEmbed = (element: Element, value: string | undefined) => {
-    if (value !== undefined && value.trim() !== "" && value.trim() !== "about:blank") throw new Error(`${entry} embeds ${value.trim()} in <${element.tagName}>. Published apps cannot embed other pages or files.`);
+  const cssImages = (value: string): AppPageValue => {
+    const parts: Array<string | number> = [];
+    let last = 0;
+    for (const match of value.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
+      const url = match[2]!, start = match.index + match[0].indexOf(url, 4);
+      parts.push(value.slice(last, start), image(url));
+      last = start + url.length;
+    }
+    return joined([...parts, value.slice(last)]);
   };
-  const setAttribute = (element: Element, name: string, value: string) => { element.attrs.find(attr => attr.name === name)!.value = value; };
-  const all = elements(document, false);
-  const baseElement = all.find(element => element.tagName === "base" && element.namespaceURI === htmlNamespace && attribute(element, "href") !== undefined);
-  if (baseElement) {
-    const href = attribute(baseElement, "href")!.trim();
-    if (/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/.test(href)) throw new Error(`${entry} sets its base address to ${href}. Remove the <base> element so the page's links point into the app.`);
-    const resolved = posix.normalize(posix.join(href.startsWith("/") ? posix.dirname(entry) : base, href.endsWith("/") ? href : posix.dirname(`${href}x`)));
-    if (resolved === ".." || resolved.startsWith("../")) throw new Error(outside(href));
-    base = resolved;
-  }
-  for (const element of all) {
-    if (element.tagName === "base" && element.namespaceURI === htmlNamespace) { defaultTreeAdapter.detachNode(element); continue; }
+  const addScript = (source: string) => {
+    if (scripts.length >= APP_PAGE_MAX_SCRIPTS) throw new Error(`${entry} has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
+    return scripts.push(source) - 1;
+  };
+  const media = (element: Element, label: string) => {
+    const condition = attribute(element, "media")?.trim() ?? "";
+    if (/[;{}"'\\]/.test(condition)) throw new Error(`${entry} gives ${label} the media condition "${condition}", which published apps cannot carry. Use a plain media query.`);
+    return condition.toLowerCase() === "all" ? "" : condition;
+  };
+  const attributes = (element: Element): AppPageAttribute[] => element.attrs
+    .map(attr => {
+      const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
+      const space = attr.namespace ? attributeSpaces[attr.namespace] : undefined;
+      return space ? [name, attr.value, space] : [name, attr.value];
+    });
+  const setValue = (rows: AppPageAttribute[], name: string, value: AppPageValue) => {
+    const row = rows.find(([candidate, , space]) => candidate === name && !space);
+    if (row) row[1] = value;
+  };
+
+  const convert = (nodes: readonly Node[], depth: number, inTemplate: boolean): AppPageNode[] => {
+    if (depth > APP_PAGE_MAX_DEPTH) throw new Error(`${entry} nests elements more than ${APP_PAGE_MAX_DEPTH} levels deep. Browsers stop nesting there. Flatten the markup.`);
+    const out: AppPageNode[] = [];
+    for (const node of nodes) {
+      if (defaultTreeAdapter.isTextNode(node)) { out.push(node.value); continue; }
+      if (defaultTreeAdapter.isCommentNode(node)) { out.push({ comment: node.data }); continue; }
+      if (!defaultTreeAdapter.isElementNode(node)) continue;
+      const element = convertElement(node, depth, inTemplate);
+      if (element) out.push(element);
+    }
+    return out;
+  };
+  const convertElement = (element: Element, depth: number, inTemplate: boolean): AppPageElement | null => {
+    const tag = element.tagName;
     const handler = element.attrs.find(attr => /^on/i.test(attr.name));
     if (handler) throw new Error(`${entry} has an ${handler.name} attribute. Published apps cannot run inline event handlers. Attach the handler in a script.`);
+    const html = element.namespaceURI === spaces.html;
+    const ns = element.namespaceURI === spaces.svg ? "svg" as const : element.namespaceURI === spaces.math ? "math" as const : undefined;
+    if (!html && tag === "script") throw new Error(`${entry} has a <script> inside <${ns}>. Published apps run only HTML scripts. Move the script out of the SVG.`);
+    const attrs = attributes(element);
     const style = attribute(element, "style");
-    if (style !== undefined) setAttribute(element, "style", style.replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (_, quote: string, url: string) => `url(${quote}${image(url)}${quote})`));
-    const html = element.namespaceURI === htmlNamespace;
-    const tag = element.tagName;
+    if (style !== undefined) setValue(attrs, "style", cssImages(style));
+    const record = (extra: Partial<AppPageElement> = {}, skip: readonly string[] = []): AppPageElement => {
+      const kept = skip.length ? attrs.filter(([name, , space]) => space || !skip.includes(name)) : attrs;
+      const content = html && tag === "template" ? convert(defaultTreeAdapter.getTemplateContent(element as DefaultTreeAdapterTypes.Template).childNodes, depth + 1, true) : undefined;
+      return { tag, ...(ns ? { ns } : {}), attrs: kept, children: convert(element.childNodes, depth + 1, inTemplate), ...(content ? { content } : {}), ...extra };
+    };
     if (!html) {
-      for (const name of ["href", "xlink:href"]) {
-        const value = attribute(element, name);
-        if (value !== undefined && (tag === "image" || tag === "use" || tag === "feImage")) setAttribute(element, name, image(value));
+      if (tag === "image" || tag === "use" || tag === "feImage") {
+        for (const row of attrs) if ((row[0] === "href" || row[0] === "xlink:href") && typeof row[1] === "string") row[1] = joined([image(row[1])]);
       }
-      continue;
+      return record();
     }
-    if (tag === "title" && title === null && !inert.has(element)) title = textOf(element);
-    if ((tag === "script" || tag === "style" || tag === "link") && inert.has(element)) continue;
+    // Links already resolve from the page's base; only the first base counts, and the policy refuses a base address.
+    if (tag === "base" && !inTemplate) return record({}, ["href"]);
     if (tag === "script") {
       const kind = scriptKind(element), src = attribute(element, "src");
-      if (kind === null) continue;
-      defaultTreeAdapter.detachNode(element);
+      if (inTemplate) {
+        if (kind === null) return record();
+        if (src !== undefined) throw new Error(`${entry} has a <script src="${src}"> inside <template>. Published apps can run only inline scripts from templates.`);
+        // A template script runs when app code inserts a copy, so its text is hashed like any other script.
+        addScript(classicScript(textOf(element), `A script in a template in ${entry}`));
+        return record();
+      }
+      if (kind === null) return record();
+      if (kind === "skip") return { ...record({}, ["src"]), children: [] };
       if (kind === "module") {
+        if (modules.length >= APP_PAGE_MAX_SCRIPTS) throw new Error(`${entry} has more than ${APP_PAGE_MAX_SCRIPTS} module scripts. Import them from one module instead.`);
         if (src === undefined) {
           const key = `dohc-page:${inline.size}.js`;
           inline.set(key, { contents: textOf(element), loader: "js" });
-          imports.push(key);
-        } else imports.push(fromEntry(local(src, "module")));
-        if (!bundleQueued) { deferred.push(null); bundleQueued = true; }
-      } else if (kind === "classic") {
-        if (src === undefined) scripts.push(classicScript(textOf(element), `A script in ${entry}`));
-        else {
-          const path = local(src, "script");
-          used.add(path);
-          (attribute(element, "defer") === undefined ? scripts : deferred).push(classicScript(text(inputs.get(path)!.bytes), path));
-        }
+          modules.push(key);
+        } else modules.push(`${pageInput}${local(src, "module")}`);
+        return { ...record({ module: modules.length - 1 }, ["src"]), children: [] };
       }
-      continue;
+      if (src === undefined) return { ...record({ run: addScript(classicScript(textOf(element), `A script in ${entry}`)) }), children: [] };
+      const path = local(src, "script");
+      const source = classicScript(text(inputs.get(path)!.bytes), path);
+      const later = attribute(element, "defer") !== undefined || attribute(element, "async") !== undefined;
+      return { ...record(later ? { defer: addScript(source) } : { run: addScript(source) }, ["src"]), children: [] };
     }
-    if (tag === "style") {
-      defaultTreeAdapter.detachNode(element);
+    if (tag === "style" && !inTemplate) {
+      const type = attribute(element, "type")?.trim().toLowerCase();
+      if (type && type !== "text/css") return record();
       const key = `dohc-page:${inline.size}.css`;
       inline.set(key, { contents: textOf(element), loader: "css" });
-      imports.push(key);
-      continue;
+      const condition = media(element, "a <style>");
+      styles.push(`@import ${JSON.stringify(key)}${condition ? ` ${condition}` : ""};`);
+      return null;
     }
     const rel = tag === "link" ? (attribute(element, "rel") ?? "").toLowerCase().split(/\s+/) : [];
-    if (rel.includes("stylesheet") && !rel.includes("alternate")) {
-      defaultTreeAdapter.detachNode(element);
-      imports.push(fromEntry(local(attribute(element, "href") ?? "", "stylesheet")));
-      continue;
+    if (rel.includes("stylesheet") && !rel.includes("alternate") && !inTemplate) {
+      const href = attribute(element, "href") ?? "";
+      if (attribute(element, "disabled") !== undefined) throw new Error(`${entry} links the stylesheet ${href} as disabled. Published apps apply every stylesheet. Remove the link or its disabled attribute.`);
+      const condition = media(element, `the stylesheet ${href}`);
+      styles.push(`@import ${JSON.stringify(`${pageInput}${local(href, "stylesheet")}`)}${condition ? ` ${condition}` : ""};`);
+      return null;
     }
     const parent = element.parentNode && defaultTreeAdapter.isElementNode(element.parentNode) ? element.parentNode.tagName : "";
-    const media = tag === "video" || tag === "audio" || tag === "track" || (tag === "source" && parent !== "picture");
-    if (media) {
+    const mediaElement = tag === "video" || tag === "audio" || tag === "track" || (tag === "source" && parent !== "picture");
+    if (mediaElement) {
       const src = attribute(element, "src");
       if (src !== undefined && !/^(?:https?:|data:|blob:)/i.test(src.trim())) throw new Error(`${entry} links ${src} as audio or video. Published apps cannot include local audio or video. Link to a copy on another site.`);
     }
-    if (tag === "iframe" || tag === "frame" || tag === "embed") refuseEmbed(element, attribute(element, "src"));
-    if (tag === "object") refuseEmbed(element, attribute(element, "data"));
-    const imageSource = (tag === "img" || (tag === "input" && attribute(element, "type")?.toLowerCase() === "image") || (tag === "source" && !media)) ? attribute(element, "src") : undefined;
-    if (imageSource !== undefined) setAttribute(element, "src", image(imageSource));
+    if (tag === "iframe" && attribute(element, "srcdoc") !== undefined) throw new Error(`${entry} embeds a page with <iframe srcdoc>. Published apps cannot embed other pages.`);
+    for (const name of tag === "object" ? ["data"] : tag === "iframe" || tag === "frame" || tag === "embed" ? ["src"] : []) {
+      const value = attribute(element, name)?.trim();
+      if (value && value !== "about:blank") throw new Error(`${entry} embeds ${value} in <${tag}>. Published apps cannot embed other pages or files.`);
+    }
+    if (tag === "img" || (tag === "input" && attribute(element, "type")?.toLowerCase() === "image") || (tag === "source" && !mediaElement)) {
+      const src = attribute(element, "src");
+      if (src !== undefined) setValue(attrs, "src", joined([image(src)]));
+    }
     const poster = tag === "video" ? attribute(element, "poster") : undefined;
-    if (poster !== undefined) setAttribute(element, "poster", image(poster));
+    if (poster !== undefined) setValue(attrs, "poster", joined([image(poster)]));
     const set = tag === "img" || tag === "source" ? attribute(element, "srcset") : undefined;
-    if (set !== undefined) setAttribute(element, "srcset", srcset(set).map(({ url, descriptor }) => descriptor ? `${image(url)} ${descriptor}` : image(url)).join(", "));
-  }
-  if (!bundleQueued) deferred.push(null);
-  const root = document.childNodes.find(defaultTreeAdapter.isElementNode);
-  const body = root?.childNodes.find((node): node is Element => defaultTreeAdapter.isElementNode(node) && node.tagName === "body");
-  const attributes = (element: Element | undefined) => (element?.attrs ?? []).filter(attr => attributeName.test(attr.name)).map(attr => [attr.name, attr.value] as [string, string]);
-  return {
-    page: { html: attributes(root), title, body: attributes(body), markup: body ? serialize(body) : "", scripts, deferred },
-    module: imports.map(path => `import ${JSON.stringify(path)};`).join("\n"), inline, base, used,
+    if (set !== undefined) {
+      setValue(attrs, "srcset", joined(srcset(set).flatMap(({ url, descriptor }, index) =>
+        [index ? ", " : "", image(url), descriptor ? ` ${descriptor}` : ""])));
+    }
+    return record();
   };
+
+  const page: AppPage = {
+    htmlAttributes: attributes(root), bodyAttributes: attributes(body),
+    head: convert(head.childNodes, 1, false), body: convert(body.childNodes, 1, false),
+    scripts, images, modules: modules.length,
+  };
+  if (styles.length) inline.set(pageStyles, { contents: styles.join("\n"), loader: "css" });
+  const module = (styles.length ? `import ${JSON.stringify(pageStyles)};\n` : "") +
+    `globalThis.${APP_PAGE_MODULES_GLOBAL} = [${modules.map(specifier => `() => require(${JSON.stringify(specifier)})`).join(", ")}];`;
+  return { page, module, inline, base, used, images: embedded };
 }

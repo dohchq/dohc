@@ -67,7 +67,7 @@ test("installed compiler runs electron-builder resources after relocation and ch
     const pageBounds = { ...bounds, maxOutputBytes: 16384 };
     const page = await compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<link rel="stylesheet" href="style.css"><p>page</p>')), file("style.css", style)] }, pageBounds);
     assert.deepEqual(page.files.map(file => file.path), ["bundle.css", "bundle.js", "page.json"]);
-    assert.match(Buffer.from(page.files[2].bytes).toString(), /<p>page<\/p>/);
+    assert.deepEqual(JSON.parse(Buffer.from(page.files[2].bytes).toString()).body, [{ tag: "p", attrs: [], children: ["page"] }]);
     await assert.rejects(compile({ ...request, entryPath: "index.html", inputs: [file("index.html", Buffer.from('<script src="missing.js"></script>'))] }, pageBounds),
       { message: "index.html links missing.js, which is not in the app. Add the file or fix the link." });
   } finally {

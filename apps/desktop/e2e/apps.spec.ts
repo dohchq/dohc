@@ -195,11 +195,14 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     <title>Reading list</title>
     <link rel="stylesheet" href="./styles.css">
     <style>h1 { letter-spacing: 2px; }</style>
-    <script defer src="later.js"></script>
+    <style media="print">main { color: rgb(255, 0, 0); }</style>
+    <script type="application/json" id="config">{"heading":"Reading list"}</script>
+    <script>window.steps = ["head:" + JSON.parse(document.getElementById("config").textContent).heading + ":" + !!document.querySelector("main")];</script>
   </head>
   <body class="shelf">
     <main>
       <h1>Reading list</h1>
+      <div id="box"><script>steps.push("box:" + document.currentScript.parentElement.id + ":" + !!document.getElementById("books"));</script></div>
       <ul id="books"></ul>
       <img alt="Cover" src="cover.png">
       <img alt="Sharp cover" srcset="cover.png 1x, img/cover-2x.png 2x">
@@ -214,17 +217,19 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
         item.textContent = title;
         document.getElementById("books").append(item);
       }
-      document.getElementById("order").textContent += "classic ";
+      steps.push("classic");
     </script>
+    <script type="module">steps.push("A"); throw new Error("A broken module stops only itself.");</script>
+    <script defer src="later.js"></script>
     <script type="module" src="./count.js"></script>
   </body>
 </html>
 ` },
       { path: "reading-list/styles.css", contents: ".shelf main { color: rgb(1, 2, 3); background: url(img/cover-2x.png) repeat; }\n" },
-      { path: "reading-list/later.js", contents: 'document.getElementById("order").textContent += "deferred ";\n' },
+      { path: "reading-list/later.js", contents: 'steps.push("B:" + document.currentScript.hasAttribute("defer"));\n' },
       { path: "reading-list/img/cover-2x.png", contents: coverPng },
       { path: "reading-list/books.js", contents: 'const books = ["The Design of Everyday Things", "Thinking in Systems"];\n' },
-      { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\ndocument.getElementById("order").textContent += "module";\n' },
+      { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\nsteps.push("C");\ndocument.getElementById("order").textContent = steps.join(" ");\n' },
       { path: "reading-list/cover.png", contents: coverPng },
     ]);
     relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
@@ -277,10 +282,12 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await expect.poll(() => app.getByRole("img", { name: "Cover", exact: true }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
     await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", /^data:image\/png;base64,\S+ 1x, data:image\/png;base64,\S+ 2x$/);
     await expect(app.locator("main")).toHaveCSS("background-image", /^url\("data:image\/png;base64,/);
-    // Under the published hash-only policy, a throwing script stops only itself; deferred and module scripts run after parsing.
-    await expect(app.locator("#order")).toHaveText("classic deferred module");
+    // Under the published hash-only policy the page runs as in a tab: head content and its ids stay, each classic script
+    // sees only what precedes it, a throw stops only its own script, and deferred and module scripts run in document order.
+    await expect(app.locator("#config")).toHaveCount(1);
+    await expect(app.locator("#order")).toHaveText("head:Reading list:false box:box:false classic A B:true C");
     await guest.screenshot({ path: info.outputPath("static-app-guest.png") });
-    expect(shared.failures.filter(message => !message.includes("A broken script stops only itself."))).toEqual([]);
+    expect(shared.failures.filter(message => !/A broken (?:script|module) stops only itself\./.test(message))).toEqual([]);
   } finally {
     try { await shared?.close(); } finally {
       try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, workspace); }

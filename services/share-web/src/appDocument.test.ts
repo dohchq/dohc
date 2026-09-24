@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { APP_BUNDLE_CONTENT_TYPES, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
@@ -74,41 +74,57 @@ describe("compiled app document", () => {
   });
 
   describe("page record", () => {
-    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ html: [["lang", "fr"]], title: "Trip", body: [["class", "trip"]],
-      markup: "<main><h1>Trip</h1></main>", scripts: ["window.log = ['first:' + document.querySelector('h1').textContent];", "throw new Error('stops only itself');", "log.push('third');"],
-      deferred: ["log.push('deferred:' + document.readyState);", null], ...overrides });
-    const build = (value: unknown, script = "log.push('bundle');") =>
-      createAppDocument([file("bundle.js", script), file("page.json", JSON.stringify(value))], limits);
+    const script = (run: number): AppPage["head"][number] => ({ tag: "script", attrs: [], children: [], run });
+    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ htmlAttributes: [["lang", "fr"]], bodyAttributes: [["class", "trip"]],
+      head: [{ tag: "title", attrs: [], children: ["Trip"] }, script(0)],
+      body: [{ tag: "main", attrs: [["id", "box"]], children: [script(1), { tag: "p", attrs: [["id", "after"]], children: ["After"] }] },
+        script(2), { comment: " end " }, script(3)],
+      scripts: ["window.log = ['head:' + !!document.body.firstChild];", "log.push('box:' + document.currentScript.parentElement.id + ':' + !!document.getElementById('after'));",
+        "throw new Error('stops only itself');", "log.push('last:' + !!document.getElementById('after'));"],
+      images: [], modules: 0, ...overrides });
+    const build = (value: unknown, bundle = "") => createAppDocument([file("bundle.js", bundle), file("page.json", JSON.stringify(value))], { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
 
-    it("inserts the markup, then each classic script as its own hashed script, then deferred scripts once parsing ends", async () => {
+    it("builds the page node by node, running each classic script as its own hashed script where it stands", () => {
       const output = build(page());
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
-      await new Promise(resolve => dom.window.document.readyState === "loading" ? dom.window.addEventListener("DOMContentLoaded", resolve) : resolve(undefined));
       expect(dom.window.document.documentElement.lang).toBe("fr");
       expect(dom.window.document.title).toBe("Trip");
       expect(dom.window.document.body.className).toBe("trip");
-      expect(dom.window.log).toEqual(["first:Trip", "third", "deferred:interactive", "bundle"]);
-      const scripts = [...dom.window.document.querySelectorAll("script")];
-      // The markup replaces the body, loader included; each created script remains.
-      expect(scripts.map(node => node.textContent)).toEqual([...page().scripts, "log.push('deferred:' + document.readyState);", "log.push('bundle');"]);
-      for (const node of scripts) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(node.textContent!).digest("base64")}'`);
+      expect(dom.window.log).toEqual(["head:false", "box:box:false", "last:true"]);
+      expect(dom.window.document.body.innerHTML).toBe('<main id="box"><script>' + page().scripts[1] + '</script><p id="after">After</p></main>' +
+        `<script>${page().scripts[2]}</script><!-- end --><script>${page().scripts[3]}</script>`);
+      for (const text of page().scripts) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
       dom.window.close();
     });
 
     it("keeps page text out of the HTML parser", () => {
       const attack = "</script><script src=\"https://evil.test/a.js\"></script>";
-      const dom = new JSDOM(build(page({ scripts: [`window.value = ${JSON.stringify(attack)};`], title: attack })).html, { runScripts: "dangerously" });
+      const dom = new JSDOM(build(page({ head: [script(0)], body: [{ tag: "p", attrs: [["title", attack]], children: [attack] }],
+        scripts: [`window.value = ${JSON.stringify(attack)};`] })).html, { runScripts: "dangerously" });
       expect(dom.window.value).toBe(attack);
       expect(dom.window.document.querySelectorAll("script[src]")).toHaveLength(0);
+      expect(dom.window.document.querySelector("p")!.textContent).toBe(attack);
+      dom.window.close();
+    });
+
+    it("fills each image reference from the page's one copy of the image", () => {
+      const png = "data:image/png;base64,iVBORw0KGgo=";
+      const dom = new JSDOM(build(page({ head: [], body: [{ tag: "img", attrs: [["src", [0]], ["srcset", [0, " 1x, ", 0, " 2x"]]], children: [] }], scripts: [], images: [png] })).html, { runScripts: "dangerously" });
+      expect(dom.window.document.querySelector("img")!.getAttribute("srcset")).toBe(`${png} 1x, ${png} 2x`);
       dom.window.close();
     });
 
     it.each([
       ["an unknown field", { ...page(), extra: true }],
-      ["no bundle position", page({ deferred: [] })],
-      ["two bundle positions", page({ deferred: [null, null] })],
-      ["an invalid attribute name", page({ body: [["on click", "x"]] })],
+      ["a missing field", (() => { const { modules: _, ...rest } = page(); return rest; })()],
+      ["a script index past the scripts", page({ body: [script(9)] })],
+      ["an image index past the images", page({ body: [{ tag: "img", attrs: [["src", [0]]], children: [] }] })],
+      ["an image that is not a data URL", page({ images: ["https://example.test/a.png"] })],
+      ["an attribute name with a space", page({ bodyAttributes: [["on click", "x"]] })],
+      ["an unknown namespace", { ...page(), body: [{ tag: "x", ns: "xul", attrs: [], children: [] }] }],
       ["a script that is not text", page({ scripts: [1 as unknown as string] })],
+      [`more than ${APP_PAGE_MAX_SCRIPTS} scripts`, page({ scripts: Array.from({ length: APP_PAGE_MAX_SCRIPTS + 1 }, (_, index) => `${index}`) })],
+      [`elements nested more than ${APP_PAGE_MAX_DEPTH} deep`, page({ body: [Array.from({ length: APP_PAGE_MAX_DEPTH + 1 }).reduce<AppPage["body"][number]>(child => ({ tag: "div", attrs: [], children: [child] }), "x")] })],
     ])("refuses a page record with %s", (_name, value) => {
       expect(() => build(value)).toThrow("Invalid app page.");
     });
