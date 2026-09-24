@@ -8,6 +8,8 @@ use crate::rpc::chats::chat_page_cursor;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
+use crate::rpc::chats::messages::ChatMessageAutomationParams;
+use crate::rpc::chats::messages::actor_kind_str;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
 use crate::rpc::chats::messages::reaction_json;
@@ -17,7 +19,6 @@ use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChannelThreadSummary;
-use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatProjectionFileAccess;
 use dohc_engine_domain::ChatThread;
 use dohc_engine_domain::ChatThreadLane;
@@ -52,6 +53,8 @@ struct ChatThreadStartParams {
     options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    automation: Option<ChatMessageAutomationParams>,
     now_ms: Option<i64>,
 }
 
@@ -215,10 +218,7 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 json!({
                     "id": opening.message_id,
                     "author": {
-                        "kind": match opening.author_kind {
-                            ChatActorKind::Human => "human",
-                            ChatActorKind::Agent => "agent",
-                        },
+                        "kind": actor_kind_str(opening.author_kind),
                         "displayName": opening.author_display_name,
                     },
                     "createdAtMs": opening.created_at_ms,
@@ -283,6 +283,7 @@ impl EngineService {
                         .into_iter()
                         .map(LocalAttachmentInput::from)
                         .collect(),
+                    automation: params.automation.map(Into::into),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },

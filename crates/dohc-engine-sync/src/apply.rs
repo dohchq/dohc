@@ -1409,7 +1409,8 @@ fn apply_message(
     if payload.message_id.is_empty()
         || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
-        || !matches!(payload.author_kind.as_str(), "human" | "agent")
+        // Another computer's automation posts as an automation, without its local provenance.
+        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation")
         || payload
             .parent_message_id
             .as_ref()
@@ -1425,7 +1426,7 @@ fn apply_message(
         });
     }
     let owner_name = normalize_agent_owner_name(
-        payload.author_kind == "agent",
+        payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
     )
     .map_err(|_| SyncError::InvalidInput {

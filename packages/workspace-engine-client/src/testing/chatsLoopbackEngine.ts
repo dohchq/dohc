@@ -71,6 +71,22 @@ type SeedChannelInput = {
 
 type LedgerEntry = { fingerprint: string; result: JsonValue };
 
+/** The engine's rule: an automation message names its Collection automation, and only it does. */
+function messageAutomation(authorKind: string, value: unknown): ChatMessage["automation"] {
+  if (value === undefined || value === null) {
+    if (authorKind === "automation") throw new Error("invalid-input");
+    return undefined;
+  }
+  if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-input");
+  const { automationId, chainDepth, ...rest } = value as Record<string, unknown>;
+  const match = typeof automationId === "string" ? /^collection:(.+)#([^#]+)$/su.exec(automationId) : null;
+  if (Object.keys(rest).length > 0 || !match || automationId !== (automationId as string).trim() ||
+    typeof chainDepth !== "number" || !Number.isInteger(chainDepth) || chainDepth < 1 || chainDepth > 64) {
+    throw new Error("invalid-input");
+  }
+  return { automationId: automationId as string, collectionPath: match[1]! };
+}
+
 function strictObject(
   value: JsonValue,
   label: string,
@@ -569,7 +585,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
+        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -583,7 +599,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
+        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -1475,7 +1491,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const messageId = requiredString(params, "messageId", "invalid-message-body");
     if (state.messages.has(messageId)) throw new Error("target-exists");
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
-    if (authorKind !== "human" && authorKind !== "agent") throw new Error("invalid-sender");
+    if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
+    const automation = messageAutomation(authorKind, params.automation);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1493,11 +1510,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
       author,
       body,
       createdAtMs: atMs,
+      ...(automation ? { automation } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
     if (ownerName !== undefined) {
-      if (authorKind !== "agent") throw new Error("invalid-sender");
+      if (authorKind === "human") throw new Error("invalid-sender");
       message.authorOwnerDisplayName = normalizeNonempty(ownerName, "invalid-sender");
     }
     const authorUserId = optionalString(params, "authorUserId");

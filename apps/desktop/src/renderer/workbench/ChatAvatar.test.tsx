@@ -53,4 +53,13 @@ describe("ChatAvatar hue", () => {
     expect(avatar.className).toContain("text-agent");
     expect(avatar.className).not.toContain("hue");
   });
+
+  it("marks an automation with a bare lightning mark and no identity color", () => {
+    render(<ChatAvatar name="Stamp the finish date" kind="automation" size="comment" />);
+    const avatar = screen.getByTitle("Stamp the finish date");
+    expect(avatar.className).toContain("text-muted");
+    expect(avatar.className).not.toMatch(/\b(border|hue|agent|rounded)/u);
+    expect(avatar.textContent).toBe("");
+    expect(avatar.querySelector("svg.lucide-zap")).not.toBeNull();
+  });
 });

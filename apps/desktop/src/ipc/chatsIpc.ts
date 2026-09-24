@@ -118,6 +118,9 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     ...(message.origin ? { origin: message.origin } : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
+    ...(message.automation
+      ? { automation: { automationId: message.automation.automationId, collectionPath: message.automation.collectionPath } }
+      : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
   };
 }
@@ -729,6 +732,9 @@ export function registerChatsIpcHandlers<
       if (!message?.authorUserId) {
         throw new Error("That author cannot be followed until their identity is verified.");
       }
+      if (message.author.kind === "automation") {
+        throw new Error("An automation cannot be followed. Follow its Group instead.");
+      }
       targetKind = message.author.kind === "agent" ? "agent" : "person";
       targetId = message.authorUserId;
     }
@@ -808,7 +814,8 @@ export function registerChatsIpcHandlers<
         message: chatMessageForIpc(item.message),
         thread: chatThreadForIpc(item.thread),
         viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
-        ...(item.message.authorUserId
+        // An automation is neither a person nor an agent to follow.
+        ...(item.message.authorUserId && item.message.author.kind !== "automation"
           ? {
               authorFollowTarget: {
                 targetKind:

@@ -4811,3 +4811,130 @@ async fn polls_and_lanes_cross_the_rpc_boundary() {
         crossed.message
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automation_message_names_its_automation_over_rpc() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-automation-author").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel", "name": "Trip", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+    let started = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "opening",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "authorOwnerDisplayName": "Ice",
+            "authorUserId": "ice",
+            "body": "Finished Book hotel",
+            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 1 },
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(
+        started["message"]["author"],
+        json!({ "kind": "automation", "displayName": "Stamp the finish date" })
+    );
+    assert_eq!(
+        started["message"]["automation"],
+        json!({ "automationId": "collection:Trip/Tasks#stamp", "collectionPath": "Trip/Tasks" })
+    );
+    let sent = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread",
+            "messageId": "reply",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "body": "Again",
+            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 2 },
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    assert_eq!(sent["automation"]["collectionPath"], json!("Trip/Tasks"));
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(
+        listed["messages"][1]["automation"]["automationId"],
+        json!("collection:Trip/Tasks#stamp")
+    );
+
+    let unnamed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread",
+            "messageId": "unnamed",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "body": "Again",
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(unnamed.code, ErrorCode::InvalidParams, "{unnamed:?}");
+    let named_human = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread",
+            "messageId": "human",
+            "authorKind": "human",
+            "authorDisplayName": "Ice",
+            "body": "Hi",
+            "automation": { "automationId": "collection:Trip/Tasks#stamp", "chainDepth": 1 },
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(
+        named_human.code,
+        ErrorCode::InvalidParams,
+        "{named_human:?}"
+    );
+    let reaction = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "automation-reaction",
+        json!({
+            "threadId": "thread",
+            "messageId": "opening",
+            "emoji": "👍",
+            "author": { "authorId": "ice", "kind": "automation", "displayName": "Stamp the finish date" },
+            "state": "added",
+            "nowMs": 50,
+        }),
+    )
+    .await;
+    assert_eq!(reaction.code, ErrorCode::InvalidParams, "{reaction:?}");
+}
