@@ -300,7 +300,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     assert_eq!(claim.automation_id, AUTOMATION);
     assert_eq!(claim.state, AutomationClaimState::Pending);
     assert_eq!(claim.collection_path, "tasks");
-    assert_eq!(claim.record_id, RECORD);
+    assert_eq!(claim.record_id.as_deref(), Some(RECORD));
     let facts = append
         .outcome
         .record_facts

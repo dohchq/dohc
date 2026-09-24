@@ -2273,14 +2273,20 @@ CREATE INDEX idx_chat_mentions_handle
     ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
 ";
 
-/// A Collection automation triggered by messages in a Group. Only the
+/// Claims that no record change starts. A Group message, a button press,
+/// and a schedule each key a claim on a trigger key the claim's trigger
+/// names (`message:<id>`, `press:<id>`, `schedule:<dueMs>`), and a message
+/// or schedule claim has no record. Only a message claim is written here;
+/// the button and schedule kinds are fixed now so the claims table is
+/// rebuilt once. SQLite cannot change a CHECK in place, so the rebuild keeps
+/// every row.
+///
+/// A Collection automation subscribes to messages in a Group. Only the
 /// computer that runs such automations registers these subscriptions, and it
 /// claims a Group message the one time it stores that message, however the
-/// message arrives, so a claim now has a fourth trigger shape: the message.
-/// SQLite cannot change a CHECK in place, so the claims table is rebuilt with
-/// every row kept. A message claim carries the message itself, within the
+/// message arrives. A message claim carries the message itself, within the
 /// claim budget.
-const V2_AUTOMATION_GROUP_MESSAGES_DDL: &str = "\
+const V2_AUTOMATION_TRIGGER_KEYS_DDL: &str = "\
 CREATE TABLE automation_group_subscriptions (
     workspace_id  TEXT    NOT NULL,
     automation_id TEXT    NOT NULL,
@@ -2299,8 +2305,8 @@ CREATE TABLE automation_claims_next (
     trigger_origin_seq    INTEGER,
     trigger_history_id    INTEGER,
     trigger_moment_order  INTEGER,
-    trigger_message_id    TEXT,
-    record_id             TEXT    NOT NULL,
+    trigger_key           TEXT,
+    record_id             TEXT,
     collection_path       TEXT    NOT NULL,
     depth                 INTEGER NOT NULL CHECK (depth >= 0),
     state                 TEXT    NOT NULL
@@ -2310,7 +2316,8 @@ CREATE TABLE automation_claims_next (
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
     change_kind           TEXT    NOT NULL DEFAULT 'changed'
-                          CHECK (change_kind IN ('added', 'changed', 'removed', 'message')),
+                          CHECK (change_kind IN ('added', 'changed', 'removed', 'message',
+                                                 'button', 'schedule')),
     author_origin_id      TEXT,
     actor_kind            TEXT
                           CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation')),
@@ -2322,8 +2329,9 @@ CREATE TABLE automation_claims_next (
     PRIMARY KEY (workspace_id, claim_id),
     CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
     CHECK ((trigger_origin_id IS NOT NULL) + (trigger_history_id IS NOT NULL)
-           + (trigger_moment_order IS NOT NULL) + (trigger_message_id IS NOT NULL) = 1),
-    CHECK ((change_kind = 'message') = (trigger_message_id IS NOT NULL)),
+           + (trigger_moment_order IS NOT NULL) + (trigger_key IS NOT NULL) = 1),
+    CHECK ((trigger_key IS NOT NULL) = (change_kind IN ('message', 'button', 'schedule'))),
+    CHECK ((record_id IS NULL) = (change_kind IN ('message', 'schedule'))),
     CHECK (message_json IS NULL OR change_kind = 'message')
 ) STRICT;
 INSERT INTO automation_claims_next
@@ -2347,9 +2355,9 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
     ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
     WHERE trigger_moment_order IS NOT NULL;
-CREATE UNIQUE INDEX idx_automation_claims_trigger_message
-    ON automation_claims(workspace_id, automation_id, trigger_message_id)
-    WHERE trigger_message_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_key
+    ON automation_claims(workspace_id, automation_id, trigger_key)
+    WHERE trigger_key IS NOT NULL;
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 CREATE INDEX idx_automation_claims_automation
@@ -2414,8 +2422,8 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 8,
-        id: "v2-automation-group-messages",
-        sql: V2_AUTOMATION_GROUP_MESSAGES_DDL,
+        id: "v2-automation-trigger-keys",
+        sql: V2_AUTOMATION_TRIGGER_KEYS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2726,20 +2734,20 @@ mod tests {
         assert!(nullable);
     }
 
-    /// Claims written before Group messages keep every column and trigger, and
-    /// the rebuilt table takes a message claim with its message only.
+    /// Claims written before trigger keys keep every column and trigger, and
+    /// the rebuilt table takes each kind with its key and record rules.
     #[test]
-    fn automation_claims_from_before_group_messages_upgrade_unchanged() {
+    fn automation_claims_from_before_trigger_keys_upgrade_unchanged() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1_000);
         let mut conn = open_bare(&path);
         let before = BASELINE_MIGRATIONS
             .iter()
-            .position(|migration| migration.id == "v2-automation-group-messages")
-            .expect("the Group message migration ships");
+            .position(|migration| migration.id == "v2-automation-trigger-keys")
+            .expect("the trigger key migration ships");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
-            .expect("store before Group messages");
+            .expect("store before trigger keys");
         conn.execute_batch(
             "INSERT INTO automation_claims \
                  (workspace_id, claim_id, automation_id, trigger_moment_order, record_id, \
@@ -2763,7 +2771,7 @@ mod tests {
         );
         let row: Row = conn
             .query_row(
-                "SELECT automation_id, trigger_moment_order, trigger_message_id, depth, state, \
+                "SELECT automation_id, trigger_moment_order, trigger_key, depth, state, \
                         attempts, error, run, message_json FROM automation_claims",
                 [],
                 |row| {
@@ -2796,37 +2804,82 @@ mod tests {
             )
         );
         let insert = |claim_id: &str,
-                      message_id: Option<&str>,
+                      key: Option<&str>,
+                      record_id: Option<&str>,
                       kind: &str,
                       message_json: Option<&str>| {
             conn.execute(
                 "INSERT INTO automation_claims \
-                     (workspace_id, claim_id, automation_id, trigger_message_id, record_id, \
+                     (workspace_id, claim_id, automation_id, trigger_key, record_id, \
                       collection_path, depth, state, created_at_ms, updated_at_ms, change_kind, \
                       message_json) \
-                 VALUES ('ws', ?1, 'collection:Trip#task', ?2, 'm', 'Trip', 0, 'pending', 5, 5, ?3, ?4)",
-                rusqlite::params![claim_id, message_id, kind, message_json],
+                 VALUES ('ws', ?1, 'collection:Trip#task', ?2, ?3, 'Trip', 0, 'pending', 5, 5, \
+                         ?4, ?5)",
+                rusqlite::params![claim_id, key, record_id, kind, message_json],
             )
         };
-        insert(
-            "atc_message",
-            Some("message-1"),
-            "message",
-            Some("{\"id\":\"message-1\"}"),
-        )
-        .expect("a message claim");
-        assert!(
-            insert("atc_again", Some("message-1"), "message", None).is_err(),
-            "one claim per message and automation"
-        );
-        assert!(
-            insert("atc_kind", Some("message-2"), "changed", None).is_err(),
-            "a message key goes with the message kind"
-        );
-        assert!(
-            insert("atc_nokey", None, "message", None).is_err(),
-            "a message claim names its message"
-        );
+        let message = Some("{\"id\":\"message-1\"}");
+        insert("atc_message", Some("message:1"), None, "message", message)
+            .expect("a message claim");
+        insert("atc_button", Some("press:1"), Some("rec"), "button", None)
+            .expect("a button claim names its record");
+        insert("atc_schedule", Some("schedule:9"), None, "schedule", None)
+            .expect("a schedule claim has no record");
+        for (claim_id, key, record_id, kind, message_json, why) in [
+            (
+                "atc_again",
+                Some("message:1"),
+                None,
+                "message",
+                None,
+                "one claim per key and automation",
+            ),
+            (
+                "atc_kind",
+                Some("message:2"),
+                Some("rec"),
+                "changed",
+                None,
+                "a record change keys on its change, not a trigger key",
+            ),
+            (
+                "atc_nokey",
+                None,
+                None,
+                "message",
+                None,
+                "a message claim names its key",
+            ),
+            (
+                "atc_record",
+                Some("message:3"),
+                Some("rec"),
+                "message",
+                None,
+                "a message claim has no record",
+            ),
+            (
+                "atc_norecord",
+                Some("press:2"),
+                None,
+                "button",
+                None,
+                "a button claim names its record",
+            ),
+            (
+                "atc_json",
+                Some("press:3"),
+                Some("rec"),
+                "button",
+                message,
+                "only a message claim carries a message",
+            ),
+        ] {
+            assert!(
+                insert(claim_id, key, record_id, kind, message_json).is_err(),
+                "{why}"
+            );
+        }
         conn.execute(
             "INSERT INTO automation_group_subscriptions \
                  (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \

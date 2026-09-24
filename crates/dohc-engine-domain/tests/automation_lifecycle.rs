@@ -192,7 +192,7 @@ fn a_record_added_and_removed_on_this_computer_claims_once_each() {
     );
     let claim = &added[0];
     assert_eq!(claim.automation_id, LIFECYCLE);
-    assert_eq!(claim.record_id, ALPHA);
+    assert_eq!(claim.record_id.as_deref(), Some(ALPHA));
     assert_eq!(claim.change.kind, AutomationChangeKind::Added);
     assert_eq!(
         claim.trigger,
@@ -251,7 +251,7 @@ fn a_record_added_and_removed_on_this_computer_claims_once_each() {
         .expect("delete record");
     let removed = reconcile(&mut store, 51);
     assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0].record_id, ALPHA);
+    assert_eq!(removed[0].record_id.as_deref(), Some(ALPHA));
     assert_eq!(removed[0].change.kind, AutomationChangeKind::Removed);
     assert_eq!(
         removed[0].trigger,

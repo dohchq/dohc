@@ -268,10 +268,11 @@ pub enum AutomationTrigger {
     Moment {
         moment_order: i64,
     },
-    /// A Group message keys on its message id, which is the same however the
-    /// message reaches this computer, so it claims once.
-    Message {
-        message_id: String,
+    /// A trigger that is not a record change names its own key. A Group
+    /// message is `message:<message id>`, the same however the message
+    /// reaches this computer, so it claims once.
+    Key {
+        key: String,
     },
 }
 
@@ -280,7 +281,8 @@ pub struct AutomationClaim {
     pub claim_id: String,
     pub automation_id: String,
     pub trigger: AutomationTrigger,
-    pub record_id: String,
+    /// The changed record. A message claim has none.
+    pub record_id: Option<String>,
     pub collection_path: String,
     /// The triggering change's chain depth (0 for an unattributed or
     /// human-authored trigger). The handler's own writes declare depth + 1.
@@ -392,7 +394,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order, trigger_message_id";
+     trigger_moment_order, trigger_key";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -402,7 +404,7 @@ fn claim_from_row(
     let trigger_origin_id: Option<String> = row.get(2)?;
     let trigger_origin_seq: Option<i64> = row.get(3)?;
     let trigger_history_id: Option<i64> = row.get(4)?;
-    let record_id: String = row.get(5)?;
+    let record_id: Option<String> = row.get(5)?;
     let collection_path: String = row.get(6)?;
     let depth: i64 = row.get(7)?;
     let state: String = row.get(8)?;
@@ -416,7 +418,7 @@ fn claim_from_row(
     let on_behalf_of: Option<String> = row.get(16)?;
     let run: i64 = row.get(17)?;
     let trigger_moment_order: Option<i64> = row.get(18)?;
-    let trigger_message_id: Option<String> = row.get(19)?;
+    let trigger_key: Option<String> = row.get(19)?;
     let claim = (|| {
         let actor_kind = actor_kind
             .map(|kind| {
@@ -430,7 +432,7 @@ fn claim_from_row(
             trigger_origin_seq,
             trigger_history_id,
             trigger_moment_order,
-            trigger_message_id,
+            trigger_key,
         ) {
             (Some(origin_id), Some(origin_seq), None, None, None) => {
                 AutomationTrigger::Coordinate {
@@ -442,7 +444,7 @@ fn claim_from_row(
             (None, None, None, Some(moment_order), None) => {
                 AutomationTrigger::Moment { moment_order }
             }
-            (None, None, None, None, Some(message_id)) => AutomationTrigger::Message { message_id },
+            (None, None, None, None, Some(key)) => AutomationTrigger::Key { key },
             _ => {
                 return Err(DomainError::StateCorrupt {
                     reason: "automation claim trigger key is not exactly one shape",
@@ -755,10 +757,10 @@ pub fn claim_group_message_in_tx(
                 reason: "Group subscription automation id has no Collection path",
             })?;
         let claimed = ClaimedChange {
-            trigger: AutomationTrigger::Message {
-                message_id: message.message_id.to_owned(),
+            trigger: AutomationTrigger::Key {
+                key: format!("message:{}", message.message_id),
             },
-            record_id: message.message_id,
+            record_id: None,
             collection_path,
             depth,
             change: AutomationChange {
@@ -945,7 +947,7 @@ fn subscriptions_wanting(
 /// claim with these facts.
 struct ClaimedChange<'a> {
     trigger: AutomationTrigger,
-    record_id: &'a str,
+    record_id: Option<&'a str>,
     collection_path: &'a str,
     depth: u32,
     change: AutomationChange,
@@ -976,7 +978,7 @@ fn insert_claims(
     let fields_json = serde_json::to_string(&claimed.fields.fields)
         .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
     let message_json = claimed.message_json()?;
-    let (origin_id, origin_seq, history_id, moment_order, message_id) = match &claimed.trigger {
+    let (origin_id, origin_seq, history_id, moment_order, key) = match &claimed.trigger {
         AutomationTrigger::Coordinate {
             origin_id,
             origin_seq,
@@ -989,9 +991,7 @@ fn insert_claims(
         ),
         AutomationTrigger::History { history_id } => (None, None, Some(*history_id), None, None),
         AutomationTrigger::Moment { moment_order } => (None, None, None, Some(*moment_order), None),
-        AutomationTrigger::Message { message_id } => {
-            (None, None, None, None, Some(message_id.as_str()))
-        }
+        AutomationTrigger::Key { key } => (None, None, None, None, Some(key.as_str())),
     };
     let (state, error) = if claimed.chain_stopped {
         (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
@@ -1008,7 +1008,7 @@ fn insert_claims(
                   trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
-                  change_fields_omitted, trigger_message_id, message_json) \
+                  change_fields_omitted, trigger_key, message_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
                          ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
@@ -1031,7 +1031,7 @@ fn insert_claims(
                     claimed.change.on_behalf_of,
                     fields_json,
                     claimed.fields.omitted,
-                    message_id,
+                    key,
                     message_json,
                 ],
             )
@@ -1041,7 +1041,7 @@ fn insert_claims(
                 claim_id,
                 automation_id: (*automation_id).to_owned(),
                 trigger: claimed.trigger.clone(),
-                record_id: claimed.record_id.to_owned(),
+                record_id: claimed.record_id.map(str::to_owned),
                 collection_path: claimed.collection_path.to_owned(),
                 depth: claimed.depth,
                 change: claimed.change.clone(),
@@ -1125,7 +1125,7 @@ pub fn claim_automation_triggers_in_tx(
     let changes: Vec<FieldChange<'_>> = facts.fields.iter().map(FieldChange::from).collect();
     let claimed = ClaimedChange {
         trigger,
-        record_id: &facts.record_id,
+        record_id: Some(&facts.record_id),
         collection_path: &facts.collection_path,
         depth,
         change: AutomationChange {
@@ -1518,7 +1518,7 @@ pub fn claim_record_lifecycle_in_tx(
                 trigger: AutomationTrigger::Moment {
                     moment_order: moment.moment_order,
                 },
-                record_id: &record.record_id,
+                record_id: Some(&record.record_id),
                 collection_path: &record.collection_path,
                 depth,
                 change,
@@ -1890,7 +1890,7 @@ pub(crate) fn settle_automation_claim_in_tx(
     conn.execute(
         &format!(
             "DELETE FROM automation_claims \
-             WHERE trigger_moment_order IS NULL AND trigger_message_id IS NULL AND {older_done}"
+             WHERE trigger_moment_order IS NULL AND change_kind <> 'message' AND {older_done}"
         ),
         prune,
     )
@@ -1899,7 +1899,7 @@ pub(crate) fn settle_automation_claim_in_tx(
         &format!(
             "UPDATE automation_claims \
              SET change_fields_json = '[]', change_fields_omitted = 0, message_json = NULL \
-             WHERE (trigger_moment_order IS NOT NULL OR trigger_message_id IS NOT NULL) \
+             WHERE (trigger_moment_order IS NOT NULL OR change_kind = 'message') \
                AND (change_fields_json <> '[]' OR message_json IS NOT NULL) AND {older_done}"
         ),
         prune,
