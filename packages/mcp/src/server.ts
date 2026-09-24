@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { documentAgentNameSchema, documentEditTextSchema } from "@dohc/cli/protocol";
+import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -228,11 +228,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_edit_document",
     {
       description:
-        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. If the call fails without a reason, read the document before you retry.",
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. `requestId` is a random key you choose, such as a UUID: sending the same edit again with the same key while dohc runs, after a timeout for example, returns the first result instead of applying the edit twice. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         find: documentEditTextSchema.min(1).optional(),
         replacement: documentEditTextSchema,
+        requestId: requestIdSchema.optional(),
       },
     },
     async (args) => text(await editDocument(ctx, args, agentName())),

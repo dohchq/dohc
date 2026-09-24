@@ -2617,7 +2617,7 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string },
+  args: { path: string; find?: string; replacement: string; requestId?: string },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
@@ -2626,6 +2626,7 @@ export async function editDocument(
     path: resolved.normalized,
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
     ...(agent === undefined ? {} : { agent }),
   });
 }

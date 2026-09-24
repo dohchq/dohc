@@ -1325,6 +1325,46 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
+    // The person turns the paragraph into a heading while the agent's text
+    // goes into it. The merge keeps the heading, and the agent's text goes
+    // with the paragraph it was typed into, so the agent must not hear the
+    // edit landed.
+    it("tells the agent when a person's change to the block took the edit's text", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const heading = documentEditUpdate(
+        Y.encodeStateAsUpdate(session.doc),
+        { find: "Before.", replacement: "## Before." },
+        { keepBlocks: false },
+      )!;
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        Y.applyUpdate(session.doc, heading);
+        return { materialized: true } as SettleResult;
+      });
+
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
+        .rejects.toThrow("some or all of its text is not in notes/a.md");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.");
+
+      // Typing elsewhere at the same moment leaves the edit's text in place.
+      const typed = new Y.Doc();
+      Y.applyUpdate(typed, Y.encodeStateAsUpdate(session.doc));
+      const otherBlock = documentEditUpdate(
+        Y.encodeStateAsUpdate(typed),
+        { find: "# Plan", replacement: "# Plan for May" },
+        { keepBlocks: true },
+      )!;
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        Y.applyUpdate(session.doc, otherBlock);
+        return { materialized: true } as SettleResult;
+      });
+      await expect(h.ipc.editDocument(edit({ find: "## Before.", replacement: "## Before noon." })))
+        .resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.");
+      await h.ipc.shutdown();
+    });
+
     it("refuses an edit that would remove a block the person may be typing in", async () => {
       const session = editableSession();
       const h = harness(session);

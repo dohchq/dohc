@@ -23,6 +23,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LiveDocumentEditUnsavedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -1375,6 +1376,53 @@ describe("CLI socket server", () => {
         origin: { attribution: agent },
       },
     ]);
+  });
+
+  it("answers a resent document edit with its first result", async () => {
+    let applied = 0;
+    const saving = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        if (input.edit.replacement === "Refused.") throw new Error("The text to replace is not in the document.");
+        if (input.edit.replacement === "Unsaved.") {
+          applied += 1;
+          throw new LiveDocumentEditUnsavedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+        }
+        applied += 1;
+        await new Promise<void>((resolve) => { saving.release = resolve; });
+        return { path: input.path, changed: true };
+      },
+    };
+    const append = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "Appended.", requestId: "edit-1" };
+
+    // The caller's first request is still saving when it gives up and sends
+    // the edit again; both hear the one result.
+    const first = invoke("documentEdit", append);
+    await vi.waitFor(() => expect(applied).toBe(1));
+    const resent = invoke("documentEdit", append);
+    saving.release();
+    await expect(first).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", append)).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(1);
+    await expect(invoke("documentEdit", { ...append, replacement: "Other." })).resolves.toEqual({
+      ok: false,
+      reason: "request id edit-1 was already used for a different request",
+    });
+
+    // An edit that changed nothing may be sent again under its id, and one
+    // that reached the document unsaved may not.
+    const refused = { ...append, replacement: "Refused.", requestId: "edit-2" };
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false });
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("not in the document") });
+    const unsaved = { ...append, replacement: "Unsaved.", requestId: "edit-3" };
+    const unsavedResult = await invoke("documentEdit", unsaved);
+    expect(unsavedResult).toMatchObject({ ok: false, reason: expect.stringContaining("not saved it") });
+    await expect(invoke("documentEdit", unsaved)).resolves.toEqual(unsavedResult);
+    expect(applied).toBe(2);
   });
 
   it("refuses document edits it cannot attribute or place", async () => {

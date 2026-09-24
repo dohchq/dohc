@@ -1,5 +1,5 @@
 import { parentPort } from "node:worker_threads";
-import { runDocumentProjection, type DocumentProjectionRequest } from "./documentProjection";
+import { runDocumentProjection, transferList, type DocumentProjectionRequest } from "./documentProjection";
 
 const port = parentPort;
 if (!port) {
@@ -8,7 +8,8 @@ if (!port) {
 
 port.on("message", ({ id, request }: { id: number; request: DocumentProjectionRequest }) => {
   try {
-    port.postMessage({ id, ok: true, result: runDocumentProjection(request) });
+    const result = runDocumentProjection(request);
+    port.postMessage({ id, ok: true, result }, transferList(result));
   } catch (error) {
     port.postMessage({
       id,

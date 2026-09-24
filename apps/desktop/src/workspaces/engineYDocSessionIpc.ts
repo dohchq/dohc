@@ -134,6 +134,12 @@ interface EngineYDocIpcOwnedSession {
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
+/**
+ * The edit reached the document's session, but dohc could not save it to the
+ * file yet. Sending it again could apply it twice.
+ */
+export class LiveDocumentEditUnsavedError extends Error {}
+
 /** Who a main-side document edit is recorded under. */
 export interface LiveDocumentEditOrigin {
   actorOriginId?: string;
@@ -1115,12 +1121,45 @@ async function applyDocumentEdit(
     // The session's journal holds the edit and a later settle saves it.
     // Sending the edit again could apply it twice.
     const cause = error instanceof Error ? error.message : String(error);
-    throw new Error(
+    throw new LiveDocumentEditUnsavedError(
       `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
       { cause: error },
     );
   }
   if (!armed) throw new Error(`The engine did not accept the edit to ${path}.`);
+  // Someone who removed or reshaped a block while the edit went into it takes
+  // the edit's text with the block. That merge is correct for the document,
+  // but the agent must not hear that its text is there.
+  if (!editLanded(provider.doc, update)) {
+    throw new Error(
+      `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
+    );
+  }
+  return true;
+}
+
+// Whether everything `update` inserted is still in `doc`: not deleted, and
+// not inside a block that was removed. Reads only the edit's own items.
+function editLanded(doc: Y.Doc, update: Uint8Array): boolean {
+  for (const inserted of Y.decodeUpdate(update).structs) {
+    if (!(inserted instanceof Y.Item) || !inserted.countable) continue;
+    const { client } = inserted.id;
+    const end = inserted.id.clock + inserted.length;
+    for (let clock = inserted.id.clock; clock < end;) {
+      if (Y.getState(doc.store, client) <= clock) return false;
+      const item: unknown = Y.getItem(doc.store, Y.createID(client, clock));
+      if (!(item instanceof Y.Item) || !attached(item)) return false;
+      clock = item.id.clock + item.length;
+    }
+  }
+  return true;
+}
+
+function attached(item: Y.Item): boolean {
+  for (let current: Y.Item | null = item; current !== null;) {
+    if (current.deleted) return false;
+    current = current.parent instanceof Y.AbstractType ? current.parent._item : null;
+  }
   return true;
 }
 

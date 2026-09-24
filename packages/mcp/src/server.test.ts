@@ -232,7 +232,7 @@ describe("MCP tool results", () => {
       edits.push(sent.args);
       return { ok: true, path: "notes/plan.md", changed: true };
     };
-    const edit = { path: "notes/plan.md", find: "Draft", replacement: "Final" };
+    const edit = { path: "notes/plan.md", find: "Draft", replacement: "Final", requestId: "plan-1" };
     for (const clientName of ["claude-code", "a/b"]) {
       const { client } = await connectedToolNames({ root, home: "/home", request }, clientName);
       const result = await client.callTool({ name: "dohc_edit_document", arguments: edit });
