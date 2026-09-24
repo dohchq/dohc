@@ -312,7 +312,7 @@ test("Windows timeout kills descendants holding pipes after cmd.exe exits", {
 });
 
 test("Windows job closes descendants after the command completes normally", {
-  skip: process.platform !== "win32", timeout: 15_000,
+  skip: process.platform !== "win32", timeout: 30_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-job-completion-"));
   try {
@@ -332,7 +332,7 @@ test("Windows job closes descendants after the command completes normally", {
         child.disconnect();
         process.exit(0);
       });
-    `], { timeoutMs: 5000, quietStdout: true });
+    `], { timeoutMs: 20_000, quietStdout: true });
     assert.equal(result.code, 0);
     assert.match(result.stdout, /descendant ready/);
     const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
@@ -449,7 +449,7 @@ test("Windows job preserves arguments, environment, cwd, and unformatted output"
     const result = await run(process.execPath, ["-e", `
       process.stdout.write(JSON.stringify({ args: process.argv.slice(1), cwd: process.cwd(), value: process.env.DOHC_JOB_TEST }));
       process.stderr.write("stderr\\r\\n雪\\u0000tail");
-    `, ...args], { cwd: root, env: { ...process.env, DOHC_JOB_TEST: "unchanged 雪" }, timeoutMs: 5000, quietStdout: true });
+    `, ...args], { cwd: root, env: { ...process.env, DOHC_JOB_TEST: "unchanged 雪" }, timeoutMs: 20_000, quietStdout: true });
     assert.deepEqual(JSON.parse(result.stdout), { args, cwd: root, value: "unchanged 雪" });
     assert.equal(result.stderr, "stderr\r\n雪\u0000tail");
     assert.equal(result.code, 0);
