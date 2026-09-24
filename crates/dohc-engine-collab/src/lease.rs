@@ -20,6 +20,7 @@
 //! risk double-granting.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::CollabError;
@@ -44,6 +45,10 @@ pub struct LeaseRegistry {
     /// [`Self::scoped`] view sharing the same held-set.
     scope: String,
     held: Arc<Mutex<HashSet<(String, String)>>>,
+    /// How many leases this registry has released, across every scoped view.
+    /// Capture defers a path a live session holds and offers it again once
+    /// this count moves.
+    released: Arc<AtomicU64>,
 }
 
 impl LeaseRegistry {
@@ -59,6 +64,7 @@ impl LeaseRegistry {
         LeaseRegistry {
             scope: root.to_string_lossy().into_owned(),
             held: Arc::clone(&self.held),
+            released: Arc::clone(&self.released),
         }
     }
 
@@ -81,6 +87,7 @@ impl LeaseRegistry {
         }
         Ok(Lease {
             held: self.held.clone(),
+            releases: self.released.clone(),
             key: self.object_scope(key),
             released: false,
         })
@@ -93,11 +100,17 @@ impl LeaseRegistry {
             .map(|held| held.contains(&self.object_scope(key)))
             .unwrap_or(false)
     }
+
+    /// A count that moves every time any lease in this registry is released.
+    pub fn release_generation(&self) -> u64 {
+        self.released.load(Ordering::Acquire)
+    }
 }
 
 /// An RAII lease guard. Dropping it releases the lease deterministically.
 pub struct Lease {
     held: Arc<Mutex<HashSet<(String, String)>>>,
+    releases: Arc<AtomicU64>,
     key: (String, String),
     released: bool,
 }
@@ -121,6 +134,7 @@ impl Lease {
         if let Ok(mut held) = self.held.lock() {
             held.remove(&self.key);
         }
+        self.releases.fetch_add(1, Ordering::AcqRel);
     }
 }
 

@@ -612,6 +612,7 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
+            Err(error) if held_by_live_session(&error) => Ok(DomainIngest::HeldByLiveSession),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -649,6 +650,7 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
+            Err(error) if held_by_live_session(&error) => Ok(DomainIngest::HeldByLiveSession),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -864,6 +866,21 @@ enum DomainIngest {
     /// The head belongs to another writer and this observation was not a
     /// disk transition capture witnessed, so nothing was written.
     ForeignHead,
+    /// A live document session holds the path; its settle records it.
+    HeldByLiveSession,
+}
+
+/// The store refuses to capture a path whose document a live session holds
+/// (`ensure_capture_target_not_leased`). That is not a failure: the session
+/// owns the content and settles it, so capture waits for the lease instead of
+/// degrading the layer for as long as someone has the document open.
+fn held_by_live_session(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    )
 }
 
 struct PreparedTextCapture {
@@ -1112,6 +1129,7 @@ impl StoreCaptureSink {
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                             Ok(IngestOutcome::NotOwned)
                         }
+                        Err(error) if held_by_live_session(&error) => Ok(IngestOutcome::Deferred),
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1291,6 +1309,7 @@ impl CaptureSink for StoreCaptureSink {
                     // Foreign head left intact: track the disk identity so the
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
+                    DomainIngest::HeldByLiveSession => Ok(IngestOutcome::Deferred),
                 }
             }
             CurrentContent::Absent => {
@@ -1352,6 +1371,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
+                    DomainIngest::HeldByLiveSession => Ok(IngestOutcome::Deferred),
                 }
             }
         }
