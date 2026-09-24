@@ -182,8 +182,7 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByText("Starting static preview…")).toBeNull();
   });
 
-  it("says so through the shell, with Try again, when another view replaced the build Share started", async () => {
-    const user = userEvent.setup();
+  describe("a Share build another view replaced", () => {
     const needsBuild: SitePackageInfo = {
       ...site,
       kind: "package",
@@ -191,22 +190,28 @@ describe("SitePreviewPage", () => {
       shareManifest: noRunnableArtifact,
     };
     const built: SitePackageInfo = { ...needsBuild, shareManifest: readyShare("report/dist/index.html") };
-    bridgeMock.getSitePackage.mockImplementation(async (payload) =>
-      payload.effectivePreviewMode === "build" ? built : needsBuild);
-    try {
+
+    // Shares "report" once and answers the notice's Try again.
+    async function shareReplaced() {
+      bridgeMock.getSitePackage.mockImplementation(async (payload) =>
+        payload.path !== "report" ? null
+          : payload.effectivePreviewMode === "build" ? built : needsBuild);
       const reportError = vi.fn();
       const onShareSite = vi.fn();
-      render(
+      const onOpenApp = vi.fn();
+      const page = (siteRoot: string) => (
         <SitePreviewPage
           workspaceId="ws-sites"
-          siteRoot="report"
+          siteRoot={siteRoot}
           onShareSite={onShareSite}
           reportError={reportError}
-        />,
+          onOpenApp={onOpenApp}
+        />
       );
+      const view = render(page("report"));
       await screen.findByTestId("site-preview-frame");
       bridgeMock.startSitePreview.mockResolvedValueOnce({ replaced: true });
-      await user.click(screen.getByTestId("site-preview-share"));
+      await userEvent.setup().click(screen.getByTestId("site-preview-share"));
       await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
       const [message, error, retry] = reportError.mock.calls[0]!;
       expect(message).toBe(
@@ -214,12 +219,40 @@ describe("SitePreviewPage", () => {
       );
       expect(error).toBeNull();
       expect(onShareSite).not.toHaveBeenCalled();
-
-      await act(async () => { retry(); });
-      await waitFor(() => expect(onShareSite).toHaveBeenCalledOnce());
-    } finally {
-      bridgeMock.getSitePackage.mockImplementation(async () => site);
+      return { view, page, retry: retry as () => void, onShareSite, onOpenApp };
     }
+
+    afterEach(() => {
+      bridgeMock.getSitePackage.mockImplementation(async () => site);
+    });
+
+    it("says so through the shell, and Try again shares from the same page", async () => {
+      const shared = await shareReplaced();
+      await act(async () => { shared.retry(); });
+      await waitFor(() => expect(shared.onShareSite).toHaveBeenCalledOnce());
+      expect(shared.onOpenApp).not.toHaveBeenCalled();
+    });
+
+    it("opens the app instead when the page moved to another app", async () => {
+      const shared = await shareReplaced();
+      shared.view.rerender(shared.page("other"));
+      await screen.findByText("App not detected");
+      const starts = bridgeMock.startSitePreview.mock.calls.length;
+      await act(async () => { shared.retry(); });
+      expect(shared.onOpenApp).toHaveBeenCalledExactlyOnceWith("report");
+      expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(starts);
+      expect(shared.onShareSite).not.toHaveBeenCalled();
+    });
+
+    it("opens the app instead when the page closed, and starts nothing", async () => {
+      const shared = await shareReplaced();
+      shared.view.unmount();
+      const starts = bridgeMock.startSitePreview.mock.calls.length;
+      await act(async () => { shared.retry(); });
+      expect(shared.onOpenApp).toHaveBeenCalledExactlyOnceWith("report");
+      expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(starts);
+      expect(shared.onShareSite).not.toHaveBeenCalled();
+    });
   });
 
   it("does not remember the mode of an answer a newer preview already replaced", async () => {

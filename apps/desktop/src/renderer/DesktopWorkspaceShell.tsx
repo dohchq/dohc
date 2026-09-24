@@ -2310,6 +2310,11 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
+  // Opens an app of this workspace in its tab, as Apps does.
+  const openAppTab = useCallback(
+    (siteRoot: string) => openPathWithHeading(siteTabPath(siteRoot)),
+    [openPathWithHeading],
+  );
   const openVirtualTab = useCallback(
     (path: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
@@ -4961,6 +4966,7 @@ export function DesktopWorkspaceShell(props: {
                 <LazySitePreviewPage
                   key={selectedAppRoot}
                   variant="panel"
+                  onOpenApp={openAppTab}
                   onUnpin={() => void setAppPinned(selectedAppRoot, false)}
                   workspaceId={workspaceId}
                   reportError={reportShellError}
@@ -5376,6 +5382,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     reportError={reportShellError}
+                    onOpenApp={openAppTab}
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onShareSite={(target) =>

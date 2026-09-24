@@ -212,6 +212,9 @@ export function SitePreviewPage(props: {
   sharedView?: boolean;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
+  // Opens an app of this workspace in a tab. A notice that outlives this page
+  // uses it to take the person back to the app it is about.
+  onOpenApp?: (siteRoot: string) => void;
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -240,6 +243,13 @@ export function SitePreviewPage(props: {
   // surface can start it again; main tells this one, and an older answer
   // never paints over a newer preview.
   const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
 
@@ -461,8 +471,18 @@ export function SitePreviewPage(props: {
         const built = await start("build", true);
         if (!isCurrent()) return;
         if (built === "replaced") {
+          // The notice outlives this page, and the page can move to another
+          // app. Try again shares only this app, from this page while it
+          // still shows it; otherwise it opens the app and leaves Share to
+          // the person.
+          const openApp = props.onOpenApp;
+          const siteRoot = props.siteRoot;
           props.reportError?.(SHARE_BUILD_REPLACED_MESSAGE, null, () => {
-            void prepareShareRef.current();
+            if (mountedRef.current && siteContextRef.current === requestContext) {
+              void prepareShareRef.current();
+            } else {
+              openApp?.(siteRoot);
+            }
           });
           return;
         }
@@ -498,7 +518,7 @@ export function SitePreviewPage(props: {
         setActionError(error instanceof Error ? error.message : "Could not prepare this app for sharing.");
       }
     }
-  }, [preview, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  }, [preview, props.onOpenApp, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
   const prepareShareRef = useRef(prepareShare);
   prepareShareRef.current = prepareShare;
 
