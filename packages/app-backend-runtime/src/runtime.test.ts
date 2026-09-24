@@ -101,7 +101,8 @@ describe("app operation runtime", () => {
     "const rows=[];while(true)rows.push('x'.repeat(10000));",
   ])("bounds guest execution and serialization: %s", async body => {
     const input = request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:2*1024*1024}});
-    await expect(evaluateAppOperation(input)).rejects.toThrow();
+    // The guest limit must stop it. The worker deadline kill reports "exceeded its deadline" instead.
+    await expect(evaluateAppOperation(input)).rejects.toThrow("App operation failed.");
   });
 
   it("kills a native SQL runaway and accepts a following operation", async () => {
