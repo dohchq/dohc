@@ -20,14 +20,14 @@ import {
   createRecord,
   dataset,
   createWorkspaceDirectory,
-  listChannels,
+  listGroups,
   queryCollection,
   readRecord,
   setRecordFields,
   listFileChats,
   readChat,
   replyToChat,
-  startChannelChat,
+  startGroupChat,
   createSite,
   deleteWorkspacePath,
   detectSites,
@@ -87,7 +87,7 @@ function text(structuredContent: Record<string, unknown>) {
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: "dohc", version: "0.1.0" });
+  const server = new McpServer({ name: "dohc", version: "0.2.0" });
 
   // A share view's write surface is its access level. The write tools
   // come in two tiers, and a tier the level does not grant is never registered
@@ -98,8 +98,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   //   any level a shared view: NO write tool of any kind
   //
   // #646 PR2 deliberately registers no chat write tool at any level. The two
-  // that exist — `dohc_start_channel_chat` and `dohc_reply_to_chat` — are
-  // CHANNEL tools, and a shared view refuses every channel write before the
+  // that exist — `dohc_start_group_chat` and `dohc_reply_to_chat` — are
+  // GROUP tools, and a shared view refuses every group write before the
   // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
   // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
   // a tool its own workspace always refuses is a promise the surface cannot
@@ -348,13 +348,13 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_list_channels",
+    "dohc_list_groups",
     {
       description:
-        "List the workspace's Chats channels (including the default #general) with each channel's chats and their ids. Requires the workspace engine.",
+        "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
     },
-    async () => text(await listChannels(ctx)),
+    async () => text(await listGroups(ctx)),
   );
 
   const chatWriteInput = {
@@ -366,24 +366,24 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   };
 
   registerWrite(
-    "dohc_start_channel_chat",
+    "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a channel as the agent. `channel` accepts a channel name, #slug, or id. No title needed — the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
-        channel: z.string().min(1).max(200),
+        group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
     },
-    async (args) => text(await startChannelChat(ctx, args)),
+    async (args) => text(await startGroupChat(ctx, args)),
   );
 
   registerWrite(
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_channel_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
@@ -459,7 +459,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_record",
     {
       description:
-        "Create a Markdown record in a collection folder as the agent, optionally seeding fields. The engine adopts the file, mints its record id, and returns it.",
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. A name already taken in the folder is refused.",
       inputSchema: {
         collectionPath: z.string().min(1).max(4096),
         name: z.string().min(1).max(200),

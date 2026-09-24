@@ -277,7 +277,8 @@ export async function invokePluginSdkHost(
     // automation as author on behalf of the owner, at the chain depth main
     // derived from the claim, keyed by the claim id, its run, and the write
     // ordinal so a crash-requeued run's identical write dedupes engine-side
-    // and an owner retry writes anew.
+    // and an owner retry writes anew. A plugin handler has no stable step
+    // identity, so its creates take new random record ids.
     case "collections.setFields":
     case "collections.createRecord": {
       const run = context.automationRun;

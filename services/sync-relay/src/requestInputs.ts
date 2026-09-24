@@ -109,10 +109,10 @@ export function cursorCodec<Cursor extends object>(
 
 export function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." is the share-route namespace. A
-  // workspace with this id could never be addressed, so refuse the claim
-  // rather than strand it.
-  if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
+  // Reserved: "/sync/shares/..." and "/sync/notices/..." are account-level
+  // namespaces. A workspace with either id could never be addressed, so
+  // refuse the claim rather than strand it.
+  if (workspaceId === "shares" || workspaceId === "notices") throw badRequest("workspaceId is reserved");
   return workspaceId;
 }
 

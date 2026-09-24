@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { acquireSupervisorOwnership, acquireWorkerLease, type SupervisorOwnership } from "./worker-ownership.ts";
 
-vi.setConfig({testTimeout:30000});
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
 async function fixture(){const root=await mkdtemp(join(tmpdir(),"dohc-worker-ownership-"));cleanups.push(()=>rm(root,{recursive:true,force:true,maxRetries:8,retryDelay:25}));return root;}

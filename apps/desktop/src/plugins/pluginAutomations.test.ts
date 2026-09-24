@@ -259,7 +259,7 @@ describe("PluginAutomations", () => {
     ).toBeUndefined();
   });
 
-  it("exposes the run's authority — automation id, owner, depth + 1 — only while the handler runs, and only to its own plugin", async () => {
+  it("exposes the run's authority — automation id, run, owner, depth + 1 — only while the handler runs, and only to its own plugin", async () => {
     const h = harness({
       runOnPlugin: async () => {
         const run = h.automations.activeRun({

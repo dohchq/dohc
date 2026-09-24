@@ -12,13 +12,17 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import {
+import type {
   EngineDaemonLifecycle,
-  type EngineWorkspace,
-  type EngineWorkspaceSessions,
+  EngineWorkspace,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -99,9 +103,8 @@ async function harness(
   const rootPath = await createTestScratch(prefix);
   roots.push(rootPath);
   const workspaceId = `${prefix}${process.pid}-${Date.now()}`;
-  const lifecycle = new EngineDaemonLifecycle({
+  const lifecycle = createRealDaemonLifecycle({
     command: engine.require(),
-    requestTimeoutMs: 10_000,
   });
   lifecycles.push(lifecycle);
   await lifecycle.start();
@@ -120,7 +123,7 @@ async function harness(
     sessions,
     routes,
     allowInsecureLoopbackForTests: true,
-    requestDeadlineMs: 10_000,
+    requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
   });
   const receivedShareEngine = createReceivedShareEngineAccess({
     sessions: () => sessions,

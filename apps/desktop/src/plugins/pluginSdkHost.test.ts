@@ -481,6 +481,9 @@ describe("invokePluginSdkHost", () => {
         idempotencyKey: "claim-7/2/1",
       }),
     ]);
+    // A plugin handler has no stable step identity, so its create does not
+    // name a record id.
+    expect(calls[1]).not.toHaveProperty("recordId");
 
     // A read in the same run context stays a read: no author override applies.
     await expect(

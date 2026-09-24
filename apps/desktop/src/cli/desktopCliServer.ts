@@ -11,12 +11,13 @@ import type {
   EngineDaemonLifecycle,
   EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
-import type {
-  CliRegistryWorkspace,
-  CliRunMessageLink,
-  CliServerHandle,
-  CliWorkspaceContext,
-  startCliServer as startCliServerImplementation,
+import {
+  CLI_REQUEST_DEADLINE_MS,
+  type CliRegistryWorkspace,
+  type CliRunMessageLink,
+  type CliServerHandle,
+  type CliWorkspaceContext,
+  type startCliServer as startCliServerImplementation,
 } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -56,6 +57,7 @@ interface DesktopCliServerDependencies<State> {
   ): Promise<Result>;
   collectionEditContextFor(
     operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+    signal: AbortSignal,
   ): Promise<CollectionRecordEditContext>;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
@@ -122,12 +124,20 @@ export function createDesktopCliServer<State>(
     // The CLI's collection writes ride the same seam plugin SDK edits take,
     // resolved per write under the physical workspace's authority, so a
     // retired-and-reattached workspace refuses instead of falling through to
-    // its successor.
+    // its successor. A write ends with the CLI request that asked for it.
     const cliCollectionEdit = <T>(
       work: (context: CollectionRecordEditContext) => Promise<T>,
     ): Promise<T> =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
-        await work(await collectionEditContextFor(operation)),
+        await work(
+          await collectionEditContextFor(
+            operation,
+            AbortSignal.any([
+              operation.signal,
+              AbortSignal.timeout(CLI_REQUEST_DEADLINE_MS),
+            ]),
+          ),
+        ),
       );
     const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
