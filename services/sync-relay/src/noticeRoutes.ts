@@ -1,32 +1,37 @@
-import { jsonResponse } from "@dohc/service-http";
+import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import {
-  NOTICE_BODY_MAX_CHARS,
+  isNoticeBody,
+  isNoticeLine,
+  isNoticeTarget,
+  NOTICE_FROM_PREFIX,
   NOTICE_ID_MAX_CHARS,
   NOTICE_KINDS,
   NOTICE_MARKS_PER_REQUEST,
   NOTICE_PAGE_MAX,
-  NOTICE_TARGET_FIELDS,
-  NOTICE_TARGET_MAX_BYTES,
+  NOTICE_POSTED_ID_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
   type NoticeKind,
   type NoticeMark,
-  type NoticeTarget,
+  type NoticeReach,
 } from "@dohc/workspace-contracts/relay";
 import { accountDisplayName } from "./discussionRoutes";
 import { badRequest, relayError } from "./errors";
-import { parseCursor, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
+import { parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import type { PostNoticeInput } from "./storage/notices";
+import { parseNoticeCursor, type NoticeCursor, type PostNoticeInput } from "./storage/notices";
+import { MAX_SHARE_ID_CHARS } from "./wireLimits";
 
 export type NoticeRoute = { route: "notices" } | { route: "notice-marks" };
+
+// Posts to other people, per sender: a burst of 30, then one every 2 seconds.
+export const NOTICE_POST_BUCKET_CAPACITY = 30;
+export const NOTICE_POST_REFILL_PER_SECOND = 0.5;
+export const NOTICE_POST_MAX_SENDERS = 10_000;
 
 // Account ids as share creation accepts them; install ids are uuids with room to spare.
 const MAX_USER_ID_CHARS = 256;
 const MAX_INSTALL_ID_CHARS = 256;
-const MAX_TARGET_FIELD_CHARS = 1_024;
 const DEFAULT_NOTICE_PAGE = 100;
-// Control characters other than tab and newline, which a body may carry.
-const BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 
 // A person's notice list: GET pulls changes after a cursor, POST adds a
 // notice to someone's list, and POST /marks sets read or dismissed. Every
@@ -37,6 +42,7 @@ export function createNoticeRoutes(
   nowMs: () => number,
   lookupUserDisplayName: ((userId: string) => Promise<string | null> | string | null) | undefined,
   claimPendingShares: (userId: string, signal?: AbortSignal) => Promise<void>,
+  postRateLimiter: TokenBucketLimiter,
 ) {
   return async function respondToNotices(
     request: Request,
@@ -47,7 +53,7 @@ export function createNoticeRoutes(
       const url = new URL(request.url);
       const page = storage.readNoticeChanges({
         recipientUserId: userId,
-        since: parseCursor(url.searchParams.get("since")),
+        cursor: parseCursorParam(url.searchParams.get("cursor")),
         limit: parseNoticePageLimit(url.searchParams.get("limit")),
         nowMs: nowMs(),
       });
@@ -55,8 +61,15 @@ export function createNoticeRoutes(
     }
     if (route.route === "notices" && request.method === "POST") {
       const notice = parsePostNotice(await readJsonObject(request));
-      // A grant still addressed to the sender's email counts once claimed.
-      await claimPendingShares(userId, request.signal);
+      if (notice.recipientUserId === userId) {
+        if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {
+          throw badRequest(`noticeId must not start with ${NOTICE_FROM_PREFIX}`);
+        }
+      } else {
+        if (!postRateLimiter.allow(userId, nowMs())) throw relayError("notice_rate_limited");
+        // A grant still addressed to the sender's email counts once claimed.
+        await claimPendingShares(userId, request.signal);
+      }
       storage.postNotice({
         ...notice,
         senderUserId: userId,
@@ -83,46 +96,32 @@ function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind)) {
     throw badRequest("kind is not a notice kind");
   }
+  if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
+  if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
+  if (!isNoticeBody(body.body)) throw badRequest("body is invalid");
+  if (!isNoticeTarget(body.target)) throw badRequest("target is invalid");
   return {
-    noticeId: parseString(body.noticeId, "noticeId", NOTICE_ID_MAX_CHARS),
+    noticeId: body.noticeId,
     recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS),
-    workspaceId: parseWorkspaceId(body.workspaceId),
+    reach: parseReach(body),
     kind: body.kind as NoticeKind,
-    title: parseText(body.title, "title", NOTICE_TITLE_MAX_CHARS),
-    body: parseBody(body.body),
-    target: parseTarget(body.target),
+    title: body.title,
+    body: body.body,
+    target: body.target,
     originInstallId: parseString(body.originInstallId, "originInstallId", MAX_INSTALL_ID_CHARS),
   };
 }
 
-function parseText(value: unknown, name: string, maxCodePoints: number): string {
-  const text = parseString(value, name, maxCodePoints * 2);
-  if ([...text].length > maxCodePoints) throw badRequest(`${name} is too long`);
-  return text;
-}
-
-function parseBody(value: unknown): string {
-  if (typeof value !== "string") throw badRequest("body must be a string");
-  if ([...value].length > NOTICE_BODY_MAX_CHARS) throw badRequest("body is too long");
-  if (BODY_CONTROL_CHARS.test(value)) throw badRequest("body must not contain control characters");
-  return value;
-}
-
-function parseTarget(value: unknown): NoticeTarget {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw badRequest("target must be an object");
+function parseReach(body: Record<string, unknown>): NoticeReach {
+  if ((body.workspaceId === undefined) === (body.shareId === undefined)) {
+    throw badRequest("name exactly one of workspaceId and shareId");
   }
-  const target: NoticeTarget = {};
-  for (const [field, fieldValue] of Object.entries(value)) {
-    if (!(NOTICE_TARGET_FIELDS as readonly string[]).includes(field)) {
-      throw badRequest("target has an unknown field");
-    }
-    target[field as keyof NoticeTarget] = parseString(fieldValue, `target.${field}`, MAX_TARGET_FIELD_CHARS);
+  if (body.workspaceId !== undefined) return { workspaceId: parseWorkspaceId(body.workspaceId) };
+  const shareId = body.shareId;
+  if (typeof shareId !== "string" || shareId.length > MAX_SHARE_ID_CHARS || !/^[a-z0-9][a-z0-9-]*$/u.test(shareId)) {
+    throw badRequest("shareId is invalid");
   }
-  if (Buffer.byteLength(JSON.stringify(target)) > NOTICE_TARGET_MAX_BYTES) {
-    throw badRequest("target is too large");
-  }
-  return target;
+  return { shareId };
 }
 
 function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark }[] {
@@ -134,8 +133,16 @@ function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark }[] {
     if (mark.mark !== "read" && mark.mark !== "dismissed") {
       throw badRequest("mark must be read or dismissed");
     }
-    return { noticeId: parseString(mark.noticeId, "noticeId", NOTICE_ID_MAX_CHARS), mark: mark.mark };
+    if (!isNoticeLine(mark.noticeId, NOTICE_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
+    return { noticeId: mark.noticeId, mark: mark.mark };
   });
+}
+
+function parseCursorParam(value: string | null): NoticeCursor | null {
+  if (value === null || value === "") return null;
+  const cursor = parseNoticeCursor(value);
+  if (!cursor) throw badRequest("cursor is invalid");
+  return cursor;
 }
 
 function parseNoticePageLimit(value: string | null): number {

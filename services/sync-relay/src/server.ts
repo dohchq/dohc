@@ -21,7 +21,13 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes, type NamedShareTransportRoute } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
-import { createNoticeRoutes, type NoticeRoute } from "./noticeRoutes";
+import {
+  createNoticeRoutes,
+  NOTICE_POST_BUCKET_CAPACITY,
+  NOTICE_POST_MAX_SENDERS,
+  NOTICE_POST_REFILL_PER_SECOND,
+  type NoticeRoute,
+} from "./noticeRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -131,6 +137,8 @@ export interface CreateSyncRelayHandlerOptions {
   linkLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
+  // Posts of notices to other people, keyed by sender.
+  noticePostRateLimiter?: TokenBucketLimiter;
   linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
@@ -217,6 +225,11 @@ export function createSyncRelayHandler({
     LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
+  noticePostRateLimiter = new TokenBucketLimiter(
+    NOTICE_POST_BUCKET_CAPACITY,
+    NOTICE_POST_REFILL_PER_SECOND,
+    NOTICE_POST_MAX_SENDERS,
+  ),
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -358,6 +371,7 @@ export function createSyncRelayHandler({
     nowMs,
     lookupUserDisplayName,
     claimPendingShares,
+    noticePostRateLimiter,
   );
 
   const respondToNamedShareTransport = createNamedShareTransportRoutes(

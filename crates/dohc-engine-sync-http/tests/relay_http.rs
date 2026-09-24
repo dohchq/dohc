@@ -1112,6 +1112,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
+        "notice_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
