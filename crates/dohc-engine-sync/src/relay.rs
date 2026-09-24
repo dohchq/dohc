@@ -345,6 +345,8 @@ pub struct SharedChannelPullOutcome {
     pub rejections: Vec<SharedChannelRejection>,
     pub skipped: usize,
     pub next_cursor: i64,
+    /// Group automation claims the applied messages took.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +526,8 @@ pub struct ShareViewPullOutcome {
     /// it; one that advanced silently would lose the skip. So it advances,
     /// and the skip is recorded.
     pub pending_cursor: crate::ShareCursor,
+    /// Group automation claims the applied messages took.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -591,6 +595,9 @@ pub enum SyncPassOutcome {
         /// Collection record changes this pass applied, in apply order, for
         /// post-commit record-event emission.
         record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        /// Group automation claims the messages this pass stored took, for
+        /// the post-commit `automation.claimed` wake.
+        automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
@@ -603,6 +610,7 @@ pub enum SyncPassOutcome {
         refusals: Vec<crate::ReplicationRefusal>,
         sharing_declined: Vec<crate::SharingDeclined>,
         record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     },
 }
 
@@ -1177,6 +1185,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: Vec::new(),
             refusals: Vec::new(),
             record_facts: Vec::new(),
+            automation_claims: Vec::new(),
             sharing_declined,
         })
     }
@@ -1255,6 +1264,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
         let mut record_facts = Vec::new();
+        let mut automation_claims = Vec::new();
         let mut retryable = Vec::new();
         let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
@@ -1280,6 +1290,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut refusals,
                     &mut sharing_declined,
                     &mut record_facts,
+                    &mut automation_claims,
                 )?,
             }
         }
@@ -1314,6 +1325,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refusals,
                             &mut sharing_declined,
                             &mut record_facts,
+                            &mut automation_claims,
                         )?;
                     }
                 }
@@ -1400,6 +1412,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 refusals,
                 sharing_declined,
                 record_facts,
+                automation_claims,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -1416,6 +1429,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             refusals,
             sharing_declined,
             record_facts,
+            automation_claims,
         })
     }
 
@@ -1758,6 +1772,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut applied = 0_usize;
         let mut refused = 0_usize;
         let mut rejections = Vec::new();
+        let mut automation_claims = Vec::new();
         let mut skipped = 0_usize;
         for op in ops {
             if own_echo.as_deref() == Some(op.origin_id.as_str()) {
@@ -1786,7 +1801,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
                     match primary {
-                        ApplyDisposition::Applied(_) => applied += 1,
+                        ApplyDisposition::Applied(claims) => {
+                            applied += 1;
+                            automation_claims.extend(claims);
+                        }
                         ApplyDisposition::Refused(refusal) => {
                             push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                         }
@@ -1837,6 +1855,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             rejections,
             skipped,
             next_cursor: cursor,
+            automation_claims,
         })
     }
 
@@ -2140,6 +2159,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut refusals = Vec::new();
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
+        let mut automation_claims = Vec::new();
         let mut blob_refusals = BTreeMap::<(String, &'static str), RelayError>::new();
         for (index, op) in ops.into_iter().enumerate() {
             // The coordinate before the envelope is built: a malformed op the
@@ -2206,7 +2226,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
-                        ApplyDisposition::Applied(_) => {}
+                        ApplyDisposition::Applied(claims) => automation_claims.extend(claims),
                         ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => {
                             skipped += 1;
                             continue;
@@ -2276,6 +2296,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 share_id: share_id.to_owned(),
                 cursor,
             },
+            automation_claims,
         })
     }
 
@@ -4485,6 +4506,7 @@ fn accumulate_pull_outcome(
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    automation_claims: &mut Vec<dohc_engine_domain::AutomationClaim>,
 ) -> Result<(), RelayError> {
     let ApplyOutcome {
         primary,
@@ -4503,6 +4525,7 @@ fn accumulate_pull_outcome(
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
             record_facts.extend(routed.record_facts);
+            automation_claims.extend(routed.automation_claims);
             for change in routed.materialization_changes {
                 insert_changed_path(changed_paths, change);
             }

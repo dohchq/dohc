@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-use crate::chats::base32_lowercase_no_padding;
+use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 use crate::collections::{
     ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts,
     CollectionRecordLifecycle, CollectionRecordLifecycleKind, field_fact_value,
@@ -78,6 +78,9 @@ pub enum AutomationChangeKind {
     /// A moment on this computer deleted the record's file or moved it out
     /// of its Collection.
     Removed,
+    /// This computer stored a new message in a watched Group. Only a Group
+    /// subscription claims it; a record subscription cannot name it.
+    Message,
 }
 
 impl AutomationChangeKind {
@@ -86,6 +89,7 @@ impl AutomationChangeKind {
             AutomationChangeKind::Added => "added",
             AutomationChangeKind::Changed => "changed",
             AutomationChangeKind::Removed => "removed",
+            AutomationChangeKind::Message => "message",
         }
     }
 
@@ -94,19 +98,21 @@ impl AutomationChangeKind {
             "added" => Ok(AutomationChangeKind::Added),
             "changed" => Ok(AutomationChangeKind::Changed),
             "removed" => Ok(AutomationChangeKind::Removed),
+            "message" => Ok(AutomationChangeKind::Message),
             _ => Err(DomainError::StateCorrupt {
                 reason: "automation change kind is not a known kind",
             }),
         }
     }
 
-    /// The `automation_subscriptions` column that says whether a
-    /// subscription wants this kind.
-    fn subscription_column(self) -> &'static str {
+    /// The `automation_subscriptions` column that says whether a record
+    /// subscription wants this kind. Messages have Group subscriptions.
+    fn subscription_column(self) -> Option<&'static str> {
         match self {
-            AutomationChangeKind::Added => "on_added",
-            AutomationChangeKind::Changed => "on_changed",
-            AutomationChangeKind::Removed => "on_removed",
+            AutomationChangeKind::Added => Some("on_added"),
+            AutomationChangeKind::Changed => Some("on_changed"),
+            AutomationChangeKind::Removed => Some("on_removed"),
+            AutomationChangeKind::Message => None,
         }
     }
 }
@@ -122,6 +128,37 @@ pub struct AutomationSubscription {
     /// A changed record claims only when one of these fields changed;
     /// `None` claims on any field. Added and removed records ignore it.
     pub fields: Option<Vec<String>>,
+}
+
+/// One Collection automation's interest in the messages of one Group: every
+/// new message, or only one whose text starts with `starts_with` after its
+/// leading whitespace, compared exactly. Only the computer that runs Group
+/// automations registers these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationGroupSubscription {
+    /// `collection:<collection path>#<automation id>`.
+    pub automation_id: String,
+    /// The Group's channel id on this computer.
+    pub channel_id: String,
+    pub starts_with: Option<String>,
+}
+
+/// A message this computer is storing, as a Group automation's claim sees it.
+#[derive(Debug, Clone, Copy)]
+pub struct AutomationGroupMessage<'a> {
+    pub message_id: &'a str,
+    pub thread_id: &'a str,
+    pub parent_message_id: Option<&'a str>,
+    /// The stored author kind: `human`, `agent`, or `automation`.
+    pub author_kind: &'a str,
+    pub author_display_name: &'a str,
+    pub author_owner_display_name: Option<&'a str>,
+    pub author_user_id: Option<&'a str>,
+    pub body: &'a str,
+    pub created_at_ms: i64,
+    /// The automation on this computer that wrote it, and that write's chain
+    /// depth. A message from another computer has none.
+    pub automation: Option<(&'a str, u32)>,
 }
 
 /// The change a claim runs for and who made it, named as record history
@@ -175,6 +212,10 @@ pub struct AutomationFieldFacts {
     /// Changed fields left out because even their truncated facts did not
     /// fit. The executor reads the record's history for them.
     pub omitted: u32,
+    /// A message claim's message, within the same budget: its body travels
+    /// whole, or as `{ "truncated": true, "bytes": N }` for the executor to
+    /// read through `chats.messages.get`. A record claim has none.
+    pub message: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,9 +258,21 @@ impl AutomationClaimState {
 /// reconcile derives the same change it claims it once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationTrigger {
-    Coordinate { origin_id: String, origin_seq: i64 },
-    History { history_id: i64 },
-    Moment { moment_order: i64 },
+    Coordinate {
+        origin_id: String,
+        origin_seq: i64,
+    },
+    History {
+        history_id: i64,
+    },
+    Moment {
+        moment_order: i64,
+    },
+    /// A Group message keys on its message id, which is the same however the
+    /// message reaches this computer, so it claims once.
+    Message {
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,7 +392,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
      created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run, \
-     trigger_moment_order";
+     trigger_moment_order, trigger_message_id";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -363,6 +416,7 @@ fn claim_from_row(
     let on_behalf_of: Option<String> = row.get(16)?;
     let run: i64 = row.get(17)?;
     let trigger_moment_order: Option<i64> = row.get(18)?;
+    let trigger_message_id: Option<String> = row.get(19)?;
     let claim = (|| {
         let actor_kind = actor_kind
             .map(|kind| {
@@ -376,13 +430,19 @@ fn claim_from_row(
             trigger_origin_seq,
             trigger_history_id,
             trigger_moment_order,
+            trigger_message_id,
         ) {
-            (Some(origin_id), Some(origin_seq), None, None) => AutomationTrigger::Coordinate {
-                origin_id,
-                origin_seq,
-            },
-            (None, None, Some(history_id), None) => AutomationTrigger::History { history_id },
-            (None, None, None, Some(moment_order)) => AutomationTrigger::Moment { moment_order },
+            (Some(origin_id), Some(origin_seq), None, None, None) => {
+                AutomationTrigger::Coordinate {
+                    origin_id,
+                    origin_seq,
+                }
+            }
+            (None, None, Some(history_id), None, None) => AutomationTrigger::History { history_id },
+            (None, None, None, Some(moment_order), None) => {
+                AutomationTrigger::Moment { moment_order }
+            }
+            (None, None, None, None, Some(message_id)) => AutomationTrigger::Message { message_id },
             _ => {
                 return Err(DomainError::StateCorrupt {
                     reason: "automation claim trigger key is not exactly one shape",
@@ -487,6 +547,11 @@ pub fn subscribe_automation_in_tx(
             reason: "Automation subscription must name at least one change kind.",
         });
     }
+    if subscription.kinds.contains(&AutomationChangeKind::Message) {
+        return Err(DomainError::InvalidInput {
+            reason: "A record subscription cannot name messages. Subscribe to a Group.",
+        });
+    }
     let wants = |kind| subscription.kinds.contains(&kind);
     let field_names_json = subscription_field_names_json(subscription.fields.as_deref())?;
     let changed = conn
@@ -514,6 +579,210 @@ pub fn subscribe_automation_in_tx(
         )
         .map_err(DomainError::sql_persist)?;
     Ok(changed == 1)
+}
+
+/// The Collection path of a Collection automation id,
+/// `collection:<path>#<automation id>`. The path must name a folder inside
+/// the workspace, because the renderer opens files under it. The rule is the
+/// bridge's `isSafeRelativePath`: relative, with no drive letter, no empty,
+/// `.`, or `..` segment, and no backslash. A colon elsewhere is a folder
+/// name.
+pub fn collection_automation_path(automation_id: &str) -> Option<&str> {
+    let (path, local) = automation_id
+        .strip_prefix("collection:")?
+        .rsplit_once('#')?;
+    let canonical = !local.is_empty()
+        && !path.contains('\\')
+        && !matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
+        && path
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."));
+    (canonical
+        && automation_id.len() <= MAX_IDENTIFIER_BYTES
+        && automation_id.trim() == automation_id
+        && !automation_id.chars().any(char::is_control))
+    .then_some(path)
+}
+
+/// Register one Collection automation's interest in one Group's messages. A
+/// second call for the pair replaces its prefix. Returns whether the stored
+/// subscription changed.
+pub fn subscribe_automation_group_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    subscription: &AutomationGroupSubscription,
+    now_ms: i64,
+) -> Result<bool, DomainError> {
+    if collection_automation_path(&subscription.automation_id).is_none() {
+        return Err(DomainError::InvalidInput {
+            reason: "A Group subscription belongs to a Collection automation, collection:<path>#<id>.",
+        });
+    }
+    let channel_id =
+        normalize_automation_identifier(&subscription.channel_id, "Group id is invalid.")?;
+    if let Some(prefix) = &subscription.starts_with
+        && (prefix.is_empty()
+            || prefix.len() > MAX_IDENTIFIER_BYTES
+            || prefix.starts_with(is_js_trim_ws)
+            || prefix.contains('\0'))
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "A Group subscription's starting text must be bounded and start with text, not space.",
+        });
+    }
+    let changed = conn
+        .execute(
+            "INSERT INTO automation_group_subscriptions \
+             (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(workspace_id, automation_id, channel_id) DO UPDATE SET \
+               starts_with = excluded.starts_with \
+             WHERE starts_with IS NOT excluded.starts_with",
+            params![
+                workspace_id,
+                subscription.automation_id,
+                channel_id,
+                subscription.starts_with,
+                now_ms,
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    Ok(changed == 1)
+}
+
+/// Remove one Group interest. Returns whether a row existed.
+pub(crate) fn unsubscribe_automation_group_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    automation_id: &str,
+    channel_id: &str,
+) -> Result<bool, DomainError> {
+    let removed = conn
+        .execute(
+            "DELETE FROM automation_group_subscriptions \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND channel_id = ?3",
+            params![workspace_id, automation_id, channel_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+    Ok(removed == 1)
+}
+
+/// The message a claim carries: its facts, and its body whole within
+/// [`MAX_AUTOMATION_FIELD_FACTS_BYTES`] or else its size.
+fn claim_message(message: &AutomationGroupMessage<'_>, channel_id: &str, lane: &str) -> Value {
+    let mut value = serde_json::json!({
+        "id": message.message_id,
+        "threadId": message.thread_id,
+        "groupId": channel_id,
+        "lane": lane,
+        "authorKind": message.author_kind,
+        "authorDisplayName": message.author_display_name,
+        "createdAtMs": message.created_at_ms,
+        "body": message.body,
+    });
+    let object = value.as_object_mut().expect("message is an object");
+    for (key, field) in [
+        ("parentMessageId", message.parent_message_id),
+        ("authorOwnerDisplayName", message.author_owner_display_name),
+        ("authorUserId", message.author_user_id),
+    ] {
+        if let Some(field) = field {
+            object.insert(key.to_owned(), serde_json::json!(field));
+        }
+    }
+    if serde_json::to_vec(&value).map_or(true, |json| json.len() > MAX_AUTOMATION_FIELD_FACTS_BYTES)
+    {
+        value["body"] = serde_json::json!({ "truncated": true, "bytes": message.body.len() });
+    }
+    value
+}
+
+/// Claim a message this computer is storing, in the transaction that stores
+/// it, for every Group subscription on its thread's Group whose starting text
+/// the message's text begins with, after its leading whitespace. Only a
+/// Group, a channel of kind `channel`, has subscriptions that claim; a DM, the
+/// agent channel, and a file's thread never do. Each claim keys on the
+/// message id, so a message stored again claims nothing. The writing
+/// automation never claims its own message. A message at the chain depth cap
+/// records a failed `chain-stopped` claim instead. An automation's message
+/// from another computer arrives without its depth, so it counts as depth 1.
+/// Returns only the claims this call inserted.
+pub fn claim_group_message_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    message: &AutomationGroupMessage<'_>,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT s.automation_id, s.starts_with, t.channel_id, t.lane \
+             FROM chat_threads t \
+             JOIN chat_channels c \
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+             JOIN automation_group_subscriptions s \
+               ON s.workspace_id = t.workspace_id AND s.channel_id = t.channel_id \
+             WHERE t.workspace_id = ?1 AND t.thread_id = ?2 AND c.kind = 'channel' \
+             ORDER BY s.automation_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let subscriptions: Vec<(String, Option<String>, String, String)> = statement
+        .query_map(params![workspace_id, message.thread_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    if subscriptions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = message.body.trim_start_matches(is_js_trim_ws);
+    let (writer, depth) = match message.automation {
+        Some((automation_id, depth)) => (Some(automation_id), depth),
+        None if message.author_kind == "automation" => (None, 1),
+        None => (None, 0),
+    };
+    let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
+    let mut inserted = Vec::new();
+    for (automation_id, starts_with, channel_id, lane) in &subscriptions {
+        if writer == Some(automation_id.as_str())
+            || starts_with
+                .as_deref()
+                .is_some_and(|prefix| !text.starts_with(prefix))
+        {
+            continue;
+        }
+        let collection_path =
+            collection_automation_path(automation_id).ok_or(DomainError::StateCorrupt {
+                reason: "Group subscription automation id has no Collection path",
+            })?;
+        let claimed = ClaimedChange {
+            trigger: AutomationTrigger::Message {
+                message_id: message.message_id.to_owned(),
+            },
+            record_id: message.message_id,
+            collection_path,
+            depth,
+            change: AutomationChange {
+                kind: AutomationChangeKind::Message,
+                author_origin_id: writer.map(str::to_owned),
+                actor_kind: ChangeActorKind::parse(message.author_kind),
+                on_behalf_of: message.author_user_id.map(str::to_owned),
+            },
+            // A stopped chain never runs, so its claim keeps no message.
+            fields: AutomationFieldFacts {
+                message: (!chain_stopped).then(|| claim_message(message, channel_id, lane)),
+                ..AutomationFieldFacts::default()
+            },
+            chain_stopped,
+        };
+        inserted.extend(insert_claims(
+            conn,
+            workspace_id,
+            &[automation_id.as_str()],
+            &claimed,
+            message.created_at_ms,
+        )?);
+    }
+    Ok(inserted)
 }
 
 /// Remove one registered interest. Returns whether a row existed.
@@ -648,12 +917,14 @@ fn subscriptions_wanting(
     workspace_id: &str,
     kind: AutomationChangeKind,
 ) -> Result<Vec<SubscriptionRow>, DomainError> {
+    let Some(column) = kind.subscription_column() else {
+        return Ok(Vec::new());
+    };
     let mut statement = conn
         .prepare(&format!(
             "SELECT automation_id, prefix, field_names_json, created_at_ms \
              FROM automation_subscriptions \
-             WHERE workspace_id = ?1 AND {} = 1 ORDER BY automation_id, prefix",
-            kind.subscription_column()
+             WHERE workspace_id = ?1 AND {column} = 1 ORDER BY automation_id, prefix"
         ))
         .map_err(DomainError::sql_corrupt)?;
     statement
@@ -682,6 +953,17 @@ struct ClaimedChange<'a> {
     chain_stopped: bool,
 }
 
+impl ClaimedChange<'_> {
+    fn message_json(&self) -> Result<Option<String>, DomainError> {
+        self.fields
+            .message
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))
+    }
+}
+
 /// Insert one claim per automation for a change. The trigger key's unique
 /// index makes a repeat a no-op. Returns only the claims inserted.
 fn insert_claims(
@@ -693,13 +975,23 @@ fn insert_claims(
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     let fields_json = serde_json::to_string(&claimed.fields.fields)
         .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
-    let (origin_id, origin_seq, history_id, moment_order) = match &claimed.trigger {
+    let message_json = claimed.message_json()?;
+    let (origin_id, origin_seq, history_id, moment_order, message_id) = match &claimed.trigger {
         AutomationTrigger::Coordinate {
             origin_id,
             origin_seq,
-        } => (Some(origin_id.as_str()), Some(*origin_seq), None, None),
-        AutomationTrigger::History { history_id } => (None, None, Some(*history_id), None),
-        AutomationTrigger::Moment { moment_order } => (None, None, None, Some(*moment_order)),
+        } => (
+            Some(origin_id.as_str()),
+            Some(*origin_seq),
+            None,
+            None,
+            None,
+        ),
+        AutomationTrigger::History { history_id } => (None, None, Some(*history_id), None, None),
+        AutomationTrigger::Moment { moment_order } => (None, None, None, Some(*moment_order), None),
+        AutomationTrigger::Message { message_id } => {
+            (None, None, None, None, Some(message_id.as_str()))
+        }
     };
     let (state, error) = if claimed.chain_stopped {
         (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
@@ -716,9 +1008,9 @@ fn insert_claims(
                   trigger_history_id, trigger_moment_order, record_id, collection_path, depth, \
                   state, attempts, error, created_at_ms, updated_at_ms, change_kind, \
                   author_origin_id, actor_kind, on_behalf_of, change_fields_json, \
-                  change_fields_omitted) \
+                  change_fields_omitted, trigger_message_id, message_json) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?13, ?14, \
-                         ?15, ?16, ?17, ?18, ?19)",
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     workspace_id,
                     claim_id,
@@ -739,6 +1031,8 @@ fn insert_claims(
                     claimed.change.on_behalf_of,
                     fields_json,
                     claimed.fields.omitted,
+                    message_id,
+                    message_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -1321,18 +1615,28 @@ fn claim_field_facts(
     workspace_id: &str,
     claim_id: &str,
 ) -> Result<AutomationFieldFacts, DomainError> {
-    let (fields_json, omitted): (String, u32) = conn
+    let (fields_json, omitted, message_json): (String, u32, Option<String>) = conn
         .query_row(
-            "SELECT change_fields_json, change_fields_omitted FROM automation_claims \
+            "SELECT change_fields_json, change_fields_omitted, message_json FROM automation_claims \
              WHERE workspace_id = ?1 AND claim_id = ?2",
             params![workspace_id, claim_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(DomainError::sql_corrupt)?;
     let fields = serde_json::from_str(&fields_json).map_err(|_| DomainError::StateCorrupt {
         reason: "automation claim field facts are not valid facts",
     })?;
-    Ok(AutomationFieldFacts { fields, omitted })
+    let message = message_json
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(|_| DomainError::StateCorrupt {
+            reason: "automation claim message is not valid JSON",
+        })?;
+    Ok(AutomationFieldFacts {
+        fields,
+        omitted,
+        message,
+    })
 }
 
 /// Flip the oldest pending claim whose automation id starts with the prefix
@@ -1570,7 +1874,9 @@ pub(crate) fn settle_automation_claim_in_tx(
     // Past the history, a done field claim goes. A done added or removed
     // claim keeps its row, without facts: a later reconcile can derive the
     // same moment again (a record whose frontmatter broke and healed), and
-    // the row's key is what keeps it from claiming twice.
+    // the row's key is what keeps it from claiming twice. A done message
+    // claim keeps its key without its message for the same reason: a message
+    // stored again after its thread was removed must not run twice.
     let older_done = "workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
          AND claim_id NOT IN ( \
              SELECT claim_id FROM automation_claims \
@@ -1584,16 +1890,17 @@ pub(crate) fn settle_automation_claim_in_tx(
     conn.execute(
         &format!(
             "DELETE FROM automation_claims \
-             WHERE trigger_moment_order IS NULL AND {older_done}"
+             WHERE trigger_moment_order IS NULL AND trigger_message_id IS NULL AND {older_done}"
         ),
         prune,
     )
     .map_err(DomainError::sql_persist)?;
     conn.execute(
         &format!(
-            "UPDATE automation_claims SET change_fields_json = '[]', change_fields_omitted = 0 \
-             WHERE trigger_moment_order IS NOT NULL AND change_fields_json <> '[]' \
-               AND {older_done}"
+            "UPDATE automation_claims \
+             SET change_fields_json = '[]', change_fields_omitted = 0, message_json = NULL \
+             WHERE (trigger_moment_order IS NOT NULL OR trigger_message_id IS NOT NULL) \
+               AND (change_fields_json <> '[]' OR message_json IS NOT NULL) AND {older_done}"
         ),
         prune,
     )
@@ -1693,6 +2000,30 @@ pub fn subscribe_automation(
 ) -> Result<bool, DomainError> {
     committed(store.write_with(faults, |tx| {
         subscribe_automation_in_tx(tx, workspace_id, subscription, now_ms)
+    })?)
+}
+
+pub fn subscribe_automation_group(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    subscription: &AutomationGroupSubscription,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<bool, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        subscribe_automation_group_in_tx(tx, workspace_id, subscription, now_ms)
+    })?)
+}
+
+pub fn unsubscribe_automation_group(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    automation_id: &str,
+    channel_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<bool, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        unsubscribe_automation_group_in_tx(tx, workspace_id, automation_id, channel_id)
     })?)
 }
 

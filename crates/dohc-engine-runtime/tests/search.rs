@@ -1885,7 +1885,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     assert!(matches!(
         apply_chat_envelope(&mut store, &thread, &NO_FAULTS),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1893,7 +1893,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     assert!(matches!(
         apply_chat_envelope(&mut store, &message, &NO_FAULTS),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()

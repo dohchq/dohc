@@ -8,6 +8,7 @@ use dohc_engine_domain::AutomationChangeKind;
 use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
+use dohc_engine_domain::AutomationGroupSubscription;
 use dohc_engine_domain::AutomationRetry;
 use dohc_engine_domain::AutomationSettle;
 use dohc_engine_domain::AutomationSubscription;
@@ -30,9 +31,17 @@ pub(crate) const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 /// running rather than double-fired.
 pub(crate) const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
+/// A subscription names records under a path or messages in one Group.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AutomationSubscribeParams {
+    Records(AutomationRecordsSubscribeParams),
+    Group(AutomationGroupSubscribeParams),
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationSubscribeParams {
+struct AutomationRecordsSubscribeParams {
     automation_id: String,
     path: String,
     kinds: Vec<AutomationChangeKind>,
@@ -42,9 +51,32 @@ struct AutomationSubscribeParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationUnsubscribeParams {
+struct AutomationGroupSubscribeParams {
+    automation_id: String,
+    group_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    starts_with: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AutomationUnsubscribeParams {
+    Records(AutomationRecordsUnsubscribeParams),
+    Group(AutomationGroupUnsubscribeParams),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationRecordsUnsubscribeParams {
     automation_id: String,
     path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationGroupUnsubscribeParams {
+    automation_id: String,
+    group_id: String,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +137,7 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
         } => json!({ "originId": origin_id, "originSeq": origin_seq }),
         AutomationTrigger::History { history_id } => json!({ "historyId": history_id }),
         AutomationTrigger::Moment { moment_order } => json!({ "momentOrder": moment_order }),
+        AutomationTrigger::Message { message_id } => json!({ "messageId": message_id }),
     };
     let mut value = json!({
         "claimId": claim.claim_id,
@@ -140,6 +173,9 @@ fn served_automation_claim_json(claim: &AutomationClaim, facts: &AutomationField
         .expect("claim change is an object");
     change.insert("fields".to_owned(), json!(facts.fields));
     change.insert("fieldsOmitted".to_owned(), json!(facts.omitted));
+    if let Some(message) = &facts.message {
+        change.insert("message".to_owned(), message.clone());
+    }
     value
 }
 
@@ -153,23 +189,46 @@ impl EngineService {
         let params: AutomationSubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let subscribed = Self::read_under_ctx(
-            &cancellation,
-            "automations.subscribe",
-            open.actor.automation_subscribe(
-                open.workspace_id.clone(),
-                AutomationSubscription {
-                    automation_id: params.automation_id,
-                    prefix: params.path,
-                    kinds: params.kinds,
-                    fields: params.fields,
-                },
-                now_ms()?,
-                Arc::new(NoFaults),
-                cancellation.token(),
-            ),
-        )
-        .await?;
+        let workspace_id = open.workspace_id.clone();
+        let subscribed = match params {
+            AutomationSubscribeParams::Records(params) => {
+                Self::read_under_ctx(
+                    &cancellation,
+                    "automations.subscribe",
+                    open.actor.automation_subscribe(
+                        workspace_id,
+                        AutomationSubscription {
+                            automation_id: params.automation_id,
+                            prefix: params.path,
+                            kinds: params.kinds,
+                            fields: params.fields,
+                        },
+                        now_ms()?,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
+                    ),
+                )
+                .await?
+            }
+            AutomationSubscribeParams::Group(params) => {
+                Self::read_under_ctx(
+                    &cancellation,
+                    "automations.subscribe",
+                    open.actor.automation_subscribe_group(
+                        workspace_id,
+                        AutomationGroupSubscription {
+                            automation_id: params.automation_id,
+                            channel_id: params.group_id,
+                            starts_with: params.starts_with,
+                        },
+                        now_ms()?,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
+                    ),
+                )
+                .await?
+            }
+        };
         Ok(json!({ "subscribed": subscribed }))
     }
 
@@ -182,18 +241,37 @@ impl EngineService {
         let params: AutomationUnsubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let unsubscribed = Self::read_under_ctx(
-            &cancellation,
-            "automations.unsubscribe",
-            open.actor.automation_unsubscribe(
-                open.workspace_id.clone(),
-                params.automation_id,
-                params.path,
-                Arc::new(NoFaults),
-                cancellation.token(),
-            ),
-        )
-        .await?;
+        let workspace_id = open.workspace_id.clone();
+        let unsubscribed = match params {
+            AutomationUnsubscribeParams::Records(params) => {
+                Self::read_under_ctx(
+                    &cancellation,
+                    "automations.unsubscribe",
+                    open.actor.automation_unsubscribe(
+                        workspace_id,
+                        params.automation_id,
+                        params.path,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
+                    ),
+                )
+                .await?
+            }
+            AutomationUnsubscribeParams::Group(params) => {
+                Self::read_under_ctx(
+                    &cancellation,
+                    "automations.unsubscribe",
+                    open.actor.automation_unsubscribe_group(
+                        workspace_id,
+                        params.automation_id,
+                        params.group_id,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
+                    ),
+                )
+                .await?
+            }
+        };
         Ok(json!({ "unsubscribed": unsubscribed }))
     }
 

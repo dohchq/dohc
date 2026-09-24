@@ -380,6 +380,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             }],
             skipped: 0,
             next_cursor: 1,
+            automation_claims: Vec::new(),
         }
     );
     assert_eq!(

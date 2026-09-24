@@ -253,7 +253,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
         assert_eq!(
             apply_chat_envelope(&mut target, operation, &NoFaults)
                 .expect("apply produced chat envelope"),
-            ApplyOutcome::new(ApplyDisposition::Applied(()))
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
         );
     }
     let applied: (String, Option<String>) = target
@@ -541,7 +541,7 @@ fn imported_opening_message_uses_zero_based_order() {
     for op in [&channel, &thread, &opening] {
         assert_eq!(
             apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply chat op"),
-            ApplyOutcome::new(ApplyDisposition::Applied(()))
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
         );
     }
     let order: i64 = engine
@@ -591,7 +591,7 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
     for op in [&with_group, &older] {
         assert_eq!(
             apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply channel"),
-            ApplyOutcome::new(ApplyDisposition::Applied(()))
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
         );
     }
     let rows: Vec<(String, String, String, Option<String>)> = engine
@@ -670,7 +670,7 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &bare, &NoFaults).expect("apply bare question"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
 
     // A file-linked thread is always a post, whatever lane the op claims.
@@ -1093,7 +1093,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1118,7 +1118,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1134,7 +1134,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_winner, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1149,7 +1149,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_loser, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1169,7 +1169,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_winner, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1184,7 +1184,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_loser, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1443,7 +1443,7 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -1534,7 +1534,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     let private_channel = envelope(
         "private-channel-source",
@@ -1557,7 +1557,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
         sharing_declined,
     } = outcome;
     assert!(sharing_declined.is_empty());
-    assert_eq!(primary, ApplyDisposition::Applied(()));
+    assert_eq!(primary, ApplyDisposition::Applied(Vec::new()));
     assert_eq!(
         refusals,
         vec![ReplicationRefusal {
@@ -1615,7 +1615,7 @@ fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -1696,7 +1696,7 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -1764,7 +1764,7 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("park attachment"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -1854,7 +1854,7 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &read, &NoFaults).expect("defer placeholder feed read"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -1948,7 +1948,7 @@ fn imported_person_follow_waits_for_a_non_dm_message() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("defer DM-only person"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2666,7 +2666,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
     assert_eq!(
         apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
             .expect("second peer accepts bounded outbound channelSlug"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
 }
 
@@ -2870,7 +2870,7 @@ fn parked_chat_coordinate_survives_store_reopen() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park before reopen"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     drop(engine);
@@ -3477,7 +3477,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         assert_eq!(
             apply_chat_envelope(&mut second_peer, operation, &NoFaults)
                 .expect("apply collision recovery envelope"),
-            ApplyOutcome::new(ApplyDisposition::Applied(()))
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
         );
     }
     let (message_body, message_rows, pending_rows): (String, i64, i64) = second_peer
@@ -3571,7 +3571,7 @@ fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &boundary, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -3675,7 +3675,7 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
     assert!(matches!(
         apply_chat_envelope(&mut engine, &visible, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -3832,7 +3832,7 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
     assert!(matches!(
         apply_chat_envelope(&mut engine, &thread, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -3840,7 +3840,7 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -4086,7 +4086,7 @@ fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decomposed, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -4139,7 +4139,7 @@ fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &caller_slug, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -4208,7 +4208,7 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
     );
     assert_eq!(
         result.expect("park missing attachment"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -4350,7 +4350,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     assert_eq!(
         apply_chat_envelope(&mut engine, &dm_only_person, &NoFaults)
             .expect("park DM-only person follow"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     let unresolved = envelope(
         "follow-fabricated-channel",
@@ -4366,7 +4366,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &unresolved, &NoFaults).expect("park unresolved follow"),
-        ApplyOutcome::new(ApplyDisposition::Applied(()))
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 2);
     let leaked = LinkedChatStore::new(&mut engine)
@@ -4893,7 +4893,7 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &ahead, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -4908,7 +4908,7 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &behind, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
@@ -4966,7 +4966,7 @@ fn reserved_agent_channel_shapes_rejected() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &canonical, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()

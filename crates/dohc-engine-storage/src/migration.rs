@@ -2273,6 +2273,89 @@ CREATE INDEX idx_chat_mentions_handle
     ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
 ";
 
+/// A Collection automation triggered by messages in a Group. Only the
+/// computer that runs such automations registers these subscriptions, and it
+/// claims a Group message the one time it stores that message, however the
+/// message arrives, so a claim now has a fourth trigger shape: the message.
+/// SQLite cannot change a CHECK in place, so the claims table is rebuilt with
+/// every row kept. A message claim carries the message itself, within the
+/// claim budget.
+const V2_AUTOMATION_GROUP_MESSAGES_DDL: &str = "\
+CREATE TABLE automation_group_subscriptions (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    channel_id    TEXT    NOT NULL,
+    starts_with   TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id, channel_id)
+) STRICT;
+CREATE INDEX idx_automation_group_subscriptions_channel
+    ON automation_group_subscriptions(workspace_id, channel_id);
+CREATE TABLE automation_claims_next (
+    workspace_id          TEXT    NOT NULL,
+    claim_id              TEXT    NOT NULL,
+    automation_id         TEXT    NOT NULL,
+    trigger_origin_id     TEXT,
+    trigger_origin_seq    INTEGER,
+    trigger_history_id    INTEGER,
+    trigger_moment_order  INTEGER,
+    trigger_message_id    TEXT,
+    record_id             TEXT    NOT NULL,
+    collection_path       TEXT    NOT NULL,
+    depth                 INTEGER NOT NULL CHECK (depth >= 0),
+    state                 TEXT    NOT NULL
+                          CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts              INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error                 TEXT,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    change_kind           TEXT    NOT NULL DEFAULT 'changed'
+                          CHECK (change_kind IN ('added', 'changed', 'removed', 'message')),
+    author_origin_id      TEXT,
+    actor_kind            TEXT
+                          CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation')),
+    on_behalf_of          TEXT,
+    change_fields_json    TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(change_fields_json)),
+    change_fields_omitted INTEGER NOT NULL DEFAULT 0 CHECK (change_fields_omitted >= 0),
+    run                   INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1),
+    message_json          TEXT    CHECK (message_json IS NULL OR json_valid(message_json)),
+    PRIMARY KEY (workspace_id, claim_id),
+    CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
+    CHECK ((trigger_origin_id IS NOT NULL) + (trigger_history_id IS NOT NULL)
+           + (trigger_moment_order IS NOT NULL) + (trigger_message_id IS NOT NULL) = 1),
+    CHECK ((change_kind = 'message') = (trigger_message_id IS NOT NULL)),
+    CHECK (message_json IS NULL OR change_kind = 'message')
+) STRICT;
+INSERT INTO automation_claims_next
+    (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+     trigger_history_id, trigger_moment_order, record_id, collection_path, depth, state,
+     attempts, error, created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind,
+     on_behalf_of, change_fields_json, change_fields_omitted, run)
+SELECT workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+       trigger_history_id, trigger_moment_order, record_id, collection_path, depth, state,
+       attempts, error, created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind,
+       on_behalf_of, change_fields_json, change_fields_omitted, run
+FROM automation_claims;
+DROP TABLE automation_claims;
+ALTER TABLE automation_claims_next RENAME TO automation_claims;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
+    ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
+    WHERE trigger_origin_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_history
+    ON automation_claims(workspace_id, automation_id, trigger_history_id)
+    WHERE trigger_history_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
+    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
+    WHERE trigger_moment_order IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_message
+    ON automation_claims(workspace_id, automation_id, trigger_message_id)
+    WHERE trigger_message_id IS NOT NULL;
+CREATE INDEX idx_automation_claims_state
+    ON automation_claims(workspace_id, state, created_at_ms, claim_id);
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2327,6 +2410,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 8,
         id: "v2-chat-automation-author",
         sql: V2_CHAT_AUTOMATION_AUTHOR_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 8,
+        id: "v2-automation-group-messages",
+        sql: V2_AUTOMATION_GROUP_MESSAGES_DDL,
         sets_user_version: None,
     },
 ];
@@ -2635,6 +2724,116 @@ mod tests {
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
+    }
+
+    /// Claims written before Group messages keep every column and trigger, and
+    /// the rebuilt table takes a message claim with its message only.
+    #[test]
+    fn automation_claims_from_before_group_messages_upgrade_unchanged() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-automation-group-messages")
+            .expect("the Group message migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("store before Group messages");
+        conn.execute_batch(
+            "INSERT INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_moment_order, record_id, \
+                  collection_path, depth, state, attempts, error, created_at_ms, updated_at_ms, \
+                  change_kind, change_fields_json, run) \
+                 VALUES ('ws', 'atc_added', 'collection:Trip#stamp', 7, 'rec', 'Trip', 1, \
+                         'failed', 2, 'boom', 3, 4, 'added', '[]', 2);",
+        )
+        .expect("seed a claim");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        type Row = (
+            String,
+            Option<i64>,
+            Option<String>,
+            i64,
+            String,
+            i64,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
+        let row: Row = conn
+            .query_row(
+                "SELECT automation_id, trigger_moment_order, trigger_message_id, depth, state, \
+                        attempts, error, run, message_json FROM automation_claims",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .expect("upgraded claim");
+        assert_eq!(
+            row,
+            (
+                "collection:Trip#stamp".into(),
+                Some(7),
+                None,
+                1,
+                "failed".into(),
+                2,
+                Some("boom".into()),
+                2,
+                None
+            )
+        );
+        let insert = |claim_id: &str,
+                      message_id: Option<&str>,
+                      kind: &str,
+                      message_json: Option<&str>| {
+            conn.execute(
+                "INSERT INTO automation_claims \
+                     (workspace_id, claim_id, automation_id, trigger_message_id, record_id, \
+                      collection_path, depth, state, created_at_ms, updated_at_ms, change_kind, \
+                      message_json) \
+                 VALUES ('ws', ?1, 'collection:Trip#task', ?2, 'm', 'Trip', 0, 'pending', 5, 5, ?3, ?4)",
+                rusqlite::params![claim_id, message_id, kind, message_json],
+            )
+        };
+        insert(
+            "atc_message",
+            Some("message-1"),
+            "message",
+            Some("{\"id\":\"message-1\"}"),
+        )
+        .expect("a message claim");
+        assert!(
+            insert("atc_again", Some("message-1"), "message", None).is_err(),
+            "one claim per message and automation"
+        );
+        assert!(
+            insert("atc_kind", Some("message-2"), "changed", None).is_err(),
+            "a message key goes with the message kind"
+        );
+        assert!(
+            insert("atc_nokey", None, "message", None).is_err(),
+            "a message claim names its message"
+        );
+        conn.execute(
+            "INSERT INTO automation_group_subscriptions \
+                 (workspace_id, automation_id, channel_id, starts_with, created_at_ms) \
+             VALUES ('ws', 'collection:Trip#task', 'channel-1', '/task', 1)",
+            [],
+        )
+        .expect("a Group subscription");
     }
 
     /// Messages and mentions written before automations could post keep every

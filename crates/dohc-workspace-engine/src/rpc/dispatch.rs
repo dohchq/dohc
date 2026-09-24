@@ -644,6 +644,10 @@ impl EngineService {
                 self.chats_mentions_list_for_handle(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.messages.get" => {
+                self.chats_messages_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.messages.list" => {
                 self.chats_messages_list(&ctx, request.workspace, request.params)
                     .await?
@@ -1179,6 +1183,7 @@ mod tests {
             "chats.follows.list",
             "chats.follows.set",
             "chats.mentions.listForHandle",
+            "chats.messages.get",
             "chats.messages.list",
             "chats.messages.send",
             "chats.reactions.list",

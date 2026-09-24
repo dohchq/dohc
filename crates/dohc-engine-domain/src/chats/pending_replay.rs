@@ -1,11 +1,13 @@
 use super::{
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
-    PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, ThreadMessageResolution,
-    bump_chat_conversation_revision, index_replicated_chat_message_search_rows,
-    mark_live_bookmarks_pending, normalize_agent_owner_name, normalize_author_user_id,
-    normalize_body, normalize_display_name, parse_mention_handles, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message,
+    PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
+    ThreadMessageResolution, bump_chat_conversation_revision,
+    index_replicated_chat_message_search_rows, mark_live_bookmarks_pending,
+    normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
+    parse_mention_handles, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
 };
+use crate::AutomationClaim;
+use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
 use crate::error::DomainError;
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -84,8 +86,9 @@ pub fn replay_pending_chat_coordinates_for_change(
     workspace_id: &str,
     op_kind: &str,
     payload: &serde_json::Value,
-) -> Result<Vec<PendingChatRefusal>, DomainError> {
+) -> Result<PendingChatReplay, DomainError> {
     let mut refusals = Vec::new();
+    let mut automation_claims = Vec::new();
     let mut dependencies = changed_chat_dependencies(tx, workspace_id, op_kind, payload)?;
     while let Some(dependency) = dependencies.pop() {
         let pending = pending_chat_operations(tx, workspace_id, &dependency)?;
@@ -96,7 +99,12 @@ pub fn replay_pending_chat_coordinates_for_change(
                 params![workspace_id, operation.origin_id, operation.origin_seq],
             )
             .map_err(DomainError::sql_persist)?;
-            match replay_pending_chat_operation(tx, workspace_id, &operation)? {
+            match replay_pending_chat_operation(
+                tx,
+                workspace_id,
+                &operation,
+                &mut automation_claims,
+            )? {
                 PendingReplayOutcome::Applied => {
                     dependencies.extend(changed_chat_dependencies(
                         tx,
@@ -113,7 +121,10 @@ pub fn replay_pending_chat_coordinates_for_change(
             }
         }
     }
-    Ok(refusals)
+    Ok(PendingChatReplay {
+        refusals,
+        automation_claims,
+    })
 }
 
 /// Re-evaluate every parked coordinate in one workspace against the committed
@@ -122,22 +133,27 @@ pub fn replay_pending_chat_coordinates_for_change(
 pub fn replay_ready_pending_chat_coordinates(
     tx: &Transaction<'_>,
     workspace_id: &str,
-) -> Result<Vec<PendingChatRefusal>, DomainError> {
+) -> Result<PendingChatReplay, DomainError> {
     let has_pending: bool = tx
         .query_row(PENDING_CHAT_WORKSPACE_EXISTS_SQL, [workspace_id], |row| {
             row.get(0)
         })
         .map_err(DomainError::sql_corrupt)?;
     if !has_pending {
-        return Ok(Vec::new());
+        return Ok(PendingChatReplay::default());
     }
 
-    let mut refusals = Vec::new();
+    let mut replay = PendingChatReplay::default();
     loop {
         let pending = pending_chat_operations_for_workspace(tx, workspace_id)?;
         let mut applied = false;
         for operation in pending {
-            match replay_pending_chat_operation(tx, workspace_id, &operation)? {
+            match replay_pending_chat_operation(
+                tx,
+                workspace_id,
+                &operation,
+                &mut replay.automation_claims,
+            )? {
                 PendingReplayOutcome::Deferred => {}
                 PendingReplayOutcome::Applied => {
                     delete_pending_chat_operation(tx, workspace_id, &operation)?;
@@ -146,12 +162,14 @@ pub fn replay_ready_pending_chat_coordinates(
                 PendingReplayOutcome::Refused(reason) => {
                     persist_pending_chat_refusal(tx, workspace_id, &operation, reason)?;
                     delete_pending_chat_operation(tx, workspace_id, &operation)?;
-                    refusals.push(pending_chat_refusal(&operation, reason));
+                    replay
+                        .refusals
+                        .push(pending_chat_refusal(&operation, reason));
                 }
             }
         }
         if !applied {
-            return Ok(refusals);
+            return Ok(replay);
         }
     }
 }
@@ -297,10 +315,13 @@ fn pending_chat_operations(
     Ok(operations)
 }
 
+/// Replay one parked coordinate. A stored message adds its Group automation
+/// claims to `automation_claims`.
 fn replay_pending_chat_operation(
     tx: &Transaction<'_>,
     workspace_id: &str,
     operation: &PendingChatOperation,
+    automation_claims: &mut Vec<AutomationClaim>,
 ) -> Result<PendingReplayOutcome, DomainError> {
     match operation.op_kind.as_str() {
         "chat.follow.set" => {
@@ -490,7 +511,7 @@ fn replay_pending_chat_operation(
                 )?;
                 return Ok(PendingReplayOutcome::Deferred);
             }
-            apply_pending_message(tx, workspace_id, payload)?;
+            automation_claims.extend(apply_pending_message(tx, workspace_id, payload)?);
             Ok(PendingReplayOutcome::Applied)
         }
         _ => Ok(PendingReplayOutcome::Refused(
@@ -503,7 +524,7 @@ fn apply_pending_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
     payload: PendingMessageAppend,
-) -> Result<(), DomainError> {
+) -> Result<Vec<AutomationClaim>, DomainError> {
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
@@ -581,7 +602,7 @@ fn apply_pending_message(
         )
         .map_err(DomainError::sql_persist)?;
     if inserted == 0 {
-        return Ok(());
+        return Ok(Vec::new());
     }
     for handle in parse_mention_handles(&body) {
         tx.execute(
@@ -644,7 +665,22 @@ fn apply_pending_message(
         &body,
     )?;
     bump_chat_conversation_revision(tx, workspace_id, &payload.thread_id)?;
-    Ok(())
+    claim_group_message_in_tx(
+        tx,
+        workspace_id,
+        &AutomationGroupMessage {
+            message_id: &payload.message_id,
+            thread_id: &payload.thread_id,
+            parent_message_id: payload.parent_message_id.as_deref(),
+            author_kind: &payload.author_kind,
+            author_display_name: &author_display_name,
+            author_owner_display_name: owner_name.as_deref(),
+            author_user_id: author_user_id.as_deref(),
+            body: &body,
+            created_at_ms: payload.created_at_ms,
+            automation: None,
+        },
+    )
 }
 
 fn park_pending_chat_operation(

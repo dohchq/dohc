@@ -1,14 +1,14 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
-    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
-    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
-    DispatchRecovery, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
-    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    ThreadDispatchPause, UnreadFileThread,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, ChannelGroup, ChannelThreadSummary,
+    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
+    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadLane, ChatThreadProjection,
+    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery, LinkedChatStore,
+    MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage,
+    SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -121,18 +121,20 @@ impl ActorHandle {
         .await
     }
 
+    /// Also returns the Group automation claims the write took, for the
+    /// caller to announce after commit.
     pub async fn chat_thread_start(
         &self,
         input: StartChannelThread,
         token: CancellationToken,
-    ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
+    ) -> Result<(ChatThread, ChatMessage, Vec<AutomationClaim>), RuntimeError> {
         self.run(move |store, _| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
-                    .start_channel_thread(&input, &NoFaults)
-                    .map_err(RuntimeError::from)
+                let mut chats = LinkedChatStore::new(store);
+                let (thread, message) = chats.start_channel_thread(&input, &NoFaults)?;
+                Ok((thread, message, chats.take_automation_claims()))
             }
         })
         .await
@@ -319,19 +321,34 @@ impl ActorHandle {
         .await
     }
 
+    /// Also returns the Group automation claims the write took, for the
+    /// caller to announce after commit.
     pub async fn chat_message_send(
         &self,
         input: SendMessage,
         token: CancellationToken,
-    ) -> Result<ChatMessage, RuntimeError> {
+    ) -> Result<(ChatMessage, Vec<AutomationClaim>), RuntimeError> {
         self.run(move |store, _| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                LinkedChatStore::new(store)
-                    .send_message(&input, &NoFaults)
-                    .map_err(RuntimeError::from)
+                let mut chats = LinkedChatStore::new(store);
+                let message = chats.send_message(&input, &NoFaults)?;
+                Ok((message, chats.take_automation_claims()))
             }
+        })
+        .await
+    }
+
+    pub async fn chat_message_get(
+        &self,
+        workspace_id: String,
+        message_id: String,
+    ) -> Result<ChatMessage, RuntimeError> {
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_message(&workspace_id, &message_id)
+                .map_err(RuntimeError::from)
         })
         .await
     }
