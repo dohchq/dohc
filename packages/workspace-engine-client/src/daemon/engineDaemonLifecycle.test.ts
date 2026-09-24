@@ -1765,12 +1765,17 @@ describe("Rust engine daemon lifecycle", () => {
 
   it("keeps a slow startup smoke while the engine answers probes", async () => {
     const failures: Error[] = [];
-    let openedAt: number | null = null;
-    const client = new FakeClient(async (request) => {
+    let answeredPings = 0;
+    let finishOpen!: () => void;
+    const client = new FakeClient((request) => {
       if (request.method === "workspace.open") {
-        // Many probe expiries long: only answered probes keep it alive.
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        openedAt = Date.now();
+        // Finishes only after the third probe, so it outlives many expiries.
+        return new Promise<Response>((resolve) => {
+          finishOpen = () => resolve(healthyPing(request));
+        });
+      }
+      if (request.method === "engine.ping" && ++answeredPings === 3) {
+        setImmediate(() => finishOpen());
       }
       return healthyPing(request);
     });
@@ -1784,10 +1789,160 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       await startupSmokeDone(client);
-      expect(openedAt).not.toBeNull();
-      expect(client.requests.filter(({ method }) => method === "engine.ping").length).toBeGreaterThan(1);
+      expect(answeredPings).toBeGreaterThanOrEqual(3);
       expect(failures).toEqual([]);
       expect(client.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("kills an engine that answers probes but never finishes the smoke, at the cap", async () => {
+    const client = new FakeClient((request) =>
+      request.method === "engine.ping"
+        ? healthyPing(request)
+        : new Promise<Response>(() => {
+            // Alive on the transport; the open never progresses.
+          }),
+    );
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      requestTimeoutMs: 200,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async () => client,
+      onFailure: (error, terminal) => failures.push({ error, terminal }),
+    });
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
+      expect(failures[0]?.error.message).toBe(
+        "Rust engine workspace.open timed out after 200ms.",
+      );
+      expect(
+        client.requests.filter(({ method }) => method === "engine.ping").length,
+      ).toBeGreaterThan(1);
+      expect(client.closeCause).toBe("transport-error");
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("condemns silence during versions.active without waiting on its close", async () => {
+    const failures: Error[] = [];
+    const client = new FakeClient((request) =>
+      request.method === "workspace.open"
+        ? healthyPing(request)
+        : new Promise<Response>(() => {
+            // Silent from here on, probes included.
+          }),
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async () => client,
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
+      expect(failures[0]?.message).toBe(
+        "Rust engine versions.active got no answer: a probe expired after 40ms with no frame of any kind from the engine.",
+      );
+      expect(client.closeCause).toBe("transport-error");
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("probes again when a probe expiry fires late, instead of condemning", async () => {
+    const failures: Error[] = [];
+    let now = 0;
+    let pings = 0;
+    let finishOpen!: () => void;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        return new Promise<Response>((resolve) => {
+          finishOpen = () => resolve(healthyPing(request));
+        });
+      }
+      if (request.method === "engine.ping") {
+        pings += 1;
+        // The first probe expires while the host is suspended for a minute.
+        if (pings === 1) {
+          now += 60_000;
+          return new Promise<Response>(() => {});
+        }
+        setImmediate(() => finishOpen());
+      }
+      return healthyPing(request);
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      monotonicNowMs: () => now,
+      launch: async () => client,
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      expect(pings).toBe(2);
+      expect(failures).toEqual([]);
+      expect(client.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("restarts into a slow replacement without spending the restart budget", async () => {
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const clients: FakeClient[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const replacement = clients.length > 0;
+        let pings = 0;
+        let finishOpen: (() => void) | undefined;
+        const client = new FakeClient((request) => {
+          if (request.method === "workspace.open" && replacement) {
+            return new Promise<Response>((resolve) => {
+              finishOpen = () => resolve(healthyPing(request));
+            });
+          }
+          if (request.method === "engine.ping" && ++pings === 3) {
+            setImmediate(() => finishOpen?.());
+          }
+          return healthyPing(request);
+        });
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => failures.push({ error, terminal }),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(clients[0]!);
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(clients).toHaveLength(2), WAIT);
+      await startupSmokeDone(clients[1]!);
+      await vi.waitFor(
+        () => expect(lifecycle.currentClient()).toBe(clients[1]),
+        WAIT,
+      );
+      expect(failures.map(({ error }) => error.message)).toEqual([
+        "Rust engine daemon exited unexpectedly with code 1.",
+      ]);
+      expect(failures.some(({ terminal }) => terminal)).toBe(false);
     } finally {
       await lifecycle.stop();
     }
@@ -1906,23 +2061,24 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
-  it("times out workspace opens with an engine deadline and cancellation", async () => {
+  it("ends a slow read at the caller's budget without condemning the engine", async () => {
     let hangOpen = false;
+    const failures: Error[] = [];
     const client = new FakeClient((request) => {
       if (request.method === "workspace.open" && hangOpen) {
         return new Promise<Response>(() => {
-          // The daemon never acknowledges this real-workspace open.
+          // The daemon never acknowledges this read attach.
         });
       }
-      if (request.method === "workspace.open") {
-        return { id: request.id, result: { workspace: "health-handle" } };
-      }
-      return { id: request.id, result: null };
+      return healthyPing(request);
     });
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      requestTimeoutMs: 20,
+      workspaceReadTimeoutMs: 100,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
       launch: async () => client,
+      onFailure: (error) => failures.push(error),
     });
 
     await lifecycle.start();
@@ -1936,12 +2092,24 @@ describe("Rust engine daemon lifecycle", () => {
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 50_000 },
       ),
-    ).rejects.toThrow(
-      /workspace\.open timed out after 20ms/,
-    );
-    expect(client.requests[0]?.deadlineMs).toBe(20);
-    expect(client.cancelledRequestIds).toEqual([client.requests[0]?.id]);
-    expect(client.closed).toBe(true);
+    ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
+    const open = client.requests.find(({ method }) => method === "workspace.open");
+    expect(open?.deadlineMs).toBeLessThanOrEqual(100);
+    expect(client.cancelledRequestIds).toEqual([open?.id]);
+    // Probes were answered while the read waited: the engine stays.
+    expect(client.requests.some(({ method }) => method === "engine.ping")).toBe(true);
+    expect(client.closed).toBe(false);
+    expect(failures).toEqual([]);
+
+    hangOpen = false;
+    await expect(
+      lifecycle.requestWorkspace(
+        "C:\\workspace",
+        "workspace",
+        "search.queryChatMessagesGranular",
+        { query: "needle", limit: 1 },
+      ),
+    ).resolves.toBeNull();
     await lifecycle.stop();
   });
 

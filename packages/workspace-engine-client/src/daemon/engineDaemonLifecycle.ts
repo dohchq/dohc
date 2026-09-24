@@ -33,6 +33,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 // Quiet time before a pending lifecycle request probes the engine. Most
 // requests finish sooner and never probe.
 const DEFAULT_REQUEST_PROBE_DELAY_MS = 5_000;
+// A probe expiry that fires this much later than asked was held up by the
+// host (a stall or a machine suspend), so its silence proves nothing.
+const LATE_TIMER_TOLERANCE_MS = 1_000;
+// One read through the engine (open, read, release) for a caller such as the
+// CLI, which waits 30s for its whole command and falls back when a read fails.
+const DEFAULT_WORKSPACE_READ_TIMEOUT_MS = 10_000;
 // Wedge detection. The restart path starts at process exit, so a daemon that
 // is alive but not answering never reaches it. These probe for that silence.
 //
@@ -138,10 +144,12 @@ export interface EngineDaemonLifecycleOptions {
   maxRestartsPerWindow?: number;
   monotonicNowMs?: () => number;
   wallNowMs?: () => number;
-  // Cap on one lifecycle request, and its wire deadline.
+  // Cap on one startup smoke request, and its wire deadline.
   requestTimeoutMs?: number;
   // Quiet time before a pending lifecycle request probes the engine.
   requestProbeDelayMs?: number;
+  // Caller budget for one requestWorkspace read, open to release.
+  workspaceReadTimeoutMs?: number;
   pingIntervalMs?: number;
   pingExpiryMs?: number;
   maxPingExpiries?: number;
@@ -305,6 +313,10 @@ export class EngineDaemonLifecycle {
   private readonly launchingClients = new Set<EngineDaemonClient>();
   private readonly workspaceRequestTails = new Map<string, Promise<void>>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
+  // A condemned request reports its reason as it kills. The smoke's own
+  // failure path may report the same error again, or lose the race to the
+  // exit it caused; either way the reason is reported once.
+  private readonly reportedFailures = new WeakSet<Error>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -390,8 +402,17 @@ export class EngineDaemonLifecycle {
     params: Request["params"],
   ): Promise<JsonValue> {
     const client = this.requireClient();
+    // A read is the caller's budget, not a verdict on the engine. The CLI waits
+    // 30s for its whole command and falls back when a read fails, so the open,
+    // the read, and the release share one short budget, and running out of it
+    // cancels the read without condemning the engine.
+    const budgetMs =
+      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
+    const endsAt = this.monotonicNowMs() + budgetMs;
+    const remaining = () =>
+      Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
     const opened = resultObject(
-      await this.sendSmokeRequest(
+      await this.sendLifecycleRequest(
         client,
         {
           id: this.requestId(),
@@ -403,7 +424,7 @@ export class EngineDaemonLifecycle {
             skipStartupMaintenance: true,
           },
         },
-        "workspace.open",
+        { capMs: remaining(), onCap: "cancel" },
       ),
       "workspace.open",
     );
@@ -415,7 +436,7 @@ export class EngineDaemonLifecycle {
     const workspace = opened.workspace as WorkspaceHandle;
     try {
       return (
-        await this.sendSmokeRequest(
+        await this.sendLifecycleRequest(
           client,
           {
             id: this.requestId(),
@@ -423,16 +444,17 @@ export class EngineDaemonLifecycle {
             workspace,
             params,
           },
-          method,
+          { capMs: remaining(), onCap: "cancel" },
         )
       ).result;
     } finally {
       // Best-effort release: the desktop closing the owner concurrently drops
       // this attachment daemon-side, and a close error thrown from a finally
       // would replace an already-obtained read result. The daemon reaps
-      // attachments with their owner, so a missed close cannot leak.
+      // attachments with their owner, so a missed close cannot leak. It gets
+      // at least a second even when the read spent the budget.
       try {
-        await this.sendSmokeRequest(
+        await this.sendLifecycleRequest(
           client,
           {
             id: this.requestId(),
@@ -440,7 +462,7 @@ export class EngineDaemonLifecycle {
             workspace,
             params: {},
           },
-          "workspace.close",
+          { capMs: Math.max(remaining(), 1_000), onCap: "cancel" },
         );
       } catch (error) {
         console.debug(
@@ -496,15 +518,19 @@ export class EngineDaemonLifecycle {
     rootDir: string,
     workspaceId: string,
   ): Promise<JsonValue> {
+    const smokeCap = {
+      capMs: this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      onCap: "condemn",
+    } as const;
     const opened = resultObject(
-      await this.sendSmokeRequest(
+      await this.sendLifecycleRequest(
         client,
         {
           id: this.requestId(),
           method: "workspace.open",
           params: { rootDir, workspaceId },
         },
-        "workspace.open",
+        smokeCap,
       ),
       "workspace.open",
     );
@@ -514,20 +540,8 @@ export class EngineDaemonLifecycle {
       );
     }
     const workspace = opened.workspace as WorkspaceHandle;
-    try {
-      const active = await this.sendSmokeRequest(
-        client,
-        {
-          id: this.requestId(),
-          method: "versions.active",
-          workspace,
-          params: {},
-        },
-        "versions.active",
-      );
-      return active.result;
-    } finally {
-      await this.sendSmokeRequest(
+    const close = async () =>
+      await this.sendLifecycleRequest(
         client,
         {
           id: this.requestId(),
@@ -535,9 +549,28 @@ export class EngineDaemonLifecycle {
           workspace,
           params: {},
         },
-        "workspace.close",
+        smokeCap,
       );
+    let active: Response;
+    try {
+      active = await this.sendLifecycleRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "versions.active",
+          workspace,
+          params: {},
+        },
+        smokeCap,
+      );
+    } catch (error) {
+      // The smoke already failed, and a condemned engine's client is closed.
+      // The close must not wait again or replace the reason.
+      await close().catch(() => undefined);
+      throw error;
     }
+    await close();
+    return active.result;
   }
 
   private requestId(): number {
@@ -555,13 +588,16 @@ export class EngineDaemonLifecycle {
     return this.client;
   }
 
-  private async sendSmokeRequest(
+  // `condemn` treats a request that outlives its cap as a stuck engine and
+  // kills it for replacement. `cancel` is a caller's budget: it cancels the
+  // request and leaves the engine alone. Silence condemns either way.
+  private async sendLifecycleRequest(
     client: EngineDaemonClient,
     request: Request,
-    method: string,
+    bound: { capMs: number; onCap: "condemn" | "cancel" },
   ): Promise<Response> {
-    const timeoutMs =
-      this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const { method } = request;
+    const timeoutMs = bound.capMs;
     const boundedRequest = {
       ...request,
       deadlineMs: request.deadlineMs ?? timeoutMs,
@@ -582,14 +618,13 @@ export class EngineDaemonLifecycle {
             console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:"reply-drained"}));
             return;
           }
-          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:method === "workspace.open" ? "kill-for-replacement" : "cancel-request"}));
+          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:bound.onCap === "condemn" ? "kill-for-replacement" : "cancel-request"}));
           void client.cancelRequest?.(request.id).catch(() => undefined);
-          if (method === "workspace.open") killForReplacement(client);
-          reject(
-            new EngineDaemonUnavailableError(
-              `Rust engine ${method} timed out after ${timeoutMs}ms.`,
-            ),
+          const error = new EngineDaemonUnavailableError(
+            `Rust engine ${method} timed out after ${timeoutMs}ms.`,
           );
+          if (bound.onCap === "condemn") this.condemn(client, error);
+          reject(error);
         });
       }, timeoutMs);
       timeout.unref();
@@ -597,8 +632,9 @@ export class EngineDaemonLifecycle {
     const watch = this.watchRequestLiveness(client, method);
     const silent = watch.silent.catch((error: unknown) => {
       if (settled) return new Promise<never>(() => {});
+      // Silence is evidence about the whole engine, whichever request saw it.
       void client.cancelRequest?.(request.id).catch(() => undefined);
-      if (method === "workspace.open") killForReplacement(client);
+      this.condemn(client, asError(error));
       throw error;
     });
     try {
@@ -644,6 +680,7 @@ export class EngineDaemonLifecycle {
           seen = beforeProbe;
           continue;
         }
+        const probedAt = this.monotonicNowMs();
         const answered = await this.sendPing(client);
         await drained();
         if (stopped) return await new Promise<never>(() => {});
@@ -652,6 +689,9 @@ export class EngineDaemonLifecycle {
           seen = afterProbe;
           continue;
         }
+        // An expiry that fired late measured this host's own stall or suspend,
+        // not the engine. Probe again instead of condemning on it.
+        if (this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS) continue;
         throw new EngineDaemonUnavailableError(
           `Rust engine ${method} got no answer: a probe expired after ${expiryMs}ms with no frame of any kind from the engine.`,
         );
@@ -1094,8 +1134,15 @@ export class EngineDaemonLifecycle {
     );
   }
 
+  private condemn(client: EngineDaemonClient, error: Error): void {
+    killForReplacement(client);
+    this.reportFailure(error, false);
+  }
+
   private reportFailure(error: Error, terminal: boolean): void {
     if (terminal) this.terminal = true;
+    if (this.reportedFailures.has(error)) return;
+    this.reportedFailures.add(error);
     try {
       this.options.onFailure?.(error, terminal);
     } catch {
