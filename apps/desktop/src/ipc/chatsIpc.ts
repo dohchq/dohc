@@ -104,6 +104,10 @@ function chatAttachmentForIpc(
   };
 }
 
+function automationForIpc(automation: NonNullable<ChatMessage["automation"]>) {
+  return { automationId: automation.automationId, collectionPath: automation.collectionPath };
+}
+
 export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
   return {
     id: message.id,
@@ -118,9 +122,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     ...(message.origin ? { origin: message.origin } : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
-    ...(message.automation
-      ? { automation: { automationId: message.automation.automationId, collectionPath: message.automation.collectionPath } }
-      : {}),
+    ...(message.automation ? { automation: automationForIpc(message.automation) } : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
   };
 }
@@ -574,6 +576,7 @@ export function registerChatsIpcHandlers<
             ...(summary.openingMessage.authorUserId ? { authorUserId: summary.openingMessage.authorUserId } : {}),
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
+            ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation) } : {}),
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,

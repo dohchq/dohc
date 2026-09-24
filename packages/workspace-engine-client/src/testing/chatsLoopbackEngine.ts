@@ -1656,6 +1656,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
                     opening.body.length > 500
                       ? `${opening.body.slice(0, 500).trimEnd()}…`
                       : opening.body,
+                  ...(opening.automation ? { automation: opening.automation } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }

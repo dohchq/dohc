@@ -1612,6 +1612,22 @@ describe("chat IPC contract", () => {
     ).toBe(false);
   });
 
+  it("carries an automation author and its local automation on a post preview", () => {
+    const preview = {
+      id: "thread-1", title: "Launch", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
+      messageCount: 1, lastReadSequence: 0, unreadCount: 1,
+      openingMessage: {
+        id: "message-1", authorKind: "automation", authorDisplayName: "Stamp the finish date",
+        authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel", reactions: [],
+        automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+      },
+    };
+    expect(ChannelThreadRecord.parse(preview).openingMessage?.automation?.collectionPath).toBe("Trip/Tasks");
+    expect(ChannelThreadRecord.safeParse({
+      ...preview, openingMessage: { ...preview.openingMessage, automation: { automationId: "x", collectionPath: "../escape" } },
+    }).success).toBe(false);
+  });
+
   it("accepts additive channel-feed previews and batched run records", () => {
     expect(
       ChannelThreadRecord.parse({

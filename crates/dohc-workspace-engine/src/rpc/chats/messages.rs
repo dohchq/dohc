@@ -181,6 +181,14 @@ pub(super) fn actor_kind_str(kind: ChatActorKind) -> &'static str {
     }
 }
 
+/// Readers open an automation from its Collection; the depth stays in the engine.
+pub(super) fn automation_json(automation: &ChatMessageAutomation) -> Value {
+    json!({
+        "automationId": automation.automation_id,
+        "collectionPath": automation.collection_path(),
+    })
+}
+
 pub(super) fn message_json(message: &ChatMessage) -> Value {
     let mut value = json!({
         "id": message.message_id,
@@ -207,15 +215,8 @@ pub(super) fn message_json(message: &ChatMessage) -> Value {
     if let Some(origin) = &message.origin {
         object.insert("origin".to_owned(), json!(origin));
     }
-    // Readers open the automation from its Collection; the depth stays in the engine.
     if let Some(automation) = &message.automation {
-        object.insert(
-            "automation".to_owned(),
-            json!({
-                "automationId": automation.automation_id,
-                "collectionPath": automation.collection_path(),
-            }),
-        );
+        object.insert("automation".to_owned(), automation_json(automation));
     }
     value
 }

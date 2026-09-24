@@ -687,6 +687,7 @@ export interface ChannelThreadSummary {
     authorUserId?: string;
     createdAtMs: number;
     bodySnippet: string;
+    automation?: ChatMessageAutomation;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };

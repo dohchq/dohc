@@ -683,6 +683,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   authorUserId: Schema.optionalKey(Schema.String),
   createdAtMs: AnyInt,
   bodySnippet: Schema.String,
+  automation: Schema.optionalKey(ChatMessageAutomationSchema),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 });
 const ChatChannelThreadSummarySchema = mutableStruct({

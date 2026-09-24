@@ -4878,6 +4878,18 @@ async fn an_automation_message_names_its_automation_over_rpc() {
         json!({ "threadId": "thread" }),
     )
     .await;
+    let threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel" }),
+    )
+    .await;
+    assert_eq!(
+        threads["threads"][0]["openingMessage"]["automation"],
+        json!({ "automationId": "collection:Trip/Tasks#stamp", "collectionPath": "Trip/Tasks" })
+    );
     assert_eq!(
         listed["messages"][1]["automation"]["automationId"],
         json!("collection:Trip/Tasks#stamp")

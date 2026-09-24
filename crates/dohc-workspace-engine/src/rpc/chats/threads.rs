@@ -10,6 +10,7 @@ use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::messages::ChatMessageAutomationParams;
 use crate::rpc::chats::messages::actor_kind_str;
+use crate::rpc::chats::messages::automation_json;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
 use crate::rpc::chats::messages::reaction_json;
@@ -240,6 +241,13 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
         .and_then(|opening| opening.author_owner_display_name.as_ref())
     {
         value["openingMessage"]["authorOwnerDisplayName"] = json!(owner_name);
+    }
+    if let Some(automation) = summary
+        .opening_message
+        .as_ref()
+        .and_then(|opening| opening.automation.as_ref())
+    {
+        value["openingMessage"]["automation"] = automation_json(automation);
     }
     value
 }

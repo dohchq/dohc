@@ -625,6 +625,8 @@ pub struct ChannelOpeningMessage {
     pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
     pub created_at_ms: i64,
+    /// Set when this computer's automation wrote the message.
+    pub automation: Option<ChatMessageAutomation>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -3309,6 +3311,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_owner_display_name: message.author_owner_display_name,
                         author_user_id: message.author_user_id,
                         created_at_ms: message.created_at_ms,
+                        automation: message.automation,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,
