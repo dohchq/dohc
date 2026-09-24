@@ -94,6 +94,7 @@ describe("engine markdown source view", () => {
     >();
     let sessionId = "";
     const bridgeMock = {
+      platform: "linux" as const,
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: markdown,

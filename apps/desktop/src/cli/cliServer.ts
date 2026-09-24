@@ -1621,7 +1621,7 @@ async function dispatch(
     }
 
     case "fileChats": {
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) {
         return {
           ok: false as const,
@@ -1736,7 +1736,7 @@ async function dispatch(
     case "collectionQuery": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -1790,7 +1790,7 @@ async function dispatch(
     case "collectionRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -1862,6 +1862,7 @@ async function dispatch(
       if (!collections) return collectionsUnavailable();
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
+        { platform: process.platform },
       );
       if (!collectionValidated.ok) {
         return cliPathRejected(
@@ -1873,6 +1874,7 @@ async function dispatch(
       // pass the stricter materialization rules before the seam sees it.
       const recordValidated = validateUserMaterializePath(
         `${collectionValidated.normalized}/${request.args.name}.md`,
+        { platform: process.platform },
       );
       if (!recordValidated.ok) {
         return cliPathRejected(

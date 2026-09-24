@@ -936,18 +936,31 @@ test("typing continues while enabling sync replaces the open document", async ()
     }, workspaceId);
     expect(enabled).toBe("ok");
 
-    // Keep typing until main hands over the replacement, so the handoff meets
-    // a document with typing it has not saved yet.
+    // The first edit after enabling sync is what makes main hand over the
+    // replacement, so that edit is still unsaved when the handoff runs. A
+    // replacement that arrived before it would test nothing, so refuse that.
     const replacements = () =>
       page.evaluate(
         () => (window as unknown as OpenDocumentSyncWindow).lineageReplacements,
       );
-    const deadline = Date.now() + 90_000;
-    for (let word = 0; (await replacements()) === 0; word += 1) {
-      if (Date.now() > deadline) {
-        throw new Error("enabling sync never replaced the open document");
-      }
-      await page.keyboard.type(` w${word}`, { delay: 20 });
+    expect(await replacements(), "the replacement arrived before any typing").toBe(0);
+    // One input event, so the marker is one update that cannot be split
+    // across the handoff.
+    await page.keyboard.insertText(" pending-marker");
+    await expect.poll(replacements, { timeout: 90_000 }).toBeGreaterThan(0);
+
+    // The marker was unsaved when the document was replaced. It must be on
+    // disk or in a stored set-aside draft, and the notice must offer it.
+    const setAsideDrafts = () =>
+      page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts") ?? "");
+    await expect
+      .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
+        timeout: 30_000,
+      })
+      .toContain("pending-marker");
+    const setAside = !(await readPlan()).includes("pending-marker");
+    if (setAside) {
+      await expect(page.getByTestId("orphaned-draft-notice")).toBeVisible();
     }
 
     await expect(editor).toHaveAttribute("contenteditable", "true", {
@@ -966,6 +979,24 @@ test("typing continues while enabling sync replaces the open document", async ()
         .filter((entry) => /lineage handoff failed/.test(entry.text))
         .map((entry) => entry.text),
     ).toEqual([]);
+
+    // A set-aside draft outlives the app. Restart on the same profile: the
+    // stored row must load and the notice center must still offer it.
+    if (setAside) {
+      await desktop.close();
+      desktop = await launchDesktopApp({ workspace: temp });
+      const restarted = desktop.page;
+      await openWorkspaceFromFirstRun(restarted, temp);
+      expect(
+        await restarted.evaluate(
+          () => localStorage.getItem("dohc-set-aside-drafts") ?? "",
+        ),
+      ).toContain("pending-marker");
+      await restarted.getByTestId("notice-center-toggle").click();
+      await expect(restarted.getByTestId("notice-set-aside-edits")).toContainText(
+        "1 set-aside edit is waiting",
+      );
+    }
   } finally {
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);

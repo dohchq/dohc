@@ -170,7 +170,7 @@ export function createWorkspaceFilesIpc<
     const listed = await shareViewFiles.list(input.target);
     let selectedPath: string | undefined;
     if (input.relativePath !== undefined) {
-      const validated = validateUserReadPath(input.relativePath);
+      const validated = validateUserReadPath(input.relativePath, { platform: process.platform });
       if (!validated.ok) {
         throw new Error(
           `Invalid export path (${validated.reason}): ${input.relativePath}`,

@@ -200,7 +200,7 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // Read-side validation: search is a read surface, so mounted shares
   // (shared-with-me/) are searchable; every other guard is identical to the
   // write validator.
-  const validated = validateUserReadPath(rawPath.replaceAll("\\", "/"));
+  const validated = validateUserReadPath(rawPath.replaceAll("\\", "/"), { platform: process.platform });
   if (!validated.ok) return [];
   // Defense-in-depth reserved/ignored segment backstop. The shared validator
   // rejects these today, and this stays near rg parsing because include globs

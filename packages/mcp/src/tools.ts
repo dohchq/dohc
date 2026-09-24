@@ -104,8 +104,8 @@ async function safeResolve(
   // the entry itself rather than following it — see realRelativeInRoot.
   const validated =
     access === "read"
-      ? validateUserReadPath(relativePath)
-      : validateUserMaterializePath(relativePath);
+      ? validateUserReadPath(relativePath, { platform: process.platform })
+      : validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }

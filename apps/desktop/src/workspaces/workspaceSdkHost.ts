@@ -154,7 +154,8 @@ export function sdkWorkspacePath(
   kind: "read" | "write" = "read",
 ): string {
   const raw = text(requestedPath, "path");
-  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
+  const platform = { platform: process.platform };
+  const result = kind === "read" ? validateUserReadPath(raw, platform) : validateUserMaterializePath(raw, platform);
   if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
   return result.normalized;
 }
