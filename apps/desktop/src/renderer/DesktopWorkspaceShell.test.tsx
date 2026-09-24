@@ -69,6 +69,7 @@ import type {
   SubmitShareChangesResult,
   WithdrawShareChangesResult,
   McpConfigResult,
+  NoticeRow,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
   PluginStatusRecord,
@@ -98,6 +99,7 @@ import type {
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import type { SentNotices } from "./shell/useSentNotices";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   type WorkspaceSettingsResult,
@@ -9361,6 +9363,87 @@ describe("automation failure notices", () => {
       bridge.listAutomationFailures.mock.calls.length,
       "another workspace's failures repainting this one",
     ).toBe(reads);
+  });
+});
+
+describe("notices sent to you", () => {
+  function sentNotices(notices: NoticeRow[]): SentNotices {
+    return {
+      notices,
+      toast: null,
+      hideToast: vi.fn(),
+      read: vi.fn(async () => undefined),
+      dismiss: vi.fn(async () => undefined),
+    };
+  }
+  const MENTION: NoticeRow = {
+    store: "account",
+    noticeId: "mention:1",
+    kind: "mention",
+    workspaceId: WORKSPACE.workspaceId,
+    recipientShareId: null,
+    senderKind: "person",
+    senderLabel: "Ana",
+    title: "Ana mentioned you in b.md",
+    body: "",
+    target: { path: "b.md" },
+    createdAtMs: 5_000,
+    readAtMs: null,
+  };
+
+  function renderWithNotices(
+    bridge: ReturnType<typeof makeBridge>,
+    extra: { sentNotices?: SentNotices; openPathOnReady?: string; onSwitchWorkspace?: (workspace: Workspace, openPath?: string) => void },
+    workspaces: Workspace[] = [WORKSPACE],
+  ) {
+    vi.stubGlobal("dohcDesktop", bridge);
+    return render(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={WORKSPACE}
+          workspaces={workspaces}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
+          {...(extra.sentNotices ? { sentNotices: extra.sentNotices } : {})}
+          {...(extra.openPathOnReady ? { openPathOnReady: extra.openPathOnReady } : {})}
+        />
+      </>,
+    );
+  }
+
+  it("opens a notice's file in this workspace and marks it read", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([MENTION]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    expect(toggle.getAttribute("aria-label")).toBe("Notices, 1 unread");
+    await user.click(toggle);
+    await user.click(within(await screen.findByTestId("sent-notice-mention:1")).getByRole("button", { name: "Open" }));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
+  });
+
+  it("switches to the workspace that holds a notice, with its file", async () => {
+    const user = userEvent.setup();
+    const trip: Workspace = { ...WORKSPACE, workspaceId: "ws-trip", rootPath: "/home/sam/dohc/trip" };
+    const onSwitchWorkspace = vi.fn();
+    renderWithNotices(
+      makeBridge(Promise.resolve(null)),
+      { sentNotices: sentNotices([{ ...MENTION, workspaceId: "ws-trip", target: { path: "Japan/day-1.md" } }]), onSwitchWorkspace },
+      [WORKSPACE, trip],
+    );
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("sent-notice-mention:1");
+    expect(row.textContent).toContain("Japan");
+    await user.click(within(row).getByRole("button", { name: "Open" }));
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+  });
+
+  it("opens the file a notice named once the workspace it switched to is ready", async () => {
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openPathOnReady: "b.md" });
+    await screen.findByTestId("tab-b.md");
   });
 });
 

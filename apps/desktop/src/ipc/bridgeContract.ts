@@ -5890,6 +5890,7 @@ export const NoticeRef = z.object({
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
 export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+export const NOTICE_READ_BATCH_MAX = 500;
 export const NoticesChangedEvent = z.undefined();
 
 export const noticeOperations = {
@@ -5897,9 +5898,12 @@ export const noticeOperations = {
     channel: "desktop:list-notices",
     payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
   },
-  readNotice: {
-    channel: "desktop:read-notice",
-    payload: NoticeRef, guard: "trusted-sender",
+  // One notice as it opens, or every unread one for "Mark all read", in
+  // batches of at most NOTICE_READ_BATCH_MAX.
+  readNotices: {
+    channel: "desktop:read-notices",
+    payload: z.object({ notices: z.array(NoticeRef).min(1).max(NOTICE_READ_BATCH_MAX) }),
+    guard: "trusted-sender",
   },
   dismissNotice: {
     channel: "desktop:dismiss-notice",

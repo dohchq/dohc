@@ -36,14 +36,18 @@ describe("desktop user settings model", () => {
     ).toBe(false);
   });
 
-  it("rejects the removed launch-behavior section instead of keeping a dual schema", () => {
-    const obsolete = {
-      ...DEFAULT_USER_SETTINGS,
-      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
-      general: { launchBehavior: "recent" },
-    };
-
-    expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
+  it("rejects removed sections instead of keeping a dual schema", () => {
+    for (const removed of [
+      { general: { launchBehavior: "recent" } },
+      { notifications: { updates: true, agentRuns: true } },
+    ]) {
+      const obsolete = {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+        ...removed,
+      };
+      expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
+    }
   });
 
   it("adds runner defaults to settings written before runner support", () => {
@@ -51,7 +55,6 @@ describe("desktop user settings model", () => {
       version: DEFAULT_USER_SETTINGS.version,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
     };
 
     expect(DesktopUserSettings.parse(legacySettings)).toEqual({
@@ -69,7 +72,6 @@ describe("desktop user settings model", () => {
         themeMode: "dark" as const,
       },
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
     };
 
@@ -104,7 +106,6 @@ describe("desktop user settings model", () => {
       version: 1 as const,
       appearance: DEFAULT_USER_SETTINGS.appearance,
       editor: DEFAULT_USER_SETTINGS.editor,
-      notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
     };
     expect(DesktopUserSettings.parse(legacy).profile).toEqual({});
@@ -250,7 +251,6 @@ describe("desktop user settings store", () => {
           themeMode: "dark",
         },
         editor: DEFAULT_USER_SETTINGS.editor,
-        notifications: DEFAULT_USER_SETTINGS.notifications,
       }),
     );
 

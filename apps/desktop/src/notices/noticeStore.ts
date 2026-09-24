@@ -74,7 +74,7 @@ export interface NoticeStore {
   // Throws when the notice breaks the relay's rules, before keeping it.
   postNotice(input: PostNoticeInput): Promise<void>;
   list(): Promise<NoticeRow[]>;
-  mark(ref: NoticeRef, mark: NoticeMark): Promise<void>;
+  mark(refs: readonly NoticeRef[], mark: NoticeMark): Promise<void>;
   // Sends waiting posts and marks, then pulls changes. Never rejects.
   sync(): Promise<void>;
 }
@@ -710,37 +710,51 @@ export function createNoticeStore(deps: {
     });
   }
 
-  async function mark(ref: NoticeRef, mark: NoticeMark): Promise<void> {
-    const session = ref.store === "account" ? await deps.session() : null;
-    if (ref.store === "account" && !session) return;
+  // Marks every named notice in one write per list, so marking a whole list
+  // read costs one save and one pass.
+  async function mark(refs: readonly NoticeRef[], mark: NoticeMark): Promise<void> {
+    const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
-      if (!session) {
+      const localIds = new Set(refs.filter((ref) => ref.store === "local").map((ref) => ref.noticeId));
+      let localChanged = false;
+      if (localIds.size > 0) {
         const file = await loadLocal();
-        const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
-        if (!row || row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) return false;
-        if (mark === "read") row.readAtMs = nowMs();
-        else row.dismissedAtMs = nowMs();
-        await saveLocal(file);
-        return true;
+        for (const row of file.rows) {
+          if (!localIds.has(row.noticeId)) continue;
+          if (row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) continue;
+          if (mark === "read") row.readAtMs = nowMs();
+          else row.dismissedAtMs = nowMs();
+          localChanged = true;
+        }
+        if (localChanged) await saveLocal(file);
       }
-      // A mark from a list shown for an account that is no longer signed in.
-      if (!session.isCurrent()) return false;
-      const file = await loadAccount(session.account);
-      const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
-      const post = file.posts.find((waiting) => waiting.request.noticeId === ref.noticeId);
-      if ((!row && !post) || row?.dismissedAtMs != null || (mark === "read" && row?.readAtMs != null)) return false;
-      if (!queueMark(file, ref.noticeId, mark)) return false;
-      // A dismissed post that has not left never needs to. The mark still
-      // goes, in case the post is already on its way.
-      if (mark === "dismissed" && post && !post.sent) {
-        file.posts = file.posts.filter((waiting) => waiting !== post);
+      // A mark from a list shown for an account that is no longer signed in
+      // changes nothing.
+      let accountChanged = false;
+      if (session?.isCurrent()) {
+        const file = await loadAccount(session.account);
+        const rows = new Map(file.rows.map((row) => [row.noticeId, row]));
+        const posts = new Map(file.posts.map((post) => [post.request.noticeId, post]));
+        const dropped = new Set<(typeof file.posts)[number]>();
+        for (const ref of refs) {
+          if (ref.store !== "account") continue;
+          const row = rows.get(ref.noticeId);
+          const post = posts.get(ref.noticeId);
+          if ((!row && !post) || row?.dismissedAtMs != null || (mark === "read" && row?.readAtMs != null)) continue;
+          if (!queueMark(file, ref.noticeId, mark)) continue;
+          accountChanged = true;
+          // A dismissed post that has not left never needs to. The mark
+          // still goes, in case the post is already on its way.
+          if (mark === "dismissed" && post && !post.sent) dropped.add(post);
+        }
+        if (dropped.size > 0) file.posts = file.posts.filter((waiting) => !dropped.has(waiting));
+        if (accountChanged) await saveAccount(session.account, file);
       }
-      await saveAccount(session.account, file);
-      return true;
+      return { local: localChanged, account: accountChanged };
     });
-    if (!changed) return;
+    if (!changed.local && !changed.account) return;
     deps.onChanged();
-    if (session) void sync();
+    if (changed.account) void sync();
   }
 
   return { postNotice, list, mark, sync };

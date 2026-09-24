@@ -164,6 +164,8 @@ import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
+import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
@@ -526,12 +528,16 @@ export function DesktopWorkspaceShell(props: {
   workspaces: Workspace[];
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
-  onSwitchWorkspace: (workspace: Workspace) => void;
+  // A notice's Open passes the file to open once the workspace is ready.
+  onSwitchWorkspace: (workspace: Workspace, openPath?: string) => void;
   // May reject: the shell shows why, with a retry.
   onManageWorkspaces?: () => void | Promise<void>;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
+  // Notices sent to this person, owned above the shell.
+  sentNotices?: SentNotices;
+  openPathOnReady?: string;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const {
@@ -602,10 +608,11 @@ export function DesktopWorkspaceShell(props: {
   >(null);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
-  const [openShareOpen, setOpenShareOpen] = useState(false);
+  // The Open a share surface: empty, or for a share a notice named.
+  const [openShare, setOpenShare] = useState<NoticeShare | "blank" | null>(null);
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   useEffect(() => {
-    if (handoffStatus.status !== "idle") setOpenShareOpen(false);
+    if (handoffStatus.status !== "idle") setOpenShare(null);
   }, [handoffStatus.status]);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
@@ -2206,6 +2213,14 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Read once: the shell remounts for each workspace.
+  const openPathOnReady = useRef(props.openPathOnReady);
+  useEffect(() => {
+    const path = openPathOnReady.current;
+    if (!workspaceIsReady || path === undefined) return;
+    openPathOnReady.current = undefined;
+    openFile(path);
+  }, [openFile, workspaceIsReady]);
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
       openFile(
@@ -4083,6 +4098,15 @@ export function DesktopWorkspaceShell(props: {
     reloadShareProposals,
     workspaceIsReady,
   ]);
+  const sentNoticeProps = useSentNoticeProps({
+    sentNotices: props.sentNotices,
+    workspaceId,
+    workspaces: props.workspaces,
+    openFile,
+    onSwitchWorkspace: props.onSwitchWorkspace,
+    onOpenShare: setOpenShare,
+    reportShellError,
+  });
   const shareChangeNotices = useMemo(
     () =>
       shareProposals.map((proposal) => ({
@@ -4327,7 +4351,7 @@ export function DesktopWorkspaceShell(props: {
   } as const;
 
   function handleMountedShare(label: string) {
-    setOpenShareOpen(false);
+    setOpenShare(null);
     void reloadShareMounts();
     void refreshFiles().catch(() => undefined);
     setExplorerFolderExpanded("shared-with-me", true);
@@ -4424,7 +4448,7 @@ export function DesktopWorkspaceShell(props: {
     setQuickOpenOpen(false);
     setPaletteOpen(false);
     setShareTarget(null);
-    setOpenShareOpen(false);
+    setOpenShare(null);
     setLiveDocumentsWorkspaceId(null);
   }, [storeUpdateRequired]);
   const checkForStoreUpdate = useCallback(async () => {
@@ -4484,7 +4508,7 @@ export function DesktopWorkspaceShell(props: {
         workspace={props.workspace}
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
-        onOpenShare={() => setOpenShareOpen(true)}
+        onOpenShare={() => setOpenShare("blank")}
         onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
         onQuickOpen={() => setQuickOpenOpen(true)}
         workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} />}
@@ -4755,6 +4779,7 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              {...sentNoticeProps}
             />
           }
         />
@@ -6012,14 +6037,21 @@ export function DesktopWorkspaceShell(props: {
                 })}
           />
         </Overlay>
-      ) : openShareOpen ? (
-        <Overlay onClose={() => setOpenShareOpen(false)}>
+      ) : openShare ? (
+        <Overlay onClose={() => setOpenShare(null)}>
           <OpenSharedView
+            key={openShare === "blank" ? "blank" : openShare.resolvedShare.shareId}
+            {...(openShare === "blank"
+              ? {}
+              : {
+                  resolvedShare: openShare.resolvedShare,
+                  liveEditing: openShare.liveEditing,
+                })}
             onWorkspaceReady={(workspace) => {
-              setOpenShareOpen(false);
+              setOpenShare(null);
               props.onSwitchWorkspace(workspace);
             }}
-            onBack={() => setOpenShareOpen(false)}
+            onBack={() => setOpenShare(null)}
             onConnectionError={reportConnectionError}
             {...(shareView
               ? {}
