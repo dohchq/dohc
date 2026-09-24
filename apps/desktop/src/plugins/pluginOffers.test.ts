@@ -600,7 +600,6 @@ describe("addOfferedPlugin", () => {
       );
       await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
     },
-    10_000,
   );
 
   // POSIX-only mechanism (Windows already frees its claim unconditionally

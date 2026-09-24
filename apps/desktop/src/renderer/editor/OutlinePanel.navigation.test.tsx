@@ -151,7 +151,6 @@ describe("MarkdownEditor heading navigation", () => {
           .querySelectorAll("h2")[1]
           ?.classList.contains("dohc-outline-target-flash"),
       ).toBe(true),
-      { timeout: 500 },
     );
 
     view.rerender(

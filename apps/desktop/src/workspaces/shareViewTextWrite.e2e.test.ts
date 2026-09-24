@@ -12,6 +12,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
@@ -116,7 +117,7 @@ async function harness(
     sessions,
     routes,
     allowInsecureLoopbackForTests: true,
-    requestDeadlineMs: 10_000,
+    requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
   });
   const receivedShareEngine = createReceivedShareEngineAccess({
     sessions: () => sessions,

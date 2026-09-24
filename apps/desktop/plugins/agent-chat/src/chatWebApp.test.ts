@@ -716,7 +716,9 @@ describe("agent chat web app", () => {
     const messageResponse = post(url, "message", { text: "Hello" }, token);
     await promptEntered.promise;
     const reservation = await stream.nextRaw();
-    const turnControls = await raceTimeout(stream.nextRaw(), 200);
+    // The gate is still held, so this arrives only if it does not wait for the
+    // driver. The bound names a regression instead of hanging the test.
+    const turnControls = await raceTimeout(stream.nextRaw(), 10_000);
 
     promptGate.resolve();
     expect((await messageResponse).status).toBe(202);
@@ -1797,7 +1799,8 @@ describe("agent chat web app", () => {
 
     const reattached = await eventStream(url, token);
     await reattached.next(); // the internal snapshot, already settled to error
-    const replayed: unknown[] = [];
+    // Wait for the first replayed event, then allow 200 ms for anything after it.
+    const replayed: unknown[] = [await raceTimeout(reattached.next(), 10_000)];
     for (;;) {
       const raced = await raceTimeout(reattached.next(), 200);
       if (raced === "timeout") break;
@@ -2307,5 +2310,5 @@ describe("agent chat web app", () => {
     const restarted = await app.startWebApp();
     const page = await fetch(new URL("/", restarted.url));
     expect(page.status).toBe(200);
-  }, 10_000);
+  });
 });

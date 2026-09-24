@@ -257,7 +257,7 @@ describe("dohc's Codex driver, as a plugin", () => {
       installed: false,
       errorMessage: "Probe timed out.",
     });
-  }, 20_000);
+  });
 
   it("starts a thread in the workspace with dohc's MCP server", async () => {
     const fixture = await startCodexPlugin();

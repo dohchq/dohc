@@ -140,7 +140,6 @@ it("reports a failed projection instead of copying the readable half", async () 
       expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
         "Copied",
       ),
-    { timeout: 5_000 },
   );
   const copied = await navigator.clipboard.readText();
   expect(copied).toContain("# My Heading");

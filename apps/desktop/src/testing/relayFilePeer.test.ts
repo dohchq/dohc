@@ -19,6 +19,7 @@ import { requireEngineBinaryOrSkip } from "./engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
 } from "./realDaemonWorkspaceSessions";
 import { RelayFilePeer } from "./relayFilePeer";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -336,7 +337,7 @@ describe("RelayFilePeer receiver contract", () => {
           sessions,
           routes,
           allowInsecureLoopbackForTests: true,
-          requestDeadlineMs: 15_000,
+          requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
         }).bind({
           workspaceId,
           rootPath,

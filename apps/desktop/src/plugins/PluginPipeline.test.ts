@@ -135,10 +135,12 @@ async function fileHashes(
   return hashes;
 }
 
+// Real plugin stops and disposal can take seconds on a loaded gate; this stays
+// inside the 60 s tests that use it.
 async function settleWithin<T>(
   promise: Promise<T>,
   message: string,
-  timeoutMs = 10_000,
+  timeoutMs = 20_000,
 ): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {

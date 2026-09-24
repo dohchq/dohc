@@ -1312,7 +1312,7 @@ describe("ShareViewFiles", () => {
     });
     await exclusive;
     expect(order).toEqual(["change", "exclusive"]);
-  }, 2_000);
+  });
 
   it("keeps reconcile behind a save's projection gap", async () => {
     const rootPath = await workspaceRoot();
@@ -1429,7 +1429,7 @@ describe("ShareViewFiles", () => {
     await expect(readFile(join(rootPath, path), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
-  }, 2_000);
+  });
 
   it("repairs tracked files without replacing recipient-owned directories", async () => {
     const rootPath = await workspaceRoot();

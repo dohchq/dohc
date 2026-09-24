@@ -312,7 +312,7 @@ describe("dohc's Claude Code driver, as a plugin", () => {
       installed: false,
       errorMessage: "Probe timed out.",
     });
-  }, 20_000);
+  });
 
   it("starts Claude in the workspace, with dohc holding the permissions", async () => {
     const fixture = await startClaudePlugin();

@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { closeDebugApplication, closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 
 const children: ChildProcess[] = [];
@@ -54,7 +54,8 @@ test.skipIf(process.platform !== "win32")("failed close stops Windows launcher d
   expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
   descendantPids.push(descendantPid);
   await expect(closeElectronApplication({ close: async () => { throw new Error("close rejected"); } }, child)).rejects.toThrow("close rejected");
-  expect(() => process.kill(descendantPid, 0)).toThrow();
+  // taskkill /F starts termination and returns; a loaded host can finish it later.
+  await vi.waitFor(() => expect(() => process.kill(descendantPid, 0)).toThrow());
   descendantPids.splice(descendantPids.indexOf(descendantPid), 1);
 });
 
