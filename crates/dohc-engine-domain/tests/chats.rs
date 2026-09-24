@@ -944,6 +944,10 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             "automation id must be collection:<path>#<id>",
         ),
         (
+            automated("m1", named("collection:c:Tasks#stamp", 1)),
+            "automation id must be collection:<path>#<id>",
+        ),
+        (
             automated("m1", named("collection:Trip\\Tasks#stamp", 1)),
             "automation id must be collection:<path>#<id>",
         ),
@@ -1156,6 +1160,15 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             "{payload}"
         );
     }
+
+    // Only a leading drive letter is refused: a folder name may hold a colon.
+    let colon = StartChannelThread {
+        body: "Hi".to_owned(),
+        ..automated("m-colon", named("collection:Trip/Budget: Q3#stamp", 1))
+    };
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(&colon, &NO_FAULTS)
+        .expect("a folder name may hold a colon");
 }
 
 #[test]

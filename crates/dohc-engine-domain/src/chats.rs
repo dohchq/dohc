@@ -1626,15 +1626,16 @@ fn normalize_message_automation(
     };
     let id = automation.automation_id.as_str();
     // The path reaches the renderer, which opens files under it, so it must
-    // name a folder inside the workspace: relative, with no empty, `.`, or
-    // `..` segment and no backslash.
+    // name a folder inside the workspace by the bridge's rule
+    // (`isSafeRelativePath`): relative, with no drive letter, no empty, `.`,
+    // or `..` segment, and no backslash. A colon elsewhere is a folder name.
     let named = id
         .strip_prefix("collection:")
         .and_then(|rest| rest.rsplit_once('#'))
         .is_some_and(|(path, local)| {
             !local.is_empty()
                 && !path.contains('\\')
-                && !path.contains(':')
+                && !matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
                 && path
                     .split('/')
                     .all(|segment| !matches!(segment, "" | "." | ".."))
