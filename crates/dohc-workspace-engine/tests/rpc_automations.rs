@@ -1117,3 +1117,178 @@ async fn a_record_an_automation_writes_through_rpc_is_added_as_its_change() {
     assert_eq!(added["change"]["actorKind"], json!("automation"));
     assert_eq!(added["depth"], json!(2));
 }
+
+fn claimed_events(
+    notices: &mut tokio::sync::mpsc::Receiver<dohc_workspace_engine::EngineEventNotice>,
+) -> Vec<Value> {
+    let mut claimed = Vec::new();
+    while let Ok(notice) = notices.try_recv() {
+        if notice.name == AUTOMATION_CLAIMED_EVENT {
+            claimed.push(notice.payload);
+        }
+    }
+    claimed
+}
+
+/// A Group subscription made through RPC claims each matching message a
+/// local write stores, announces each claim, and serves the message with
+/// it. `chats.messages.get` reads the whole message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_messages_written_here_claim_through_rpc() {
+    const TASK: &str = "collection:Trip/Tasks#task";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let service = Arc::new(EngineService::new());
+    let mut notices = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                    "captureMode": "none",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "trip", "name": "Trip", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+
+    let mixed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.subscribe",
+        json!({ "automationId": TASK, "groupId": "trip", "path": "Trip", "kinds": ["added"] }),
+    )
+    .await;
+    assert_eq!(
+        mixed.code,
+        ErrorCode::InvalidParams,
+        "one shape or the other"
+    );
+    let subscribed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.subscribe",
+        json!({ "automationId": TASK, "groupId": "trip", "startsWith": "/task" }),
+    )
+    .await;
+    assert_eq!(subscribed, json!({ "subscribed": true }));
+
+    claimed_events(&mut notices);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "trip",
+            "threadId": "t1",
+            "messageId": "m1",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "ada",
+            "body": "/task Buy tickets",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    let claimed = claimed_events(&mut notices);
+    assert_eq!(claimed.len(), 1, "{claimed:?}");
+    assert_eq!(claimed[0]["trigger"], json!({ "key": "message:m1" }));
+    assert_eq!(claimed[0]["recordId"], Value::Null);
+    assert_eq!(claimed[0]["collectionPath"], json!("Trip/Tasks"));
+    assert_eq!(claimed[0]["workspaceId"], json!(WORKSPACE_ID));
+
+    let send = async |id: &mut u64, message_id: &str, body: &str| {
+        call(
+            &transport,
+            &handle,
+            id,
+            "chats.messages.send",
+            json!({
+                "threadId": "t1",
+                "messageId": message_id,
+                "parentMessageId": "m1",
+                "authorKind": "human",
+                "authorDisplayName": "Ana",
+                "body": body,
+                "nowMs": 30,
+            }),
+        )
+        .await
+    };
+    send(&mut id, "m2", "/task Pack").await;
+    assert_eq!(claimed_events(&mut notices).len(), 1, "a matching reply");
+    send(&mut id, "m3", "hello").await;
+    assert!(claimed_events(&mut notices).is_empty(), "no starting text");
+
+    let served = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.claimNext",
+        json!({ "automationIdPrefix": "collection:" }),
+    )
+    .await;
+    assert_eq!(
+        served["change"],
+        json!({
+            "kind": "message",
+            "authorOriginId": null,
+            "actorKind": "human",
+            "onBehalfOf": "ada",
+            "fields": [],
+            "fieldsOmitted": 0,
+            "message": {
+                "id": "m1",
+                "threadId": "t1",
+                "groupId": "trip",
+                "lane": "posts",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "authorUserId": "ada",
+                "createdAtMs": 20,
+                "body": "/task Buy tickets",
+            },
+        })
+    );
+    let read = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.get",
+        json!({ "messageId": "m1" }),
+    )
+    .await;
+    assert_eq!(read["message"]["body"], json!("/task Buy tickets"));
+
+    let unsubscribed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.unsubscribe",
+        json!({ "automationId": TASK, "groupId": "trip" }),
+    )
+    .await;
+    assert_eq!(unsubscribed, json!({ "unsubscribed": true }));
+    send(&mut id, "m4", "/task Again").await;
+    assert!(claimed_events(&mut notices).is_empty(), "unsubscribed");
+}

@@ -1422,6 +1422,221 @@ fn another_computers_automation_message_applies_without_its_automation() {
     assert_eq!(replayed, ("automation".to_owned(), "Ana".to_owned()));
 }
 
+fn applied_claims(
+    outcome: Result<ApplyOutcome<Vec<dohc_engine_domain::AutomationClaim>>, SyncError>,
+) -> Vec<dohc_engine_domain::AutomationClaim> {
+    match outcome.expect("apply") {
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(claims),
+            refusals,
+            sharing_declined,
+        } if refusals.is_empty() && sharing_declined.is_empty() => claims,
+        other => panic!("expected an applied message: {other:?}"),
+    }
+}
+
+/// Subscribe `collection:Trip/Tasks#task` to the imported Group's messages
+/// that start with `/task`.
+fn subscribe_imported_group(engine: &mut EngineStore) {
+    let channel_id: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads WHERE thread_id = 'thread-imported'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("imported Group");
+    dohc_engine_domain::subscribe_automation_group(
+        engine,
+        "ws",
+        &dohc_engine_domain::AutomationGroupSubscription {
+            automation_id: "collection:Trip/Tasks#task".to_owned(),
+            channel_id,
+            starts_with: Some("/task".to_owned()),
+        },
+        1,
+        &NoFaults,
+    )
+    .expect("subscribe");
+}
+
+/// Another member's message in the imported Group.
+fn group_message(
+    origin: &str,
+    seq: i64,
+    message_id: &str,
+    thread_id: &str,
+    author_kind: &str,
+    body: &str,
+) -> ReplicationEnvelope {
+    let mut payload = json!({
+        "messageId": message_id,
+        "threadId": thread_id,
+        "authorKind": author_kind,
+        "authorDisplayName": "Ana",
+        "authorUserId": "ana",
+        "body": body,
+        "createdAtMs": 30 + seq,
+    });
+    if author_kind == "automation" {
+        payload["authorOwnerDisplayName"] = json!("Ana");
+    }
+    envelope(origin, seq, "chat.message.append", payload)
+}
+
+/// A Group message claims in the transaction that applies it, dated when it
+/// was written, however it arrives: from the relay, again from a second
+/// lane, or parked until its thread lands. Another computer's automation
+/// arrives without its depth and counts as depth 1.
+#[test]
+fn an_applied_group_message_claims_once_however_it_arrives() {
+    use dohc_engine_domain::{AutomationChangeKind, AutomationTrigger, ChangeActorKind};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    subscribe_imported_group(&mut engine);
+
+    let member = group_message(
+        "peer",
+        3,
+        "m-ana",
+        "thread-imported",
+        "human",
+        " /task Buy tickets",
+    );
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &member, &NoFaults));
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].automation_id, "collection:Trip/Tasks#task");
+    assert_eq!(
+        claims[0].trigger,
+        AutomationTrigger::Key {
+            key: "message:m-ana".to_owned()
+        }
+    );
+    assert_eq!(claims[0].record_id, None);
+    assert_eq!(claims[0].created_at_ms, 33, "dated when it was written");
+    assert_eq!(claims[0].depth, 0);
+    assert_eq!(claims[0].change.kind, AutomationChangeKind::Message);
+    assert_eq!(claims[0].change.actor_kind, Some(ChangeActorKind::Human));
+    assert_eq!(claims[0].change.on_behalf_of.as_deref(), Some("ana"));
+
+    let second_lane = group_message(
+        "share-lane",
+        0,
+        "m-ana",
+        "thread-imported",
+        "human",
+        " /task Buy tickets",
+    );
+    assert!(
+        applied_claims(apply_chat_envelope(&mut engine, &second_lane, &NoFaults)).is_empty(),
+        "the same message from a second lane claims nothing"
+    );
+    let other = group_message("peer", 4, "m-hello", "thread-imported", "human", "hello");
+    assert!(applied_claims(apply_chat_envelope(&mut engine, &other, &NoFaults)).is_empty());
+
+    let automated = group_message(
+        "peer",
+        5,
+        "m-auto",
+        "thread-imported",
+        "automation",
+        "/task From Ana's automation",
+    );
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &automated, &NoFaults));
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].depth, 1);
+    assert_eq!(claims[0].change.author_origin_id, None);
+    assert_eq!(
+        claims[0].change.actor_kind,
+        Some(ChangeActorKind::Automation)
+    );
+
+    let early = group_message(
+        "early-peer",
+        0,
+        "m-early",
+        "late-thread",
+        "human",
+        "/task Later",
+    );
+    assert!(applied_claims(apply_chat_envelope(&mut engine, &early, &NoFaults)).is_empty());
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 25,
+            "channelSlug": "imported"
+        }),
+    );
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &thread, &NoFaults));
+    assert_eq!(
+        claims
+            .iter()
+            .map(|claim| claim.trigger.clone())
+            .collect::<Vec<_>>(),
+        vec![AutomationTrigger::Key {
+            key: "message:m-early".to_owned()
+        }],
+        "the parked message claims when its thread lands"
+    );
+}
+
+/// A relay pass hands the service every claim its applies took, for the
+/// post-commit wake.
+#[test]
+fn a_relay_pass_reports_the_group_message_claims_it_applied() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    imported_chat_fixture(&mut engine, "peer");
+    subscribe_imported_group(&mut engine);
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![
+                group_message("peer", 3, "m-1", "thread-imported", "human", "/task One"),
+                group_message("peer", 4, "m-2", "thread-imported", "human", "hello"),
+            ],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        automation_claims,
+        ..
+    } = outcome
+    else {
+        panic!("expected a complete pass: {outcome:?}");
+    };
+    assert_eq!(applied, 2);
+    assert_eq!(
+        automation_claims
+            .iter()
+            .map(|claim| claim.trigger.clone())
+            .collect::<Vec<_>>(),
+        vec![dohc_engine_domain::AutomationTrigger::Key {
+            key: "message:m-1".to_owned()
+        }]
+    );
+}
+
 #[test]
 fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     let (_scratch, _path, mut engine) = open_store();
