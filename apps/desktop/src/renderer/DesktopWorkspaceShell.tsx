@@ -4275,8 +4275,8 @@ export function DesktopWorkspaceShell(props: {
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
   const saveUserSettingsFromChats = useCallback(
-    async (settings: DesktopUserSettings) => {
-      await bridge().setUserSettings({ settings });
+    async (settings: DesktopUserSettings, base: DesktopUserSettings) => {
+      await bridge().setUserSettings({ settings, base });
     },
     [],
   );

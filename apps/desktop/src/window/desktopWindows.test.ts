@@ -93,7 +93,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     currentUpdateState: vi.fn(() => ({ canInstall })),
     stateDir: () => "state",
     readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
-    writeUserSettingsFile: vi.fn((directory, value) => write(directory, value)),
+    writeUserSettingsFile: vi.fn((directory, value, base) => write(directory, value, base)),
     createMainWindow: vi.fn((options) => {
       createdOptions.push(options);
       const window = new Window(); all.push(window); return window.native;

@@ -128,7 +128,8 @@ export function createSettingsIpc<
     registerHandler(CHANNELS.setUserSettings, async (event, payload) => {
       assertTrustedSender(event);
       const input = SetUserSettingsPayload.parse(payload);
-      return saveUserSettings(() => writeUserSettingsFile(stateDir(), input.settings));
+      return saveUserSettings(() =>
+        writeUserSettingsFile(stateDir(), input.settings, input.base));
     });
 
     registerHandler(CHANNELS.resetUserSettings, async (event) => {

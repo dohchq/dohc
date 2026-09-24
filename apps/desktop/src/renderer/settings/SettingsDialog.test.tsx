@@ -277,6 +277,7 @@ describe("SettingsDialog", () => {
 
     await user.click(await screen.findByRole("radio", { name: "Dark" }));
     expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      base: DEFAULT_USER_SETTINGS,
       settings: expect.objectContaining({
         appearance: expect.objectContaining({ themeMode: "dark" }),
       }),
@@ -453,6 +454,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({ profile: { preferredName: "Sam" } }),
       }),
     );
@@ -527,6 +529,7 @@ describe("SettingsDialog", () => {
       ),
     );
     expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      base: expect.any(Object),
       settings: expect.objectContaining({
         appearance: expect.objectContaining({ themeMode: "light" }),
       }),
@@ -621,6 +624,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: {
             command: "codex exec --sandbox workspace-write",
@@ -662,6 +666,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: {
             // Persisted commands are trimmed; the draft's leading whitespace
@@ -696,6 +701,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        base: expect.any(Object),
         settings: expect.objectContaining({
           runner: expect.objectContaining({ command: "claude -p" }),
         }),

@@ -23,7 +23,7 @@ const state = WorkspaceUiState.parse({
   version: 2, activeView: "explorer", sidebarVisible: true, sidebarWidth: 320,
   editorGroups: [{ id: "main", tabs: [], activeTab: null, size: 1 }], activeEditorGroup: "main",
 });
-const settingsPayload = { settings: DEFAULT_USER_SETTINGS };
+const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS };
 const workspacePayload = { workspaceId: "workspace-a" };
 const patchPayload = { ...workspacePayload, patch: { agents: { mcpAutoStart: false } } };
 const uiPayload = { ...workspacePayload, state };
@@ -110,7 +110,7 @@ async function harness() {
   const zoom = createZoomMutation({
     enqueue: enqueueUserSettingsWrite,
     read: () => userSettingsStore.readCachedUserSettingsFile(stateDirectory),
-    write: value => userSettingsStore.writeUserSettingsFile(stateDirectory, value),
+    write: (value, base) => userSettingsStore.writeUserSettingsFile(stateDirectory, value, base),
     apply: applyZoomLevelToWindows,
   });
   capability.registerSettingsIpcHandlers();
@@ -175,7 +175,7 @@ describe("registered settings IPC", () => {
     for (const channel of [CHANNELS.setUserSettings, ...workspaceRequests.map(([channel]) => channel)]) {
       await expect(h.invoke(channel, {})).rejects.toThrow();
     }
-    await expect(h.invoke(CHANNELS.setUserSettings, { settings: { ...DEFAULT_USER_SETTINGS, runner: { command: " ", enabled: true, timeoutMinutes: 30 } } })).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.setUserSettings, { settings: { ...DEFAULT_USER_SETTINGS, runner: { command: " ", enabled: true, timeoutMinutes: 30 } }, base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.setWorkspaceUiState, { ...uiPayload, state: { ...state, sidebarWidth: -1 } })).rejects.toThrow();
     for (const port of [writes, workspaceReads, workspaceWrites, resets, uiReads, uiWrites]) expect(port).not.toHaveBeenCalled();
     expect(h.effects).toEqual([]);
@@ -185,7 +185,7 @@ describe("registered settings IPC", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "default" });
     const settings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 } };
-    await expect(h.invoke(CHANNELS.setUserSettings, { settings })).resolves.toEqual({ settings, source: "stored" });
+    await expect(h.invoke(CHANNELS.setUserSettings, { settings, base: DEFAULT_USER_SETTINGS })).resolves.toEqual({ settings, source: "stored" });
     expect(h.preferredName()).toBe("Sam");
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual({ settings, source: "stored" });
     await expect(h.invoke(CHANNELS.resetUserSettings)).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
@@ -206,16 +206,16 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const reached = deferred(), release = deferred();
     const realWrite = userSettingsStore.writeUserSettingsFile;
-    const writes = vi.spyOn(userSettingsStore, "writeUserSettingsFile").mockImplementationOnce(async (dir, settings) => {
-      reached.resolve(); await release.promise; return realWrite(dir, settings);
+    const writes = vi.spyOn(userSettingsStore, "writeUserSettingsFile").mockImplementationOnce(async (dir, settings, base) => {
+      reached.resolve(); await release.promise; return realWrite(dir, settings, base);
     });
     const firstSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "First" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 } };
     const nextSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Next" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: -2 } };
-    const first = h.invoke(CHANNELS.setUserSettings, { settings: firstSettings });
+    const first = h.invoke(CHANNELS.setUserSettings, { settings: firstSettings, base: DEFAULT_USER_SETTINGS });
     const pending = [first];
     try {
       await reached.promise;
-      const next = h.invoke(CHANNELS.setUserSettings, { settings: nextSettings });
+      const next = h.invoke(CHANNELS.setUserSettings, { settings: nextSettings, base: DEFAULT_USER_SETTINGS });
       const zoom = h.zoom("in");
       const reset = h.invoke(CHANNELS.resetUserSettings);
       pending.push(next, zoom, reset);
@@ -285,7 +285,7 @@ describe("registered settings IPC", () => {
     h.refreshDispatchTray.mockImplementationOnce(async () => { trayReached.resolve(); await trayRelease.promise; });
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
     const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
-    const result = h.invoke(CHANNELS.setUserSettings, { settings });
+    const result = h.invoke(CHANNELS.setUserSettings, { settings, base: DEFAULT_USER_SETTINGS });
     try {
       await trayReached.promise;
       expect(h.scanWorkspace).not.toHaveBeenCalled();
@@ -310,7 +310,7 @@ describe("registered settings IPC", () => {
     const error = new Error("tray unavailable");
     h.refreshDispatchTray.mockRejectedValueOnce(error);
     const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
-    await expect(h.invoke(CHANNELS.setUserSettings, { settings })).rejects.toBe(error);
+    await expect(h.invoke(CHANNELS.setUserSettings, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(2);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
@@ -319,7 +319,7 @@ describe("registered settings IPC", () => {
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
     const h = await harness();
     const path = join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE);
-    await h.invoke(CHANNELS.setUserSettings, { settings: { ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 } } });
+    await h.invoke(CHANNELS.setUserSettings, { settings: { ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 } }, base: DEFAULT_USER_SETTINGS });
     h.broadcastUserSettings.mockClear();
     h.applyZoomLevelToWindows.mockClear();
     h.refreshDispatchTray.mockClear();

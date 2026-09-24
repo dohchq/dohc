@@ -5445,8 +5445,11 @@ export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
 export type DesktopUserSettings = DesktopUserSettingsType;
 export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
+// `base` is the settings the caller changed. Main writes only the difference,
+// so a caller that has not yet seen an edit made in the file cannot undo it.
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
+  base: DesktopUserSettingsSchema,
 }).strict();
 export type SetUserSettingsPayload = z.infer<typeof SetUserSettingsPayload>;
 

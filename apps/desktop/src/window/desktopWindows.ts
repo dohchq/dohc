@@ -229,7 +229,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   const mutateWindowZoom = createZoomMutation({
     enqueue: enqueueUserSettingsWrite,
     read: () => readCachedUserSettingsFile(stateDir()),
-    write: (settings) => writeUserSettingsFile(stateDir(), settings),
+    write: (settings, base) => writeUserSettingsFile(stateDir(), settings, base),
     apply: applyZoomLevelToWindows,
   });
 

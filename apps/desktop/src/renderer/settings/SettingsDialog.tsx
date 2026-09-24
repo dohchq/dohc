@@ -287,7 +287,7 @@ export function SettingsDialog(props: {
     markSaving();
     setError(null);
     try {
-      const saved = await bridge().setUserSettings({ settings });
+      const saved = await bridge().setUserSettings({ settings, base: previous.settings });
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(saved);
       markSaved();

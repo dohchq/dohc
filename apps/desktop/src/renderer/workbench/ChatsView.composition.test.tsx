@@ -266,7 +266,7 @@ describe("ChatsView My agent", () => {
       ...DEFAULT_USER_SETTINGS,
       profile: { ...DEFAULT_USER_SETTINGS.profile, agentName: "Nova" },
       runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
-    });
+    }, DEFAULT_USER_SETTINGS);
   });
 });
 

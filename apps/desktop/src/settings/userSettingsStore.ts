@@ -145,14 +145,16 @@ async function commitUserSettings(
 }
 
 /**
- * Saves settings into the file as it is now. Only the settings that changed
- * are written; keys dohc does not know, and values it could not use and did
- * not change, stay as the person wrote them. A file dohc cannot use is
+ * Saves a change into the file as it is now. Only the settings that differ
+ * between `base`, what the caller changed, and `settings` are written. An
+ * edit made in the file since the caller read it stays, and so do keys dohc
+ * does not know and values it could not use. A file dohc cannot use is
  * refused rather than replaced: it may be a person's edit in progress.
  */
 export async function writeUserSettingsFile(
   dir: string,
   settings: DesktopUserSettings,
+  base: DesktopUserSettings,
 ): Promise<DesktopUserSettingsResult> {
   const root = resolve(dir);
   const next = DesktopUserSettings.parse(settings);
@@ -160,10 +162,7 @@ export async function writeUserSettingsFile(
   if (onDisk.problem !== null) {
     throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
   }
-  return commitUserSettings(
-    root,
-    onDisk.raw ? overlaySettings(onDisk.raw, onDisk.result.settings, next) : next,
-  );
+  return commitUserSettings(root, overlaySettings(onDisk.raw ?? onDisk.result.settings, base, next));
 }
 
 /** Replaces the whole file. Reset user settings is the one caller. */

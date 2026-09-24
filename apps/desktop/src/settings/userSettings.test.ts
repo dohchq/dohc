@@ -200,7 +200,7 @@ describe("desktop user settings store", () => {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
     };
-    await writeUserSettingsFile(root, settings);
+    await replaceUserSettingsFile(root, settings);
     expect(await readUserSettingsFile(root)).toEqual({
       settings,
       source: "stored",
@@ -219,7 +219,7 @@ describe("desktop user settings store", () => {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "light" as const },
     };
-    await writeUserSettingsFile(root, first);
+    await replaceUserSettingsFile(root, first);
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
 
     await writeFile(
@@ -228,7 +228,7 @@ describe("desktop user settings store", () => {
     );
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
 
-    await writeUserSettingsFile(root, second);
+    await writeUserSettingsFile(root, second, first);
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(second);
   });
 
@@ -349,7 +349,7 @@ describe("desktop user settings store", () => {
     const saved = await writeUserSettingsFile(root, {
       ...current.settings,
       appearance: { ...current.settings.appearance, zoomLevel: 2 },
-    });
+    }, current.settings);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       appearance: { themeMode: "dark", zoomLevel: 2 },
       editor: { fontSize: 99 },
@@ -367,15 +367,32 @@ describe("desktop user settings store", () => {
     await writeUserSettingsFile(root, {
       ...saved.settings,
       editor: { ...saved.settings.editor, fontSize: 16 },
-    });
+    }, saved.settings);
     expect(JSON.parse(await readFile(path, "utf8")).editor).toEqual({ fontSize: 16 });
+  });
+
+  it("keeps an edit made in the file after the caller read it", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    const seen = (await readUserSettingsFile(root)).settings;
+    // The person switches to dark in the file before Settings hears of it.
+    await writeFile(path, JSON.stringify({
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+    }));
+    const saved = await writeUserSettingsFile(root, {
+      ...seen,
+      appearance: { ...seen.appearance, zoomLevel: 1 },
+    }, seen);
+    expect(saved.settings.appearance).toEqual({ themeMode: "dark", zoomLevel: 1 });
   });
 
   it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
     await writeFile(path, "{ \"appearance\": ");
-    await expect(writeUserSettingsFile(root, DEFAULT_USER_SETTINGS)).rejects.toThrow(
+    await expect(writeUserSettingsFile(root, DEFAULT_USER_SETTINGS, DEFAULT_USER_SETTINGS)).rejects.toThrow(
       `dohc did not save settings. dohc could not use ${path}: it is not valid JSON. Fix the file, or select Reset user in Advanced to replace it.`,
     );
     expect(await readFile(path, "utf8")).toBe("{ \"appearance\": ");
@@ -393,7 +410,7 @@ describe("desktop user settings store", () => {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
     };
-    await writeUserSettingsFile(root, dark);
+    await writeUserSettingsFile(root, dark, DEFAULT_USER_SETTINGS);
     expect(await reloadUserSettingsFile(root)).toBeNull();
 
     await writeFile(path, JSON.stringify({ appearance: { themeMode: "light" } }));
@@ -434,7 +451,7 @@ describe("desktop user settings store", () => {
   it("refuses to read a symlinked user settings file", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const outside = await createTestScratch("dohc-user-settings-");
-    await writeUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
     const outsideSettings = join(outside, USER_SETTINGS_FILE);
     await writeFile(
       outsideSettings,
