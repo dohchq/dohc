@@ -14,8 +14,8 @@ use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 use saphyr::{
-    AnnotatedMappingOwned, AnnotatedNodeOwned, LoadableYamlNode, MappingOwned, MarkedYamlOwned,
-    ScalarOwned, ScalarStyle, Tag, Yaml, YamlDataOwned, YamlOwned,
+    AnnotatedMappingOwned, AnnotatedNodeOwned, LoadableYamlNode, MappingOwned, ScalarOwned,
+    ScalarStyle, Tag, Yaml, YamlDataOwned, YamlOwned,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1206,7 +1206,10 @@ pub fn is_collection_markdown_path(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(".md"))
 }
 
-fn is_frontmatter_delimiter(line: &str) -> bool {
+/// Whether a line opens or closes a Markdown frontmatter block: `---`, then
+/// only spaces or tabs.
+#[must_use]
+pub fn is_frontmatter_delimiter(line: &str) -> bool {
     line.trim_end_matches(['\r', '\n'])
         .strip_prefix("---")
         .is_some_and(|suffix| {
@@ -1317,8 +1320,10 @@ impl<'input> LoadableYamlNode<'input> for DuplicateYamlNode {
 
 fn duplicate_yaml_key_text(value: &DuplicateYamlNode) -> Option<String> {
     match &value.data {
-        YamlDataOwned::Value(ScalarOwned::String(value))
-        | YamlDataOwned::Representation(value, _, _) => Some(value.clone()),
+        YamlDataOwned::Representation(text, style, tag) => Some(frontmatter_key_text(
+            frontmatter_scalar(text, *style, tag.as_ref()).value,
+        )),
+        YamlDataOwned::Value(ScalarOwned::String(value)) => Some(value.clone()),
         YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
         YamlDataOwned::Value(ScalarOwned::FloatingPoint(value)) => Some(value.to_string()),
         YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
@@ -1409,160 +1414,246 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn non_finite_yaml_number(value: f64) -> Option<&'static str> {
-    if value.is_nan() {
-        Some(".nan")
-    } else if value == f64::INFINITY {
-        Some(".inf")
-    } else if value == f64::NEG_INFINITY {
-        Some("-.inf")
+/// One frontmatter scalar as the value model reads it. The rules follow the
+/// desktop's loader in `packages/ydoc-projection/src/import-export.ts`:
+/// js-yaml's core schema, with `_` allowed between integer digits. A scalar
+/// the model cannot hold keeps its text: a non-finite float, an integer
+/// outside int64, or a value its explicit tag cannot resolve.
+struct FrontmatterScalar {
+    value: Value,
+    non_finite: bool,
+}
+
+enum ResolvedScalar {
+    Value(Value),
+    /// A number the value model cannot hold.
+    Unrepresentable {
+        non_finite: bool,
+    },
+    NotResolved,
+}
+
+fn frontmatter_scalar(text: &str, style: ScalarStyle, tag: Option<&Tag>) -> FrontmatterScalar {
+    let resolved = match tag {
+        Some(tag) if !yaml_tag_is_supported(tag) => ResolvedScalar::NotResolved,
+        Some(tag) => match tag.suffix.as_str() {
+            "null" => resolve_yaml_null(text),
+            "bool" => resolve_yaml_bool(text),
+            "int" => resolve_yaml_int(text, true),
+            "float" => resolve_yaml_float(text),
+            _ => ResolvedScalar::NotResolved,
+        },
+        None if style == ScalarStyle::Plain => resolve_plain_yaml_scalar(text),
+        None => ResolvedScalar::NotResolved,
+    };
+    let (value, non_finite) = match resolved {
+        ResolvedScalar::Value(value) => (value, false),
+        ResolvedScalar::Unrepresentable { non_finite } => {
+            (Value::String(text.to_owned()), non_finite)
+        }
+        ResolvedScalar::NotResolved => (Value::String(text.to_owned()), false),
+    };
+    FrontmatterScalar { value, non_finite }
+}
+
+/// Whether a plain scalar reads back as the same string. A presenter must
+/// quote any other string, including one that names a number the value model
+/// keeps as text, such as `.nan` or an integer outside int64.
+#[must_use]
+pub fn plain_yaml_scalar_is_string(text: &str) -> bool {
+    matches!(resolve_plain_yaml_scalar(text), ResolvedScalar::NotResolved)
+}
+
+fn resolve_plain_yaml_scalar(text: &str) -> ResolvedScalar {
+    for resolve in [
+        resolve_yaml_null,
+        resolve_yaml_bool,
+        |text: &str| resolve_yaml_int(text, false),
+        resolve_yaml_float,
+    ] {
+        let resolved = resolve(text);
+        if !matches!(resolved, ResolvedScalar::NotResolved) {
+            return resolved;
+        }
+    }
+    ResolvedScalar::NotResolved
+}
+
+fn yaml_tag_is_supported(tag: &Tag) -> bool {
+    tag.is_yaml_core_schema()
+        && matches!(
+            tag.suffix.as_str(),
+            "str" | "seq" | "map" | "null" | "bool" | "int" | "float"
+        )
+}
+
+fn resolve_yaml_null(text: &str) -> ResolvedScalar {
+    if matches!(text, "" | "~" | "null" | "Null" | "NULL") {
+        ResolvedScalar::Value(Value::Null)
     } else {
-        None
+        ResolvedScalar::NotResolved
     }
 }
 
-fn yaml_value_is_non_finite_number(value: &YamlOwned) -> bool {
+fn resolve_yaml_bool(text: &str) -> ResolvedScalar {
+    match text {
+        "true" | "True" | "TRUE" => ResolvedScalar::Value(Value::Bool(true)),
+        "false" | "False" | "FALSE" => ResolvedScalar::Value(Value::Bool(false)),
+        _ => ResolvedScalar::NotResolved,
+    }
+}
+
+/// js-yaml's core integer: decimal with an optional sign, or `0o`/`0x`. An
+/// explicit `!!int` also reads `0b` and a sign before a radix prefix. A `_`
+/// may separate two digits.
+fn resolve_yaml_int(text: &str, explicit: bool) -> ResolvedScalar {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'_'
+            && !(index > 0
+                && bytes[index - 1].is_ascii_hexdigit()
+                && bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit))
+        {
+            return ResolvedScalar::NotResolved;
+        }
+    }
+    let normalized = text.replace('_', "");
+    let unsigned = normalized.strip_prefix(['-', '+']).unwrap_or(&normalized);
+    let signed = unsigned.len() != normalized.len();
+    let (radix, digits) = [("0b", 2), ("0o", 8), ("0x", 16)]
+        .into_iter()
+        .find_map(|(prefix, radix)| unsigned.strip_prefix(prefix).map(|digits| (radix, digits)))
+        .unwrap_or((10, unsigned));
+    if radix != 10 && !explicit && (radix == 2 || signed) {
+        return ResolvedScalar::NotResolved;
+    }
+    if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(radix)) {
+        return ResolvedScalar::NotResolved;
+    }
+    // js-yaml refuses an integer whose float value overflows.
+    let approximate = digits.chars().fold(0_f64, |value, digit| {
+        value * f64::from(radix) + f64::from(digit.to_digit(radix).unwrap_or(0))
+    });
+    if !approximate.is_finite() {
+        return ResolvedScalar::NotResolved;
+    }
+    let negative = normalized.starts_with('-');
+    match i128::from_str_radix(digits, radix)
+        .ok()
+        .and_then(|magnitude| i64::try_from(if negative { -magnitude } else { magnitude }).ok())
+    {
+        Some(integer) => ResolvedScalar::Value(Value::from(integer)),
+        None => ResolvedScalar::Unrepresentable { non_finite: false },
+    }
+}
+
+/// js-yaml's core float. `.inf` and `.nan` name numbers the value model
+/// cannot hold; a finite form that overflows is not a float.
+fn resolve_yaml_float(text: &str) -> ResolvedScalar {
+    if matches!(text, ".nan" | ".NaN" | ".NAN") {
+        return ResolvedScalar::Unrepresentable { non_finite: true };
+    }
+    let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
+        return ResolvedScalar::Unrepresentable { non_finite: true };
+    }
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, None), |(mantissa, exponent)| {
+            (mantissa, Some(exponent))
+        });
+    let exponent_is_valid = exponent.is_none_or(|exponent| {
+        let exponent = exponent.strip_prefix(['-', '+']).unwrap_or(exponent);
+        !exponent.is_empty() && digits(exponent)
+    });
+    let mantissa_is_valid = match mantissa.split_once('.') {
+        None => !mantissa.is_empty() && digits(mantissa),
+        Some((whole, fraction)) => {
+            digits(whole) && digits(fraction) && !(whole.is_empty() && fraction.is_empty())
+        }
+    };
+    if !exponent_is_valid || !mantissa_is_valid {
+        return ResolvedScalar::NotResolved;
+    }
+    match unsigned.parse::<f64>() {
+        Ok(value) if value.is_finite() => {
+            ResolvedScalar::Value(Value::from(if text.starts_with('-') {
+                -value
+            } else {
+                value
+            }))
+        }
+        _ => ResolvedScalar::NotResolved,
+    }
+}
+
+fn frontmatter_key_text(value: Value) -> String {
     match value {
-        YamlOwned::Value(ScalarOwned::FloatingPoint(value)) => !value.into_inner().is_finite(),
-        YamlOwned::Tagged(_, value) => yaml_value_is_non_finite_number(value),
+        Value::String(text) => text,
+        Value::Number(number) => number.as_i64().map_or_else(
+            || number.as_f64().unwrap_or_default().to_string(),
+            |integer| integer.to_string(),
+        ),
+        other => other.to_string(),
+    }
+}
+
+fn frontmatter_node_json(node: &DuplicateYamlNode) -> Value {
+    match &node.data {
+        YamlDataOwned::Representation(text, style, tag) => {
+            frontmatter_scalar(text, *style, tag.as_ref()).value
+        }
+        YamlDataOwned::Sequence(values) => {
+            Value::Array(values.iter().map(frontmatter_node_json).collect())
+        }
+        YamlDataOwned::Mapping(mapping) => Value::Object(
+            mapping
+                .iter()
+                .filter_map(|(key, value)| {
+                    duplicate_yaml_key_text(key).map(|key| (key, frontmatter_node_json(value)))
+                })
+                .collect(),
+        ),
+        YamlDataOwned::Tagged(_, value) => frontmatter_node_json(value),
+        _ => Value::Null,
+    }
+}
+
+fn frontmatter_node_is_non_finite(node: &DuplicateYamlNode) -> bool {
+    match &node.data {
+        YamlDataOwned::Representation(text, style, tag) => {
+            frontmatter_scalar(text, *style, tag.as_ref()).non_finite
+        }
         _ => false,
     }
 }
 
-fn yaml_value_has_unsupported_tag(value: &YamlOwned) -> bool {
-    match value {
-        YamlOwned::Tagged(tag, value) => {
-            !(tag.is_yaml_core_schema()
-                && matches!(
-                    tag.suffix.as_str(),
-                    "str" | "seq" | "map" | "null" | "bool" | "int" | "float"
-                ))
-                || yaml_value_has_unsupported_tag(value)
+fn frontmatter_node_has_unsupported_tag(node: &DuplicateYamlNode) -> bool {
+    match &node.data {
+        YamlDataOwned::Representation(_, _, tag) => {
+            tag.as_ref().is_some_and(|tag| !yaml_tag_is_supported(tag))
         }
-        YamlOwned::Sequence(values) => values.iter().any(yaml_value_has_unsupported_tag),
-        YamlOwned::Mapping(mapping) => mapping.iter().any(|(key, value)| {
-            yaml_value_has_unsupported_tag(key) || yaml_value_has_unsupported_tag(value)
+        YamlDataOwned::Tagged(tag, value) => {
+            !yaml_tag_is_supported(tag) || frontmatter_node_has_unsupported_tag(value)
+        }
+        YamlDataOwned::Sequence(values) => values.iter().any(frontmatter_node_has_unsupported_tag),
+        YamlDataOwned::Mapping(mapping) => mapping.iter().any(|(key, value)| {
+            frontmatter_node_has_unsupported_tag(key) || frontmatter_node_has_unsupported_tag(value)
         }),
         _ => false,
     }
 }
 
-fn yaml_to_json(value: &YamlOwned) -> Value {
-    match value {
-        YamlOwned::Value(ScalarOwned::Null) => Value::Null,
-        YamlOwned::Value(ScalarOwned::Boolean(value)) => Value::Bool(*value),
-        YamlOwned::Value(ScalarOwned::Integer(value)) => Value::from(*value),
-        YamlOwned::Value(ScalarOwned::FloatingPoint(value)) => {
-            non_finite_yaml_number(value.into_inner()).map_or_else(
-                || {
-                    Value::Number(
-                        serde_json::Number::from_f64(value.into_inner())
-                            .expect("finite YAML float is a JSON number"),
-                    )
-                },
-                |value| Value::String(value.to_owned()),
-            )
-        }
-        YamlOwned::Value(ScalarOwned::String(value)) => Value::String(value.clone()),
-        YamlOwned::Representation(value, ScalarStyle::Plain, None) if value.contains('_') => {
-            separated_integer(value).map_or_else(|| Value::String(value.clone()), Value::from)
-        }
-        YamlOwned::Representation(value, _, _) => Value::String(value.clone()),
-        YamlOwned::Sequence(values) => Value::Array(values.iter().map(yaml_to_json).collect()),
-        YamlOwned::Mapping(mapping) => {
-            let mut object = serde_json::Map::new();
-            for (key, value) in mapping {
-                if let Some(key) = yaml_key_text(key) {
-                    object.insert(key, yaml_to_json(value));
-                }
-            }
-            Value::Object(object)
-        }
-        YamlOwned::Tagged(_, value) => yaml_to_json(value),
-        YamlOwned::Alias(_) | YamlOwned::BadValue => Value::Null,
-    }
-}
-
-fn separated_integer(value: &str) -> Option<i64> {
-    if !value.contains('_') {
-        return None;
-    }
-    for (index, byte) in value.bytes().enumerate() {
-        if byte != b'_' {
-            continue;
-        }
-        if index == 0
-            || index + 1 == value.len()
-            || !value.as_bytes()[index - 1].is_ascii_hexdigit()
-            || !value.as_bytes()[index + 1].is_ascii_hexdigit()
-        {
-            return None;
-        }
-    }
-    let normalized = value.replace('_', "");
-    let (sign, magnitude) = normalized.strip_prefix('-').map_or_else(
-        || (1_i128, normalized.strip_prefix('+').unwrap_or(&normalized)),
-        |magnitude| (-1_i128, magnitude),
-    );
-    let (radix, digits) = magnitude
-        .strip_prefix("0b")
-        .map(|digits| (2, digits))
-        .or_else(|| magnitude.strip_prefix("0o").map(|digits| (8, digits)))
-        .or_else(|| magnitude.strip_prefix("0x").map(|digits| (16, digits)))
-        .unwrap_or((10, magnitude));
-    let magnitude = i128::from_str_radix(digits, radix).ok()?;
-    i64::try_from(sign * magnitude).ok()
-}
-
-fn marked_yaml_key_text(value: &MarkedYamlOwned) -> Option<String> {
-    match &value.data {
-        YamlDataOwned::Value(ScalarOwned::String(value))
-        | YamlDataOwned::Representation(value, _, _) => Some(value.clone()),
-        YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
-        YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
-        YamlDataOwned::Value(ScalarOwned::Null) => Some("null".to_owned()),
-        YamlDataOwned::Tagged(_, value) => marked_yaml_key_text(value),
-        _ => None,
-    }
-}
-
-fn normalize_separated_yaml_integers(value: &mut Value, marked: &MarkedYamlOwned, source: &str) {
-    if let (Value::String(current), YamlDataOwned::Value(ScalarOwned::String(marked_value))) =
-        (&*value, &marked.data)
-        && current == marked_value
-    {
-        let start = marked.span.start.index();
-        let end = marked.span.end.index();
-        if let Some(representation) = source.get(start..end)
-            && representation == marked_value
-            && let Some(integer) = separated_integer(representation)
-        {
-            *value = Value::from(integer);
-        }
-        return;
-    }
-
-    match (value, &marked.data) {
-        (Value::Array(values), YamlDataOwned::Sequence(marked_values)) => {
-            for (value, marked) in values.iter_mut().zip(marked_values) {
-                normalize_separated_yaml_integers(value, marked, source);
-            }
-        }
-        (Value::Object(values), YamlDataOwned::Mapping(marked_values)) => {
-            for (key, marked_value) in marked_values {
-                let Some(key) = marked_yaml_key_text(key) else {
-                    continue;
-                };
-                if let Some(value) = values.get_mut(&key) {
-                    normalize_separated_yaml_integers(value, marked_value, source);
-                }
-            }
-        }
-        (value, YamlDataOwned::Tagged(_, marked)) => {
-            normalize_separated_yaml_integers(value, marked, source);
-        }
-        _ => {}
-    }
+/// Load YAML with every scalar left unresolved, so [`frontmatter_scalar`]
+/// reads it instead of saphyr's own schema.
+fn load_unresolved_yaml(source: &str) -> Option<Vec<DuplicateYamlNode>> {
+    let mut loader = saphyr::YamlLoader::<DuplicateYamlNode>::default();
+    loader.early_parse(false);
+    saphyr_parser::Parser::new_from_str(source)
+        .load(&mut loader, true)
+        .ok()?;
+    Some(loader.into_documents())
 }
 
 struct ParsedMarkdownFrontmatter<'a> {
@@ -1595,80 +1686,43 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
     }
     let body_start = body_start?;
     let yaml_source = &markdown[yaml_start..yaml_end];
-    let duplicate_documents = DuplicateYamlNode::load_from_str(yaml_source).ok()?;
-    if duplicate_documents
-        .iter()
-        .any(duplicate_yaml_value_has_duplicate_mapping_key)
-    {
-        return None;
-    }
-    let documents = YamlOwned::load_from_str(yaml_source).ok()?;
-    let marked_documents = yaml_source
-        .contains('_')
-        .then(|| MarkedYamlOwned::load_from_str(yaml_source))
-        .transpose()
-        .ok()?;
+    let body = &markdown[body_start..];
     let yaml_is_empty = yaml_source.lines().all(|line| {
         let content = line.trim_start_matches([' ', '\t', '\r']);
         content.is_empty() || content.starts_with('#')
     });
-    let document = match documents.as_slice() {
-        [] if yaml_is_empty => None,
-        [document] => Some(document),
-        _ => return None,
+    if yaml_is_empty {
+        return Some(ParsedMarkdownFrontmatter {
+            value: Value::Object(serde_json::Map::new()),
+            body,
+            non_finite_fields: HashSet::new(),
+            unsupported_tag_fields: HashSet::new(),
+        });
+    }
+    let documents = load_unresolved_yaml(yaml_source)?;
+    let [document] = documents.as_slice() else {
+        return None;
     };
-    let marked_document = match marked_documents.as_deref() {
-        None | Some([]) if yaml_is_empty => None,
-        None => None,
-        Some([document]) => Some(document),
-        Some(_) => return None,
-    };
-    let (value, non_finite_fields, unsupported_tag_fields) = if let Some(document) = document {
-        let mut root = document;
-        while let YamlOwned::Tagged(_, value) = root {
-            root = value;
+    if duplicate_yaml_value_has_duplicate_mapping_key(document) {
+        return None;
+    }
+    let mapping = duplicate_yaml_mapping(document)?;
+    let mut non_finite_fields = HashSet::new();
+    let mut unsupported_tag_fields = HashSet::new();
+    for (key, value) in mapping {
+        let Some(key) = duplicate_yaml_key_text(key) else {
+            continue;
+        };
+        if frontmatter_node_is_non_finite(value) {
+            non_finite_fields.insert(key.clone());
         }
-        if let Some(mapping) = root.as_mapping() {
-            let non_finite_fields = mapping
-                .iter()
-                .filter_map(|(key, value)| {
-                    yaml_value_is_non_finite_number(value)
-                        .then(|| yaml_key_text(key))
-                        .flatten()
-                })
-                .collect();
-            let unsupported_tag_fields = mapping
-                .iter()
-                .filter_map(|(key, value)| {
-                    yaml_value_has_unsupported_tag(value)
-                        .then(|| yaml_key_text(key))
-                        .flatten()
-                })
-                .collect();
-            let mut value = yaml_to_json(document);
-            if let Some(marked_document) = marked_document {
-                normalize_separated_yaml_integers(&mut value, marked_document, yaml_source);
-            }
-            (value, non_finite_fields, unsupported_tag_fields)
-        } else if document.is_null() && yaml_is_empty {
-            (
-                Value::Object(serde_json::Map::new()),
-                HashSet::new(),
-                HashSet::new(),
-            )
-        } else {
-            return None;
+        if frontmatter_node_has_unsupported_tag(value) {
+            unsupported_tag_fields.insert(key);
         }
-    } else {
-        (
-            Value::Object(serde_json::Map::new()),
-            HashSet::new(),
-            HashSet::new(),
-        )
-    };
+    }
     Some(ParsedMarkdownFrontmatter {
-        value,
-        body: &markdown[body_start..],
+        value: frontmatter_node_json(document),
+        body,
         non_finite_fields,
         unsupported_tag_fields,
     })

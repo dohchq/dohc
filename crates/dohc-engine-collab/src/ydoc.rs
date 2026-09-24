@@ -59,8 +59,9 @@ pub const ROOT_META: &str = "meta";
 pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
 /// Reserved engine metadata that preserves a CRLF Markdown artifact's line endings.
 const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
-const TAGGED_FRONTMATTER_PREFIX_META_KEY: &str = "dohcTaggedFrontmatterPrefix";
-const TAGGED_FRONTMATTER_BASELINE_META_KEY: &str = "dohcTaggedFrontmatterBaseline";
+/// The frontmatter text a document was imported with, kept while it reads as
+/// the current frontmatter. See [`frontmatter_yaml::kept`].
+const FRONTMATTER_SOURCE_META_KEY: &str = "dohcFrontmatterSource";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
@@ -505,7 +506,6 @@ impl Ydoc {
             return Some(source);
         }
         let staged = Ydoc::wire();
-        self.copy_tagged_frontmatter_to(&staged);
         staged
             .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
             .ok()?;
@@ -541,8 +541,7 @@ impl Ydoc {
                 ("schemaVersion", Out::Any(Any::Number(1.0)))
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
-                        TAGGED_FRONTMATTER_PREFIX_META_KEY
-                            | TAGGED_FRONTMATTER_BASELINE_META_KEY
+                        FRONTMATTER_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_SHA_META_KEY
                             | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
@@ -554,11 +553,6 @@ impl Ydoc {
             }
         }
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
-            return Err(invalid());
-        }
-        if meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY)
-            != meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY)
-        {
             return Err(invalid());
         }
         let source_fields = [
@@ -919,45 +913,21 @@ impl Ydoc {
             })
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
-        if let (Some(Out::Any(Any::String(prefix))), Some(Out::Any(Any::String(baseline)))) = (
-            meta.get(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
-            meta.get(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY),
-        ) {
-            if baseline.as_ref()
-                == if has_frontmatter {
-                    &frontmatter_yaml.value
+        if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
+            if let Some(kept) = frontmatter_yaml::kept(&source, &entries)? {
+                let mut preserved = ProjectionBuffer::new();
+                preserved.push_str(&kept)?;
+                // A closing delimiter at the end of the file needs a line
+                // break before the body a person adds under it.
+                if !body_markdown.is_empty() && !kept.ends_with('\n') {
+                    preserved.push_str(if uses_crlf { "\r\n\r\n" } else { "\n\n" })?;
+                }
+                preserved.push_str(&if uses_crlf {
+                    body_markdown.replace('\n', "\r\n")
                 } else {
-                    "{}\n"
-                }
-            {
-                checked_projection_len(0, prefix.len())?;
-                let equivalent =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&prefix)
-                        .is_some_and(|(parsed, trailing)| {
-                            prefix.starts_with("---")
-                                && trailing.trim_matches(['\r', '\n']).is_empty()
-                                && parsed.as_object().is_some_and(|map| {
-                                    map.len() == entries.len()
-                                        && entries.iter().all(|(key, value)| {
-                                            map.get(key).is_some_and(|parsed| {
-                                                project_frontmatter(key, parsed).is_ok_and(|left| {
-                                                    project_frontmatter(key, value)
-                                                        .is_ok_and(|right| left == right)
-                                                })
-                                            })
-                                        })
-                                })
-                        });
-                if equivalent {
-                    let mut preserved = ProjectionBuffer::new();
-                    preserved.push_str(&prefix)?;
-                    preserved.push_str(&if uses_crlf {
-                        body_markdown.replace('\n', "\r\n")
-                    } else {
-                        body_markdown
-                    })?;
-                    return Ok(preserved.into_string());
-                }
+                    body_markdown
+                })?;
+                return Ok(preserved.into_string());
             }
         }
         let mut out = ProjectionBuffer::new();
@@ -1048,18 +1018,19 @@ impl Ydoc {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
                 let meta = self.doc.get_or_insert_map(ROOT_META);
-                let (frontmatter, body) = split_markdown_frontmatter(markdown);
+                let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
+                let source = frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?;
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
-                    let retains_prefix = matches!(
-                        meta.get(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
-                        Some(Out::Any(Any::String(prefix))) if markdown.starts_with(prefix.as_ref())
-                    );
-                    if !retains_prefix {
-                        meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
-                        meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
+                    match &source {
+                        Some(source) => {
+                            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source.as_str());
+                        }
+                        None => {
+                            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
+                        }
                     }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
@@ -1136,29 +1107,8 @@ impl Ydoc {
         max_bytes: usize,
     ) -> Result<Vec<u8>, CollabError> {
         self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
-            point.copy_tagged_frontmatter_to(staged);
             restore_copy::copy(point, staged, max_bytes)
         })
-    }
-
-    fn copy_tagged_frontmatter_to(&self, target: &Ydoc) {
-        let source = self.doc.get_or_insert_map(ROOT_META);
-        let source_txn = self.doc.transact();
-        let meta = target.doc.get_or_insert_map(ROOT_META);
-        let mut txn = target.doc.transact_mut();
-        for key in [
-            TAGGED_FRONTMATTER_PREFIX_META_KEY,
-            TAGGED_FRONTMATTER_BASELINE_META_KEY,
-        ] {
-            match source.get(&source_txn, key) {
-                Some(Out::Any(Any::String(value))) => {
-                    meta.insert(&mut txn, key, value.as_ref());
-                }
-                _ => {
-                    meta.remove(&mut txn, key);
-                }
-            }
-        }
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -1313,6 +1263,7 @@ impl Ydoc {
         staged.apply(&full)?;
         drop(full);
         edit(&staged)?;
+        staged.keep_frontmatter_source_of(markdown)?;
         staged.record_validated_markdown_source_reference(markdown)?;
         let update = if bounded {
             let mut encoder = bounded_encoder::BoundedEncoder::new(
@@ -1353,6 +1304,24 @@ impl Ydoc {
 
         self.apply(&update)?;
         Ok(update)
+    }
+
+    /// Keep the frontmatter text of exact source bytes, so the frontmatter
+    /// survives once a later edit makes the bytes stale.
+    fn keep_frontmatter_source_of(&self, markdown: &str) -> Result<(), CollabError> {
+        let (frontmatter, prefix, _) = split_markdown_frontmatter(markdown);
+        let source = frontmatter_yaml::source(prefix, &frontmatter, markdown.contains("\r\n"))?;
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let mut txn = self.doc.transact_mut();
+        match source {
+            Some(source) => {
+                meta.insert(&mut txn, FRONTMATTER_SOURCE_META_KEY, source);
+            }
+            None => {
+                meta.remove(&mut txn, FRONTMATTER_SOURCE_META_KEY);
+            }
+        }
+        Ok(())
     }
 
     fn record_validated_markdown_source_reference(
@@ -1435,19 +1404,22 @@ enum MdBlock {
     },
 }
 
-/// Split a leading `---` YAML frontmatter block off the chosen markdown.
-/// Values use the collection indexer's YAML parser so a richdoc seed and its
-/// index agree on scalar, sequence, and mapping types.
-fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
+/// Split a leading `---` YAML frontmatter block, with the blank lines after
+/// it, off the chosen markdown. Values use the collection indexer's YAML
+/// parser so a richdoc seed and its index agree on scalar, sequence, and
+/// mapping types.
+fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str, &str) {
     match dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown) {
-        Some((Value::Object(frontmatter), body)) => {
-            let body = body
+        Some((Value::Object(frontmatter), mut body)) => {
+            while let Some(rest) = body
                 .strip_prefix("\r\n")
                 .or_else(|| body.strip_prefix('\n'))
-                .unwrap_or(body);
-            (frontmatter, body)
+            {
+                body = rest;
+            }
+            (frontmatter, &markdown[..markdown.len() - body.len()], body)
         }
-        _ => (serde_json::Map::new(), markdown),
+        _ => (serde_json::Map::new(), "", markdown),
     }
 }
 
@@ -6134,57 +6106,46 @@ fn main() {}
             "top": {},
             "nested": { "child": {} },
         });
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("seed empty frontmatter mappings");
+        for markdown in [chosen, canonical] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("seed empty frontmatter mappings");
 
-        assert_eq!(doc.frontmatter_json(), expected_frontmatter);
-        let settled = doc
-            .project(ContentKind::Richdoc)
-            .expect("settle empty frontmatter mappings")
-            .content;
-        assert_eq!(settled, canonical);
-
-        let roundtripped = Ydoc::wire();
-        roundtripped
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
-            .expect("roundtrip settled frontmatter");
-        assert_eq!(roundtripped.frontmatter_json(), expected_frontmatter);
-        assert_eq!(
-            roundtripped
-                .project(ContentKind::Richdoc)
-                .expect("settle roundtripped frontmatter")
-                .content,
-            settled
-        );
+            assert_eq!(doc.frontmatter_json(), expected_frontmatter);
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("settle empty frontmatter mappings")
+                    .content,
+                markdown
+            );
+        }
     }
 
     #[test]
     fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
         let chosen = "---\n1.5: value\n---\n\nbody text";
         let canonical = "---\n'1.5': value\n---\n\nbody text";
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+        for markdown in [chosen, canonical] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("seed floating-point frontmatter key");
+
+            assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("settle floating-point frontmatter key")
+                    .content,
+                markdown
+            );
+        }
+        let edited = Ydoc::wire();
+        edited
+            .rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("seed floating-point frontmatter key");
-
-        assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
-        let settled = doc
-            .project(ContentKind::Richdoc)
-            .expect("settle floating-point frontmatter key")
-            .content;
-        assert_eq!(settled, canonical);
-
-        let roundtripped = Ydoc::wire();
-        roundtripped
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
-            .expect("roundtrip settled floating-point frontmatter key");
-        assert_eq!(roundtripped.frontmatter_json(), json!({ "1.5": "value" }));
+        edited.frontmatter_set("1.5", "changed");
         assert_eq!(
-            roundtripped
-                .project(ContentKind::Richdoc)
-                .expect("settle roundtripped floating-point frontmatter key")
-                .content,
-            settled
+            edited.project(ContentKind::Richdoc).unwrap().content,
+            "---\n'1.5': changed\n---\n\nbody text"
         );
     }
 
@@ -6252,7 +6213,7 @@ fn main() {}
     }
 
     #[test]
-    fn source_preserving_rewrite_clears_previous_tagged_frontmatter_projection() {
+    fn source_preserving_rewrite_replaces_the_previous_frontmatter_source() {
         let doc = Ydoc::wire();
         let selected = "---\npriority: high\n---\n\nRestored body";
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
@@ -6262,13 +6223,8 @@ fn main() {}
             let mut txn = doc.doc.transact_mut();
             meta.insert(
                 &mut txn,
-                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                FRONTMATTER_SOURCE_META_KEY,
                 "---\npriority: !custom high\n---\n\n",
-            );
-            meta.insert(
-                &mut txn,
-                TAGGED_FRONTMATTER_BASELINE_META_KEY,
-                "priority: high\n",
             );
         }
         assert!(doc.project_richdoc().unwrap().contains("!custom"));
@@ -6281,12 +6237,11 @@ fn main() {}
             Some(selected)
         );
         let txn = doc.doc.transact();
-        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY));
-        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY));
+        assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
     }
 
     #[test]
-    fn forged_tagged_frontmatter_prefix_falls_back_to_canonical_projection() {
+    fn forged_frontmatter_source_falls_back_to_canonical_projection() {
         for prefix in [
             "---\npriority: !custom foreign\n---\n\n",
             "---\npriority: !custom high\n---\n\ninjected body\n",
@@ -6300,12 +6255,7 @@ fn main() {}
             let meta = doc.doc.get_or_insert_map(ROOT_META);
             {
                 let mut txn = doc.doc.transact_mut();
-                meta.insert(&mut txn, TAGGED_FRONTMATTER_PREFIX_META_KEY, prefix);
-                meta.insert(
-                    &mut txn,
-                    TAGGED_FRONTMATTER_BASELINE_META_KEY,
-                    "priority: high\n",
-                );
+                meta.insert(&mut txn, FRONTMATTER_SOURCE_META_KEY, prefix);
             }
             assert_eq!(
                 doc.project_richdoc().unwrap(),
@@ -6324,10 +6274,9 @@ fn main() {}
             let mut txn = doc.doc.transact_mut();
             meta.insert(
                 &mut txn,
-                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                FRONTMATTER_SOURCE_META_KEY,
                 "---\nvalue: -0.0\n---\n\n",
             );
-            meta.insert(&mut txn, TAGGED_FRONTMATTER_BASELINE_META_KEY, "value: 0\n");
         }
         assert_eq!(doc.project_richdoc().unwrap(), "---\nvalue: 0\n---\n\nBody");
     }
@@ -6525,17 +6474,28 @@ fn main() {}
     #[test]
     fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
         let doc = Ydoc::wire();
-        let chosen = "---\ndone: \"true\"\nsummary: \"TODO: call Bob\"\n---\n\nbody text";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body text")
             .expect("richdoc rewrite");
+        for (key, value) in [
+            ("done", "true"),
+            ("summary", "TODO: call Bob"),
+            ("score", ".nan"),
+            ("id", "99999999999999999999"),
+            ("hex", "0x_1F"),
+        ] {
+            doc.frontmatter_set(key, value);
+        }
 
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
             projected.content,
-            "---\ndone: 'true'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
+            "---\nid: '99999999999999999999'\ndone: 'true'\nhex: 0x_1F\nscore: '.nan'\nsummary: 'TODO: call Bob'\n---\n\nbody text"
         );
-        assert_eq!(doc.frontmatter_json()["done"], json!("true"));
-        assert_eq!(doc.frontmatter_json()["summary"], json!("TODO: call Bob"));
+        let reread = Ydoc::wire();
+        reread
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &projected.content)
+            .expect("richdoc rewrite");
+        assert_eq!(reread.frontmatter_json(), doc.frontmatter_json());
     }
 
     #[test]

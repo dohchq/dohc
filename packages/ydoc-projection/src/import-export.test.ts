@@ -387,12 +387,34 @@ describe('Y.Doc markdown import/export', () => {
     expect(changed).not.toContain('!custom high')
   })
 
+  it('rewrites only the frontmatter keys that change', () => {
+    const written = [
+      '---', '# Trip', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999',
+      'zero: -0', 'tags:', '- a', '---', '', 'Body',
+    ].join('\n')
+    const doc = markdownToYDoc(written)
+    try {
+      expect(getDohcYDocFrontmatter(doc)).toEqual({
+        id: '99999999999999999999', score: '.nan', tags: ['a'], title: 'Lisbon', zero: 0,
+      })
+      expect(yDocToMarkdown(doc)).toBe(written)
+      const frontmatter = doc.getMap('frontmatter')
+      frontmatter.set('title', 'Porto')
+      frontmatter.delete('zero')
+      frontmatter.set('status', 'booked')
+      expect(yDocToMarkdown(doc)).toBe([
+        '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
+        'tags:', '- a', 'status: booked', '---', '', 'Body',
+      ].join('\n'))
+    } finally { doc.destroy() }
+  })
+
   it.each([
     '---\npriority: !custom foreign\n---\n\n',
     '---\npriority: !custom high\n---\n\ninjected body\n',
-  ])('refuses forged tagged-frontmatter prefix %s', prefix => {
+  ])('refuses forged frontmatter source %s', prefix => {
     const doc = markdownToYDoc('---\npriority: !custom high\n---\n\nReal body')
-    doc.getMap('meta').set('dohcTaggedFrontmatterPrefix', prefix)
+    doc.getMap('meta').set('dohcFrontmatterSource', prefix)
     try {
       expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
     } finally { doc.destroy() }
@@ -403,18 +425,15 @@ describe('Y.Doc markdown import/export', () => {
       name: 'out-of-safe-range integer',
       source: '9007199254740993',
       value: 9007199254740993n,
-      settledSource: '9007199254740993',
     },
     {
       name: 'out-of-int64 integral float',
       source: '1e20',
       value: 1e20,
-      settledSource: '100000000000000000000.0',
     },
-  ])('seeds and settles $name without changing its numeric kind', ({
+  ])('seeds and settles $name without changing its text or numeric kind', ({
     source,
     value,
-    settledSource,
   }) => {
     const input = ['---', `exact: ${source}`, 'status: open', '---', '', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
@@ -425,7 +444,7 @@ describe('Y.Doc markdown import/export', () => {
     replica.getMap('frontmatter').set('status', 'closed')
     const settled = yDocToMarkdown(replica)
 
-    expect(settled).toContain(`exact: ${settledSource}`)
+    expect(settled).toContain(`exact: ${source}`)
     expect(getDohcYDocFrontmatter(markdownToYDoc(settled)).exact)
       .toBe(value)
   })
@@ -458,12 +477,12 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toBe(input)
   })
 
-  it('keeps comment-only frontmatter empty under the js-yaml 5 parser', () => {
+  it('keeps comment-only frontmatter as an empty map and as the text written', () => {
     const input = ['---', '# metadata', '', '---', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
 
     expect(getDohcYDocFrontmatter(doc)).toEqual({})
-    expect(yDocToMarkdown(doc)).toBe('# Body')
+    expect(yDocToMarkdown(doc)).toBe(input)
   })
 
   it('round-trips hostile frontmatter keys as own data properties', () => {

@@ -49,11 +49,13 @@ const MAX_INT64 = (1n << 63n) - 1n
 const SHARED_BIGINT_KEY = '$dohcBigInt'
 const PUBLIC_ROOTS = new Set(['body', 'frontmatter', 'meta'])
 const META_KEYS = new Set([
-  'schemaVersion', 'dohcMarkdownCrlf',
-  'dohcTaggedFrontmatterPrefix', 'dohcTaggedFrontmatterBaseline',
+  'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource',
   'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
 const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
+// Exact text the projection keeps only while it reads as the current state.
+// A frontmatter edit leaves it behind, so it need not match a reimport.
+const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource'] as const
 const ByteArray = Uint8Array
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!
@@ -670,12 +672,10 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
   if (Object.hasOwn(snapshot, 'dohcMarkdownCrlf') && snapshot.dohcMarkdownCrlf !== true) {
     refuse('invalid-schema')
   }
-  const hasPrefix = Object.hasOwn(snapshot, 'dohcTaggedFrontmatterPrefix')
-  const hasBaseline = Object.hasOwn(snapshot, 'dohcTaggedFrontmatterBaseline')
-  if (hasPrefix !== hasBaseline || (hasPrefix && (
-    typeof snapshot.dohcTaggedFrontmatterPrefix !== 'string'
-    || typeof snapshot.dohcTaggedFrontmatterBaseline !== 'string'
-  ))) refuse('invalid-schema')
+  if (Object.hasOwn(snapshot, 'dohcFrontmatterSource') && (
+    typeof snapshot.dohcFrontmatterSource !== 'string'
+    || exceedsUtf8Bytes(snapshot.dohcFrontmatterSource, 10 * 1024 * 1024)
+  )) refuse('invalid-schema')
   const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
   if (sourceFields !== 0) {
     if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
@@ -750,12 +750,12 @@ function validatePublicState(
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
-      let projectedMetadata = metadata
-      if (Object.hasOwn(metadata, 'dohcMarkdownSource')) {
-        projectedMetadata = { ...metadata }
-        for (const key of SOURCE_META_KEYS) delete projectedMetadata[key]
+      const withoutSources = (values: Record<string, unknown>) => {
+        const kept = { ...values }
+        for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key]
+        return kept
       }
-      if (!semanticEqual(projectedMetadata, Object.fromEntries(reimported.getMap('meta').entries()))) refuse('invalid-schema')
+      if (!semanticEqual(withoutSources(metadata), withoutSources(Object.fromEntries(reimported.getMap('meta').entries())))) refuse('invalid-schema')
     } finally { reimported.destroy() }
   }
   return preservedSource ?? projectedMarkdown

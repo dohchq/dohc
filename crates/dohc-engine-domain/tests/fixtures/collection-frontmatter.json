@@ -180,6 +180,46 @@
       }
     },
     {
+      "name": "non-finite-floats-keep-their-text",
+      "markdown": "---\nnan: .nan\nnamed: .NaN\ninf: .inf\nneg: -.Inf\nplus: +.inf\n---",
+      "expected": {"nan": ".nan", "named": ".NaN", "inf": ".inf", "neg": "-.Inf", "plus": "+.inf"}
+    },
+    {
+      "name": "integers-outside-int64-keep-their-text",
+      "markdown": "---\nbig: 9223372036854775808\nsmall: -9223372036854775809\nhuge: 99999999999999999999\nmax: 9223372036854775807\n---",
+      "expected": {"big": "9223372036854775808", "small": "-9223372036854775809", "huge": "99999999999999999999", "max": {"$dohcInt64": "9223372036854775807"}}
+    },
+    {
+      "name": "negative-zero-integer-is-zero",
+      "markdown": "---\nzero: -0\nfloat: -0.0\n---",
+      "expected": {"zero": 0, "float": -0.0}
+    },
+    {
+      "name": "explicit-core-tags-resolve-like-plain-scalars",
+      "markdown": "---\ntagged: !!int 7\noctal: !!int 0o7\nbinary: !!int 0b101\nsigned: !!int -0x1F\nquoted: !!int \"12\"\nfloat: !!float 1\ntext: !!str 7\n---",
+      "expected": {"tagged": 7, "octal": 7, "binary": 5, "signed": -31, "quoted": 12, "float": 1.0, "text": "7"}
+    },
+    {
+      "name": "explicit-tags-that-cannot-resolve-keep-their-text",
+      "markdown": "---\nflag: !!bool yes\ncount: !!int many\nnothing: !!null nope\n---",
+      "expected": {"flag": "yes", "count": "many", "nothing": "nope"}
+    },
+    {
+      "name": "binary-and-signed-radix-integers-stay-text",
+      "markdown": "---\nbin: 0b1010_1010\nplain: 0b101\nsigned: -0x1F\nhex: 0x_1F\nseparated: 0x1_F\n---",
+      "expected": {"bin": "0b1010_1010", "plain": "0b101", "signed": "-0x1F", "hex": "0x_1F", "separated": 31}
+    },
+    {
+      "name": "custom-tagged-scalars-keep-their-text",
+      "markdown": "---\ncount: !custom 7\nflag: !custom true\n---",
+      "expected": {"count": "7", "flag": "true"}
+    },
+    {
+      "name": "kept-block-scalar-keeps-its-last-blank-line",
+      "markdown": "---\nb: |+\n  keeps\n\n---",
+      "expected": {"b": "keeps\n\n"}
+    },
+    {
       "name": "duplicate-floating-point-key-is-rejected",
       "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n1.5: first\n1.5: second\n---",
       "expected": null

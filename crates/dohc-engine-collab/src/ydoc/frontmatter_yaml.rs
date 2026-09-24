@@ -2,6 +2,7 @@
 //! Scalar style rules adapted from nodeca/js-yaml commit
 //! 6740445e7bf0ec701f14226e1dfa7ef50f7068cc. See js-yaml-LICENSE.txt.
 use super::*;
+use dohc_engine_domain::collections::is_frontmatter_delimiter;
 
 pub(super) fn compare_keys(left: &str, right: &str, root: bool) -> std::cmp::Ordering {
     let index = |key: &str| {
@@ -178,11 +179,7 @@ fn scalar(value: &str, indent: usize, key: bool) -> ProjectionResult<String> {
         plain &= value.chars().nth(1).is_some_and(|c| c != ' ' && c != '\t');
     }
     plain &= !value.ends_with([' ', '\t', ':']);
-    // The domain parser retains non-finite floats as strings. YAML still resolves
-    // these tokens implicitly, so the presenter must quote their string values.
-    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
-    plain &=
-        !matches!(unsigned, ".inf" | ".Inf" | ".INF") && !matches!(value, ".nan" | ".NaN" | ".NAN");
+    plain &= dohc_engine_domain::collections::plain_yaml_scalar_is_string(value);
     for marker in ["---", "..."] {
         if let Some(rest) = value.strip_prefix(marker) {
             plain &= !rest.is_empty() && !rest.starts_with([' ', '\t', '\r', '\n']);
@@ -255,6 +252,206 @@ fn double(value: &str) -> ProjectionResult<String> {
     }
     out.push('"')?;
     Ok(out.into_string())
+}
+
+/// The frontmatter block and blank lines a document starts with, when the
+/// projection would write them differently. Import keeps them as the
+/// document's frontmatter source.
+pub(super) fn source(
+    prefix: &str,
+    frontmatter: &serde_json::Map<String, Value>,
+    uses_crlf: bool,
+) -> ProjectionResult<Option<String>> {
+    let mut canonical = String::new();
+    if !frontmatter.is_empty() {
+        let mut ordered: Vec<_> = frontmatter.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| compare_keys(left, right, true));
+        canonical.push_str("---\n");
+        for (key, value) in ordered {
+            canonical.push_str(&project_frontmatter(key, value)?);
+        }
+        canonical.push_str("---\n\n");
+    }
+    if uses_crlf {
+        canonical = canonical.replace('\n', "\r\n");
+    }
+    Ok((prefix != canonical).then(|| prefix.to_owned()))
+}
+
+/// The frontmatter a person wrote, kept through a settle. A key whose value
+/// did not change keeps its lines and the comments above them. A changed key
+/// gets its canonical entry in place, a removed key loses its lines, and a new
+/// key is added after the others. `None` when the result would not read back
+/// as `current`, so the caller writes canonical frontmatter instead. The
+/// desktop keeps frontmatter the same way (`keptFrontmatter` in
+/// packages/ydoc-projection/src/import-export.ts).
+pub(super) fn kept(
+    source: &str,
+    current: &BTreeMap<String, Value>,
+) -> ProjectionResult<Option<String>> {
+    checked_projection_len(0, source.len())?;
+    let mut lines = source.split_inclusive('\n');
+    let Some(open) = lines
+        .next()
+        .filter(|line| line.ends_with('\n') && is_frontmatter_delimiter(line))
+    else {
+        return Ok(None);
+    };
+    let mut yaml_end = open.len();
+    let mut closed = false;
+    for line in lines {
+        if is_frontmatter_delimiter(line) {
+            closed = true;
+            break;
+        }
+        yaml_end += line.len();
+    }
+    if !closed {
+        return Ok(None);
+    }
+    let yaml = &source[open.len()..yaml_end];
+    let closing = &source[yaml_end..];
+    let line_ending = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
+    let canonical = |key: &str, value: &Value| -> ProjectionResult<String> {
+        let entry = project_frontmatter(key, value)?;
+        Ok(if line_ending == "\n" {
+            entry
+        } else {
+            entry.replace('\n', line_ending)
+        })
+    };
+    let mut kept = String::new();
+    if let Some(split) = entries(yaml) {
+        kept.push_str(split.head);
+        for entry in &split.entries {
+            let Some(value) = current.get(&entry.key) else {
+                continue;
+            };
+            kept.push_str(entry.lead);
+            if project_frontmatter(&entry.key, &entry.value)?
+                == project_frontmatter(&entry.key, value)?
+            {
+                kept.push_str(entry.text);
+            } else {
+                kept.push_str(&canonical(&entry.key, value)?);
+            }
+            checked_projection_len(0, kept.len())?;
+        }
+        let mut added: Vec<_> = current
+            .iter()
+            .filter(|(key, _)| !split.entries.iter().any(|entry| &entry.key == *key))
+            .collect();
+        added.sort_by(|(left, _), (right, _)| compare_keys(left, right, true));
+        for (key, value) in added {
+            kept.push_str(&canonical(key, value)?);
+            checked_projection_len(0, kept.len())?;
+        }
+        kept.push_str(split.tail);
+    } else {
+        kept.push_str(yaml);
+    }
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    let candidate = ensure_projection_string(format!("{open}{kept}{closing}"))?;
+    let equivalent =
+        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&candidate)
+            .is_some_and(|(parsed, body)| {
+                only_line_breaks(body) && parsed.as_object().is_some_and(|parsed| {
+                    parsed.len() == current.len() && current.iter().all(|(key, value)| {
+                        parsed.get(key).is_some_and(|parsed| {
+                            matches!(
+                                (project_frontmatter(key, parsed), project_frontmatter(key, value)),
+                                (Ok(left), Ok(right)) if left == right
+                            )
+                        })
+                    })
+                })
+            });
+    Ok(equivalent.then_some(candidate))
+}
+
+fn only_line_breaks(mut text: &str) -> bool {
+    while let Some(rest) = text
+        .strip_prefix("\r\n")
+        .or_else(|| text.strip_prefix('\n'))
+    {
+        text = rest;
+    }
+    text.is_empty()
+}
+
+struct Entry<'a> {
+    key: String,
+    value: Value,
+    lead: &'a str,
+    text: &'a str,
+}
+
+struct Entries<'a> {
+    head: &'a str,
+    entries: Vec<Entry<'a>>,
+    tail: &'a str,
+}
+
+/// Split frontmatter YAML into its top-level entries. A column-0 comment or
+/// blank line belongs to the entry below it. `None` when an entry does not
+/// read as one key on its own, for example through an alias to another entry.
+fn entries(yaml: &str) -> Option<Entries<'_>> {
+    // (lead start, text start, text end) byte offsets of each entry.
+    let mut blocks: Vec<(usize, usize, usize)> = Vec::new();
+    let mut offset = 0;
+    for line in yaml.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        if content
+            .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+            .is_empty()
+            || content.starts_with('#')
+        {
+            continue;
+        }
+        let continuation = content.starts_with([' ', '\t'])
+            || (content.starts_with(['-', ':'])
+                && matches!(content.as_bytes().get(1), None | Some(b' ' | b'\t')));
+        if continuation {
+            blocks.last_mut()?.2 = offset;
+        } else {
+            let lead = blocks.last().map_or(0, |block| block.2);
+            blocks.push((lead, start, offset));
+        }
+    }
+    let head = blocks.first().map_or("", |block| &yaml[..block.1]);
+    let tail = &yaml[blocks.last().map_or(0, |block| block.2)..];
+    let mut entries: Vec<Entry<'_>> = Vec::with_capacity(blocks.len());
+    for (index, (lead, start, end)) in blocks.into_iter().enumerate() {
+        let text = &yaml[start..end];
+        let Some(Value::Object(map)) = dohc_engine_domain::collections::markdown_frontmatter_json(
+            &format!("---\n{text}---\n"),
+        ) else {
+            return None;
+        };
+        let mut map = map.into_iter();
+        let (Some((key, value)), None) = (map.next(), map.next()) else {
+            return None;
+        };
+        if entries.iter().any(|entry| entry.key == key) {
+            return None;
+        }
+        entries.push(Entry {
+            key,
+            value,
+            lead: if index == 0 { "" } else { &yaml[lead..start] },
+            text,
+        });
+    }
+    Some(Entries {
+        head,
+        entries,
+        tail,
+    })
 }
 
 #[cfg(test)]

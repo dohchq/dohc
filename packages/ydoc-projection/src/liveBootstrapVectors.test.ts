@@ -17,6 +17,8 @@ const scalarStrings = [
   'a\nb', ' a\nb', '\na\n', 'a\n\n', 'a\n b\n', 'a\t#b', 'a:\tb',
   '\0', '\x01', '\x07', '\x08', '\x0b', '\x0c', '\x1b', '\x1f', '\x7f', '\x85', '\xa0',
   '\u2028', '\u2029', '\ufeff', '\ufffe', '\uffff', '世界', '🦀', '\uE000', '\ud800', '\udfff',
+  // Numbers the frontmatter value model keeps as text.
+  '9223372036854775808', '99999999999999999999', '0b1010_1010', '0x_1F', '0x1_F', '1e400',
 ]
 const differentialSamples = scalarStrings.flatMap((value, index) => [
   { name: `scalar-${index}`, markdown: 'Body', values: { value } },
@@ -26,7 +28,43 @@ const differentialSamples = scalarStrings.flatMap((value, index) => [
 const numericSamples = [0, -0, 1, -1, 1.25, Number.MIN_VALUE, Number.MAX_VALUE,
   Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 2 ** 53, 1e-6, 1e-7, 1e20, 1e21]
   .map((value, index) => ({ name: `number-${index}`, markdown: 'Body', values: { value } }))
-type Sample = { name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>; alternateBaseline?: boolean }
+type Sample = {
+  name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>
+  // Typed at the end of the body, keys removed, and a replacement frontmatter source.
+  typed?: string; remove?: string[]; source?: string
+}
+// Frontmatter a person wrote, which a settle must keep as written: comments,
+// order, spacing, and values the engine's JSON model cannot hold.
+const WRITTEN_FRONTMATTER = [
+  '---', '# Trip plan', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999', 'zero: -0',
+  'octal: !!int 0o7', 'hex: 0x_1F', 'bin: 0b1010_1010', 'flag: !!bool yes', 'count: !custom 7',
+  'tags:', '- a', '- b', '---', '', 'Body', '',
+].join('\n')
+const settleSamples: Sample[] = [
+  ...Object.entries({
+    'non-finite': '---\nnan: .nan\ninf: .inf\nneg: -.inf\n---\n\nBody\n',
+    'beyond-i64': '---\nbig: 9223372036854775808\nsmall: -9223372036854775809\nid: 99999999999999999999\n---\n\nBody\n',
+    'negative-zero': '---\nzero: -0\nfloat: -0.0\n---\n\nBody\n',
+    'explicit-int': '---\ntagged: !!int 7\noctal: !!int 0o7\n---\n\nBody\n',
+    'separated-radix': '---\nhex: 0x_1F\nbin: 0b1010_1010\nsep: 1_000\n---\n\nBody\n',
+    'unresolvable-tag': '---\nflag: !!bool yes\ncount: !!int many\n---\n\nBody\n',
+    'custom-tag': '---\ncount: !custom 7\n---\n\nBody\n',
+    'comment-only': '---\n# note\n---\n\nBody\n',
+    'no-blank-line': '---\ntitle: Plan\n---\nBody\n',
+    'flow-mapping': '---\n{a: 1, b: .nan}\n---\n\nBody\n',
+    'delimiter-at-end': '---\ntitle: Plan\n--- ',
+    'crlf-delimiter-at-end': '---\r\ntitle: Plan\r\n---',
+    written: WRITTEN_FRONTMATTER,
+  }).map(([name, markdown]) => ({ name: `settle-typed-${name}`, markdown, typed: ', typed' })),
+  { name: 'settle-key-changed', markdown: WRITTEN_FRONTMATTER, values: { title: 'Porto' } },
+  { name: 'settle-key-removed', markdown: WRITTEN_FRONTMATTER, remove: ['score'] },
+  { name: 'settle-key-added', markdown: WRITTEN_FRONTMATTER, values: { status: 'booked', icon: '🧳' } },
+  { name: 'settle-all-keys-removed', markdown: '---\n# note\ntitle: Plan\n---\n\nBody\n', remove: ['title'] },
+  { name: 'settle-crlf-key-changed', markdown: '---\r\n# note\r\nz: last\r\ntitle: First\r\n---\r\n\r\nBody\r\n', values: { title: 'Second' } },
+  { name: 'settle-flow-mapping-changed', markdown: '---\n{a: 1, b: .nan}\n---\n\nBody\n', values: { a: 2 } },
+  { name: 'settle-forged-source-body', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom high\n---\n\ninjected body\n' },
+  { name: 'settle-forged-source-value', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom foreign\n---\n\n' },
+]
 const samples: Sample[] = [
   { name: 'empty', markdown: '' },
   { name: 'rich-unicode', markdown: '# Hello 世界\n\n**Bold** and 🦀.' },
@@ -47,7 +85,7 @@ const samples: Sample[] = [
   { name: 'tagged-empty-map', markdown: '---\n!custom {}\n---\n\nBody' },
   { name: 'tagged-array', markdown: '---\npriority: !custom high\ntags:\n  - one\n  - two\n---\n\nBody' },
   { name: 'tagged-nested-order', markdown: '---\nnested: !custom\n  z: last\n  a: first\n---\n\nBody' },
-  { name: 'tagged-equivalent-baseline-changed', markdown: '---\npriority: !custom high\n---\n\nBody', alternateBaseline: true },
+  ...settleSamples,
   ...differentialSamples,
   ...numericSamples,
   ...frontmatterFixtures.vectors.map(vector => ({ name: `public-frontmatter-${vector.name}`, markdown: vector.markdown })),
@@ -68,7 +106,19 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
     try {
       if (sample.edit) doc.getMap('frontmatter').set('priority', 'low')
       if (sample.values) for (const [key, value] of Object.entries(sample.values)) doc.getMap('frontmatter').set(key, value)
-      if (sample.alternateBaseline) doc.getMap('meta').set('dohcTaggedFrontmatterBaseline', 'priority: "high"\n')
+      for (const key of sample.remove ?? []) doc.getMap('frontmatter').delete(key)
+      if (sample.source !== undefined) doc.getMap('meta').set('dohcFrontmatterSource', sample.source)
+      if (sample.typed !== undefined) {
+        const body = doc.getXmlFragment('body')
+        const paragraph = body.get(body.length - 1)
+        const text = paragraph instanceof Y.XmlElement ? paragraph.get(paragraph.length - 1) : undefined
+        if (text instanceof Y.XmlText) text.insert(text.length, sample.typed)
+        else {
+          const added = new Y.XmlElement('paragraph')
+          added.insert(0, [new Y.XmlText(sample.typed)])
+          body.push([added])
+        }
+      }
       const bytes = Y.encodeStateAsUpdate(doc)
       const decoded = new Y.Doc()
       try {

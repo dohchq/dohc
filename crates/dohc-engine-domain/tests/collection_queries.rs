@@ -2039,7 +2039,7 @@ fn reconcile_indexes_non_finite_yaml_numbers_without_dropping_them() {
     for (field, expected) in [
         ("NotANumber", json!(".nan")),
         ("PositiveInfinity", json!(".inf")),
-        ("NegativeInfinity", json!("-.inf")),
+        ("NegativeInfinity", json!("-.INF")),
     ] {
         let value = record
             .values

@@ -3735,8 +3735,10 @@ mod tests {
 
     #[test]
     fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
+        // The settle keeps the blank lines under frontmatter, so the lexical
+        // variant the projector changes sits between two body blocks.
         const ORIGINAL: &str =
-            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
 
         let sender = dohc_engine_collab::Ydoc::wire();

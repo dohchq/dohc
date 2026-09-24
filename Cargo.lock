@@ -352,6 +352,7 @@ dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
  "saphyr",
+ "saphyr-parser",
  "serde",
  "serde_json",
  "sha2",

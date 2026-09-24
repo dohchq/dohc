@@ -406,16 +406,18 @@ describe('public Markdown schema', () => {
     })
     refused(checkpoint, 'capacity-refused')
   }, 60_000)
-  it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcTaggedFrontmatterBaseline', '']])('rejects strict metadata %s = %s', (key, value) => {
+  it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcFrontmatterSource', 1]])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
   })
-  it('rejects absent version, stale tagged baseline and unobservable CRLF flags', () => {
+  it('rejects absent version and unobservable CRLF flags', () => {
     refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
-    refused(encode('Text', doc => {
-      doc.getMap('meta').set('dohcTaggedFrontmatterPrefix', '---\nx: 1\n---\n\n')
-      doc.getMap('meta').set('dohcTaggedFrontmatterBaseline', 'stale')
-    }))
     refused(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
+  })
+  it('accepts frontmatter text that a later frontmatter edit left behind', () => {
+    const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
+      doc.getMap('frontmatter').set('title', 'B')
+    }))
+    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText')
   })
   it.each([undefined, new Uint8Array([1]), new Y.Text('discarded'), new Y.Doc()])('rejects nonpublic frontmatter values %#', value => {
     refused(encode('Text', doc => doc.getMap('frontmatter').set('value', value)))
