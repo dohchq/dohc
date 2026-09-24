@@ -968,7 +968,7 @@ export class YdocAdapterSession {
   }
 
   async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
-    this.assertOpen();
+    this.assertRecordable();
     await this.recordChain;
     // A resync request that landed while the journal drained is waited out,
     // not reported as a failed save: the settle must not write text this

@@ -94,7 +94,7 @@ export function createProposalRoutes(
     action: "propose",
     workspaceId: string,
   ) => () => void,
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
 ) {
   // Whether a recipient may propose changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
@@ -511,7 +511,7 @@ export function createProposalRoutes(
         },
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${route.workspaceId}`);
+        discussionActivity.wakeLog(route.workspaceId);
       }
       return jsonResponse({
         ok: true,

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DiscussionActivityHub } from "./discussionActivity";
+import {
+  DiscussionActivityCapacityError,
+  DiscussionActivityHub,
+  linkLogWaitGroup,
+} from "./discussionActivity";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 import {
   appendLog,
@@ -75,6 +79,28 @@ describe("held device log reads", () => {
 
     await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });
     expect(await json(await parked)).toMatchObject({ hasMore: true });
+  });
+
+  it("keeps the owner's capacity when link readers fill theirs", async () => {
+    const { h, activity } = await ownedLog(new DiscussionActivityHub({ maxWaitersPerShare: 1 }));
+    const reader = new AbortController();
+    const linkRead = activity.wait(linkLogWaitGroup("workspace"), "link:reader", {
+      holdMs: 30_000,
+      signal: reader.signal,
+      shouldPark: () => true,
+    });
+    expect(() =>
+      activity.wait(linkLogWaitGroup("workspace"), "link:other", { holdMs: 30_000, shouldPark: () => true }),
+    ).toThrow(DiscussionActivityCapacityError);
+
+    const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000"));
+    await vi.waitFor(() => expect(activity.stats().waiters).toBe(2));
+    await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });
+    expect(await json(await held)).toMatchObject({ hasMore: true });
+    // The append wakes the link reader too.
+    await linkRead;
+    reader.abort();
+    expect(activity.stats().waiters).toBe(0);
   });
 
   it("refuses a hold that is not an integer within the limit", async () => {

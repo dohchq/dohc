@@ -224,6 +224,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       (error: unknown) => {
         if (watch !== controller) return;
         watch = undefined;
+        // The sign-in expired: the engine stops, and the status says so.
+        if (error instanceof RelayUnauthorizedError) {
+          handleFailure(error);
+          return;
+        }
         console.error(`[desktop] relay change wait failed for ${options.rootDir}:`, error);
         scheduleWatch();
       },

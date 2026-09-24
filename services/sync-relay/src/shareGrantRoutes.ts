@@ -69,7 +69,7 @@ export function createShareGrantRoutes(
   requireShareWorkspace: (share: { workspaceId: string }, workspaceId: string) => void,
   terminateLinkStreamsForGrant: ReturnType<typeof createLinkResponseStreams>["terminateLinkStreamsForGrant"],
   terminateLinkStreamsForShare: ReturnType<typeof createLinkResponseStreams>["terminateLinkStreamsForShare"],
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wake" | "wakeLog">,
   linkGrantBody: ReturnType<typeof createShareSummaries>["linkGrantBody"],
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
@@ -183,7 +183,7 @@ export function createShareGrantRoutes(
       if (!secret) throw notFound();
       terminateLinkStreamsForGrant(result.grant.grantId);
       discussionActivity.wake(share.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...linkGrantBody(result.grant),
@@ -248,7 +248,7 @@ export function createShareGrantRoutes(
       }
       if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
       discussionActivity.wake(share.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...linkGrantBody(result.grant),
@@ -288,7 +288,7 @@ export function createShareGrantRoutes(
       });
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...namedGrantTransitionBody(result.grant),
@@ -325,7 +325,7 @@ export function createShareGrantRoutes(
       });
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
-      discussionActivity.wake(`log:${share.workspaceId}`);
+      discussionActivity.wakeLog(share.workspaceId);
       return jsonResponse({
         ok: true,
         ...namedGrantTransitionBody(result.grant),
@@ -375,13 +375,13 @@ export function createShareGrantRoutes(
         }
         terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
         return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
       }
       if (storage.revokeShare(route.shareId, nowMs())) {
         terminateLinkStreamsForShare(route.shareId);
         discussionActivity.wake(route.shareId);
-        discussionActivity.wake(`log:${share.workspaceId}`);
+        discussionActivity.wakeLog(share.workspaceId);
       }
       return jsonResponse({ ok: true, shareId: route.shareId });
     }

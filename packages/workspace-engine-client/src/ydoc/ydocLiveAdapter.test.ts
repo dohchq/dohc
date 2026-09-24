@@ -266,6 +266,26 @@ it("journals what a person types while a resync is pending, without failing the 
   peer.destroy(); await provider.close();
 });
 
+it("waits out a pending resync before it saves, instead of failing the save", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const adapter = new YdocLiveAdapter(resyncRequestTransport(engine, () => held));
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+
+  const saved = session.settle();
+  await drain();
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(0);
+  release();
+  await expect(saved).resolves.toMatchObject({materialized: true});
+  expect(session.doc.getText("plainText").toString()).toBe("remote seed");
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
 it("retries a failed resync when the next resync request arrives", async () => {
   const engine = seedPlaintextEngine("seed");
   let resyncs = 0;

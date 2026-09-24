@@ -823,6 +823,27 @@ describe("relaySyncEngine", () => {
     errorSpy.mockRestore();
   });
 
+  it("stops as sign-in expired when the relay refuses a held read", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const waits = relayWaits();
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange, idlePullMs: 1000, waitForChange: waits.wait });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+    onChange.mockClear();
+
+    waits.fail(new RelayUnauthorizedError());
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sync.snapshot().authExpired).toBe(true);
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(waits.sinces()).toHaveLength(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+    await sync.stop();
+    errorSpy.mockRestore();
+  });
+
   // The idle cost this engine pays in one minute, with the relay holding each
   // read for 25 s. Polling every 5 s ran 12 passes, each one a relay log read
   // plus a shared-channel read for every joined channel.

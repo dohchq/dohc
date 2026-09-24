@@ -1,5 +1,9 @@
 import { jsonResponse } from "@dohc/service-http";
-import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
+import {
+  DiscussionActivityCapacityError,
+  ownerLogWaitGroup,
+  type DiscussionActivityHub,
+} from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
@@ -29,7 +33,7 @@ export function createWorkspaceReplicationRoutes(
     | "workspaceIsOwnedBy"
   >,
   nowMs: () => number,
-  discussionActivity: Pick<DiscussionActivityHub, "wake" | "wait">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -136,7 +140,7 @@ export function createWorkspaceReplicationRoutes(
         },
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${route.workspaceId}`);
+        discussionActivity.wakeLog(route.workspaceId);
       }
       return jsonResponse({
         ok: true,
@@ -257,7 +261,7 @@ export function createWorkspaceReplicationRoutes(
       storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
     if (input.holdMs > 0 && !hasMore()) {
       try {
-        await discussionActivity.wait(`log:${workspaceId}`, `owner:${userId}`, {
+        await discussionActivity.wait(ownerLogWaitGroup(workspaceId), `owner:${userId}`, {
           holdMs: input.holdMs,
           signal: request.signal,
           shouldPark: () => !hasMore(),
