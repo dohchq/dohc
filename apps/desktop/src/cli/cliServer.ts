@@ -77,7 +77,9 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import type { LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import type { DocumentEdit } from "@dohc/ydoc-projection";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -174,6 +176,18 @@ export interface CliCollectionsPort {
   writes: CliCollectionWriteSeam;
 }
 
+// Live Markdown documents for the document verbs. Main answers through the
+// editor session that holds a document, so an edit reaches an open editor
+// as the person's own typing would.
+export interface CliDocumentsPort {
+  read(path: string): Promise<{ path: string; markdown: string }>;
+  edit(input: {
+    path: string;
+    edit: DocumentEdit;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<{ path: string; changed: boolean }>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -197,6 +211,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
+  documents?: CliDocumentsPort;
 }
 
 export interface CliRunMessageLink {
@@ -491,6 +506,24 @@ function collectionWriteAuthor(
 ): ChangeAuthor {
   if (actor === "agent") return CLI_AGENT_AUTHOR;
   return createLocalChangeAuthor(options.localUserDisplayName());
+}
+
+// Provenance for a document edit. A person's edit is this device's, like
+// their typing. An agent's edit is an agent's on behalf of the local owner,
+// recorded under the name the agent gave itself, or under no name.
+function documentEditOrigin(actor: CliActor, agent: string | undefined): LiveDocumentEditOrigin {
+  if (actor === "human") return { attribution: { actorKind: "human" } };
+  return {
+    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+  };
+}
+
+function documentsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "documents are not available in this workspace",
+  };
 }
 
 async function loadChannels(
@@ -1899,6 +1932,39 @@ async function dispatch(
         );
       }
     }
+
+    case "documentRead": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const validated = validateUserReadPath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      try {
+        return { ok: true as const, ...(await documents.read(validated.normalized)) };
+      } catch (error) {
+        return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "documentEdit": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, find, replacement } = request.args;
+      if (agent !== undefined && actor !== "agent") {
+        return { ok: false as const, reason: "only an agent edit carries an agent name" };
+      }
+      const validated = validateUserWritePath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      try {
+        const outcome = await documents.edit({
+          path: validated.normalized,
+          edit: { find, replacement },
+          origin: documentEditOrigin(actor, agent),
+        });
+        return { ok: true as const, ...outcome };
+      } catch (error) {
+        return mcpFailure(error, `failed to edit document: ${request.args.path}`);
+      }
+    }
   }
 
   const loadedChannels = request.verb === "reply"
@@ -2366,8 +2432,10 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const documentWriteRequest = request.verb === "documentEdit";
   const writeRequest =
     collectionWriteRequest ||
+    documentWriteRequest ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2377,7 +2445,9 @@ async function workspaceContextForRequest(
     throw new CliCommandError(
       collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
-        : "chats are not available in a read-only shared view",
+        : documentWriteRequest
+          ? "document edits are not available in a read-only shared view"
+          : "chats are not available in a read-only shared view",
     );
   }
   const context = await options.openWorkspace(workspace);

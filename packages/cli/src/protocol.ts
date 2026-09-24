@@ -111,6 +111,27 @@ const chatArgsSchema = z
   .strict();
 const channelsFullArgsSchema = z.object(argsBase).strict();
 
+const documentPathArg = z.string().min(1).max(4096);
+// Both sides of an edit fit one request, which the socket bounds at 1 MiB.
+const MAX_DOCUMENT_EDIT_CHARS = 256 * 1024;
+// A name the calling agent gives itself, recorded as the author of its edits.
+// A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const documentReadArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg })
+  .strict();
+const documentEditArgsSchema = z
+  .object({
+    ...argsBase,
+    agent: documentAgentNameSchema.optional(),
+    path: documentPathArg,
+    find: z.string().min(1).max(MAX_DOCUMENT_EDIT_CHARS).optional(),
+    replacement: z.string().max(MAX_DOCUMENT_EDIT_CHARS),
+  })
+  .strict();
+
 // Collection field values cross the CLI socket in the engine wire's JSON
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
 // `$dohcFloat64` marker object. The desktop translates with the
@@ -277,6 +298,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     verb: z.literal("collectionCreateRecord"),
     args: collectionCreateRecordArgsSchema,
   }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -722,6 +745,15 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+const documentReadResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), markdown: z.string() }).strict(),
+  rawFailureSchema,
+]);
+const documentEditResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean() }).strict(),
+  rawFailureSchema,
+]);
+
 const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
@@ -744,6 +776,8 @@ const cliResultSchemas = {
   collectionRecord: collectionRecordResultSchema,
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
+  documentRead: documentReadResultSchema,
+  documentEdit: documentEditResultSchema,
 } as const;
 
 export type CliResultByVerb = {

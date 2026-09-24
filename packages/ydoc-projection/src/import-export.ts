@@ -365,7 +365,7 @@ export function markdownToYDoc(markdown: string): Y.Doc {
   return doc
 }
 
-function parseRichdocMarkdown(markdown: string): JSONContent {
+export function parseRichdocMarkdown(markdown: string): JSONContent {
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )
@@ -1521,7 +1521,7 @@ function orderFrontmatter(
   return ordered
 }
 
-function frontmatterYaml(frontmatter: Record<string, unknown>): string {
+export function frontmatterYaml(frontmatter: Record<string, unknown>): string {
   return yaml.dump(orderFrontmatter(frontmatter), {
     schema: losslessFrontmatterSchema,
     lineWidth: -1,

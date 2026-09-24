@@ -31,6 +31,16 @@ import {
 } from "../workspaces/collectionRecordEdits";
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
+import { readWorkspaceText } from "../workspaces/workspaceAssets";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+
+// With no editor open, the file holds the document's settled text.
+async function settledMarkdown(rootPath: string, path: string): Promise<string> {
+  const read = await readWorkspaceText(rootPath, path);
+  if (read.truncated) throw new Error(`${path} is too large to open as a live document.`);
+  return read.text;
+}
 
 interface DesktopCliServerDependencies<State> {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -61,6 +71,7 @@ interface DesktopCliServerDependencies<State> {
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
   ): Promise<Result | null>;
+  liveDocuments: LiveDocumentSessions;
   chatWrites: ChatWrites;
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
@@ -89,6 +100,7 @@ export function createDesktopCliServer<State>(
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
     withEngineAdapter,
+    liveDocuments,
     chatWrites,
     startCliServer,
     stateDir,
@@ -223,6 +235,27 @@ export function createDesktopCliServer<State>(
           if (!result) throw new Error("The workspace engine is not running.");
           return result;
         },
+      },
+      // Document reads and edits go through the desktop's live document
+      // sessions, the ones its editor holds, so an agent's edit merges into
+      // an open editor instead of racing it on disk.
+      documents: {
+        read: async (path) => {
+          const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          const doc = live.doc ?? markdownToYDoc(await settledMarkdown(workspace.rootPath, live.path));
+          try {
+            return { path: live.path, markdown: documentMarkdown(doc) };
+          } finally {
+            doc.destroy();
+          }
+        },
+        edit: ({ path, edit, origin }) =>
+          liveDocuments.editDocument({
+            workspaceId: workspace.workspaceId,
+            path,
+            origin,
+            change: (current) => documentEditUpdate(current, edit),
+          }),
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit }) => {

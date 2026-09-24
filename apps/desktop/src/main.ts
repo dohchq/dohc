@@ -3102,6 +3102,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   withEngineAdapter,
+  // The sessions are created below; the CLI server reaches them only per request.
+  liveDocuments: {
+    readDocument: (input) => engineYDocSessionIpc.readDocument(input),
+    editDocument: (input) => engineYDocSessionIpc.editDocument(input),
+  },
   chatWrites,
   startCliServer,
   stateDir,

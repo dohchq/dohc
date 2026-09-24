@@ -16,7 +16,7 @@ import {
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
-import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
@@ -1253,6 +1253,181 @@ describe("engine Y.Doc IPC adapter", () => {
         seq: 1,
       }),
     ).toEqual({ accepted: false, reason: "session-unavailable" });
+  });
+
+  describe("main-side document edits", () => {
+    const agentOrigin = {
+      actorOriginId: "claude-code",
+      attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 },
+    };
+
+    // A session over a real Y.Doc: an applied update lands in it, the way
+    // the capture's canonical doc takes a journaled update.
+    function editableSession(trace: string[] = []) {
+      const doc = new Y.Doc();
+      doc.getText("t").insert(0, "before");
+      return providerSession({
+        doc,
+        applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
+          trace.push("apply");
+          Y.applyUpdate(doc, update);
+          onArmed?.();
+        }),
+        settleNow: vi.fn(async () => {
+          trace.push("settle");
+          return { materialized: true } as Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
+        }),
+        close: vi.fn(async () => {
+          trace.push("close");
+        }),
+      });
+    }
+
+    function appendTo(current: Y.Doc, text: string): Uint8Array {
+      const copy = new Y.Doc();
+      Y.applyUpdate(copy, Y.encodeStateAsUpdate(current));
+      let update: Uint8Array | null = null;
+      copy.on("update", (next: Uint8Array) => {
+        update = next;
+      });
+      copy.getText("t").insert(copy.getText("t").length, text);
+      return update!;
+    }
+
+    const edit = (text: string) => ({
+      workspaceId: "workspace-1",
+      path: "notes/a.md",
+      origin: agentOrigin,
+      change: (current: Y.Doc) => appendTo(current, text),
+    });
+
+    it("applies the edit through the editor that holds the document and shows it there", async () => {
+      const sender = new FakeSender(7);
+      const session = editableSession();
+      const h = harness(session);
+      const opened = await h.ipc.open(sender, openPayload);
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, opened.initialUpdate!);
+
+      await expect(h.ipc.editDocument(edit(" after"))).resolves.toEqual({
+        path: "notes/a.md",
+        changed: true,
+      });
+
+      expect(session.doc.getText("t").toString()).toBe("before after");
+      expect(session.applyLocalUpdate).toHaveBeenCalledWith(
+        expect.any(Uint8Array),
+        expect.any(Function),
+        agentOrigin,
+      );
+      expect(session.settleNow).toHaveBeenCalledOnce();
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      const shown = sender.sent.filter(({ channel }) => channel === CHANNELS.engineYDocRemoteUpdate);
+      expect(shown).toHaveLength(1);
+      const payload = shown[0]!.payload as { sessionId: string; update: Uint8Array; lineageGeneration: number };
+      expect(payload).toMatchObject({ sessionId: openPayload.sessionId, lineageGeneration: 1 });
+      Y.applyUpdate(editor, payload.update);
+      expect(editor.getText("t").toString()).toBe("before after");
+      await h.ipc.shutdown();
+    });
+
+    it("opens a session for the edit alone when no editor holds the document", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      const h = harness(session);
+
+      await expect(h.ipc.editDocument(edit(" after"))).resolves.toEqual({
+        path: "notes/a.md",
+        changed: true,
+      });
+
+      expect(trace).toEqual(["apply", "settle", "close"]);
+      expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
+      expect(session.doc.getText("t").toString()).toBe("before after");
+    });
+
+    it("keeps an editor that opens during the edit waiting until the edit's session closes", async () => {
+      const trace: string[] = [];
+      const editSession = editableSession(trace);
+      const released = deferred<void>();
+      const resolveDocumentPath = vi.fn(async (_workspace: unknown, path: string) => path);
+      const h = harness(editSession, { resolveDocumentPath });
+      vi.mocked(editSession.settleNow).mockImplementationOnce(async () => {
+        trace.push("settle");
+        await released.promise;
+        return { materialized: true } as Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
+      });
+      vi.mocked(h.capture.openYDocSession)
+        .mockImplementationOnce(async () => editSession)
+        .mockImplementationOnce(async () => {
+          trace.push("editor-open");
+          return providerSession();
+        });
+      const editing = h.ipc.editDocument(edit(" after"));
+      await vi.waitFor(() => expect(trace).toContain("settle"));
+
+      const opening = h.ipc.open(new FakeSender(7), openPayload);
+      // The open resolves its path, then reaches the reservation. Drain the
+      // queue so an open that did not wait would already be in the capture.
+      await vi.waitFor(() => expect(resolveDocumentPath).toHaveBeenCalledTimes(2));
+      await new Promise((drained) => setImmediate(drained));
+      expect(trace).toEqual(["apply", "settle"]);
+
+      released.resolve();
+      await editing;
+      await expect(opening).resolves.toMatchObject({ available: true });
+      expect(trace).toEqual(["apply", "settle", "close", "editor-open"]);
+      await h.ipc.shutdown();
+    });
+
+    it("tells the caller an edit is in the document when only its save failed", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(new Error("disk full"));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(edit(" after"))).rejects.toThrow(
+        "The edit is in notes/a.md, but dohc has not saved it to the file yet (disk full). Read the document before you retry.",
+      );
+      expect(session.doc.getText("t").toString()).toBe("before after");
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("reports no change without applying or settling", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await expect(
+        h.ipc.editDocument({ ...edit(""), change: () => null }),
+      ).resolves.toEqual({ path: "notes/a.md", changed: false });
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.settleNow).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("refuses shared views, scenes, and missing documents before opening a session", async () => {
+      const h = harness(editableSession(), {
+        resolveDocumentPath: async (_workspace, path) => (path === "gone.md" ? null : path),
+      });
+      await expect(h.ipc.editDocument({ ...edit(""), path: "board.excalidraw" }))
+        .rejects.toThrow("not a Markdown document");
+      await expect(h.ipc.editDocument({ ...edit(""), path: "gone.md" }))
+        .rejects.toThrow("No document at gone.md");
+      h.setReadOnly(true);
+      await expect(h.ipc.editDocument(edit("")))
+        .rejects.toThrow("shared view");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("reads a copy of the held document, or nothing when no editor holds it", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }))
+        .resolves.toEqual({ path: "notes/a.md", doc: null });
+
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
+      expect(read.doc?.getText("t").toString()).toBe("before");
+      expect(read.doc).not.toBe(session.doc);
+      await h.ipc.shutdown();
+    });
   });
 
   it("releases pending work on sender retirement and uses shuttingDown only for quit", async () => {

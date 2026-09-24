@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { DatasetRequest } from "@dohc/cli/dataset";
+import { documentAgentNameSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -31,6 +32,7 @@ import {
   createSite,
   deleteWorkspacePath,
   detectSites,
+  editDocument,
   importData,
   listWorkspaceFiles,
   listChanges,
@@ -38,6 +40,7 @@ import {
   moveWorkspacePath,
   queryDatabase,
   readChange,
+  readDocument,
   readWorkspaceFile,
   searchWorkspaceFiles,
   testSite,
@@ -202,11 +205,44 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
 
+  server.registerTool(
+    "dohc_read_document",
+    {
+      description:
+        "Read a Markdown document as it is now, including edits an open editor has not saved to the file yet. Read it before dohc_edit_document: edits match this text.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await readDocument(ctx, args)),
+  );
+
+  // The client names itself in the MCP handshake. A name the document door
+  // accepts becomes the author of this agent's edits; no name is invented.
+  const agentName = (): string | undefined => {
+    const named = documentAgentNameSchema.safeParse(server.server.getClientVersion()?.name);
+    return named.success ? named.data : undefined;
+  };
+
+  registerWrite(
+    "dohc_edit_document",
+    {
+      description:
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. If the call fails without a reason, read the document before you retry.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        find: z.string().min(1).max(256 * 1024).optional(),
+        replacement: z.string().max(256 * 1024),
+      },
+    },
+    async (args) => text(await editDocument(ctx, args, agentName())),
+  );
+
   registerWrite(
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown and Excalidraw documents must be edited in dohc and are refused here. The desktop watcher captures file history while open, or on the next open.",
+        "Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),

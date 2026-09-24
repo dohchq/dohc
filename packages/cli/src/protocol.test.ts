@@ -232,6 +232,38 @@ describe("collection result schemas", () => {
   });
 });
 
+describe("document request schemas", () => {
+  it("parses a read, an edit, and an edit that adds at the end", () => {
+    expect(cliRequestSchema.safeParse(request("documentRead", { path: "notes/a.md" })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      agent: "claude-code", path: "notes/a.md", find: "Draft", replacement: "Final",
+    })).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      path: "notes/a.md", replacement: "## Next",
+    })).success).toBe(true);
+  });
+
+  it("refuses an agent name that could pass for an automation, and an empty find", () => {
+    for (const agent of ["plugin/automation", "", " padded", "x".repeat(65)]) {
+      expect(cliRequestSchema.safeParse(request("documentEdit", {
+        agent, path: "notes/a.md", replacement: "x",
+      })).success, agent).toBe(false);
+    }
+    expect(cliRequestSchema.safeParse(request("documentEdit", {
+      path: "notes/a.md", find: "", replacement: "x",
+    })).success).toBe(false);
+  });
+
+  it("parses document results and structured failures", () => {
+    expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" }))
+      .toEqual({ ok: true, path: "a.md", markdown: "# A" });
+    expect(parseCliResult("documentEdit", { ok: true, path: "a.md", changed: false }))
+      .toEqual({ ok: true, path: "a.md", changed: false });
+    expect(parseCliResult("documentEdit", { ok: false, reason: "refused" }))
+      .toEqual({ ok: false, reason: "refused" });
+  });
+});
+
 
 it("preserves a group's purpose and each thread's lane", () => {
   const channel = { id: "c:team", name: "Team", slug: "team", kind: "channel", purpose: "Plan the launch" };

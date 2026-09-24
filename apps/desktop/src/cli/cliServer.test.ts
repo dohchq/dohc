@@ -42,6 +42,7 @@ import {
   startCliServer,
   type CliCollectionsPort,
   type CliCollectionWriteSeam,
+  type CliDocumentsPort,
   type CliRegistryWorkspace,
   type CliServerHandle,
   type CliServerOptions,
@@ -1326,6 +1327,110 @@ describe("CLI socket server", () => {
         },
       },
     ]);
+  });
+
+  it("reads and edits documents with provenance the door derives", async () => {
+    const edits: Array<Parameters<CliDocumentsPort["edit"]>[0]> = [];
+    context.documents = {
+      async read(path) {
+        return { path, markdown: "# Plan\n\nDraft." };
+      },
+      async edit(input) {
+        edits.push(input);
+        return { path: input.path, changed: true };
+      },
+    };
+
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", markdown: "# Plan\n\nDraft." });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/plan.md",
+      find: "Draft.",
+      replacement: "Final.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "Appended.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "human",
+      path: "notes/plan.md",
+      find: "Final.",
+      replacement: "Done.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+
+    // An agent that names itself is recorded under that name; one that does
+    // not stays an agent with no name; a person's edit is this device's.
+    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    expect(edits).toEqual([
+      {
+        path: "notes/plan.md",
+        edit: { find: "Draft.", replacement: "Final." },
+        origin: { actorOriginId: "claude-code", attribution: agent },
+      },
+      {
+        path: "notes/plan.md",
+        edit: { find: undefined, replacement: "Appended." },
+        origin: { attribution: agent },
+      },
+      {
+        path: "notes/plan.md",
+        edit: { find: "Final.", replacement: "Done." },
+        origin: { attribution: { actorKind: "human" } },
+      },
+    ]);
+  });
+
+  it("refuses document edits it cannot attribute or place", async () => {
+    let touched = 0;
+    context.documents = {
+      async read() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async edit() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+    };
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "human",
+      agent: "claude-code",
+      path: "notes/plan.md",
+      replacement: "x",
+    })).resolves.toEqual({ ok: false, reason: "only an agent edit carries an agent name" });
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+      replacement: "x",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    expect(touched).toBe(0);
+
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "x",
+    })).rejects.toThrow("document edits are not available in a read-only shared view");
+    expect(touched).toBe(0);
   });
 
   it("answers collection verbs honestly when the port is absent", async () => {

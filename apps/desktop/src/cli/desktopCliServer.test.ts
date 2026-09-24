@@ -1,6 +1,9 @@
-import { resolve } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createDesktopCliServer } from "./desktopCliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
@@ -75,6 +78,10 @@ function fixture(rootPath = resolve("cli-workspace")) {
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     withEngineAdapter: async () => null,
+    liveDocuments: {
+      readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, doc: null })),
+      editDocument: vi.fn<Dependencies["liveDocuments"]["editDocument"]>(async ({ path }) => ({ path, changed: false })),
+    },
     chatWrites,
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
@@ -244,6 +251,42 @@ describe("desktop CLI workspace context", () => {
       expect(admitted[0]).toBe(admitted[1]);
       expect(opened).toHaveBeenCalledOnce();
     } finally { doc.destroy(); await f.authorities.close(); }
+  });
+
+  it("reads a document from the editor that holds it, and otherwise from its file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-documents-"));
+    try {
+      await writeFile(join(root, "notes.md"), "# Notes\n\n* settled item\n");
+      const f = fixture(root);
+      const held = markdownToYDoc("# Notes\n\nLive text.");
+      const read = vi.mocked(f.dependencies.liveDocuments.readDocument);
+      read.mockResolvedValueOnce({ path: "notes.md", doc: held });
+      const context = await f.create().openCliWorkspace(f.workspace);
+      expect(await context.documents!.read("notes.md"))
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\nLive text." });
+      // The file answers in the form an edit matches against.
+      expect(await context.documents!.read("notes.md"))
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\n- settled item" });
+      expect(read.mock.calls).toEqual([
+        [{ workspaceId: "workspace", path: "notes.md" }],
+        [{ workspaceId: "workspace", path: "notes.md" }],
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("hands a document edit to the live sessions as an update against their doc", async () => {
+    const f = fixture();
+    const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+    await context.documents!.edit({ path: "notes.md", edit: { find: "Draft", replacement: "Final" }, origin });
+    const [input] = edit.mock.calls[0]!;
+    expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
+    const current = markdownToYDoc("Draft plan.");
+    Y.applyUpdate(current, input.change(current)!);
+    expect(documentMarkdown(current)).toBe("Final plan.");
   });
 
   it("refuses a collection edit whose admitted physical workspace retires while its context opens", async () => {

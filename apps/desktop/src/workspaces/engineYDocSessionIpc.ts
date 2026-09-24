@@ -3,6 +3,7 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import {
   isYdocArtifactAssetsInvalidRefusal,
   type ArtifactAssetDescriptor,
+  type ChangeAttributionWire,
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
@@ -63,7 +64,12 @@ export interface EngineYDocIpcSender {
   once(event: "destroyed", listener: () => void): this;
 }
 
-export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & { liveWritable?(): boolean };
+// A shared view's named live provider settles on its host and has no
+// settleNow; a local capture's provider does.
+export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
+  liveWritable?(): boolean;
+  settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
+};
 export interface EngineYDocSessionCapture {
   openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number) => void}): Promise<EngineYDocSessionProvider>;
 }
@@ -122,8 +128,31 @@ interface EngineYDocIpcOwnedSession {
   retiredArtifactAssets: ArtifactAssetDescriptor[];
   deleted: boolean;
   emit: (event: SessionEvent) => void;
+  // Sends an update that did not come from this editor to its Y.Doc.
+  show(update: Uint8Array): void;
   markDeleted(): void;
   close: WorkspaceEngineYDocProviderSession["close"];
+}
+
+/** Who a main-side document edit is recorded under. */
+export interface LiveDocumentEditOrigin {
+  actorOriginId?: string;
+  attribution: ChangeAttributionWire;
+}
+
+export interface LiveDocumentEdit {
+  workspaceId: string;
+  /** Validated and normalized; resolved again to the path sessions use. */
+  path: string;
+  /** The update that makes the edit against the document's current state, or null for no change. */
+  change(current: Y.Doc): Uint8Array | null;
+  origin: LiveDocumentEditOrigin;
+}
+
+/** Main-side reads and edits of live documents, for doors other than the editor. */
+export interface LiveDocumentSessions {
+  readDocument(input: { workspaceId: string; path: string }): Promise<{ path: string; doc: Y.Doc | null }>;
+  editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }>;
 }
 
 type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
@@ -162,10 +191,17 @@ interface DocumentReservationState {
   tail: Promise<void>;
 }
 
+class LiveDocumentOwnedError extends Error {
+  constructor() {
+    super(
+      "The engine owns this live document. Close its editor before writing the file directly.",
+    );
+    this.name = "LiveDocumentOwnedError";
+  }
+}
+
 function liveDocumentMutationRefusal(): Error {
-  return new Error(
-    "The engine owns this live document. Close its editor before writing the file directly.",
-  );
+  return new LiveDocumentOwnedError();
 }
 
 /** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
@@ -246,7 +282,7 @@ class DocumentMutationReservations {
   }
 }
 
-class EngineYDocSessionIpc {
+class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
@@ -516,6 +552,7 @@ class EngineYDocSessionIpc {
           retiredArtifactAssets: [],
           deleted: false,
           emit: signals.emit,
+          show: (update) => publish(() => signals.remoteUpdate(update)),
           markDeleted() {
             owned.deleted = true;
             owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
@@ -654,6 +691,126 @@ class EngineYDocSessionIpc {
       });
     }
     return ApplyEngineYDocUpdateResult.parse(applied.value);
+  }
+
+  /**
+   * A live document for a main-side door, such as the CLI socket that MCP
+   * also uses. The editor session that holds the document answers with a
+   * copy of its Y.Doc; `doc` is null when no editor holds it, and the caller
+   * reads the settled file at `path`.
+   */
+  async readDocument(
+    input: { workspaceId: string; path: string },
+  ): Promise<{ path: string; doc: Y.Doc | null }> {
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    try {
+      authority.assertCurrent();
+      const path = await this.#markdownDocumentPath(authority.workspace, input.path);
+      authority.assertCurrent();
+      const held = this.#isSharedView(authority.workspace)
+        ? undefined
+        : this.#owner.documentSession(authority.workspace.attachmentId, path);
+      if (!held) return { path, doc: null };
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(held.session.provider.doc));
+      return { path, doc };
+    } finally {
+      authority.release();
+    }
+  }
+
+  /**
+   * Applies a main-side edit to a live document. The editor session that
+   * holds the document applies it and shows it to the person. With no editor
+   * open, a session opened for this edit alone applies and settles it, and an
+   * editor that opens meanwhile waits for that session to close.
+   */
+  async editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }> {
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (this.#isSharedView(workspace)) {
+        throw new Error("Documents in a shared view change through the share, not this workspace.");
+      }
+      const path = await this.#markdownDocumentPath(workspace, input.path);
+      authority.assertCurrent();
+      const attachment = workspace.attachmentId;
+      const held = this.#owner.documentSession(attachment, path);
+      if (held) return { path, changed: await this.#editHeld(held, path, input) };
+      try {
+        const changed = await this.#documentReservations.runMutation(
+          attachment,
+          path,
+          () => this.#owner.ownsDocument(attachment, path),
+          async () => {
+            authority.assertCurrent();
+            return await this.#editUnheld(workspace, path, input);
+          },
+        );
+        return { path, changed };
+      } catch (error) {
+        if (!(error instanceof LiveDocumentOwnedError)) throw error;
+        // An editor opened the document first. Its session takes the edit
+        // once it is open.
+        const opened = this.#owner.documentSession(attachment, path);
+        if (!opened) throw new Error(`dohc is opening ${path}. Try again.`);
+        return { path, changed: await this.#editHeld(opened, path, input) };
+      }
+    } finally {
+      authority.release();
+    }
+  }
+
+  async #markdownDocumentPath(workspace: EngineYDocWorkspace, requested: string): Promise<string> {
+    if (liveDocumentKindForPath(requested) !== "richdoc") {
+      throw new Error(`${requested} is not a Markdown document.`);
+    }
+    const path = await this.#resolveDocumentPath(workspace, requested);
+    if (path === null) throw new Error(`No document at ${requested}.`);
+    if (liveDocumentKindForPath(path) !== "richdoc") {
+      throw new Error(`${requested} is not a Markdown document.`);
+    }
+    return path;
+  }
+
+  async #editHeld(
+    held: NonNullable<ReturnType<EngineYDocIpcSessionOwner["documentSession"]>>,
+    path: string,
+    input: LiveDocumentEdit,
+  ): Promise<boolean> {
+    held.assertCurrent();
+    const owned = held.session;
+    if (owned.deleted) throw new Error(`${path} was deleted.`);
+    if (owned.ownerHandoff) throw new Error(`dohc is handing ${path} to its live session. Try again.`);
+    return await applyDocumentEdit(owned.provider, path, input, owned.show);
+  }
+
+  async #editUnheld(
+    workspace: EngineYDocWorkspace,
+    path: string,
+    input: LiveDocumentEdit,
+  ): Promise<boolean> {
+    let capture = this.#captureFor(workspace);
+    if (!capture) {
+      await this.#ensureCaptureFor(workspace);
+      capture = this.#captureFor(workspace);
+    }
+    if (!capture) throw new Error("The workspace engine is not running.");
+    const provider = await capture.openYDocSession({
+      path,
+      contentKind: "richdoc",
+      // Nothing else reads this session's doc before it closes.
+      onRemoteUpdate: () => undefined,
+    });
+    try {
+      if (provider.contentKind !== "richdoc") {
+        throw new Error(`${path} is not a Markdown document.`);
+      }
+      return await applyDocumentEdit(provider, path, input, () => undefined);
+    } finally {
+      await provider.close();
+    }
   }
 
   existingOwner(binding: LiveObjectBinding) {
@@ -877,6 +1034,41 @@ class EngineYDocSessionIpc {
     }
     return unavailableOpen();
   }
+}
+
+// Journals one main-side edit on a live document session and settles it, so
+// the edit is in the engine and the file when the caller hears back. The
+// update is computed against the session's own doc and reaches the editor as
+// a remote update, which merges with anything the person typed meanwhile.
+async function applyDocumentEdit(
+  provider: EngineYDocSessionProvider,
+  path: string,
+  input: LiveDocumentEdit,
+  show: (update: Uint8Array) => void,
+): Promise<boolean> {
+  const settleNow = provider.settleNow;
+  if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
+  const update = input.change(provider.doc);
+  if (update === null) return false;
+  let armed = false;
+  provider.applyLocalUpdate(update, () => {
+    armed = true;
+  }, input.origin);
+  show(update);
+  try {
+    await settleNow.call(provider);
+  } catch (error) {
+    if (!armed) throw error;
+    // The session's journal holds the edit and a later settle saves it.
+    // Sending the edit again could apply it twice.
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+      { cause: error },
+    );
+  }
+  if (!armed) throw new Error(`The engine did not accept the edit to ${path}.`);
+  return true;
 }
 
 export function createEngineYDocSessionIpc(

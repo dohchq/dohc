@@ -1,0 +1,148 @@
+import { expect, test, type Page } from "@playwright/test";
+import { sendCliRequest } from "@dohc/cli/client";
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+  type CliResultByVerb,
+  type CliVerb,
+} from "@dohc/cli/protocol";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { launchDesktopApp } from "./helpers/desktopApp";
+import { waitForCliEndpoint } from "./helpers/dohcCli";
+import { ydocUpdateAuthors } from "./helpers/engineDb";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
+  type TempWorkspace,
+} from "./helpers/workspace";
+
+// An agent reads and edits live documents through the hop its MCP tools use:
+// the desktop's authenticated CLI socket. `requestCli` in
+// packages/mcp/src/tools.ts sends the same request, with actor "agent" and the
+// name the MCP client gave itself. The person keeps typing in the document
+// while the agent's edit arrives.
+
+type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
+
+async function agentCli<Verb extends CliVerb>(
+  temp: TempWorkspace,
+  verb: Verb,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+): Promise<CliResultByVerb[Verb]> {
+  const request = {
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb,
+    args: { cwd: temp.rootPath, actor: "agent" as const, ...args },
+  } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
+  return await sendCliRequest<Verb>(request, { stateDir: temp.homeDir });
+}
+
+// Expands the document's folder unless an earlier open already did.
+async function openDocument(page: Page, path: string): Promise<void> {
+  const segments = path.split("/");
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const folder = explorerRow(page, segments.slice(0, index + 1).join("/"));
+    if ((await folder.getAttribute("aria-expanded")) !== "true") await folder.click();
+  }
+  await explorerRow(page, path).click();
+  // The engine session is live once the local editor's Edit toggle is gone.
+  await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByTestId("markdown-editor")).toBeVisible();
+}
+
+async function fileText(temp: TempWorkspace, path: string): Promise<string> {
+  return await readFile(join(temp.rootPath, path), "utf8").catch(() => "");
+}
+
+test("an agent's edit merges into a document the person is typing in", async ({}, testInfo) => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  let desktop: Desktop | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      {
+        path: "notes/plan.md",
+        contents: "# Plan\n\nThe person writes here.\n\nThe agent edits this line.\n",
+      },
+      { path: "notes/closed.md", contents: "# Closed\n\nNobody has this open.\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
+    await waitForCliEndpoint(temp.homeDir);
+    await openDocument(page, "notes/plan.md");
+
+    // The person puts the cursor at the end of their paragraph and types.
+    const editor = page.getByTestId("markdown-editor");
+    await editor.getByText("The person writes here.").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" Typed before the agent.");
+
+    // The agent reads the open document, then edits another block and adds a
+    // section while the person's typing may not have settled yet.
+    const read = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+    if (!read.ok) throw new Error(`documentRead failed: ${read.reason}`);
+    expect(read.markdown).toContain("The agent edits this line.");
+    const edited = await agentCli(temp, "documentEdit", {
+      agent: "e2e-agent",
+      path: "notes/plan.md",
+      find: "The agent edits this line.",
+      replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
+    });
+    expect(edited).toEqual({ ok: true, path: "notes/plan.md", changed: true });
+
+    // The person keeps typing where the cursor was.
+    await page.keyboard.type(" Typed after.");
+
+    await expect(editor).toContainText(
+      "The person writes here. Typed before the agent. Typed after.",
+    );
+    await expect(editor).toContainText("The agent edited this line.");
+    await expect(editor.getByRole("heading", { name: "Added by the agent" })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("agent-edit-merged.png") });
+
+    // Both people's text reaches the agent's next read and the file.
+    const merged = [
+      "The person writes here. Typed before the agent. Typed after.",
+      "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
+    ];
+    await expect
+      .poll(async () => {
+        const next = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+        return next.ok && merged.every((part) => next.markdown.includes(part));
+      }, { timeout: 30_000 })
+      .toBe(true);
+    await expect
+      .poll(async () => {
+        const text = await fileText(temp, "notes/plan.md");
+        return merged.every((part) => text.includes(part));
+      }, { timeout: 30_000 })
+      .toBe(true);
+
+    // The engine records the agent's update under the name it gave, and the
+    // person's typing as a person's.
+    const authors = ydocUpdateAuthors(temp.rootPath);
+    expect(authors).toContainEqual({ actorOriginId: "e2e-agent", actorKind: "agent" });
+    expect(authors.some((author) => author.actorKind === "human")).toBe(true);
+
+    // With no editor open, the edit opens a session of its own, settles, and
+    // lands in the file before the call returns.
+    const closed = await agentCli(temp, "documentEdit", {
+      path: "notes/closed.md",
+      replacement: "Added with no editor open.",
+    });
+    expect(closed).toEqual({ ok: true, path: "notes/closed.md", changed: true });
+    expect(await fileText(temp, "notes/closed.md")).toContain("Added with no editor open.");
+    await openDocument(page, "notes/closed.md");
+    await expect(page.getByTestId("markdown-editor")).toContainText("Added with no editor open.");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
