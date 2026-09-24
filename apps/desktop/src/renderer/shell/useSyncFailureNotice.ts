@@ -111,6 +111,8 @@ export function useSyncFailureNotice(input: {
   const known = failure !== undefined;
   const sinceMs = failure?.sinceMs ?? null;
   const attempts = failure?.attempts ?? null;
+  const cause = failure?.cause ?? null;
+  const detail = failure?.detail ?? null;
   useEffect(() => {
     const current = failureRef.current;
     // A status still loading says nothing. Only a status with no failure
@@ -122,7 +124,9 @@ export function useSyncFailureNotice(input: {
       clear();
       return;
     }
-    const key = `${current.sinceMs}:${current.attempts}`;
+    // A reconnect retry changes the cause or detail without counting an
+    // attempt; refiling keeps the row in step and cannot raise a toast.
+    const key = `${current.sinceMs}:${current.attempts}:${current.cause}:${current.detail}`;
     if (filedRef.current === key) return;
     let shown = shownFailures.get(workspaceId);
     if (shown?.sinceMs !== current.sinceMs) {
@@ -136,7 +140,7 @@ export function useSyncFailureNotice(input: {
       { message: syncFailureMessage(current), detail: current.detail, toast },
       key,
     );
-  }, [attempts, clear, file, known, sinceMs, workspaceId]);
+  }, [attempts, cause, clear, detail, file, known, sinceMs, workspaceId]);
 
   // Back online after an outage: try now instead of waiting out the backoff.
   // Its outcome arrives as status, like any automatic pass.

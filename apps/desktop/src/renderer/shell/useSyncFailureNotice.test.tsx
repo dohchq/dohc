@@ -117,6 +117,23 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.detail).toBe("RelayUnreachableError: attempt 3");
   });
 
+  // #1233 review: a reconnect retry changed the cause without counting an
+  // attempt, and the row kept the old message and detail.
+  it("refiles the row when a reconnect retry changes the cause, without a toast", () => {
+    const view = renderNotice({
+      failure: { cause: "unknown", detail: "RelayError: first", sinceMs: 100, attempts: 1 },
+    });
+    expect(view.rows()[0]!.message).toBe("dohc could not sync this workspace.");
+    view.rerender({
+      workspaceId: "ws-a",
+      failure: { cause: "server-unreachable", detail: "RelayUnreachableError: reconnect", sinceMs: 100, attempts: 1 },
+    });
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]!.message).toBe("dohc could not reach the server.");
+    expect(view.rows()[0]!.detail).toBe("RelayUnreachableError: reconnect");
+    expect(view.toasts()).toEqual([]);
+  });
+
   // #1233 review: a retry answered after the shell unmounted marked the
   // failure as toasted, so coming back showed a quiet row and later failures
   // never interrupted.
