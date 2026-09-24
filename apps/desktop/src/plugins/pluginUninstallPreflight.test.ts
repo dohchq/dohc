@@ -423,11 +423,7 @@ describe("plugin uninstall preflight", () => {
     expect(summary.counts.notRecoverableFromHistory).toBe(25);
     // The bridge contract is the enforcing edge: an uncapped producer fails
     // here instead of shipping an unbounded array to the renderer.
-    // packagedDisplayName is merged in one layer up (main.ts, from the
-    // packaged manifest) — never part of what this module produces.
-    expect(() =>
-      PluginUninstallPreflightRecord.parse({ ...summary, packagedDisplayName: null }),
-    ).not.toThrow();
+    expect(() => PluginUninstallPreflightRecord.parse(summary)).not.toThrow();
     expect(Object.keys(summary)).not.toContain("files");
   });
 

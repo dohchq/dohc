@@ -1804,8 +1804,8 @@ describe("plugin details tabs", () => {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
       plugins: [
-        { ...rowFields, id: "agent-chat", directoryName: "chat-a", displayName: "Chat A" },
-        { ...rowFields, id: "agent-chat", directoryName: "chat-b", displayName: "Chat B" },
+        { ...rowFields, id: "chat-plugin", directoryName: "chat-a", displayName: "Chat A" },
+        { ...rowFields, id: "chat-plugin", directoryName: "chat-b", displayName: "Chat B" },
       ] as PluginStatusRecord[],
     }));
     renderShell(bridge);
