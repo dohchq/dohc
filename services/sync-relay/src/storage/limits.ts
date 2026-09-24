@@ -45,15 +45,5 @@ export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
 export const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
 export const ACTIVE_LINK_DEPENDENT_GRANT_LIMIT = 1_000;
 
-// A person's notice list keeps at most this many rows. A new notice past it
-// removes read and dismissed rows first, oldest first, then the oldest unread.
-export const NOTICE_LIST_ROW_LIMIT = 1_000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-// How long a row stays after it arrives unread, after it is read, and after
-// it is dismissed. A dismissed row stays as a tombstone so a computer that
-// was away still learns of the dismissal.
-export const NOTICE_UNREAD_RETENTION_MS = 180 * DAY_MS;
-export const NOTICE_READ_RETENTION_MS = 90 * DAY_MS;
-export const NOTICE_DISMISSED_RETENTION_MS = 30 * DAY_MS;
-// Expired rows each post removes from every list, oldest first.
+// Expired notices each post removes from every list, oldest first.
 export const NOTICE_SWEEP_BATCH = 100;

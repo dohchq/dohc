@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { PostNoticeRequest, RelayNotice } from "@dohc/workspace-contracts/relay";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
   NOTICE_UNREAD_RETENTION_MS,
-} from "./storage/limits";
+  type PostNoticeRequest,
+  type RelayNotice,
+} from "@dohc/workspace-contracts/relay";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {

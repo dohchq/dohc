@@ -391,6 +391,17 @@ export const NOTICE_ID_MAX_CHARS = 512;
 export const NOTICE_MARKS_PER_REQUEST = 100;
 export const NOTICE_PAGE_MAX = 200;
 
+// A person's notice list keeps at most this many rows. A new notice past it
+// removes read and dismissed rows first, oldest first, then the oldest unread.
+export const NOTICE_LIST_ROW_LIMIT = 1_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// How long a row stays after it arrives unread, after it is read, and after
+// it is dismissed. A dismissed row stays as a tombstone so a computer that
+// was away still learns of the dismissal.
+export const NOTICE_UNREAD_RETENTION_MS = 180 * DAY_MS;
+export const NOTICE_READ_RETENTION_MS = 90 * DAY_MS;
+export const NOTICE_DISMISSED_RETENTION_MS = 30 * DAY_MS;
+
 // What a notice points at. Every field is optional; a notice for someone
 // other than its sender must name a path both of them can read.
 export interface NoticeTarget {

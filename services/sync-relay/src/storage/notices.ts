@@ -1,5 +1,9 @@
 import {
+  NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_KINDS,
+  NOTICE_LIST_ROW_LIMIT,
+  NOTICE_READ_RETENTION_MS,
+  NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
   type NoticeMark,
   type NoticeTarget,
@@ -11,13 +15,7 @@ import { relayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { fileSideOf, visibleSharePath } from "../shareFilter";
 import type { StorageContext } from "./context";
-import {
-  NOTICE_DISMISSED_RETENTION_MS,
-  NOTICE_LIST_ROW_LIMIT,
-  NOTICE_READ_RETENTION_MS,
-  NOTICE_SWEEP_BATCH,
-  NOTICE_UNREAD_RETENTION_MS,
-} from "./limits";
+import { NOTICE_SWEEP_BATCH } from "./limits";
 
 export interface PostNoticeInput {
   noticeId: string;
