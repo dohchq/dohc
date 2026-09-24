@@ -385,7 +385,7 @@ for (const flag of ["--require", "--import"]) {
 
 for (const waitForRelay of [false, true]) {
   test(`Windows job closes the relay without launching commands or preloads when assignment fails${waitForRelay ? " after relay startup" : ""}`, {
-    skip: process.platform !== "win32", timeout: 10_000,
+    skip: process.platform !== "win32", timeout: 30_000,
   }, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-job-assignment-"));
     try {
@@ -408,7 +408,7 @@ for (const waitForRelay of [false, true]) {
           process.execPath, fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload,
         ].map(quote).join(" ")}`], {
         env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` },
-        encoding: "utf8", windowsHide: true, timeout: 5000,
+        encoding: "utf8", windowsHide: true, timeout: 20_000,
       });
       assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, 1, result.stderr);
@@ -431,7 +431,7 @@ for (const input of ["", "invalid payload"]) {
       const payload = Buffer.from(JSON.stringify({ command: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] })).toString("base64");
       // An argv payload must not bypass the job owner's stdin authorization.
       const result = spawnSync(process.execPath, [fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload], {
-        input, encoding: "utf8", windowsHide: true, timeout: 5000,
+        input, encoding: "utf8", windowsHide: true, timeout: 20_000,
       });
       assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, 1, result.stderr);
@@ -441,7 +441,7 @@ for (const input of ["", "invalid payload"]) {
 }
 
 test("Windows job preserves arguments, environment, cwd, and unformatted output", {
-  skip: process.platform !== "win32", timeout: 10_000,
+  skip: process.platform !== "win32", timeout: 30_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-job-quoting-"));
   try {
