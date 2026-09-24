@@ -124,26 +124,27 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
     persistentRowidTables.set(db,tables);
   }
   authorize(db, request, options);
-  const quickjs = await newQuickJS(request.limits.memoryBytes);
-  try { return run(quickjs.module, db, request, options); }
-  catch (error) {
-    if (quickjs.exhausted() && !(error instanceof AppBackendRuntimeError)) {
-      throw new Error(`App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`);
-    }
-    throw error;
-  }
+  return run(await newQuickJS(request.limits.memoryBytes), db, request, options);
 }
 
-function run(quickjs: QuickJSWASMModule, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
-  const runtime = quickjs.newRuntime();
+function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boolean}, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
+  const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
   runtime.setInterruptHandler(() => performance.now() >= deadline);
+  const memoryLimit = `App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`;
+  // A guest exception after the memory filled is the memory limit, unless the deadline stopped the guest.
+  const guestFailure = (message: string) => new Error(exhausted() && performance.now() < deadline ? memoryLimit : message);
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
   let refusal: AppOperationRefusal | undefined;
   const attachedFileIds = new Set<string>();
+  // With the memory full, the FFI copies a new string through a null pointer, so a callback answers with an error instead.
+  const reply = (text: string) => {
+    if (!exhausted()) { const value = vm.newString(text); if (!exhausted()) return value; }
+    return { error: vm.newError(memoryLimit) };
+  };
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
       if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
@@ -176,7 +177,7 @@ function run(quickjs: QuickJSWASMModule, db: DatabaseSync, request: GuestRequest
       } finally {
         authorize(db, request, options);
       }
-      return vm.newString(output);
+      return reply(output);
     } catch (error) {
       return { error: vm.newError(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.") };
     }
@@ -198,7 +199,7 @@ function run(quickjs: QuickJSWASMModule, db: DatabaseSync, request: GuestRequest
       const id=vm.getString(fileId), file=request.files.find(file=>file.fileId===id);
       if (!file) return {error:vm.newError("Unknown app file.")};
       attachedFileIds.add(id);
-      return vm.newString(JSON.stringify(file));
+      return reply(JSON.stringify(file));
     });
     vm.setProp(vm.global,"__refuse",refuse); vm.setProp(vm.global,"__attach",attach);
     refuse.dispose(); attach.dispose();
@@ -230,14 +231,14 @@ function run(quickjs: QuickJSWASMModule, db: DatabaseSync, request: GuestRequest
     removed.dispose();
     try {
       const loaded = vm.evalCode(request.source, "app-backend.js");
-      if (loaded.error) { loaded.error.dispose(); throw new Error("App operation source failed."); }
+      if (loaded.error) { loaded.error.dispose(); throw guestFailure("App operation source failed."); }
       loaded.value.dispose();
       const result = vm.callFunction(invoke, vm.undefined);
       if (refusal) { result.dispose(); throw new AppBackendRuntimeError(refusal); }
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
         result.error.dispose();
-        throw new Error("App operation failed.");
+        throw guestFailure("App operation failed.");
       }
       try {
         if (vm.typeof(result.value) !== "string") throw new Error("App operation must return JSON.");

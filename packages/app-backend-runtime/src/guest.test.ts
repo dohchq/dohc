@@ -142,4 +142,22 @@ describe("guest memory", () => {
       expect((await evaluate(db, request("return 'next';"), { persistentConnection: true })).resultJson).toBe('"next"');
     });
   });
+
+  it("names the memory limit only for a failure the full memory caused", async () => {
+    await withDatabase(async db => {
+      const persistent = { persistentConnection: true };
+      const fill = "let held = []; try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}";
+      // The deadline stops a loop that runs after the operation caught its out-of-memory error.
+      await expect(evaluate(db, request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }), persistent))
+        .rejects.toThrow(/^App operation failed\.$/);
+      // A host check keeps its own error.
+      await expect(evaluate(db, request(`${fill} held = null; return 'x'.repeat(100);`, { limits: { ...DEFAULT_LIMITS, resultBytes: 10 } }), persistent))
+        .rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
+      await expect(evaluate(db, request(`${fill} throw new Error('later');`), persistent))
+        .rejects.toThrow(/^App operation needed more than its 24 MiB memory limit, so it stopped\.$/);
+      // While the memory is full, the database answers with the limit instead of a result.
+      const read = `${fill} let message = 'read'; try { ctx.db.query('SELECT * FROM items'); } catch (error) { message = error.message; } held = null; return message;`;
+      expect(JSON.parse((await evaluate(db, request(read), persistent)).resultJson)).toBe("App operation needed more than its 24 MiB memory limit, so it stopped.");
+    });
+  });
 });
