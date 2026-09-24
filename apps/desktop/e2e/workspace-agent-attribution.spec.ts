@@ -108,7 +108,7 @@ test("a dohc-tracked run's edits show as \"Agent\" in History; later edits are n
 test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const workspaceId = "agent-chat-reply";
+  const workspaceId = "mcp-chat-reply";
 
   try {
     // A known workspace id so the MCP process (which reads the manifest for

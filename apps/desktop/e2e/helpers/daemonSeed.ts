@@ -1,10 +1,12 @@
-import {
-  EngineDaemonLifecycle,
-  type AttachedEngineWorkspace,
-  type EngineWorkspaceSessions,
+import type {
+  AttachedEngineWorkspace,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../../src/testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../../src/testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -57,7 +59,7 @@ export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   options: { maxRestarts?: number } = {},
 ): Promise<LiveDaemonWorkspace> {
-  const lifecycle = new EngineDaemonLifecycle({
+  const lifecycle = createRealDaemonLifecycle({
     command: resolveEngineBinary(),
     ...(options.maxRestarts !== undefined ? { maxRestarts: options.maxRestarts } : {}),
   });
@@ -94,7 +96,7 @@ export async function seedThroughDaemon<T>(
   workspace: { workspaceId: string; rootPath: string },
   seed: (stores: DaemonSeedStores) => Promise<T>,
 ): Promise<T> {
-  const lifecycle = new EngineDaemonLifecycle({ command: resolveEngineBinary() });
+  const lifecycle = createRealDaemonLifecycle({ command: resolveEngineBinary() });
   let sessions: EngineWorkspaceSessions | null = null;
   try {
     await lifecycle.start();

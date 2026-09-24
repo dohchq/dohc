@@ -174,10 +174,7 @@ describe("GraphView", () => {
     await waitFor(() =>
       expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
     );
-    await waitFor(
-      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(240),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(screen.queryAllByTestId("graph-node")).toHaveLength(240));
     expect(screen.getAllByTestId("graph-file-row")).toHaveLength(240);
     expect(
       screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
@@ -221,10 +218,7 @@ describe("GraphView", () => {
     await waitFor(() =>
       expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
     );
-    await waitFor(
-      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500));
     expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
     expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
       "500 of 900 docs shown",

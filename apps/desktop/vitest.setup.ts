@@ -1,3 +1,5 @@
+import { vi } from "vitest";
+
 // jsdom implements no hit testing: document.elementFromPoint does not exist.
 //
 // ProseMirror calls it on every pointer press (posAtCoords, reached from its
@@ -38,3 +40,26 @@ if (
     value: () => null,
   });
 }
+
+// Testing Library's own 1 s default for waitFor and findBy* failed loaded runs
+// with "Unable to find" while the product was healthy. A full gate beside other
+// work then missed a 5 s wait for the source-view toggle that passes alone.
+// 10 s stays inside vitest.config.ts's 30 s test timeout, so a stuck wait
+// still reports what it waited for.
+if (typeof document !== "undefined") {
+  const { configure } = await import("@testing-library/dom");
+  configure({ asyncUtilTimeout: 10_000 });
+}
+
+// vi.waitFor has the same fixed 1 s default and no setting for it, so every
+// desktop suite gets the same 10 s here. An explicit timeout still wins.
+// Under fake timers each check advances the fake clock by the interval, so a
+// longer wait would move fake time further; those waits keep vitest's default.
+const waitFor = vi.waitFor;
+vi.waitFor = (callback, options) =>
+  waitFor(
+    callback,
+    typeof options === "number" || vi.isFakeTimers()
+      ? options
+      : { timeout: 10_000, ...options },
+  );

@@ -324,8 +324,8 @@ describe("plugin agent drivers, through the real plugin process", () => {
         decision: "allow_once",
       });
       expect(asked).toEqual(["permission-1"]);
-      // The person still sees the request the policy answered, exactly as a
-      // built-in driver reports it.
+      // The person still sees the request the policy answered, exactly as any
+      // driver reports it.
       expect(events.some((event) => event.kind === "permission-request")).toBe(true);
 
       await session.dispose();

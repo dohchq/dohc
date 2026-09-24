@@ -229,6 +229,27 @@ describe("PageIdentity", () => {
       expect(title.selectionStart).toBe("Trip to Tokyo ".length);
       expect(onChange.mock.lastCall?.[0]).toContain("title: Trip to Tokyo plan");
     });
+
+    it("keeps focus in the title while an IME picks a candidate", () => {
+      const onEnterBody = vi.fn();
+      render(
+        <PageIdentity
+          body={"# Body\n"}
+          onChange={() => {}}
+          filenameStem="note"
+          onEnterBody={onEnterBody}
+        />,
+      );
+
+      const input = screen.getByTestId("page-title");
+      fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
+      fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+      fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+      expect(onEnterBody).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onEnterBody).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("collab (Y.Map) mode", () => {

@@ -13,6 +13,13 @@ import {
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import {
+  NOTICE_BODY_MAX_CHARS,
+  NOTICE_ID_MAX_CHARS,
+  NOTICE_SENDER_LABEL_MAX_CHARS,
+  NOTICE_TARGET_FIELD_MAX_CHARS,
+  NOTICE_TITLE_MAX_CHARS,
+} from "@dohc/workspace-contracts/relay";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -70,7 +77,6 @@ import {
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
   PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
@@ -2146,6 +2152,12 @@ export const SyncDmsPayload = z.object({
   // pass is bounded, so a poll that names its open conversation keeps that one
   // fresh instead of waiting for the rotation to reach it.
   openChannelId: OPAQUE_ID.optional(),
+  // True for the renderer's own scheduled refreshes: the list and conversation
+  // timers, and the first refresh when Chats or a conversation opens. Main
+  // pulls this workspace's own relay log for these, where members' replies to
+  // owned DMs and Groups land. A refresh that reacts to a workspace activity
+  // event leaves it unset, because the pull's own events would refresh again.
+  poll: z.boolean().optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
 
@@ -2156,6 +2168,10 @@ export const SyncDmsResult = z.object({
   dms: z.array(DmRecord),
   pending: z.array(DmRequestRow),
   declined: z.array(DmRequestRow),
+  // True when the request listing or the shared-channel pass failed as a
+  // whole. One failing share does not count. The renderer holds the syncs
+  // nobody asked for instead of trying again at once.
+  failed: z.boolean(),
 });
 export type SyncDmsResult = z.infer<typeof SyncDmsResult>;
 
@@ -3195,18 +3211,6 @@ export const PluginPipelineError = z.object({
 }).strict();
 export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
 
-const OFFERED_PLUGIN_DIRECTORY_NAME = z.enum(
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
-);
-
-export const OfferedPluginRecord = z.object({
-  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
-  displayName: z.string().min(1).max(120).nullable(),
-  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
-  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
-}).strict();
-export type OfferedPluginRecord = z.infer<typeof OfferedPluginRecord>;
-
 export const PluginStatusRecord = z.object({
   id: PLUGIN_ID,
   directoryName: z.string().min(1).max(255),
@@ -3300,16 +3304,6 @@ export const ListPluginsPayload = z.object({
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
 
-// Same shape as ListPluginsPayload — aliased rather than duplicated.
-export const ListOfferedPluginsPayload = ListPluginsPayload;
-export type ListOfferedPluginsPayload = z.infer<typeof ListOfferedPluginsPayload>;
-
-export const AddOfferedPluginPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
-}).strict();
-export type AddOfferedPluginPayload = z.infer<typeof AddOfferedPluginPayload>;
-
 // A plugin's settings values. Bounded by the same declaration count the
 // manifest allows, because a plugin can never have more settings than it
 // declares — main resolves the stored file against the manifest before this
@@ -3353,18 +3347,6 @@ export const ListPluginsResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
 ]);
 export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
-
-export const ListOfferedPluginsResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), offers: z.array(OfferedPluginRecord) }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type ListOfferedPluginsResult = z.infer<typeof ListOfferedPluginsResult>;
-
-export const AddOfferedPluginResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
-  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
-]);
-export type AddOfferedPluginResult = z.infer<typeof AddOfferedPluginResult>;
 
 export const PluginActionResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
@@ -3412,11 +3394,6 @@ export const PluginUninstallPreflightRecord = z.object({
     additionalLocations: z.number().int().nonnegative(),
   }).strict().nullable(),
   warning: PluginUninstallWarning.nullable(),
-  // The packaged built-in's own manifest displayName, read fresh for this
-  // directoryName — never this copy's own, which can be hand-edited or too
-  // broken to read. Null for anything that isn't a built-in driver
-  // directory: nothing packaged for Add to ever restore there.
-  packagedDisplayName: z.string().min(1).max(120).nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<
   typeof PluginUninstallPreflightRecord
@@ -3486,8 +3463,8 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
   // An invalid, never-installed candidate's arrival or departure names no
   // pluginId "changed"/"removed" could carry — this is the one honest fact
   // discovery has to offer instead: something in this workspace's invalid
-  // candidates moved, so anything reading discovery (offers, the plugin
-  // list) should re-check.
+  // candidates moved, so anything reading discovery (the plugin list)
+  // should re-check.
   z.object({
     kind: z.literal("discovery-changed"),
     workspaceId: WORKSPACE_ID,
@@ -5152,6 +5129,10 @@ export type ListAutomationFailuresPayload = z.infer<
 
 export const AutomationFailureNotice = z.object({
   automationId: z.string().min(1),
+  // The newest failed claim: the one a Try again re-runs.
+  claimId: z.string().min(1),
+  // A chain stop never ran, and no Try again can run it.
+  chainStopped: z.boolean(),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
@@ -5485,8 +5466,11 @@ export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
 export type DesktopUserSettings = DesktopUserSettingsType;
 export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
+// `base` is the settings the caller changed. Main writes only the difference,
+// so a caller that has not yet seen an edit made in the file cannot undo it.
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
+  base: DesktopUserSettingsSchema,
 }).strict();
 export type SetUserSettingsPayload = z.infer<typeof SetUserSettingsPayload>;
 
@@ -5861,6 +5845,68 @@ export const workspaceSearchOperations = {
   },
 } satisfies OperationTable;
 
+// Notices sent to a person. "account" rows come from the signed-in account's
+// notice list on the relay and reach all of that person's computers. "local"
+// rows stay on this computer: nobody is signed in, the workspace does not sync
+// through the signed-in server, or the server has no notice list. Dismissed
+// rows are not listed. Lengths count code points, as the relay does.
+export const NoticeStoreName = z.enum(["local", "account"]);
+const codePoints = (min: number, max: number) =>
+  z.string().refine((value) => {
+    const length = [...value].length;
+    return length >= min && length <= max;
+  });
+const NOTICE_TARGET_FIELD = codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS).optional();
+export const NoticeTargetShape = z.object({
+  path: NOTICE_TARGET_FIELD,
+  record: NOTICE_TARGET_FIELD,
+  thread: NOTICE_TARGET_FIELD,
+  message: NOTICE_TARGET_FIELD,
+  share: NOTICE_TARGET_FIELD,
+  automation: NOTICE_TARGET_FIELD,
+  run: NOTICE_TARGET_FIELD,
+});
+export const NoticeRow = z.object({
+  store: NoticeStoreName,
+  noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
+  kind: z.string().min(1).max(64),
+  // A local row names this computer's workspace. An account row names the
+  // workspace, or the share the person reads it through when it is not theirs.
+  workspaceId: z.string().min(1).max(1_024).nullable(),
+  recipientShareId: z.string().min(1).max(128).nullable(),
+  senderKind: z.enum(["person", "agent", "automation"]).nullable(),
+  senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
+  title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
+  body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  // Null once the person can no longer open what the notice pointed at.
+  target: NoticeTargetShape.nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  readAtMs: z.number().int().nonnegative().nullable(),
+});
+export type NoticeRow = z.infer<typeof NoticeRow>;
+export const NoticeRef = z.object({
+  store: NoticeStoreName,
+  noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
+});
+export type NoticeRef = z.infer<typeof NoticeRef>;
+export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+export const NoticesChangedEvent = z.undefined();
+
+export const noticeOperations = {
+  listNotices: {
+    channel: "desktop:list-notices",
+    payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
+  },
+  readNotice: {
+    channel: "desktop:read-notice",
+    payload: NoticeRef, guard: "trusted-sender",
+  },
+  dismissNotice: {
+    channel: "desktop:dismiss-notice",
+    payload: NoticeRef, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
 // engine capture, reusing its store) and STREAMS remote CRDT deltas back over
@@ -6100,7 +6146,8 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
-    OperationBridge<typeof workspaceSearchOperations> {
+    OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof noticeOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6265,10 +6312,6 @@ export interface DohcDesktopBridge
     listener: (event: PluginWebAppFailedEvent) => void,
   ): () => void;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
-  listOfferedPlugins(
-    payload: ListOfferedPluginsPayload,
-  ): Promise<ListOfferedPluginsResult>;
-  addOfferedPlugin(payload: AddOfferedPluginPayload): Promise<AddOfferedPluginResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
@@ -6508,6 +6551,14 @@ export interface DohcDesktopBridge
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
+  // Reads the settings file again, applies it, and answers what is in effect.
+  reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  getUserSettingsFilePath(): Promise<string>;
+  // Opens the settings file in the system's editor, creating it first when
+  // there is none.
+  openUserSettingsFile(): Promise<void>;
+  // Opens this workspace's .dohc/settings.local.json in the system's editor.
+  openWorkspaceSettingsFile(payload: WorkspaceSettingsPayload): Promise<void>;
   getWorkspaceSettings(
     payload: WorkspaceSettingsPayload,
   ): Promise<WorkspaceSettingsResult>;
@@ -6546,6 +6597,9 @@ export interface DohcDesktopBridge
   onAutomationFailuresChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // Live push: the notices listNotices returns changed. A poke, not the
+  // rows. Returns an unsubscribe function.
+  onNoticesChanged(listener: () => void): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

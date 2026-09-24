@@ -16,7 +16,7 @@
  * static block exists so first paint never waits on JS — edit values in BOTH
  * files or the sync test fails. */
 :root {
-  --font-sans: "InterVariable", system-ui, "Segoe UI", sans-serif;
+  --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
   --dohc-bg: #faf9f5;

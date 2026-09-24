@@ -20,9 +20,12 @@ const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../../..", import.meta.url));
 const { certificate, key: privateKey } = await ensureLocalhostTls();
 let relayMain: string, shareMain: string, deploymentCommand: string, credentialCommand: string, connectorCommand: string;
+// No test here waits for a handshake or heartbeat to expire. Beside 32 CPU
+// burners a connector took 16 s to register through the proxy, share-web, and
+// relay, and gave up at a 10 s handshake bound.
 const limits: DeviceControlLimits = { maxConnections: 8, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
-  handshakeTimeoutMs: 5000, heartbeatIntervalMs: 100, heartbeatTimeoutMs: 2000, closeTimeoutMs: 100 };
+  handshakeTimeoutMs: 20_000, heartbeatIntervalMs: 100, heartbeatTimeoutMs: 10_000, closeTimeoutMs: 100 };
 const exchangeKey = "actual-outbound-device-control-test-key";
 const cleanups: (() => Promise<unknown>)[] = [];
 let scratch: string;
@@ -285,7 +288,8 @@ if (process.env.DENY_DEVICE_LISTEN === '1') {
       expect(sql.prepare(`SELECT count(*) AS total FROM "${name}"`).get()?.total, name).toBe(0);
     }
   } finally { sql.close(); }
-}, 90_000);
+  // About a dozen processes start in sequence: 25 s on a quiet host, 109 s beside 32 CPU burners.
+}, 180_000);
 
 it("reports invalid control configuration without echoing its value or a stack trace", async () => {
   const assets = join(scratch, "config-viewer");

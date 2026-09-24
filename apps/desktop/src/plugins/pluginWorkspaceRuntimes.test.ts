@@ -35,6 +35,7 @@ interface TestParts {
   automations: {
     dispose: ReturnType<typeof vi.fn>;
     stopForEngineRestart: ReturnType<typeof vi.fn>;
+    notifyClaimed: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -59,6 +60,7 @@ function makeParts(overrides: {
     automations: {
       dispose: vi.fn(async () => undefined),
       stopForEngineRestart: vi.fn(),
+      notifyClaimed: vi.fn(),
     },
   };
 }
@@ -512,6 +514,21 @@ describe("plugin workspace runtimes", () => {
     teardown.resolve();
     await first;
     expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("drains automation claims once discovery lands, even with no plugins", async () => {
+    const opening = deferred<void>();
+    const harness = createHarness({
+      create: () => makeParts({ start: () => opening.promise }),
+    });
+    const started = harness.owner.ensure(workspace());
+    // Before discovery lands nothing is knowable, so nothing drains.
+    expect(harness.created[0]?.automations.notifyClaimed).not.toHaveBeenCalled();
+    opening.resolve();
+    await started;
+    // No plugin reported a status, so this is the only wake-up that can
+    // settle the claims of a plugin removed while the app was closed.
+    expect(harness.created[0]?.automations.notifyClaimed).toHaveBeenCalledTimes(1);
   });
 
   it("disposes automations after the pipeline and before workspace events", async () => {
