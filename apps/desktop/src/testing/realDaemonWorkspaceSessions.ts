@@ -12,6 +12,9 @@ import {
 // One fixed test-only deadline keeps that contention policy out of individual
 // suites without changing production.
 export const REAL_DAEMON_DEADLINE_MS = 20_000;
+// A real-daemon test does several deadline-bounded steps. Three deadlines let
+// a slow step fail on its own deadline, with its own error, before the test's.
+export const REAL_DAEMON_TEST_TIMEOUT_MS = 3 * REAL_DAEMON_DEADLINE_MS;
 
 /** Creates sessions for tests that start a real engine daemon. */
 export function createRealDaemonWorkspaceSessions(

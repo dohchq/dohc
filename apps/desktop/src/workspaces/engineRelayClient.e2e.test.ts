@@ -11,6 +11,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
@@ -243,7 +244,7 @@ describe("EngineRelayClient real daemon", () => {
         await relay.close();
       }
     },
-    30_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 });
 

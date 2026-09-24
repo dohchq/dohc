@@ -7,6 +7,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
@@ -140,6 +141,6 @@ describe("live agent dispatch store real daemon", () => {
         await rm(root, { recursive: true, force: true });
       }
     },
-    30_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 });

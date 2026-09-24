@@ -7,6 +7,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { mountRootFor } from "./shareMounts";
 import {
@@ -115,7 +116,7 @@ describe("share mounts real daemon", () => {
         await rm(host, { recursive: true, force: true });
       }
     },
-    30_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 
   it.skipIf(engine.missing)(

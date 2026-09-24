@@ -137,12 +137,16 @@ describe("real daemon workspace sessions", () => {
     const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
     const offenders = testSources(desktopRoot)
       .map(({ path, source }) => ({ path: path.replaceAll("\\", "/"), source }))
-      .filter(({ path, source }) => path !== FACTORY_PATH && source.includes(LIFECYCLE_CONSTRUCTOR))
+      .filter(({ path, source }) =>
+        path !== FACTORY_PATH &&
+        (source.includes(LIFECYCLE_CONSTRUCTOR) ||
+          // desktopEngine.test.ts builds the production daemon over a fake launch.
+          (source.includes("createRustEngineDaemon(") &&
+            /requireEngineBinaryOrSkip\(|resolveEngineBinary\(/.test(source))))
       .map(({ path }) => path)
       .sort();
 
-    // Its first test stalls the host past the product's own request deadline.
-    expect(offenders).toEqual(["src/workspaces/engineDaemonWedgeWatch.e2e.test.ts"]);
+    expect(offenders).toEqual([]);
   });
 });
 

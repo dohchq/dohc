@@ -7,6 +7,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
@@ -88,6 +89,6 @@ describe("live linked chat store real daemon", () => {
         await rm(rootPath, { recursive: true, force: true });
       }
     },
-    30_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 });

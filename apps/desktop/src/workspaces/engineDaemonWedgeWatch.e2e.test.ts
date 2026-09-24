@@ -1,12 +1,16 @@
 import {
   createEngineClient,
-  EngineDaemonLifecycle,
   type EngineDaemonClient,
+  type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import type { Request } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonLifecycle } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  REAL_DAEMON_DEADLINE_MS,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 
 // The lifecycle unit suite drives a fake client. A fake cannot prove that the
 // real daemon serves engine.ping, nor that the real client reports its answer
@@ -31,7 +35,7 @@ describe("engine.ping against a real daemon", () => {
     const failures: Error[] = [];
     let complete!: () => void, refuse!: (error: Error) => void, stalled = false;
     const smoke = new Promise<void>((resolve,reject) => {complete=resolve;refuse=reject;});
-    const lifecycle = new EngineDaemonLifecycle({command:engine.require(),maxRestarts:0,
+    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,
       onFailure(error) {failures.push(error);refuse(error);},
       launch:async options => {
         const client = await createEngineClient(options);
@@ -40,9 +44,10 @@ describe("engine.ping against a real daemon", () => {
             const pending = client.sendRequest(request);
             if (!stalled && request.method === "workspace.open") {
               stalled = true;
-              // Freeze only this process after the pipe write. The real daemon
-              // keeps running and queues its reply before the 5s timer expires.
-              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5_500));
+              // Freeze only this process after the pipe write. The lifecycle sends
+              // its request timeout as the daemon's deadline, so the real daemon
+              // queues its reply inside it, and the freeze outlasts both.
+              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,REAL_DAEMON_DEADLINE_MS + 1_000));
             }
             const response = await pending;
             if (request.method === "workspace.close") complete();
@@ -59,7 +64,7 @@ describe("engine.ping against a real daemon", () => {
     expect(stalled).toBe(true);
     expect(failures).toEqual([]);
     await expect(lifecycle.currentClient().sendRequest({id:99,method:"engine.ping",params:{}})).resolves.toMatchObject({id:99});
-  },20_000);
+  },REAL_DAEMON_TEST_TIMEOUT_MS);
 
   it.skipIf(engine.missing)(
     "answers every probe, so a healthy daemon is never killed",
@@ -110,13 +115,20 @@ describe("engine.ping against a real daemon", () => {
       // Not vacuous: probes really went out over the real transport and the
       // real daemon really answered them. Counting the answered ones rather
       // than asserting on every probe leaves the newest one free to be in
-      // flight at this instant. Within three interval-plus-expiry windows,
-      // three probes were answered or one expired and killed the daemon.
+      // flight at this instant. Each answer takes at least one interval, so
+      // this many answers span two expiries: long enough for a kill to show.
+      const answersSpanningTwoExpiries = (2 * pingExpiryMs) / pingIntervalMs;
       await expect
-        .poll(() => probes.filter(({ answered }) => answered).length, {
-          timeout: 3 * (pingIntervalMs + pingExpiryMs),
-        })
-        .toBeGreaterThanOrEqual(3);
+        .poll(
+          () => ({
+            failures: failures.map((error) => error.message),
+            spannedTwoExpiries:
+              probes.filter(({ answered }) => answered).length >=
+              answersSpanningTwoExpiries,
+          }),
+          { timeout: REAL_DAEMON_DEADLINE_MS },
+        )
+        .toEqual({ failures: [], spannedTwoExpiries: true });
       // And none of them carried a wire deadline, which is what keeps the
       // client's own timer out of the silence measurement.
       expect(
@@ -126,6 +138,6 @@ describe("engine.ping against a real daemon", () => {
       // Same daemon throughout: a kill would have ended or replaced it.
       expect(() => lifecycle.currentClient()).not.toThrow();
     },
-    60_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 });

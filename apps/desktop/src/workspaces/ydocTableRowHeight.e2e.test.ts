@@ -13,6 +13,7 @@ import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
   REAL_DAEMON_DEADLINE_MS,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
@@ -127,4 +128,4 @@ it("keeps a resized row and an external cell edit across a settled close and reo
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
   }
-}, 60_000);
+}, REAL_DAEMON_TEST_TIMEOUT_MS);
