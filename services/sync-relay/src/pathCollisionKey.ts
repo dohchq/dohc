@@ -7,6 +7,8 @@ export function pathCollisionKey(path: string): string {
   return path.split("/").map(componentKey).join("/");
 }
 
+// Lower, upper, then lower again, so every spelling of a letter lands on one
+// form: "ẞ", "ß" and "ss" all become "ss", and "ς" and "σ" become one sigma.
 function componentKey(name: string): string {
-  return name.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFKC").replace(/[. ]+$/u, "");
+  return name.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase().normalize("NFKC").replace(/[. ]+$/u, "");
 }

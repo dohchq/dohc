@@ -544,6 +544,24 @@ describe("round 1 of review", () => {
     expect(body).toMatchObject({ path: `${PACKING}/automations.yaml`, currentBlobSha256: null });
   });
 
+  it("finds a file where a new Collection needs a folder", async () => {
+    const r = await relay();
+    await r.owner.write("object-file", "trip/Ideas", "a file, not a folder\n");
+    await upload(r, SCHEMA);
+    const body = await expectCode(await write(r, [create("trip/ideas/new/collection.yaml", SCHEMA)]), 409, "stale");
+    expect(body).toMatchObject({ path: "trip/ideas/new", currentBlobSha256: null });
+  });
+
+  it("reads an unchanged automations file once", async () => {
+    const r = await relay();
+    const same = automations(STAMP);
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, same);
+    const reads = vi.spyOn(r.storage, "getBlob");
+    const response = await write(r, [edit(`${PACKING}/automations.yaml`, same, same)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(reads.mock.calls.map(([, sha]) => sha)).toEqual([sha256(same)]);
+  });
+
   it("keys current files that existed before the key table", async () => {
     const r = await relay();
     await r.owner.write("object-taken", "trip/Ideas/old.md", "old\n");
@@ -586,6 +604,24 @@ describe("the direct-write decision", () => {
       expect(decision.allowed, `${first} beside ${second}`).toBe(false);
     }
     expect(pathCollisionKey("Trip/Ideas. /A.MD")).toBe(pathCollisionKey("trip/ideas/a.md"));
+  });
+
+  it("folds every spelling of a letter to one key", () => {
+    // Each group lands on one key, and folding a key again changes nothing.
+    const groups = [
+      ["\u1e9e.md", "\u00df.md", "ss.md", "SS.md"], // capital and small sharp s
+      ["\u0131.md", "i.md", "I.md"], // dotless i
+      ["\u0130.md", "i\u0307.md"], // dotted capital I
+      ["\u03c2.md", "\u03c3.md", "\u03a3.md"], // final, small, and capital sigma
+      ["\u039f\u0394\u039f\u03a3", "\u03bf\u03b4\u03bf\u03c3", "\u03bf\u03b4\u03bf\u03c2"],
+      ["\ufb01le.md", "file.md", "FILE.md. "], // a ligature and a trailing dot and space
+    ];
+    for (const group of groups) {
+      const keys = group.map(pathCollisionKey);
+      expect(new Set(keys).size, group.join(" ")).toBe(1);
+      expect(pathCollisionKey(keys[0]!)).toBe(keys[0]);
+    }
+    expect(new Set(groups.map((group) => pathCollisionKey(group[0]!))).size).toBe(groups.length);
   });
 
   it("takes exactly 500 records in a new Collection", () => {

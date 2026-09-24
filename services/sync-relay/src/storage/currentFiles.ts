@@ -5,9 +5,13 @@ import type { StorageContext } from "./context";
 import { pathCollisionKey } from "../pathCollisionKey";
 
 const CURRENT_FILE_KEYS_MIGRATION_ID = "current-file-collision-keys-v1";
+// A new fold needs a new migration id: the fill below then keys every
+// current file again.
 const CURRENT_FILE_KEY_INSERT_SQL = `
-  INSERT OR IGNORE INTO sync_relay_current_file_keys (workspace_id, version_id, path, collision_key)
-  VALUES (?, ?, ?, ?)`;
+  INSERT INTO sync_relay_current_file_keys (workspace_id, version_id, path, collision_key)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET collision_key = excluded.collision_key
+    WHERE collision_key <> excluded.collision_key`;
 
 // Each current file's collision key, so "does the owner have this path under
 // any spelling?" is an index lookup, not a scan. A row goes with its current

@@ -263,17 +263,21 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   }
 }
 
-// Whether the owner has a file at `path`, or under it, under any spelling
-// that shares its collision key. Two index lookups: "/" sorts just before
-// "0", so the keys under `key/` fall in [`key/`, `key0`).
+// Whether the owner has a file at `path`, under it, or at one of its
+// folders, under any spelling that shares a collision key. A file where a
+// folder must go would keep the new file from ever reaching a disk. Index
+// lookups only: "/" sorts just before "0", so the keys under `key/` fall
+// in [`key/`, `key0`).
 function spellingTaken(storage: StorageContext, workspaceId: string, path: string): boolean {
   const key = pathCollisionKey(path);
+  const parts = key.split("/");
+  const atOrAbove = parts.map((_, index) => parts.slice(0, index + 1).join("/"));
   const row = storage.db.prepare(
     `SELECT EXISTS (SELECT 1 FROM sync_relay_current_file_keys
-         WHERE workspace_id = ? AND version_id = ? AND collision_key = ?)
+         WHERE workspace_id = ? AND version_id = ? AND collision_key IN (${atOrAbove.map(() => "?").join(", ")}))
        OR EXISTS (SELECT 1 FROM sync_relay_current_file_keys
          WHERE workspace_id = ? AND version_id = ? AND collision_key >= ? AND collision_key < ?) AS taken`,
-  ).get(workspaceId, MAIN_VERSION_ID, key, workspaceId, MAIN_VERSION_ID, `${key}/`, `${key}0`);
+  ).get(workspaceId, MAIN_VERSION_ID, ...atOrAbove, workspaceId, MAIN_VERSION_ID, `${key}/`, `${key}0`);
   return Number(row?.taken) === 1;
 }
 
@@ -355,7 +359,9 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
       if (after.status !== "read" || after.entries.some((entry) => entry.status !== "valid")) {
         throw refusal(`${change.afterPath} has an automation that is not valid`);
       }
-      const before = change.basedOnBlobSha256 === null ? null : priorText(storage, workspaceId, change.basedOnBlobSha256);
+      const before = change.basedOnBlobSha256 === null
+        ? null
+        : texts.get(change.basedOnBlobSha256)?.text ?? priorText(storage, workspaceId, change.basedOnBlobSha256);
       if (changesPersonalStep(before, after)) {
         throw refusal(`${change.afterPath} changes an automation with a personal step; send it as a proposal`);
       }
