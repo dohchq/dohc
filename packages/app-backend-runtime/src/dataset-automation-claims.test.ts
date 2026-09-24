@@ -48,6 +48,8 @@ function transactions(db: DatabaseSync) {
     try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
   };
 }
+// `count` new tasks, as the values of one insert.
+const tasks = (count: number) => Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",");
 // Everything the ledger retains for the dataset, as it charged it.
 function retained(db: DatabaseSync): number {
   return ["claims", "revisions"].reduce((sum, table) =>
@@ -167,14 +169,16 @@ it("stops at the claim limit, with one failed claim that says so", () => {
     .toEqual([{ automation_id: "collection:tasks#a", state: "failed", attempts: 0, error: DATASET_AUTOMATION_CLAIM_LIMIT }]);
 });
 
-it("commits a change it cannot read, with one failed claim per automation that says why, wherever the refusal falls", () => {
+it("commits a change it cannot read, failing only the automations that watch what it holds, wherever the refusal falls", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tasks#b", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tags#new", ["added"], null, TAGS));
+  // Neither watches a table and change kind this change holds.
+  f.claims.subscribe(scope, subscription("collection:tasks#done", ["changed"]));
+  f.claims.subscribe(scope, subscription("collection:tags#gone", ["removed"], null, TAGS));
   // More matching records than the limit come before a value no field type holds.
-  const rows = Array.from({ length: 150 }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`);
-  const committed = f.commit(`INSERT INTO tasks VALUES${rows.join(",")}; INSERT INTO tags VALUES(1,randomblob(4));`);
+  const committed = f.commit(`INSERT INTO tasks VALUES${tasks(150)}; INSERT INTO tags VALUES(1,randomblob(4));`);
   expect(committed.kind).toBe("committed");
   const decoded = [...decodeChangeset(committed.changeset)];
   expect(decoded.findIndex(row => row.table === "tags")).toBeGreaterThan(DATASET_AUTOMATION_CLAIMS_PER_COMMIT / 2);
@@ -183,6 +187,13 @@ it("commits a change it cannot read, with one failed claim per automation that s
   expect(failed.map(row => [row.automation_id, row.state, row.attempts, row.fact, row.error])).toEqual(["collection:tags#new", "collection:tasks#a", "collection:tasks#b"]
     .map(automationId => [automationId, "failed", 0, null, "Name holds bytes, which no field type can hold."]));
   expect(() => f.claims.retry({ workspaceId: scope.workspaceId, claimId: String(failed[0]!.claim_id) })).toThrow("cannot run again");
+  // When even the change's tables cannot be read, every automation hears of it.
+  const revision = f.cursor.revision + 1;
+  f.db.exec("BEGIN IMMEDIATE");
+  f.claims.recordCommit({ cursor: { ...f.cursor, revision }, changeset: Uint8Array.of(0x54), columns: {}, approved: ledgerRevision, actor: { kind: "owner" } });
+  f.db.exec("COMMIT");
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_automation_claims WHERE revision=? AND state='failed' AND fact IS NULL").get(revision)).toEqual({ count: 5 });
+  expect(f.charged).toBe(retained(f.db));
 });
 
 it("names a record whose id is too long in one failed claim, never a cut id", () => {
@@ -264,6 +275,29 @@ it("requeues a claim a dead process left running, and fails it once it died at t
   expect(f.charged).toBe(retained(f.db));
 });
 
+it("trims the claims the reaper fails to the history, with a refund", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.commit(`INSERT INTO tasks VALUES${tasks(DATASET_AUTOMATION_HISTORY)}`);
+  for (const claim of drain(f.claims)) f.claims.settle(claim, { state: "done" });
+  f.commit("INSERT INTO tasks VALUES('x','Open',''),('y','Open',''),('z','Open','')");
+  // Two crashes use up each claim's attempts.
+  for (let crash = 0; crash < 2; crash++) { expect(drain(f.claims)).toHaveLength(3); f.reopen(); }
+  const kept = f.db.prepare("SELECT state,error FROM dohc_dataset_automation_claims ORDER BY rowid").all();
+  expect(kept).toHaveLength(DATASET_AUTOMATION_HISTORY);
+  expect(kept.slice(-3)).toEqual([1, 2, 3].map(() => ({ state: "failed", error: DATASET_AUTOMATION_RECLAIM_EXHAUSTED })));
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("settles a failure that gives no reason", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.commit("INSERT INTO tasks VALUES('a','Open',''),('b','Open','')");
+  const [first, second] = drain(f.claims);
+  expect(f.claims.settle(first!, { state: "failed", error: "" }).error).toBe("The automation failed without saying why.");
+  expect(f.claims.settle(second!, { state: "failed", error: " \0 " }).error).toBe("The automation failed without saying why.");
+});
+
 it("raises the run on Try again and keeps the claim's facts", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#status", ["changed"]));
@@ -290,6 +324,34 @@ it("carries small values whole and names fields whose values are too large", () 
     { fieldId: STATUS, previous: null, next: "Open" },
     { fieldId: NOTES, previous: null, next: null, truncated: true },
   ]);
+});
+
+it("keeps a claim within 64 KiB when every field of the widest table changes by 8 KiB", () => {
+  const f = ledger(), WIDE = id(200);
+  const columns = Array.from({ length: 127 }, (_, index) => `f${index}`);
+  const wideSchema = `CREATE TABLE wide(id TEXT PRIMARY KEY NOT NULL,${columns.map(column => `${column} TEXT NOT NULL`).join(",")});`;
+  const wide = describeDatasetRevision({ revision: 1, schemaSql: wideSchema, operationSource: "globalThis.operations={};", definition: {
+    formatVersion: 1, datasetId: scope.datasetId, name: "Wide", schemaPath: "wide/schema.sql", operationsPath: "wide/operations.js",
+    tables: [{ tableId: WIDE, name: "Wide", sqlName: "wide", primaryKey: "id", fields: [
+      { fieldId: id(201), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      ...columns.map((column, index) => ({ fieldId: id(300 + index), name: column, sqlColumn: column, type: "text" as const, required: true, unique: false })),
+    ] }],
+    operations: [{ operationId: id(202), name: "read", label: "Read", tableId: WIDE, kind: "read", access: "owner", readOnly: true, fieldIds: [id(201)] }] } });
+  const data = new DatabaseSync(":memory:"); data.exec(wideSchema);
+  data.prepare(`INSERT INTO wide VALUES(${["?", ...columns.map(() => "?")].join(",")})`).run("r".repeat(1000), ...columns.map(() => "a".repeat(8000)));
+  const session = data.createSession();
+  data.exec(`UPDATE wide SET ${columns.map(column => `${column}='${"b".repeat(8000)}'`).join(",")}`);
+  const changeset = session.changeset(); session.close();
+  const reported = { wide: data.prepare("PRAGMA table_info(wide)").all().map(column => String(column.name)) }; data.close();
+  f.claims.subscribe(scope, subscription("collection:wide#any", ["changed"], null, WIDE));
+  f.db.exec("BEGIN IMMEDIATE");
+  f.claims.recordCommit({ cursor: { ...f.cursor, revision: 1, approvedRevisionHash: wide.revisionSha256 }, changeset, columns: reported, approved: wide, actor: { kind: "owner" } });
+  f.db.exec("COMMIT");
+  const fact = f.claims.next(scope.workspaceId)!.fact!;
+  expect(Buffer.byteLength(JSON.stringify(fact))).toBeLessThanOrEqual(64 * 1024);
+  expect(fact.fields).toHaveLength(127);
+  expect(fact.fields.filter(field => !field.truncated).length).toBeGreaterThan(0);
+  expect(fact.fields.filter(field => field.truncated).length).toBeGreaterThan(100);
 });
 
 it("keeps subscriptions current, and forgets a deleted dataset", () => {

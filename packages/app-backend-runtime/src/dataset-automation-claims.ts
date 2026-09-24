@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { DatasetRevision } from "@dohc/security-contract/dataset";
-import { datasetChangeFacts, DatasetChangeFactsError, type DatasetChangeFact, type DatasetFieldChange } from "./dataset-change-facts.js";
+import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetChangeFacts, DatasetChangeFactsError, decodeChangeset, type DatasetChangeFact, type DatasetFieldChange } from "./dataset-change-facts.js";
 import type { DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetCommit } from "./supervisor.js";
 
@@ -13,8 +13,8 @@ import type { DatasetCommit } from "./supervisor.js";
 // materialization never commit, so they never claim.
 //
 // A change the facts reader refuses, such as a value no field type holds,
-// still commits. It claims no record: each subscribed automation gets one
-// failed claim that says why. A claim carries the values of the fields its
+// still commits. It claims no record: each automation that watches a table
+// and change kind the change holds gets one failed claim that says why. A claim carries the values of the fields its
 // automation watches, whoever can read them; the executor's reach check
 // filters them before a step uses them.
 //
@@ -109,8 +109,10 @@ function sync<T>(run: () => T): T {
   if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Automation claim callbacks must be synchronous.");
   return result;
 }
+// Failure text never refuses a settle, which would leave its claim running until the reaper.
 function failure(value: string): string {
-  const whole = Buffer.from(text(value.trim(), "failure", Number.POSITIVE_INFINITY));
+  const trimmed = typeof value === "string" ? value.replaceAll("\0", "").trim() : "";
+  const whole = Buffer.from(trimmed || "The automation failed without saying why.");
   let end = Math.min(whole.byteLength, ERROR_BYTES);
   // Cut before a character, never inside one.
   while (end < whole.byteLength && (whole[end]! & 0xc0) === 0x80) end--;
@@ -136,6 +138,23 @@ function bounded(fact: DatasetChangeFact, fieldIds: readonly string[] | null): D
     budget -= extra;
     return field;
   }) };
+}
+
+const KIND_OF = { insert: "added", update: "changed", delete: "removed" } as const;
+// Each approved table and change kind a changeset holds, read from its headers
+// alone, so a refused value does not hide them. Null when even those are unreadable.
+function touched(definition: DatasetDefinition, changeset: Uint8Array): Set<string> | null {
+  const found = new Set<string>();
+  try {
+    for (const row of decodeChangeset(changeset)) {
+      const table = definition.tables.find(candidate => candidate.sqlName.toLowerCase() === row.table.toLowerCase());
+      if (table) found.add(`${table.tableId} ${KIND_OF[row.operation]}`);
+    }
+  } catch (error) {
+    if (error instanceof DatasetChangeFactsError) return null;
+    throw error;
+  }
+  return found;
 }
 
 function claim(row: Record<string, unknown>): DatasetAutomationClaim {
@@ -193,9 +212,14 @@ export function createDatasetAutomationClaims(options: {
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
       PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`);
     // The reaper. A running claim here belongs to a process that no longer runs.
-    db.prepare(`UPDATE dohc_dataset_automation_claims SET state=CASE WHEN attempts>=?1 THEN 'failed' ELSE 'pending' END,
-      error=CASE WHEN attempts>=?1 THEN ?2 END,updated_at_ms=?3 WHERE state='running'`)
-      .run(DATASET_AUTOMATION_ATTEMPTS, DATASET_AUTOMATION_RECLAIM_EXHAUSTED, now());
+    const reaped = db.prepare(`UPDATE dohc_dataset_automation_claims SET state=CASE WHEN attempts>=?1 THEN 'failed' ELSE 'pending' END,
+      error=CASE WHEN attempts>=?1 THEN ?2 END,updated_at_ms=?3 WHERE state='running' RETURNING workspace_id,dataset_id,automation_id,state`)
+      .all(DATASET_AUTOMATION_ATTEMPTS, DATASET_AUTOMATION_RECLAIM_EXHAUSTED, now());
+    const exhausted = new Map(reaped.filter(row => row.state === "failed").map(row => [JSON.stringify([row.workspace_id, row.dataset_id, row.automation_id]), row]));
+    for (const row of exhausted.values()) {
+      const scope = { workspaceId: String(row.workspace_id), datasetId: String(row.dataset_id) };
+      account(scope, -trim(scope, String(row.automation_id)));
+    }
   });
   return {
     /**
@@ -243,7 +267,12 @@ export function createDatasetAutomationClaims(options: {
           delta += storageBytes; made++;
           if (error) failed.add(automationId);
         };
-        if (refusal !== undefined) for (const { automationId } of subscriptions) insert(automationId, "", "", null, refusal);
+        if (refusal !== undefined) {
+          const reached = touched(input.approved.definition, input.changeset);
+          for (const { automationId, tableId, kinds } of subscriptions) {
+            if (reached === null || kinds.some(kind => reached.has(`${tableId} ${kind}`))) insert(automationId, "", "", null, refusal);
+          }
+        }
         else planned.forEach(({ subscription, fact }, index) => {
           const recordKey = JSON.stringify(fact.recordId), tooLong = Buffer.byteLength(recordKey) > RECORD_ID_BYTES;
           const error = index === DATASET_AUTOMATION_CLAIMS_PER_COMMIT ? DATASET_AUTOMATION_CLAIM_LIMIT
