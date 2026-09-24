@@ -112,7 +112,9 @@ enum MomentAuthor {
     },
 }
 
-const COLLECTION_FILE_ORIGIN_PREFIX: &str = "relay:collection-file:";
+/// The relay-owned origin for a named recipient's direct writes. It carries
+/// only `moment.append`; the router refuses every other operation from it.
+pub(crate) const COLLECTION_FILE_ORIGIN_PREFIX: &str = "relay:collection-file:";
 const AUTOMATIONS_FILENAME: &str = "automations.yaml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1192,6 +1194,8 @@ fn verify_named_author(
             });
         }
     }
+    // A version this device has not imported yet is a retry, not a refusal.
+    require_version(tx, &envelope.workspace_id, &payload.version_id)?;
     if !writes_collection_own_file(tx, &envelope.workspace_id, payload)? {
         return Err(SyncError::InvalidInput {
             reason: "named moment author may write only a Collection's own files",
@@ -1202,14 +1206,15 @@ fn verify_named_author(
 
 /// An in-place text write to `<C>/collection.yaml`, or to `<C>/automations.yaml`
 /// beside it, or the creation of a record directly inside a folder that holds
-/// `collection.yaml`. A new Collection's `collection.yaml` therefore has to
-/// arrive before its records.
+/// `collection.yaml`. A new Collection's `collection.yaml` goes only into a
+/// folder that holds nothing yet, and has to arrive before its records.
 fn writes_collection_own_file(
     tx: &Transaction<'_>,
     workspace_id: &str,
     payload: &MomentAppendPayload,
 ) -> Result<bool, SyncError> {
     let path = payload.path.as_str();
+    let version_id = payload.version_id.as_str();
     let Some((folder, file_name)) = path.rsplit_once('/') else {
         return Ok(false);
     };
@@ -1225,21 +1230,68 @@ fn writes_collection_own_file(
     {
         return Ok(false);
     }
+    // The object coordinate decides what the write touches, so it must agree
+    // with the path: an edit names the object already at that path, and a
+    // create names an object this workspace has never held.
+    let creates = matches!(payload.before_present.as_str(), "absent" | "null");
+    let object_agrees = if creates {
+        !workspace_holds_object(tx, workspace_id, &payload.object_id)?
+    } else {
+        select_snapshot_by_object(tx, workspace_id, version_id, &payload.object_id)?
+            .is_some_and(|snapshot| snapshot.path == path)
+    };
+    if !object_agrees {
+        return Ok(false);
+    }
     let folder_holds_schema = || {
         select_snapshot_by_path(
             tx,
             workspace_id,
-            &payload.version_id,
+            version_id,
             &format!("{folder}/{COLLECTION_SCHEMA_FILENAME}"),
         )
         .map(|schema| schema.is_some())
     };
-    let creates = matches!(payload.before_present.as_str(), "absent" | "null");
     Ok(match file_name {
-        COLLECTION_SCHEMA_FILENAME => true,
+        // A schema created in a folder that already holds files would turn
+        // those files into records.
+        COLLECTION_SCHEMA_FILENAME => {
+            !creates || !folder_holds_any_file(tx, workspace_id, version_id, folder)?
+        }
         AUTOMATIONS_FILENAME => folder_holds_schema()?,
         _ => creates && is_collection_markdown_path(path) && folder_holds_schema()?,
     })
+}
+
+fn workspace_holds_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM file_objects WHERE workspace_id=?1 AND object_id=?2)",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether any file, plain or secret, sits at `folder` or anywhere under it.
+fn folder_holds_any_file(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    folder: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+                       AND (path=?3 OR substr(path,1,length(?4))=?4)) \
+             OR EXISTS(SELECT 1 FROM secret_files WHERE workspace_id=?1 AND version_id=?2 \
+                       AND (path=?3 OR substr(path,1,length(?4))=?4))",
+        params![workspace_id, version_id, folder, format!("{folder}/")],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 fn validate_payload_bounds(payload: &MomentAppendPayload) -> Result<(), SyncError> {
