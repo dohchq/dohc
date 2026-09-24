@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
@@ -22,6 +23,9 @@ interface LoopbackFile {
   content: string;
   // Whether this version has a file snapshot.
   head: "present" | "absent";
+  // The moment that wrote this head. Every capture writes a new one, and a
+  // replicated file keeps the moment id it was written under.
+  headMomentId: string;
 }
 
 // Mirrors `dohc_engine_collab::durable::Regime`: LocalOnly is a prunable
@@ -88,6 +92,9 @@ export interface SeedLoopbackFileInput {
   objectId?: string;
   // The default models an ordinary captured file with a version snapshot.
   head?: "present" | "absent";
+  // Pass the same id to two engines to model one replicated head. The
+  // default models a fresh local capture.
+  headMomentId?: string;
 }
 
 function fileKey(workspace: string, versionId: string, path: string): string {
@@ -109,6 +116,25 @@ function fileKey(workspace: string, versionId: string, path: string): string {
 // id, orphaning the lineage the open's derived id created.
 function deriveObjectId(fileLookupKey: string): string {
   return `object-derived-${fileLookupKey}`;
+}
+
+// Mirrors `dohc_engine_collab::seed_client_id`: one client per head moment,
+// so every device seeding one replicated head sends the same seed.
+function seedClientId(
+  workspace: string,
+  versionId: string,
+  objectId: string,
+  contentKind: YdocContentKind,
+  file: LoopbackFile,
+): number {
+  return (
+    createHash("sha256")
+      .update(
+        JSON.stringify([workspace, versionId, objectId, contentKind, file.headMomentId, sha256(file.content)]),
+      )
+      .digest()
+      .readUInt32BE(0) || 1
+  );
 }
 
 function lineageKey(
@@ -262,6 +288,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   >();
   private nextSessionId = 1;
   private nextMomentId = 1;
+  private nextHeadMomentId = 1;
   private nextRecaptureOrder = 2;
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
@@ -300,6 +327,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind: input.contentKind ?? "richdoc",
       content: input.content,
       head: input.head ?? "present",
+      headMomentId: input.headMomentId ?? `captured-moment-${this.nextHeadMomentId++}`,
     });
   }
 
@@ -557,7 +585,12 @@ export class YdocLoopbackEngine implements EngineTransport {
         lineage: lineage ? "existing" : "absent",
         lineageClaimId: null,
         head: file ? file.head : "absent",
-        ...(seedContent !== undefined ? { seedContent } : {}),
+        ...(seedContent !== undefined && file !== undefined
+          ? {
+              seedContent,
+              seedClientId: seedClientId(request.workspace, versionId, objectId, contentKind, file),
+            }
+          : {}),
       },
       blob: Y.encodeStateAsUpdate(doc),
     };

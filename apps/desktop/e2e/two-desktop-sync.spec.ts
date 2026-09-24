@@ -6,6 +6,7 @@ import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { withEngineDb } from "./helpers/engineDb";
 import { spawnSyncRelay } from "./helpers/syncRelay";
 import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, seedCloudCredentials, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
 
@@ -157,7 +158,7 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
   }
 });
 
-test("@two-client a document open on two desktops keeps both desktops' edits", async () => {
+test("@two-client two desktops that open a document offline merge their edits once each closes it", async () => {
   test.setTimeout(300_000);
   const first = await createTempWorkspace();
   const second = await createTempWorkspace();
@@ -166,6 +167,9 @@ test("@two-client a document open on two desktops keeps both desktops' edits", a
   let right: Desktop | null = null;
   let relay: Relay | null = null;
   const disk = (workspace: Workspace) => readFile(join(workspace.rootPath, "shared.md"), "utf8");
+  const lineageClaims = (workspace: Workspace) =>
+    withEngineDb(workspace.rootPath, (db) => db.prepare("SELECT lineage_claim_id AS claim FROM ydoc_docs WHERE path = 'shared.md'").all().map((row) => row.claim)) ?? [];
+  const count = (text: string, needle: string) => text.split(needle).length - 1;
   try {
     relay = await seedSharedWorkspace(workspaceId, first, second);
     left = await joinWorkspace(first, workspaceId, relay.baseUrl);
@@ -174,13 +178,17 @@ test("@two-client a document open on two desktops keeps both desktops' edits", a
     const relayDb = relay.dbPath;
 
     // Both desktops open the document while neither can see the other's copy.
+    // Each editor seeds it, and both seeds originate one lineage.
     await relay.stop();
     relay = null;
     await openLiveDocument(left.page);
     await openLiveDocument(right.page);
+    await expect.poll(() => lineageClaims(first)).toHaveLength(1);
+    await expect.poll(() => lineageClaims(second), { message: "both editors originate the same base" }).toEqual(lineageClaims(first));
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
 
-    // Online: the left types. The right holds the document open, then closes it.
+    // Online: the left types. An open editor does not yet show edits pulled
+    // from another desktop, so the right closes the document to receive them.
     await typeAtEnd(left.page, " Typed on the left.");
     await expect.poll(() => disk(first)).toContain("Typed on the left.");
     await right.page.keyboard.press("ControlOrMeta+w");
@@ -188,7 +196,7 @@ test("@two-client a document open on two desktops keeps both desktops' edits", a
     await openLiveDocument(right.page);
     await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.");
 
-    // Offline: each desktop types into the same document.
+    // Offline: each desktop types into the same document, then closes it.
     await relay.stop();
     relay = null;
     await typeAtEnd(left.page, " Left offline.");
@@ -198,11 +206,13 @@ test("@two-client a document open on two desktops keeps both desktops' edits", a
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
     for (const desktop of [left, right]) await desktop.page.keyboard.press("ControlOrMeta+w");
 
-    const everyEdit = ["Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
+    const everyEdit = ["# Shared", "Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
     await expect.poll(async () => {
       const [leftText, rightText] = [await disk(first), await disk(second)];
-      return leftText === rightText && everyEdit.every((edit) => leftText.includes(edit));
+      return leftText === rightText && everyEdit.every((edit) => count(leftText, edit) === 1);
     }, { timeout: 120_000 }).toBe(true);
+    const merged = await disk(first);
+    for (const edit of everyEdit) expect(count(merged, edit), edit).toBe(1);
     for (const [desktop, workspace] of [[left, first], [right, second]] as const) {
       const files = (await readdir(workspace.rootPath)).filter((name) => name !== ".dohc");
       expect(files, "no recovered copy or conflict file beside the document").toEqual(["shared.md"]);

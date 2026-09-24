@@ -320,26 +320,6 @@ function declareDohcRootSchema(
   }
 }
 
-/**
- * The Yjs client a seed writes under, derived from what it seeds.
- *
- * Two devices that open the same file before either sees the other's copy
- * each seed the document. With the same client, both seeds are the same
- * bytes, so both devices originate the same base and share one lineage that
- * later edits merge into. A random client would give each device its own
- * lineage, and the relay would keep only one of them.
- */
-function seedClientId(
-  contentKind: YdocContentKind,
-  content: string,
-): number {
-  const digest = createHash("sha256")
-    .update(`dohc:ydoc-seed-client:v1\0${contentKind}\0`)
-    .update(content)
-    .digest();
-  return digest.readUInt32BE(0) || 1;
-}
-
 function createPlaintextSeedDoc(content: string, clientID: number): Y.Doc {
   const doc = new Y.Doc();
   doc.clientID = clientID;
@@ -1422,7 +1402,18 @@ export class YdocLiveAdapter {
         if (!isWellFormedUtf16(result.seedContent)) {
           throw new IllFormedUtf16EditError();
         }
-        const clientID = seedClientId(result.contentKind, result.seedContent);
+        const clientID = result.seedClientId;
+        if (
+          clientID === undefined ||
+          !Number.isInteger(clientID) ||
+          clientID < 1 ||
+          clientID > 0xffff_ffff
+        ) {
+          throw new YdocAdapterError(
+            "response-mismatch",
+            "The engine returned seed content without a valid seed client id.",
+          );
+        }
         const seedDoc =
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(result.seedContent, clientID)
