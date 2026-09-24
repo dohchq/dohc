@@ -458,6 +458,8 @@ describe("dataset worker prepare result", () => {
     ["an empty list", { tasks: [] }],
     ["a name that is not text", { tasks: ["id", 7] }],
     ["an empty name", { tasks: ["id", ""] }],
+    ["a hole in the list", { tasks: new Array(1) }],
+    ["a name twice, in another letter case", { tasks: ["id", "Name", "name"] }],
   ])("refuses a prepare result with %s as a protocol error", async (_case, columns) => {
     const directory = await mkdtemp(join(tmpdir(), "dohc-change-facts-"));
     // The real worker, with its prepare reply's columns replaced.

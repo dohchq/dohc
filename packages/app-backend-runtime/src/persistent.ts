@@ -18,8 +18,19 @@ const MAX_TABLE_COLUMNS=32_767;
 function tableColumns(value:unknown,tables:readonly string[]):boolean {
   if(value===null || typeof value!=="object" || Array.isArray(value) || Object.getPrototypeOf(value)!==Object.prototype) return false;
   const entries=Object.entries(value);
-  return entries.length===tables.length && entries.every(([table,names])=>tables.includes(table) && Array.isArray(names) &&
-    names.length>0 && names.length<=MAX_TABLE_COLUMNS && names.every(name=>typeof name==="string" && name.length>0));
+  return entries.length===tables.length && entries.every(([table,names])=>tables.includes(table) && columnNames(names));
+}
+// A non-empty list with a name at every index, each distinct in any letter case, as SQLite compares column names.
+function columnNames(names:unknown):boolean {
+  if(!Array.isArray(names) || names.length===0 || names.length>MAX_TABLE_COLUMNS) return false;
+  const seen=new Set<string>();
+  for(let index=0;index<names.length;index+=1) {
+    if(!Object.hasOwn(names,index)) return false;
+    const name:unknown=names[index];
+    if(typeof name!=="string" || name.length===0 || seen.has(name.toLowerCase())) return false;
+    seen.add(name.toLowerCase());
+  }
+  return true;
 }
 const nodeLauncher:AppRuntimeLauncher=options=>{
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
