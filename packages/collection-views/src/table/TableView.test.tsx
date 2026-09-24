@@ -127,3 +127,23 @@ describe("paused table editing", () => {
     });
   });
 });
+
+describe("field marks", () => {
+  it("shows a field's mark after its name, and says what it means without renaming the sort control", () => {
+    const schema = makeSchema([{ name: "title", type: "text" }, { name: "done", type: "checkbox" }]);
+    const marks = new Map([["done", { icon: <svg data-testid="mark-icon" />, label: 'Set by the automation "Stamp"' }]]);
+    const onSortChange = vi.fn();
+    render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} onSortChange={onSortChange} />);
+
+    const done = screen.getByRole("button", { name: "done" });
+    const description = document.getElementById(done.getAttribute("aria-describedby") ?? "");
+    expect(description?.getAttribute("role")).toBe("tooltip");
+    expect(description?.textContent).toBe('Set by the automation "Stamp"');
+    expect(done.querySelector('[data-testid="mark-icon"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "title" }).hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.getAllByTestId("table-field-mark")).toHaveLength(1);
+
+    fireEvent.click(done);
+    expect(onSortChange).toHaveBeenCalledWith([{ field: "done", direction: "asc" }]);
+  });
+});

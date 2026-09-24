@@ -1,6 +1,6 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
@@ -60,14 +60,49 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 
 // A moment authored by a dohc-tracked agent run displays as
 // "the agent name" (the same formatting rule the chat rail uses via
-// chatAuthorLabel); everything else keeps its actor-neutral origin label.
+// chatAuthorLabel), and one an automation authored as the automation's
+// name; everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">,
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.automationAuthor) return moment.automationAuthor.name;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
     : engineOriginLabel(moment.origin);
+}
+
+// Where a moment came from, as one line of History. An automation's name
+// follows the ⚡ mark, and hovering says which Collection it belongs to.
+export function EngineMomentSource(props: {
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "automationAuthor">;
+  testId: string;
+}) {
+  const { moment } = props;
+  const automation = moment.automationAuthor;
+  if (automation) {
+    return (
+      <span
+        data-testid={props.testId}
+        title={automation.collection ? `Automation in ${automation.collection}` : "Automation"}
+        className="inline-flex items-center gap-1 text-muted"
+      >
+        <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+        <span className="sr-only">Automation </span>
+        {automation.name}
+      </span>
+    );
+  }
+  // Agent-authored moments speak in the olive attribution voice; everything
+  // else is a neutral origin in ink.
+  return (
+    <span
+      data-testid={props.testId}
+      className={moment.agentAuthorName !== undefined ? "text-agent" : "text-muted"}
+    >
+      {engineMomentSourceLabel(moment)}
+    </span>
+  );
 }
 
 // The group-level author: the shared agent author name when every moment in
@@ -155,9 +190,6 @@ function MomentRow(props: {
 }) {
   const { moment } = props;
   const recordedAt = formatChatTime(moment.recordedAtMs);
-  // Agent-authored moments speak in the olive attribution voice; everything
-  // else is a neutral origin in ink.
-  const isAgent = moment.agentAuthorName !== undefined;
   return (
     <button
       type="button"
@@ -206,12 +238,7 @@ function MomentRow(props: {
               engineOperationLabel(moment)
             ) : (
               <>
-                <span
-                  data-testid="engine-moment-source"
-                  className={isAgent ? "text-agent" : "text-muted"}
-                >
-                  {engineMomentSourceLabel(moment)}
-                </span>
+                <EngineMomentSource moment={moment} testId="engine-moment-source" />
                 {" · "}
                 <time
                   data-testid="engine-moment-recorded-at"

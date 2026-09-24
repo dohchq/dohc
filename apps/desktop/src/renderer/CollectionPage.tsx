@@ -34,6 +34,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
+import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -153,6 +154,9 @@ export function CollectionPage({
     [collectionPath, executor],
   );
   const state = useCollectionStore(store);
+  // The ⚡ on each field an automation sets: one read per Collection, again
+  // only when main's automations change.
+  const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(workspaceId, collectionPath));
 
   const views = details?.schema.views ?? [];
   const activeView: ViewDefinition | null =
@@ -527,6 +531,7 @@ export function CollectionPage({
             onCreateOption={createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
+            fieldMarks={tableFieldMarks}
             onNearEnd={loadNextPage}
           />
         )}

@@ -6,6 +6,7 @@ import {
   collectionAutomationId,
   definitionHash,
   evaluationRequest,
+  fieldWritesOf,
   findQueryOf,
   localIsoTime,
   parseCollectionAutomationId,
@@ -112,6 +113,33 @@ describe("what the executor can run", () => {
       .toMatch(/record change/);
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
     expect(unsupportedReason(withStep(finds))).toMatch(/at most 5 Find steps/);
+  });
+});
+
+describe("field writes", () => {
+  it("names each field a step sets, in the Collection the step changes", () => {
+    const log = automation([
+      "id: log", "name: Log", "when: record-added", "do:",
+      "  - set: {Seen: true}",
+      "  - add-record: {Task: '=record.Name', Logged on: '=today()'}",
+      "    collection: Archive",
+      "    as: logged",
+      "  - set: {Filed: true}",
+      "    records: logged",
+      "  - find: 'record.Status == \"Doing\"'",
+      "    as: doing",
+      "  - if: doing.length > 0",
+      "    do:",
+      "      - set: {Nudged: true}",
+      "        records: doing",
+    ].join("\n"));
+    expect(fieldWritesOf(log)).toEqual([
+      { collection: null, field: "Seen" },
+      { collection: "Archive", field: "Task" },
+      { collection: "Archive", field: "Logged on" },
+      { collection: "Archive", field: "Filed" },
+      { collection: null, field: "Nudged" },
+    ]);
   });
 });
 

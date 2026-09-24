@@ -67,6 +67,10 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import type { DesktopUserSettings } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
+import {
+  CollectionAutomationsRevisionProvider,
+  useCollectionAutomationsRevision,
+} from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -3856,6 +3860,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
+  const automationsRevision = useCollectionAutomationsRevision(workspaceId, workspaceIsReady);
 
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewDamaged) return;
@@ -4477,6 +4482,7 @@ export function DesktopWorkspaceShell(props: {
   retryLiveDeliveryRef.current = retryLiveDelivery;
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
+    <CollectionAutomationsRevisionProvider value={automationsRevision}>
     <div
       data-testid="workspace-shell"
       // Flips to "true" only once openWorkspace has resolved — which in main
@@ -6047,6 +6053,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
+    </CollectionAutomationsRevisionProvider>
     </AgentSettingsContext.Provider>
   );
 }

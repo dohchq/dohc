@@ -73,6 +73,7 @@ async function world(options: {
   let opens = 0;
   let failOpenAt: number | null = null;
   let holdsChanged = 0;
+  let automationsChanged = 0;
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
   const until = (condition: () => boolean) => new Promise<void>((resolve) => {
     const check = () => { if (condition()) { waiters.delete(check); resolve(); } };
@@ -297,6 +298,7 @@ async function world(options: {
     store,
     onFailuresChanged: () => { failuresChanged.push("changed"); wake(); },
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
+    onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); },
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
   });
@@ -327,6 +329,7 @@ async function world(options: {
   return {
     root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
     holdsChanged: () => holdsChanged,
+    automationsChanged: () => automationsChanged,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
     resumable,
@@ -1342,5 +1345,36 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(w.failuresChanged).toEqual([]);
+  });
+
+  it("marks each field switched-on automations set, in the Collection they set it, and names them", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: [
+      BUMP,
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status, to: Done}",
+      "    do: [{set: {Count: 0, Finished on: '=today()'}}]",
+      "  - id: idle",
+      "    name: Idle",
+      "    enabled: false",
+      "    when: record-added",
+      "    do: [{set: {Idle: true}}]",
+    ].join("\n") } });
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+    await w.executor.open();
+    expect(w.automationsChanged()).toBe(1);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([
+      { field: "Count", automations: ["Bump", "Stamp"] },
+      { field: "Finished on", automations: ["Stamp"] },
+    ]);
+    await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
+    expect(w.executor.automationName(TASKS)).toBe("Bump");
+
+    // A reload says so once it has read the file again.
+    await w.writeAutomations("Tasks", BUMP.replace("name: Bump", "name: Bump the count"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.automationsChanged() === 2);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Bump the count"] }]);
+    expect(w.executor.automationName("collection:Tasks#stamp")).toBeNull();
   });
 });

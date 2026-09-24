@@ -132,6 +132,25 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it("marks each property an automation sets, and names the automations to keyboard and screen reader users", async () => {
+    const user = userEvent.setup();
+    render(
+      <PropertiesPanel
+        body={"---\nid: rec-1\nStatus: Done\nFinished on: 2026-09-25\n---\n"}
+        onChange={vi.fn()}
+        fieldMarks={new Map([["Finished on", ["Stamp the finish date", "Tidy"]]])}
+      />,
+    );
+    const marks = screen.getAllByTestId("automation-field-mark");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest('[data-testid="property-row"]')?.querySelector("input")?.value).toBe("Finished on");
+    const mark = screen.getByRole("img", { name: 'Set by the automations "Stamp the finish date" and "Tidy"' });
+    // The mark follows its property's name in the tab order.
+    await user.click(screen.getByDisplayValue("Finished on"));
+    await user.tab();
+    expect(document.activeElement).toBe(mark);
+  });
+
   it("hides the reserved icon key from the user property rows", () => {
     render(
       <PropertiesPanel

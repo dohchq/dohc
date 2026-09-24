@@ -46,6 +46,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("EngineHistoryView automation rows", () => {
+  it("shows the automation's name after the ⚡, and its Collection on hover", () => {
+    render(
+      <EngineHistoryView
+        moments={[
+          moment({ id: "m-auto", origin: "api", path: "Tasks/new.md", automationAuthor: { name: "Stamp the finish date", collection: "Tasks" } }),
+        ]}
+        hasMore={false}
+        loadingMore={false}
+        protectedTruncated={false}
+        onLoadMore={() => {}}
+        onOpenMoment={() => {}}
+      />,
+    );
+    const source = screen.getByTestId("engine-moment-source");
+    expect(source.textContent).toBe("Automation Stamp the finish date");
+    expect(source.getAttribute("title")).toBe("Automation in Tasks");
+    expect(source.querySelector("svg")).not.toBeNull();
+  });
+});
+
 describe("EngineHistoryView protected rows", () => {
   it("renders a lock on protected moments and none on ordinary ones", () => {
     render(

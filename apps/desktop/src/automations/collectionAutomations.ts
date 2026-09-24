@@ -21,6 +21,7 @@ import {
   collectionAutomationId,
   COLLECTION_AUTOMATION_PREFIX,
   definitionHash,
+  fieldWritesOf,
   parseCollectionAutomationId,
   reachStepsOf,
   subscriptionFor,
@@ -111,6 +112,8 @@ export interface CollectionAutomationsOptions {
   onFailuresChanged(): void;
   /** A step started or stopped waiting for a current editor: the hold notices re-read. */
   onHoldsChanged(): void;
+  /** The automations dohc read from the workspace changed: the ⚡ field marks re-read. */
+  onAutomationsChanged(): void;
   onError(context: string, error: unknown): void;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
@@ -144,6 +147,12 @@ export type CollectionAutomationsFile =
   | { status: "missing" }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
   | { status: "read"; contentHash: string | null; automations: CollectionAutomationSummary[] };
+
+/** One field that switched-on automations set, with their names in file order. */
+export interface CollectionFieldMark {
+  field: string;
+  automations: string[];
+}
 
 /** A step that waits for a current editor to allow it, for its notice. */
 export interface CollectionAutomationHold {
@@ -305,7 +314,9 @@ export class CollectionAutomations {
       this.publishHolds();
     }).then(
       () => {
-        if (current()) this.rosterChanged();
+        if (!current()) return;
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
       },
       (error: unknown) => {
         // A later open tries again.
@@ -343,7 +354,10 @@ export class CollectionAutomations {
     })
       // A new or changed step gets its verdict now, while the people who
       // could have written it can still edit the Collection.
-      .then(() => this.rosterChanged())
+      .then(() => {
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
+      })
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
@@ -506,6 +520,33 @@ export class CollectionAutomations {
       });
     }
     return holds;
+  }
+
+  /**
+   * The fields in one Collection that switched-on automations set, from any
+   * Collection's automations. Before the workspace opens its automations
+   * there are none; `onAutomationsChanged` says when to ask again.
+   */
+  async fieldMarks(collectionPath: string): Promise<CollectionFieldMark[]> {
+    if (this.opened === null) return [];
+    await this.opened;
+    const marks = new Map<string, Map<string, string>>();
+    for (const { automationId, collectionPath: home, automation } of this.everyAutomation()) {
+      if (!automation.enabled) continue;
+      for (const write of fieldWritesOf(automation)) {
+        if ((write.collection ?? home) !== collectionPath) continue;
+        const names = marks.get(write.field) ?? new Map<string, string>();
+        names.set(automationId, automation.name);
+        marks.set(write.field, names);
+      }
+    }
+    return [...marks].map(([field, names]) => ({ field, automations: [...names.values()] }));
+  }
+
+  /** The name an automation has in its Collection's file now, or null when the file no longer has it. */
+  automationName(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    return parsed ? (this.definitionFor(parsed)?.name ?? null) : null;
   }
 
   /**

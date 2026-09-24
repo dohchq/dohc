@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -41,6 +41,17 @@ export interface CollectionOptionCreate {
   previousValues?: readonly CollectionValue[];
 }
 
+/**
+ * A mark after a field's name in the header, such as the ⚡ of a field that
+ * automations set. The host supplies the icon and its words; hovering the
+ * header or focusing its sort control shows the words, and screen readers
+ * hear them as the control's description.
+ */
+export interface TableFieldMark {
+  icon: ReactNode;
+  label: string;
+}
+
 export interface TableViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -66,6 +77,8 @@ export interface TableViewProps {
   relationExecutor?: CollectionQueryExecutor;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
+  /** Marks by field name. Built once by the host, so rows never pay for them. */
+  fieldMarks?: ReadonlyMap<string, TableFieldMark>;
   /**
    * Called when the virtualizer renders within NEAR_END_ROWS of the last
    * loaded record. Hosts respond by loading the next page; extra calls are
@@ -108,8 +121,10 @@ export function TableView({
   onOpenRecord,
   relationExecutor,
   personLabel,
+  fieldMarks,
   onNearEnd,
 }: TableViewProps) {
+  const markId = useId();
   const fields = useMemo(
     () => deriveColumns(schema, visibleFields),
     [schema, visibleFields],
@@ -230,27 +245,45 @@ export function TableView({
         {onOpenRecord ? (
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
         ) : null}
-        {fields.map((field) => {
+        {fields.map((field, index) => {
           const sorted = primarySort?.field === field.name ? primarySort.direction : null;
+          const mark = fieldMarks?.get(field.name);
+          const markLabelId = `${markId}-mark-${index}`;
           return (
             <div
               key={field.name}
               role="columnheader"
               aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
+              className="group/header relative"
               style={{ width: COLUMN_WIDTH }}
             >
               <button
                 type="button"
+                aria-describedby={mark ? markLabelId : undefined}
                 className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
                 onClick={() => toggleSort(field.name)}
               >
                 <span className="truncate">{field.name}</span>
+                {mark ? (
+                  <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
+                    {mark.icon}
+                  </span>
+                ) : null}
                 {sorted ? (
                   <span aria-hidden="true" className="text-subtle">
                     {sorted === "asc" ? "↑" : "↓"}
                   </span>
                 ) : null}
               </button>
+              {mark ? (
+                <span
+                  id={markLabelId}
+                  role="tooltip"
+                  className="dohc-popover pointer-events-none absolute left-2 top-full z-20 mt-1 hidden w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-[12px] font-normal text-ink group-hover/header:block group-has-[:focus-visible]/header:block"
+                >
+                  {mark.label}
+                </span>
+              ) : null}
             </div>
           );
         })}

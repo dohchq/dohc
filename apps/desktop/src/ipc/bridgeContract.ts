@@ -16,6 +16,7 @@ import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations
 import type {
   CollectionAutomationHolds,
   CollectionAutomationRetry,
+  CollectionFieldMark,
   CollectionAutomationRun,
   CollectionAutomationsFile,
 } from "../automations/collectionAutomations";
@@ -1368,6 +1369,9 @@ export const EngineMomentRecord = z.object({
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
+  // Present when an automation authored the moment: its name as this
+  // computer's automations.yaml has it, and the Collection it belongs to.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).nullable() }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -5224,6 +5228,15 @@ export type ResetAutomationHoldsResult = { status: "reset" | "roster-unknown" };
 export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
 export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
 
+// The fields in one Collection that switched-on automations set, for the
+// ⚡ marks on the table and the record's properties.
+export const ListCollectionFieldMarksPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionFieldMarksPayload = z.infer<typeof ListCollectionFieldMarksPayload>;
+export type ListCollectionFieldMarksResult = { marks: CollectionFieldMark[] };
+
 // Replaces the file's automations with these, over the content the panel
 // read (null when the file did not exist).
 export const WriteCollectionAutomationsPayload = z.object({
@@ -6511,6 +6524,7 @@ export interface DohcDesktopBridge
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
   revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
+  listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
@@ -6694,6 +6708,10 @@ export interface DohcDesktopBridge
   onNoticesChanged(listener: () => void): () => void;
   // A step started or stopped waiting for a current editor: re-list holds.
   onAutomationHoldsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
+  // The automations main read from the workspace changed: re-read field marks.
+  onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
   // Live push: main signals a cloud session transition (login, logout,

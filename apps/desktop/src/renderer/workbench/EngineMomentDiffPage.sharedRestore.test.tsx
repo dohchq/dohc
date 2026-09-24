@@ -14,7 +14,10 @@ const text = {path: base.path, contentKind: "text" as const, sha256: "a".repeat(
 const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, payload: {before: null, after: text}}};
 
 async function open(detail: WorkspaceEngineMomentDetail) {
-  const moment = engineMomentDetailForIpc(detail, () => "Owner");
+  const moment = engineMomentDetailForIpc(detail, {
+    agent: () => "Owner",
+    automation: (automationId) => ({ name: automationId, collection: null }),
+  });
   const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], pendingOperation: null,
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
