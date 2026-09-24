@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { getConfig } from "@testing-library/dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Guards that `vitest.setup.ts` is registered, not what it does.
 //
@@ -27,5 +27,14 @@ describe("apps/desktop vitest setup", () => {
 
   it("gives Testing Library waits the loaded-machine window, not its own 1 s default", () => {
     expect(getConfig().asyncUtilTimeout).toBe(10_000);
+  });
+
+  it("gives vi.waitFor and expect.poll the same window, not vitest's 1 s default", async () => {
+    const start = performance.now();
+    const elapsed = () => performance.now() - start;
+    await Promise.all([
+      vi.waitFor(() => expect(elapsed()).toBeGreaterThan(1_100)),
+      expect.poll(elapsed).toBeGreaterThan(1_100),
+    ]);
   });
 });

@@ -33,6 +33,8 @@ export default defineConfig({
     // In a full gate beside other work, the 100-tab-limit shell tests took over
     // 15 s; each passes alone. 30 s matches the storage and service packages.
     testTimeout: 30_000,
+    // expect.poll's own default is 1 s; waits get the same 10 s as vitest.setup.ts.
+    expect: { poll: { timeout: 10_000 } },
     // node >= 25 ships a default-on WebStorage whose localStorage global is
     // created without a backing file in the workers ("--localstorage-file was
     // provided without a valid path") and shadows jsdom's real Storage, so
