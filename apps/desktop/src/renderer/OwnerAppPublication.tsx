@@ -67,7 +67,7 @@ function PublicationControl(props: PublicationProps) {
     {props.triggerLabel ? <PrimaryButton ref={trigger} onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
     </IconButton>}
-    {open ? <PublicationDialog {...props} onClose={close} /> : null}
+    {open ? <PublicationDialog {...props} onClose={close} onReopen={() => setOpen(true)} /> : null}
   </>;
 }
 
@@ -77,7 +77,7 @@ function linkLabel(link: ActiveLink) {
   return `${paths}${version} · ${link.access} · ${link.grantId.slice(0, 8)}`;
 }
 
-function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
+function PublicationDialog(props: PublicationProps & { onClose: () => void; onReopen: () => void }) {
   const [links, setLinks] = useState<ActiveLink[]>([]);
   const [selected, setSelected] = useState("");
   const [loading, setLoading] = useState(true);
@@ -219,7 +219,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
     } catch (error) {
       if (alive.current && mine === request.current) {
         cancel(candidate.current); candidate.current = null;
-        reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(error, "")), () => { if (alive.current) void prepareWith(input, link); });
+        // After the dialog closes, Try again reopens it so the owner can prepare the app again.
+        reportError("dohc could not prepare this app.", new Error(ipcErrorMessage(error, "")), () => { if (alive.current) void prepareWith(input, link); else props.onReopen(); });
       }
     } finally { if (alive.current && mine === request.current) { setBusy(null); setLocalPreparing(false); } }
   };

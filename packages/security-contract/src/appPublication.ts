@@ -9,6 +9,11 @@ export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTI
   APP_COLLECTION_CURSOR_BYTES,APP_COLLECTION_PAGE_BYTES,APP_COLLECTION_RESPONSE_BYTES,
   type AppCollectionCreateRequest,type AppCollectionReadRequest,type AppCollectionReceipt,type AppCollectionPage} from "./appCollection";
 
+/** A compiled bundle: the script, its styles, and, for an HTML entry, the page record. */
+const bundleContentTypes: Readonly<Record<string, string>> = {
+  "bundle.js": "text/javascript; charset=utf-8", "bundle.css": "text/css; charset=utf-8", "page.json": "application/json; charset=utf-8",
+};
+
 /** Publication transport ceilings shared by desktop, relay, and browser launch. */
 export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
 export const APP_PUBLICATION_MAX_FILES = 512;
@@ -71,7 +76,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
   if (!Array.isArray(row.inputs) || row.inputs.length < 1 || row.inputs.length > limits.maxFiles ||
       row.inputs.length > limits.maxMetadataBytes ||
       !Array.isArray(row.dependencies) || row.dependencies.length < 1 || row.dependencies.length > row.inputs.length ||
-      !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 2 ||
+      !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 3 ||
       !Array.isArray(row.capabilities) || row.capabilities.length > 1) throw new Error("Unsupported publication inventory or capabilities.");
   let remainingTextBytes = limits.maxMetadataBytes;
   const readText = (value: unknown): string => {
@@ -106,8 +111,8 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
   const outputs = new Set<string>();let total = 0;
   const files = row.files.map(value => {
     const file = object(value, ["path", "sha256", "byteLength", "contentType"]);
-    if (file.path !== "bundle.js" && file.path !== "bundle.css") throw new Error("Unsupported publication bundle path.");
-    const contentType = file.path === "bundle.css" ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8";
+    if (typeof file.path !== "string" || !Object.hasOwn(bundleContentTypes, file.path)) throw new Error("Unsupported publication bundle path.");
+    const contentType = bundleContentTypes[file.path]!;
     if (file.contentType !== contentType || outputs.has(file.path)) throw new Error("Invalid publication bundle type or duplicate.");
     outputs.add(file.path);const byteLength = size(file.byteLength);total += byteLength;
     if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes || byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Publication bundle bound exceeded.");

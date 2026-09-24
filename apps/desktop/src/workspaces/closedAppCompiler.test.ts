@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createAppDocument } from "@dohc/app-browser/document";
 import { compileClosedApp } from "./closedAppCompiler";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -95,7 +96,7 @@ describe("closed app compiler", () => {
 
   it("does not grant package subpaths through a root mapping", async () => {
     await expect(compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", "import 'react/jsx-runtime'"), file("deps/react.js", "export {}")],
-      packageMap: { react: "deps/react.js" }, bounds })).rejects.toThrow(/outside/);
+      packageMap: { react: "deps/react.js" }, bounds })).rejects.toThrow("main.ts imports the package react/jsx-runtime, which app.publish.json does not map.");
   });
 
   it("rejects an override present when the compiler module loads after it is cleared", async () => {
@@ -161,65 +162,156 @@ describe("closed app compiler", () => {
     expect(new TextDecoder().decode(result.files[0]!.bytes)).toContain("data:image/png");
   });
 
-  it.each(["https://example.test/a.png", "data:image/png;base64,AAAA", "../private.png"])("refuses undeclared CSS URL %s", async url => {
+  it.each(["https://example.test/a.png", "../private.png"])("refuses undeclared CSS URL %s", async url => {
     await expect(compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", "import './style.css'"),
       file("style.css", `body { background: url('${url}') }`)], bounds })).rejects.toThrow();
   });
 
   describe("HTML page entry", () => {
     const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    const image = (path: string) => ({ path, bytes: png, sha256: hash(png) });
+    const dataUrl = `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
     const page = (html: string, ...others: ReturnType<typeof file>[]) => compileClosedApp({ entryPath: "site/index.html", bounds,
       inputs: [file("site/index.html", html), ...others] });
+    const require = createRequire(import.meta.url);
+    const { JSDOM } = require("jsdom") as { JSDOM: new (html: string, options: { runScripts: "dangerously" }) => { window: Window & typeof globalThis & { log?: string[]; errors?: string[] } } };
+    /** Runs the published document in a DOM, as a guest's browser would load it. */
+    const open = async (result: Awaited<ReturnType<typeof compileClosedApp>>) => {
+      const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
+      const dom = new JSDOM(document.html.replace("<body>", "<body><script>window.log=[];window.errors=[];window.addEventListener('error',e=>window.errors.push(e.message))</script>"), { runScripts: "dangerously" });
+      await vi.waitFor(() => expect(dom.window.document.readyState).not.toBe("loading"));
+      return dom;
+    };
 
-    it("rebuilds the page, keeps classic globals shared, and runs module scripts last", async () => {
+    it("rebuilds the page and runs each script as its own script, in the order a browser runs them", async () => {
       const result = await page(`<!doctype html><html lang="fr"><head><title>Trip</title><link rel="stylesheet" href="style.css">
-        <style>p { margin: 0 }</style><script src="/data.js"></script></head>
-        <body class="trip"><h1>Trip</h1><img alt="Map" src="./map.png"><ol id="stops"></ol><output></output>
+        <style>p { margin: 0 }</style><script src="/data.js"></script><script defer src="later.js"></script></head>
+        <body class="trip"><h1>Trip</h1><ol id="stops"></ol><output></output>
         <script type="application/json" id="seed">{"stop":"Kyoto"}</script>
-        <script>for (const stop of stops) document.getElementById("stops").append(Object.assign(document.createElement("li"), { textContent: stop }));</script>
-        <script type="module">import { count } from "./count.js"; document.querySelector("output").textContent = count();</script>
-        <script nomodule>document.body.dataset.legacy = "ran";</script></body></html>`,
-        file("site/style.css", "h1 { color: red }"), file("site/data.js", "var stops = ['Tokyo'];"),
-        file("site/count.js", "export const count = () => String(document.querySelectorAll('li').length);"),
-        { path: "site/map.png", bytes: png, sha256: hash(png) }, file("site/unused.js", "throw new Error('unused')"));
-      expect(result.files.map(output => output.path)).toEqual(["bundle.css", "bundle.js"]);
-      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/count.js", "site/data.js", "site/index.html", "site/map.png", "site/style.css"]);
+        <script>log.push("inline:" + document.readyState); for (const stop of stops) document.getElementById("stops").append(Object.assign(document.createElement("li"), { textContent: stop }));</script>
+        <script>"use strict"; log.push((function () { return this; })() === undefined ? "strict" : "sloppy");</script>
+        <script>throw new Error("first script fails");</script>
+        <script>let stops = []; log.push("not reached");</script>
+        <script>log.push("after the failures");</script>
+        <script type="module">import { count } from "./count.js"; log.push("module:" + count());</script>
+        <script nomodule>log.push("nomodule");</script></body></html>`,
+        file("site/style.css", "h1 { color: red }"), file("site/data.js", "var stops = ['Tokyo'];"), file("site/later.js", "log.push('deferred:' + document.readyState);"),
+        file("site/count.js", "export const count = () => String(document.querySelectorAll('li').length);"), file("site/unused.js", "throw new Error('unused')"));
+      expect(result.compiler.recipe).toBe("dohc-closed-app-v3");
+      expect(result.files.map(output => output.path)).toEqual(["bundle.css", "bundle.js", "page.json"]);
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/count.js", "site/data.js", "site/index.html", "site/later.js", "site/style.css"]);
       expect(new TextDecoder().decode(result.files[0]!.bytes)).toMatch(/h1[^}]*color: red[\s\S]*p[^}]*margin: 0/);
-      const require = createRequire(import.meta.url);
-      const { JSDOM } = require("jsdom") as { JSDOM: new (html: string, options: { runScripts: "outside-only" }) => { window: Window & typeof globalThis } };
-      const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', { runScripts: "outside-only" });
+      const dom = await open(result);
       try {
-        // Executes a trusted test fixture to prove the published document, not runtime isolation.
-        dom.window.eval(new TextDecoder().decode(result.files[1]!.bytes));
         const document = dom.window.document;
         expect(document.documentElement.lang).toBe("fr");
         expect(document.title).toBe("Trip");
         expect(document.body.className).toBe("trip");
         expect(document.getElementById("root")).toBeNull();
-        expect([...document.querySelectorAll("li")].map(item => item.textContent)).toEqual(["Tokyo"]);
-        expect(document.querySelector("output")!.textContent).toBe("1");
         expect(document.getElementById("seed")!.textContent).toBe('{"stop":"Kyoto"}');
-        expect(document.querySelector("img")!.src).toBe(`data:image/png;base64,${Buffer.from(png).toString("base64")}`);
-        expect(document.body.dataset.legacy).toBeUndefined();
+        await vi.waitFor(() => expect(dom.window.log).toContain("module:1"));
+        // A throw or a redeclared name stops only its own script; the module and the deferred script run once parsing ends.
+        expect(dom.window.log).toEqual(["inline:loading", "strict", "after the failures", "deferred:interactive", "module:1"]);
+        expect(dom.window.errors).toEqual([expect.stringContaining("first script fails"), expect.stringMatching(/stops/)]);
+        expect([...document.querySelectorAll("li")].map(item => item.textContent)).toEqual(["Tokyo"]);
       } finally { dom.window.close(); }
+    });
+
+    it("pins every script's hash in the page's security policy and nothing else", async () => {
+      const result = await page('<script>window.one = 1;</script><script src="two.js"></script>', file("site/two.js", "window.two = 2;"));
+      const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
+      const pinned = (text: string) => `'sha256-${createHash("sha256").update(text).digest("base64")}'`;
+      expect(document.scriptSources).toEqual(expect.arrayContaining([pinned("window.one = 1;"), pinned("window.two = 2;")]));
+      expect(document.html).toMatch(/script-src ('sha256-[A-Za-z0-9+/=]+' ?)+;/);
+      expect(document.html).not.toMatch(/unsafe-inline'[^;]*script|strict-dynamic|unsafe-eval/);
+    });
+
+    it("embeds local images from src, srcset, poster, style attributes, SVG, and template content", async () => {
+      const result = await page(`<img alt="a" src="map.png"><img alt="b" srcset="map.png 1x, img/Big.PNG 2x" src="https://example.test/remote.png">
+        <picture><source srcset="map.png"><img alt="c" src="//cdn.example.test/x.png"></picture><video poster="map.png" src="https://example.test/v.mp4"></video>
+        <div style="background: url('img/Big.PNG')"></div><svg><image href="map.png"/><use href="#icon"/></svg>
+        <template><img alt="d" src="map.png"><script>window.fromTemplate = true;</script></template>`, image("site/map.png"), image("site/img/Big.PNG"));
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/img/Big.PNG", "site/index.html", "site/map.png"]);
+      const dom = await open(result);
+      try {
+        const document = dom.window.document;
+        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe(dataUrl);
+        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe(`${dataUrl} 1x, ${dataUrl} 2x`);
+        expect(document.querySelector("img[alt=b]")!.getAttribute("src")).toBe("https://example.test/remote.png");
+        expect(document.querySelector("source")!.getAttribute("srcset")).toBe(dataUrl);
+        expect(document.querySelector("img[alt=c]")!.getAttribute("src")).toBe("//cdn.example.test/x.png");
+        expect(document.querySelector("video")!.getAttribute("poster")).toBe(dataUrl);
+        expect(document.querySelector("div")!.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
+        expect(document.querySelector("image")!.getAttribute("href")).toBe(dataUrl);
+        expect(document.querySelector("use")!.getAttribute("href")).toBe("#icon");
+        const template = document.querySelector("template")!.content;
+        expect(template.querySelector("img")!.getAttribute("src")).toBe(dataUrl);
+        expect(template.querySelector("script")).not.toBeNull();
+        expect((dom.window as unknown as { fromTemplate?: boolean }).fromTemplate).toBeUndefined();
+      } finally { dom.window.close(); }
+    });
+
+    it("resolves links from a local <base> and removes it", async () => {
+      const result = await page('<base href="assets/"><link rel="stylesheet" href="style.css"><img alt="m" src="map.png">',
+        file("site/assets/style.css", "h1 { color: blue }"), image("site/assets/map.png"));
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/assets/map.png", "site/assets/style.css", "site/index.html"]);
+      expect(new TextDecoder().decode(result.files[2]!.bytes)).not.toContain("<base");
     });
 
     it.each([
       ['<script src="https://cdn.example.test/app.js"></script>', "site/index.html loads https://cdn.example.test/app.js from outside the app. Save a copy in the app folder and link to that instead."],
       ['<link rel="stylesheet" href="//fonts.example.test/a.css">', "site/index.html loads //fonts.example.test/a.css from outside the app."],
       ['<script src="missing.js"></script>', "site/index.html links missing.js, which is not in the app. Add the file or fix the link."],
-      ['<img src="map.svg">', "site/index.html links map.svg, which is not in the app."],
+      ['<img src="map.svg">', "site/index.html links map.svg as an image. Use a PNG, JPEG, GIF, WebP, or AVIF file instead."],
+      ['<img src="my%20map.png">', "site/index.html links my map.png. Rename it using only letters, digits, and _ @ . / -, then publish again."],
+      ['<img srcset="missing.png 2x">', "site/index.html links missing.png, which is not in the app."],
       ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
+      ['<video src="intro.mp4"></video>', "site/index.html links intro.mp4 as audio or video. Published apps cannot include local audio or video."],
+      ['<iframe src="other.html"></iframe>', "site/index.html embeds other.html in <iframe>. Published apps cannot embed other pages or files."],
+      ['<base href="https://example.test/">', "site/index.html sets its base address to https://example.test/. Remove the <base> element"],
       ['<button onclick="go()">Go</button>', "site/index.html has an onclick attribute. Published apps cannot run inline event handlers. Attach the handler in a script."],
       ["<script>import('./app.js')</script>", 'A script in site/index.html imports a module. Load it with <script type="module"> instead.'],
       ["<script>let = ;</script>", "A script in site/index.html is not valid JavaScript"],
-      ['<script type="module">import "./secret.ts"</script>', "site/index.html: App import is outside its declared inputs."],
-    ])("refuses %s in plain words", async (html, message) => {
+      ['<script type="module">import "./secret.ts"</script>', "site/index.html imports ./secret.ts, which is not in the app."],
+    ])("refuses %s and names the file", async (html, message) => {
       await expect(page(html, file("site/app.js", "export {}"))).rejects.toThrow(message);
     });
 
-    it("accepts an HTML file only as the entry", async () => {
+    it("accepts the same forms when the files are in the app", async () => {
+      const result = await page('<script src="app.js"></script><link rel="stylesheet" href="app.css"><img src="map.png"><img srcset="map.png 2x"><script type="module">import "./secret.ts"</script>',
+        file("site/app.js", "window.app = 1;"), file("site/app.css", "p{}"), image("site/map.png"), file("site/secret.ts", "export const secret: number = 1;"));
+      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/app.css", "site/app.js", "site/index.html", "site/map.png", "site/secret.ts"]);
+    });
+
+    it("accepts HTML as the entry and only as the entry", async () => {
+      await expect(page("<p>Only a page</p>")).resolves.toMatchObject({ files: [{ path: "bundle.js" }, { path: "page.json" }] });
       await expect(compileClosedApp({ entryPath: "site/main.js", bounds, inputs: [file("site/main.js", "export {}"), file("site/index.html", "<p>")] })).rejects.toThrow(/Unsupported closed app input type/);
+    });
+  });
+
+  describe("stylesheet URLs", () => {
+    const png = Uint8Array.from([137, 80, 78, 71]);
+    const css = (source: string, ...others: Array<{ path: string; bytes: Uint8Array; sha256: string }>) => compileClosedApp({ entryPath: "app/main.ts", bounds,
+      inputs: [file("app/main.ts", "import './css/style.css'"), file("app/css/style.css", source), ...others] });
+
+    it("resolves bare names from the stylesheet, keeps fragments, and keeps written image data URLs", async () => {
+      const result = await css(`@import "theme.css"; .a { background: url(img/bg.png?v=2#x) } .b { marker: url(#arrow) }
+        .c { background: url(data:image/png;base64,iVBORw==) } @font-face { font-family: A; src: url(Font.WOFF2?#iefix) }`,
+        file("app/css/theme.css", "p { color: red }"), { path: "app/css/img/bg.png", bytes: png, sha256: hash(png) }, { path: "app/css/Font.WOFF2", bytes: png, sha256: hash(png) });
+      const output = new TextDecoder().decode(result.files[0]!.bytes);
+      expect(output).toContain("color: red");
+      expect(output).toContain("url(#arrow)");
+      expect(output).toContain("url(data:image/png;base64,iVBORw==)");
+      expect(output.match(/url\(data:(?:image\/png|font\/woff2)/g)).toHaveLength(3);
+    });
+
+    it.each([
+      ["url(img/missing.png)", "app/css/style.css imports img/missing.png, which is not in the app."],
+      ["url(data:text/html,<b>x</b>)", "app/css/style.css embeds a data URL of type text/html. Use an image or a WOFF2 font instead."],
+      ["url(https://example.test/a.png)", "app/css/style.css loads https://example.test/a.png from outside the app."],
+      ["url(../../../private.png)", "app/css/style.css imports ../../../private.png, which is not in the app."],
+    ])("refuses %s and names the stylesheet", async (url, message) => {
+      await expect(css(`.a { background: ${url} }`)).rejects.toThrow(message);
     });
   });
 

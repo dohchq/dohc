@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
-  window: Window & typeof globalThis & { value?: string };
+  window: Window & typeof globalThis & { value?: string; log?: string[] };
 } };
 
 const limits = { maxBundleBytes: 4096, maxDocumentBytes: 8192 };
 function file(path: string, text: string): AppDocumentFile {
   const bytes = Buffer.from(text);
   return { path, bytes, byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"),
-    contentType: path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8" };
+    contentType: APP_BUNDLE_CONTENT_TYPES[path] ?? "text/css; charset=utf-8" };
 }
 
 describe("compiled app document", () => {
@@ -71,6 +71,47 @@ describe("compiled app document", () => {
     input.bytes = Uint8Array.from([0xff]);input.byteLength = 1;
     input.sha256 = createHash("sha256").update(input.bytes).digest("hex");
     expect(() => createAppDocument([input], limits)).toThrow();
+  });
+
+  describe("page record", () => {
+    const page = (overrides: Partial<AppPage> = {}): AppPage => ({ html: [["lang", "fr"]], title: "Trip", body: [["class", "trip"]],
+      markup: "<main><h1>Trip</h1></main>", scripts: ["window.log = ['first:' + document.querySelector('h1').textContent];", "throw new Error('stops only itself');", "log.push('third');"],
+      deferred: ["log.push('deferred:' + document.readyState);", null], ...overrides });
+    const build = (value: unknown, script = "log.push('bundle');") =>
+      createAppDocument([file("bundle.js", script), file("page.json", JSON.stringify(value))], limits);
+
+    it("inserts the markup, then each classic script as its own hashed script, then deferred scripts once parsing ends", async () => {
+      const output = build(page());
+      const dom = new JSDOM(output.html, { runScripts: "dangerously" });
+      await new Promise(resolve => dom.window.document.readyState === "loading" ? dom.window.addEventListener("DOMContentLoaded", resolve) : resolve(undefined));
+      expect(dom.window.document.documentElement.lang).toBe("fr");
+      expect(dom.window.document.title).toBe("Trip");
+      expect(dom.window.document.body.className).toBe("trip");
+      expect(dom.window.log).toEqual(["first:Trip", "third", "deferred:interactive", "bundle"]);
+      const scripts = [...dom.window.document.querySelectorAll("script")];
+      // The markup replaces the body, loader included; each created script remains.
+      expect(scripts.map(node => node.textContent)).toEqual([...page().scripts, "log.push('deferred:' + document.readyState);", "log.push('bundle');"]);
+      for (const node of scripts) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(node.textContent!).digest("base64")}'`);
+      dom.window.close();
+    });
+
+    it("keeps page text out of the HTML parser", () => {
+      const attack = "</script><script src=\"https://evil.test/a.js\"></script>";
+      const dom = new JSDOM(build(page({ scripts: [`window.value = ${JSON.stringify(attack)};`], title: attack })).html, { runScripts: "dangerously" });
+      expect(dom.window.value).toBe(attack);
+      expect(dom.window.document.querySelectorAll("script[src]")).toHaveLength(0);
+      dom.window.close();
+    });
+
+    it.each([
+      ["an unknown field", { ...page(), extra: true }],
+      ["no bundle position", page({ deferred: [] })],
+      ["two bundle positions", page({ deferred: [null, null] })],
+      ["an invalid attribute name", page({ body: [["on click", "x"]] })],
+      ["a script that is not text", page({ scripts: [1 as unknown as string] })],
+    ])("refuses a page record with %s", (_name, value) => {
+      expect(() => build(value)).toThrow("Invalid app page.");
+    });
   });
 
   it("produces one document identity regardless of input inventory order", () => {

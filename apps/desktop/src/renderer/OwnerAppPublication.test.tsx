@@ -527,6 +527,11 @@ describe("owner app publication", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     await act(async () => { (reportError.mock.calls[0]![2] as () => void)(); });
     await waitFor(() => expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "prepare")).toHaveLength(2));
+    // Once the dialog is closed, Try again opens it again instead of doing nothing.
+    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
+    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
+    await act(async () => { (reportError.mock.calls[1]![2] as () => void)(); });
+    expect(await screen.findByTestId("app-publication-dialog")).toBeTruthy();
   });
 
   it("never opens a launch that resolves after the workspace changed", async () => {

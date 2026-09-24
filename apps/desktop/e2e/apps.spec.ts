@@ -195,29 +195,36 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     <title>Reading list</title>
     <link rel="stylesheet" href="./styles.css">
     <style>h1 { letter-spacing: 2px; }</style>
+    <script defer src="later.js"></script>
   </head>
   <body class="shelf">
     <main>
       <h1>Reading list</h1>
       <ul id="books"></ul>
       <img alt="Cover" src="cover.png">
+      <img alt="Sharp cover" srcset="cover.png 1x, img/cover-2x.png 2x">
       <p role="status"></p>
+      <p id="order"></p>
     </main>
     <script src="books.js"></script>
+    <script>throw new Error("A broken script stops only itself.");</script>
     <script>
       for (const title of books) {
         const item = document.createElement("li");
         item.textContent = title;
         document.getElementById("books").append(item);
       }
+      document.getElementById("order").textContent += "classic ";
     </script>
     <script type="module" src="./count.js"></script>
   </body>
 </html>
 ` },
-      { path: "reading-list/styles.css", contents: ".shelf main { color: rgb(1, 2, 3); }\n" },
+      { path: "reading-list/styles.css", contents: ".shelf main { color: rgb(1, 2, 3); background: url(img/cover-2x.png) repeat; }\n" },
+      { path: "reading-list/later.js", contents: 'document.getElementById("order").textContent += "deferred ";\n' },
+      { path: "reading-list/img/cover-2x.png", contents: coverPng },
       { path: "reading-list/books.js", contents: 'const books = ["The Design of Everyday Things", "Thinking in Systems"];\n' },
-      { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\n' },
+      { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\ndocument.getElementById("order").textContent += "module";\n' },
       { path: "reading-list/cover.png", contents: coverPng },
     ]);
     relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
@@ -251,7 +258,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
     await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();
     const sources = publication.getByTestId("app-publication-source-paths");
-    for (const file of ["index.html", "styles.css", "books.js", "count.js", "cover.png"]) await expect(sources).toContainText(`reading-list/${file}`);
+    for (const file of ["index.html", "styles.css", "books.js", "later.js", "count.js", "cover.png", "img/cover-2x.png"]) await expect(sources).toContainText(`reading-list/${file}`);
     await page.screenshot({ path: info.outputPath("static-app-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
     await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
@@ -267,9 +274,13 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await expect(app.getByRole("status")).toHaveText("2 books");
     await expect(app.locator("main")).toHaveCSS("color", "rgb(1, 2, 3)");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toHaveCSS("letter-spacing", "2px");
-    await expect.poll(() => app.getByRole("img", { name: "Cover" }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
+    await expect.poll(() => app.getByRole("img", { name: "Cover", exact: true }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
+    await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", /^data:image\/png;base64,\S+ 1x, data:image\/png;base64,\S+ 2x$/);
+    await expect(app.locator("main")).toHaveCSS("background-image", /^url\("data:image\/png;base64,/);
+    // Under the published hash-only policy, a throwing script stops only itself; deferred and module scripts run after parsing.
+    await expect(app.locator("#order")).toHaveText("classic deferred module");
     await guest.screenshot({ path: info.outputPath("static-app-guest.png") });
-    expect(shared.failures).toEqual([]);
+    expect(shared.failures.filter(message => !message.includes("A broken script stops only itself."))).toEqual([]);
   } finally {
     try { await shared?.close(); } finally {
       try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, workspace); }
