@@ -513,8 +513,10 @@ fn apply_deferred_base(
                 losing_lineage_claim_id,
                 winner,
             } => (winner, Some(losing_lineage_claim_id)),
-            dohc_engine_collab::ClaimOutcome::Claimed { .. }
-            | dohc_engine_collab::ClaimOutcome::Resumed => {
+            // The lineage already holds this base, so its state and projection
+            // are unchanged; the claim only recorded the base's relay position.
+            dohc_engine_collab::ClaimOutcome::Resumed => return Ok(None),
+            dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                 let winner = dohc_engine_collab::read_marker_in(tx, &key)
                     .map_err(map_collab_hard_error)?
                     .ok_or_else(|| local_corruption("parked winning Y.Doc has no marker"))?;
@@ -2789,8 +2791,20 @@ pub fn apply_ydoc_envelope(
                     losing_lineage_claim_id,
                     winner,
                 } => (winner, Some(losing_lineage_claim_id), true),
-                dohc_engine_collab::ClaimOutcome::Claimed { .. }
-                | dohc_engine_collab::ClaimOutcome::Resumed => {
+                // Another device seeded the same file state, or the relay
+                // redelivered this base. Either way the lineage already holds
+                // it; projecting the bare base here would roll the file back
+                // over every edit made since.
+                dohc_engine_collab::ClaimOutcome::Resumed => {
+                    return Ok(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-base-resumed"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    });
+                }
+                dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                     let winner = dohc_engine_collab::read_marker_in(tx, &claim_key)
                         .map_err(map_collab_hard_error)?
                         .ok_or_else(|| local_corruption("claimed Y.Doc lineage has no marker"))?;

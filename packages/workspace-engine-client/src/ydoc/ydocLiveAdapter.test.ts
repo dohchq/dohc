@@ -341,6 +341,43 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   await expect(owner.applyRemoteUpdate(new Uint8Array([0,0]))).rejects.toThrow("closed");
 });
 
+describe("seeding an absent lineage", () => {
+  // The seed one device sends when it first opens `content`.
+  async function seedFor(
+    contentKind: "plaintext" | "richdoc",
+    content: string,
+  ): Promise<Uint8Array> {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: PATH, content, contentKind });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind });
+    await session.close({ settle: false });
+    adapter.dispose();
+    const seeds = engine.requests.flatMap((request) => {
+      if (request.method !== YDOC_METHOD.recordUpdate) return [];
+      const params = request.params as { seed?: boolean; updateBase64: string };
+      return params.seed === true ? [params.updateBase64] : [];
+    });
+    expect(seeds).toHaveLength(1);
+    return new Uint8Array(Buffer.from(seeds[0]!, "base64"));
+  }
+  const clientsOf = (update: Uint8Array) =>
+    new Set(Y.decodeUpdate(update).structs.map((struct) => struct.id.client));
+
+  it.each(["plaintext", "richdoc"] as const)(
+    "sends the same %s seed from every device that opens the same text",
+    async (contentKind) => {
+      const content = "# Shared\n\nStarting together.\n";
+      const first = await seedFor(contentKind, content);
+      expect(await seedFor(contentKind, content)).toEqual(first);
+      // Different text seeds under a different client, so two seeds of one
+      // document can never claim the same Yjs item ids.
+      const other = await seedFor(contentKind, `${content}\nMore.\n`);
+      expect(clientsOf(other)).not.toEqual(clientsOf(first));
+    },
+  );
+});
+
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
     const engine = new YdocLoopbackEngine();
