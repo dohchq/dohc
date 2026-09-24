@@ -230,13 +230,13 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn(async () => session);
     f.dependencies.collectionEditContextFor = async (operation, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);
     try {
       expect(await context.collections!.writes.setFields({ recordPath: "tasks/one.md", fields: { status: "done" },
-        author: { kind: "user", userId: "owner" } })).toEqual({ path: "tasks/one.md", replaced: { status: null } });
+        author: { kind: "user", userId: "owner" } })).toEqual({ path: "tasks/one.md", replaced: { status: null }, kept: {} });
       expect(doc.getMap("frontmatter").get("status")).toBe("done");
       expect(events).toEqual(["apply", "settle", "close"]);
       await expect(context.collections!.writes.createRecord({ collectionPath: "tasks", name: "../bad",
@@ -253,7 +253,7 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn();
     f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);

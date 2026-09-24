@@ -457,6 +457,16 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
   dismissAutomationFailure: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
+  listCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
+  listCollectionAutomationRuns: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
+  retryCollectionAutomation: (payload) =>
+    ipcRenderer.invoke(CHANNELS.retryCollectionAutomation, payload),
+  confirmCollectionAutomationStep: (payload) =>
+    ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
+  writeCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
   onAutomationFailuresChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {

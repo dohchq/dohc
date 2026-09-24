@@ -15,6 +15,7 @@ import {
   registerDevToolsIpcHandlers,
 } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
+import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -88,7 +89,7 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   PluginPanelSdkEvent,
@@ -182,6 +183,10 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
+import { CollectionAutomations } from "./automations/collectionAutomations";
+import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
+import { createAutomationRunStore } from "./automations/automationRunStore";
+import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
@@ -344,9 +349,11 @@ import {
 } from "./plugins/pluginSurfaces";
 
 import {
+  readWorkspaceText,
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
+  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
@@ -602,6 +609,7 @@ const {
   get chatDispatchService(): DesktopWorkspaceCallbacksDependencies<DesktopWorkspaceAuthorityState>["chatDispatchService"] {
     return chatDispatchService;
   },
+  collectionAutomationsOf: (state) => state.collectionAutomations,
 });
 
 let linuxStableCliBinDir: string | undefined;
@@ -1110,7 +1118,23 @@ const shareRosters = createShareRosters({
   },
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
+  onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
 });
+
+// One formula evaluator for every open workspace. Its worker thread starts
+// on the first run and stops when idle. The worker runs from the staged
+// runtime, like the dataset child, because the main bundle cannot resolve
+// the package's own worker file.
+const automationEvaluator = createAutomationFormulaEvaluator(() =>
+  createAutomationEvaluator({
+    entryPath: join(pluginResourcesBasePath(), "app-backend-runtime", "automation-worker.mjs"),
+  }),
+);
+
+// The Collection automation executor of an open workspace, or undefined.
+function collectionAutomationsOf(workspaceId: string): CollectionAutomations | undefined {
+  return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
+}
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
@@ -1128,6 +1152,7 @@ const shareRosters = createShareRosters({
 
 interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionState {
   activity: WorkspaceActivityState;
+  collectionAutomations: CollectionAutomations;
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
@@ -1186,6 +1211,7 @@ function createDesktopWorkspaceAuthorityState(
   const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   return {
     activity: new WorkspaceActivityState(),
+    collectionAutomations: createCollectionAutomationsFor(binding),
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
@@ -1261,6 +1287,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
+      state.collectionAutomations.dispose(),
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
       Promise.resolve().then(() =>
@@ -3034,6 +3061,10 @@ async function openWorkspaceActivityForOperation(
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
+  // Automations run where changes are captured: never in a shared view.
+  if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
+    void operation.state.collectionAutomations.open();
+  }
   return result;
 }
 
@@ -3112,8 +3143,16 @@ async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
   editSignal?: AbortSignal,
 ): Promise<CollectionRecordEditContext> {
-  const { workspace, capture } =
-    await requirePluginEngineCaptureForOperation(operation);
+  const { capture } = await requirePluginEngineCaptureForOperation(operation);
+  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal);
+}
+
+function collectionEditContextWith(
+  operation: DesktopWorkspaceOperation,
+  capture: CollectionRecordEditContext["capture"],
+  signal: AbortSignal,
+): CollectionRecordEditContext {
+  const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
   return {
     capture,
@@ -3124,8 +3163,50 @@ async function collectionEditContextFor(
       if (!daemon) throw new Error("The workspace engine is not running.");
       return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
     },
-    signal: editSignal ?? operation.signal,
+    signal,
   };
+}
+
+// A workspace text file, or null when there is none.
+async function readWorkspaceTextIfPresent(rootPath: string, relativePath: string) {
+  try {
+    return await readWorkspaceText(rootPath, relativePath);
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException)?.code ?? "")) return null;
+    throw error;
+  }
+}
+
+// An open workspace's Collection automations. Runs write through the same
+// seam as every other collection write, with the capture the workspace
+// already opened, and end at the run's own signal or the operation's.
+function createCollectionAutomationsFor(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+): CollectionAutomations {
+  const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
+  const workspace = { workspaceId, rootPath, attachmentId };
+  return new CollectionAutomations({
+    withEngine: (work) => withEngineAdapter(workspace, work),
+    withRecordWrites: (signal, work) =>
+      withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) {
+          throw new Error("This workspace was closed.");
+        }
+        const capture = activity.engineCaptureFor(workspaceId);
+        if (!capture) throw new Error(captureRefusal("Automations"));
+        return work(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal])));
+      }),
+    readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
+    writeText: (path, text, expectedContentHash) =>
+      writeWorkspaceText(rootPath, path, text, expectedContentHash),
+    pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
+    roster: () => shareRosters.forRun(workspaceId),
+    evaluator: automationEvaluator,
+    store: createAutomationRunStore(rootPath),
+    onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
+    onError: (context, error) =>
+      console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+  });
 }
 
 const { invokeWorkspacePluginSdk, routePluginPanelSdk } =
@@ -3329,6 +3410,7 @@ const desktopEngine = createDesktopEngine({
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
+  collectionAutomations: { current: collectionAutomationsOf },
   notifyAutomationFailuresChanged, launchMarks, desktopMarks, logLaunchMarksOnce,
 });
 const {
@@ -4546,6 +4628,13 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity,
   });
   agentRunsIpc.registerAutomationFailures();
+  registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
+    readText: readWorkspaceTextIfPresent,
+    createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
+    writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
+  });
 
   registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),

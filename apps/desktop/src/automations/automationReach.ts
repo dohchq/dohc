@@ -84,7 +84,8 @@ export interface ReachAutomation {
   steps: readonly ReachStep[];
 }
 
-export type StepReach = { allowed: true } | { allowed: false; reason: string };
+// `person` names the editor whose reach stopped the step, when one did.
+export type StepReach = { allowed: true } | { allowed: false; reason: string; person?: string };
 
 /** A share the owner is about to create. */
 export interface ReachShare {
@@ -109,8 +110,8 @@ interface Person {
 const ALLOWED: StepReach = { allowed: true };
 const SETTINGS = "Settings → Sync and sharing";
 
-function stop(reason: string): StepReach {
-  return { allowed: false, reason };
+function stop(reason: string, person?: string): StepReach {
+  return person === undefined ? { allowed: false, reason } : { allowed: false, reason, person };
 }
 
 // A path exactly as the engine lists it: relative, no "." or "..", forward
@@ -219,15 +220,15 @@ function checkOwnerStep(
   switch (step.kind) {
     case "change-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "edit"));
-      return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "find-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "view"));
-      return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "post": {
       const blocked = editors.find((person) => !canPost(person, step.group.channelWireId));
-      return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "notify": {
       if (step.person.userId === roster.ownerUserId) return ALLOWED;
