@@ -175,10 +175,13 @@ import {
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
+  markWorkspaceShareRosterPulled,
+  setWorkspaceShareRoster,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
 import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
@@ -1078,6 +1081,37 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
+// Each open workspace's copy of the grants its owner gave, for the automation
+// reach check.
+const shareRosters = createShareRosters({
+  findWorkspace,
+  saveRoster: setWorkspaceShareRoster,
+  markRosterPulled: markWorkspaceShareRosterPulled,
+  listRoster: async (workspace) => {
+    let credentials: CloudSessionCredentials;
+    try {
+      ({ credentials } = await remoteForWorkspace(workspace));
+    } catch (error) {
+      // Signed out, or signed in to another account or server: the message
+      // says which, and dohc could not ask.
+      return { kind: "unanswered", next: error instanceof Error ? error.message : "Sign in to your server first.", partial: false };
+    }
+    if (!credentials.relayUrl) {
+      return { kind: "unanswered", next: "Reconnect your sharing server, then try again.", partial: false };
+    }
+    return listRosterGrants(workspace.workspaceId, async (path) => {
+      const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    });
+  },
+  localUserId: async () => {
+    await warmCredentialCache().catch(() => undefined);
+    return cachedCredentials?.userId ?? null;
+  },
+  logError: (workspaceId, error) =>
+    console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
+});
+
 // MU-C4 shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
@@ -1225,6 +1259,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     };
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
+    shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1795,12 +1830,15 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: () => {
+    afterSuccessfulPull: ({ recovered }) => {
       void noticeStore().sync();
+      void shareRosters.pulled(workspace.workspaceId, recovered);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );
     },
+    // Recorded durably before each pull request goes out.
+    pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
@@ -2995,6 +3033,7 @@ async function openWorkspaceActivityForOperation(
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
+  shareRosters.open(canonicalWorkspace.workspaceId);
   return result;
 }
 
@@ -4189,6 +4228,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
@@ -4490,6 +4530,7 @@ function registerIpcHandlers(): void {
         ...(labelHint.length > 0 ? { labelHint } : {}),
         assertCurrent,
       }),
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
