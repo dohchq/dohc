@@ -4,6 +4,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import { describe, expect, it, vi } from "vitest";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc, type DocumentEdit } from "@dohc/ydoc-projection";
 
 import {
   YDocPathNotInVersionError,
@@ -1260,12 +1261,12 @@ describe("engine Y.Doc IPC adapter", () => {
       actorOriginId: "claude-code",
       attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 },
     };
+    type SettleResult = Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
 
-    // A session over a real Y.Doc: an applied update lands in it, the way
-    // the capture's canonical doc takes a journaled update.
-    function editableSession(trace: string[] = []) {
-      const doc = new Y.Doc();
-      doc.getText("t").insert(0, "before");
+    // A session over a real document: an applied update lands in its doc, the
+    // way the capture's canonical doc takes a journaled update.
+    function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
+      const doc = markdownToYDoc(markdown);
       return providerSession({
         doc,
         applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
@@ -1275,7 +1276,7 @@ describe("engine Y.Doc IPC adapter", () => {
         }),
         settleNow: vi.fn(async () => {
           trace.push("settle");
-          return { materialized: true } as Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
+          return { materialized: true } as SettleResult;
         }),
         close: vi.fn(async () => {
           trace.push("close");
@@ -1283,23 +1284,13 @@ describe("engine Y.Doc IPC adapter", () => {
       });
     }
 
-    function appendTo(current: Y.Doc, text: string): Uint8Array {
-      const copy = new Y.Doc();
-      Y.applyUpdate(copy, Y.encodeStateAsUpdate(current));
-      let update: Uint8Array | null = null;
-      copy.on("update", (next: Uint8Array) => {
-        update = next;
-      });
-      copy.getText("t").insert(copy.getText("t").length, text);
-      return update!;
-    }
-
-    const edit = (text: string) => ({
+    const edit = (documentEdit: DocumentEdit) => ({
       workspaceId: "workspace-1",
       path: "notes/a.md",
       origin: agentOrigin,
-      change: (current: Y.Doc) => appendTo(current, text),
+      change: async (state: Uint8Array) => documentEditUpdate(state, documentEdit),
     });
+    const append = edit({ replacement: "After." });
 
     it("applies the edit through the editor that holds the document and shows it there", async () => {
       const sender = new FakeSender(7);
@@ -1309,12 +1300,9 @@ describe("engine Y.Doc IPC adapter", () => {
       const editor = new Y.Doc();
       Y.applyUpdate(editor, opened.initialUpdate!);
 
-      await expect(h.ipc.editDocument(edit(" after"))).resolves.toEqual({
-        path: "notes/a.md",
-        changed: true,
-      });
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true });
 
-      expect(session.doc.getText("t").toString()).toBe("before after");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
       expect(session.applyLocalUpdate).toHaveBeenCalledWith(
         expect.any(Uint8Array),
         expect.any(Function),
@@ -1327,7 +1315,29 @@ describe("engine Y.Doc IPC adapter", () => {
       const payload = shown[0]!.payload as { sessionId: string; update: Uint8Array; lineageGeneration: number };
       expect(payload).toMatchObject({ sessionId: openPayload.sessionId, lineageGeneration: 1 });
       Y.applyUpdate(editor, payload.update);
-      expect(editor.getText("t").toString()).toBe("before after");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      await h.ipc.shutdown();
+    });
+
+    it("applies nothing when the editor's session changes while the edit is computed", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const computing = deferred<void>();
+      const release = deferred<void>();
+      const editing = h.ipc.editDocument({
+        ...append,
+        change: async (state) => {
+          computing.resolve();
+          await release.promise;
+          return documentEditUpdate(state, { replacement: "After." });
+        },
+      });
+      await computing.promise;
+      h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+      release.resolve();
+      await expect(editing).rejects.toThrow("changed hands while dohc prepared the edit, and nothing changed");
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
       await h.ipc.shutdown();
     });
 
@@ -1336,14 +1346,27 @@ describe("engine Y.Doc IPC adapter", () => {
       const session = editableSession(trace);
       const h = harness(session);
 
-      await expect(h.ipc.editDocument(edit(" after"))).resolves.toEqual({
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." }))).resolves.toEqual({
         path: "notes/a.md",
         changed: true,
       });
 
       expect(trace).toEqual(["apply", "settle", "close"]);
       expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
-      expect(session.doc.getText("t").toString()).toBe("before after");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.");
+    });
+
+    it("reports a saved edit as done when only the session's release fails", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      vi.mocked(session.close).mockRejectedValueOnce(new Error("release refused"));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(trace).toEqual(["apply", "settle"]);
+      expect(h.onError).toHaveBeenCalledWith(
+        expect.stringContaining("close after an edit failed for notes/a.md"),
+        expect.objectContaining({ message: "release refused" }),
+      );
     });
 
     it("keeps an editor that opens during the edit waiting until the edit's session closes", async () => {
@@ -1355,7 +1378,7 @@ describe("engine Y.Doc IPC adapter", () => {
       vi.mocked(editSession.settleNow).mockImplementationOnce(async () => {
         trace.push("settle");
         await released.promise;
-        return { materialized: true } as Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
+        return { materialized: true } as SettleResult;
       });
       vi.mocked(h.capture.openYDocSession)
         .mockImplementationOnce(async () => editSession)
@@ -1363,7 +1386,7 @@ describe("engine Y.Doc IPC adapter", () => {
           trace.push("editor-open");
           return providerSession();
         });
-      const editing = h.ipc.editDocument(edit(" after"));
+      const editing = h.ipc.editDocument(append);
       await vi.waitFor(() => expect(trace).toContain("settle"));
 
       const opening = h.ipc.open(new FakeSender(7), openPayload);
@@ -1380,14 +1403,32 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
+    it("refuses with a retryable reason when an editor opens as the edit begins", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      // The editor's open holds the document's reservation when the edit asks
+      // for it.
+      const opening = deferred<WorkspaceEngineYDocProviderSession>();
+      vi.mocked(h.capture.openYDocSession).mockImplementationOnce(async () => await opening.promise);
+      const opened = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(h.capture.openYDocSession).toHaveBeenCalledOnce());
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        "notes/a.md opened in an editor as dohc began the edit, and nothing changed. Try again.",
+      );
+      opening.resolve(session);
+      await opened;
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
     it("tells the caller an edit is in the document when only its save failed", async () => {
       const session = editableSession();
       vi.mocked(session.settleNow).mockRejectedValueOnce(new Error("disk full"));
       const h = harness(session);
-      await expect(h.ipc.editDocument(edit(" after"))).rejects.toThrow(
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
         "The edit is in notes/a.md, but dohc has not saved it to the file yet (disk full). Read the document before you retry.",
       );
-      expect(session.doc.getText("t").toString()).toBe("before after");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
       expect(session.close).toHaveBeenCalledOnce();
     });
 
@@ -1395,7 +1436,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const session = editableSession();
       const h = harness(session);
       await expect(
-        h.ipc.editDocument({ ...edit(""), change: () => null }),
+        h.ipc.editDocument({ ...append, change: async () => null }),
       ).resolves.toEqual({ path: "notes/a.md", changed: false });
       expect(session.applyLocalUpdate).not.toHaveBeenCalled();
       expect(session.settleNow).not.toHaveBeenCalled();
@@ -1406,26 +1447,25 @@ describe("engine Y.Doc IPC adapter", () => {
       const h = harness(editableSession(), {
         resolveDocumentPath: async (_workspace, path) => (path === "gone.md" ? null : path),
       });
-      await expect(h.ipc.editDocument({ ...edit(""), path: "board.excalidraw" }))
+      await expect(h.ipc.editDocument({ ...append, path: "board.excalidraw" }))
         .rejects.toThrow("not a Markdown document");
-      await expect(h.ipc.editDocument({ ...edit(""), path: "gone.md" }))
+      await expect(h.ipc.editDocument({ ...append, path: "gone.md" }))
         .rejects.toThrow("No document at gone.md");
       h.setReadOnly(true);
-      await expect(h.ipc.editDocument(edit("")))
+      await expect(h.ipc.editDocument(append))
         .rejects.toThrow("shared view");
       expect(h.capture.openYDocSession).not.toHaveBeenCalled();
     });
 
-    it("reads a copy of the held document, or nothing when no editor holds it", async () => {
+    it("reads the held document's state, or nothing when no editor holds it", async () => {
       const session = editableSession();
       const h = harness(session);
       await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }))
-        .resolves.toEqual({ path: "notes/a.md", doc: null });
+        .resolves.toEqual({ path: "notes/a.md", state: null });
 
       await h.ipc.open(new FakeSender(7), openPayload);
       const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
-      expect(read.doc?.getText("t").toString()).toBe("before");
-      expect(read.doc).not.toBe(session.doc);
+      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.");
       await h.ipc.shutdown();
     });
   });

@@ -2,11 +2,19 @@ import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
 import { describe, expect, test } from 'vitest'
 import * as Y from 'yjs'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { documentEditUpdate, documentMarkdown, type DocumentEdit } from './document-edit.js'
-import { getDohcProseMirrorSchema, markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from './import-export.js'
+import {
+  documentEditUpdate,
+  documentMarkdown,
+  settledDocumentMarkdown,
+  type DocumentEdit,
+} from './document-edit.js'
+import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from './import-export.js'
+
+const state = (doc: Y.Doc) => Y.encodeStateAsUpdate(doc)
+const markdownOf = (doc: Y.Doc) => documentMarkdown(state(doc))
 
 function edited(doc: Y.Doc, edit: DocumentEdit): Y.Doc {
-  const update = documentEditUpdate(doc, edit)
+  const update = documentEditUpdate(state(doc), edit)
   if (update) Y.applyUpdate(doc, update)
   return doc
 }
@@ -29,8 +37,9 @@ describe('documentMarkdown', () => {
   test('reads an ordinary document as its file does', () => {
     const markdown = '---\ntitle: Trip\n---\n\n# Kyoto\n\n- Day one\n- Day two\n\nA **bold** plan.'
     const doc = markdownToYDoc(markdown)
-    expect(documentMarkdown(doc)).toBe(markdown)
-    expect(documentMarkdown(doc)).toBe(yDocToMarkdown(doc))
+    expect(markdownOf(doc)).toBe(markdown)
+    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc))
+    expect(settledDocumentMarkdown('# Kyoto\n\n* Day one\n')).toBe('# Kyoto\n\n- Day one')
   })
 })
 
@@ -38,13 +47,12 @@ describe('documentEditUpdate', () => {
   test('replaces text and leaves the other blocks as they were', () => {
     const doc = markdownToYDoc('# Kyoto\n\nDay one: temples.\n\nDay two: markets.')
     const body = getDohcYDocBodyFragment(doc)
-    const [heading, , dayTwo] = body.toArray()
+    const [heading, dayOne, dayTwo] = body.toArray()
 
     edited(doc, { find: 'temples', replacement: 'temples and tea' })
 
-    expect(documentMarkdown(doc)).toBe('# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.')
-    expect(body.get(0)).toBe(heading)
-    expect(body.get(2)).toBe(dayTwo)
+    expect(markdownOf(doc)).toBe('# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.')
+    expect(body.toArray()).toEqual([heading, dayOne, dayTwo])
   })
 
   test('adds a section written as Markdown', () => {
@@ -53,34 +61,33 @@ describe('documentEditUpdate', () => {
       find: 'Fly home.',
       replacement: 'Fly home.\n\n## Friday 14\n\n- Sleep\n- Unpack',
     })
-    expect(documentMarkdown(doc)).toBe(
+    expect(markdownOf(doc)).toBe(
       '# Itinerary\n\n## Thursday\n\nFly home.\n\n## Friday 14\n\n- Sleep\n- Unpack',
     )
   })
 
-  test('adds text at the end when there is nothing to find', () => {
+  test('adds text after the last block with text, ahead of trailing empty paragraphs', () => {
     const doc = editorDoc([paragraph('Notes'), paragraph()])
+    const cursorBlock = getDohcYDocBodyFragment(doc).get(1)
     edited(doc, { replacement: '## Next\n\nCall the hotel.' })
-    expect(documentMarkdown(doc)).toBe('Notes\n\n## Next\n\nCall the hotel.\n\n')
-    // The empty paragraph that held the cursor is still the last block.
+    expect(markdownOf(doc)).toBe('Notes\n\n## Next\n\nCall the hotel.\n\n')
     const body = getDohcYDocBodyFragment(doc)
-    expect(body.get(body.length - 1)?.toString()).toBe('<paragraph></paragraph>')
+    expect(body.get(body.length - 1)).toBe(cursorBlock)
   })
 
-  test('fills an empty document', () => {
-    const doc = editorDoc([paragraph()])
-    edited(doc, { replacement: 'First line.' })
-    expect(documentMarkdown(doc)).toBe('First line.')
+  test('adds text to a document with no blocks and to one with only an empty paragraph', () => {
+    expect(markdownOf(edited(new Y.Doc(), { replacement: 'First line.' }))).toBe('First line.')
+    expect(markdownOf(edited(editorDoc([paragraph()]), { replacement: 'First line.' })))
+      .toBe('First line.\n\n')
   })
 
-  test('removes a block replaced with nothing', () => {
-    const doc = markdownToYDoc('Keep.\n\nDrop this.\n\nKeep too.')
-    edited(doc, { find: '\n\nDrop this.', replacement: '' })
-    expect(documentMarkdown(doc)).toBe('Keep.\n\nKeep too.')
+  test('removes a block', () => {
+    const doc = edited(markdownToYDoc('Keep.\n\nDrop this.\n\nKeep too.'), { find: '\n\nDrop this.', replacement: '' })
+    expect(markdownOf(doc)).toBe('Keep.\n\nKeep too.')
   })
 
   test('refuses text it cannot find once', () => {
-    const doc = markdownToYDoc('Tea.\n\nTea.')
+    const doc = state(markdownToYDoc('Tea.\n\nTea.'))
     expect(() => documentEditUpdate(doc, { find: 'Coffee', replacement: 'x' }))
       .toThrow('not in the document')
     expect(() => documentEditUpdate(doc, { find: 'Tea', replacement: 'x' }))
@@ -88,29 +95,38 @@ describe('documentEditUpdate', () => {
   })
 
   test('refuses an edit of the frontmatter', () => {
-    const doc = markdownToYDoc('---\ntitle: Trip\n---\n\nBody.')
+    const doc = state(markdownToYDoc('---\ntitle: Trip\n---\n\nBody.'))
     expect(() => documentEditUpdate(doc, { find: 'title: Trip', replacement: 'title: Tour' }))
       .toThrow('frontmatter')
   })
 
   test('answers null when nothing changes', () => {
-    const doc = markdownToYDoc('Same.')
+    const doc = state(markdownToYDoc('Same.'))
     expect(documentEditUpdate(doc, { find: 'Same', replacement: 'Same' })).toBeNull()
     expect(documentEditUpdate(doc, { replacement: '  ' })).toBeNull()
   })
 
-  test('edits a plain-text document', () => {
-    const doc = plainTextToYDoc('line one\nline two')
-    edited(doc, { find: 'two', replacement: '2' })
-    edited(doc, { replacement: 'line three' })
-    expect(documentMarkdown(doc)).toBe('line one\nline 2\nline three')
-  })
+  // A block written by the engine's own Markdown projection can lack
+  // attributes the editor schema defaults, such as an ordered list's start.
+  // Reading it back fills the default in, and the edit must not write that
+  // into a block it does not touch.
+  test('leaves blocks outside the edit untouched when their stored attributes differ from the schema', () => {
+    const doc = markdownToYDoc('1. one\n2. two\n\nEdit me.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |')
+    const body = getDohcYDocBodyFragment(doc)
+    const list = body.get(0) as Y.XmlElement
+    list.removeAttribute('start')
+    const table = body.get(2) as Y.XmlElement
+    const cell = ((table.get(0) as Y.XmlElement).get(0) as Y.XmlElement)
+    for (const name of Object.keys(cell.getAttributes())) cell.removeAttribute(name)
+    const touched: string[] = []
+    list.observeDeep(() => touched.push('list'))
+    table.observeDeep(() => touched.push('table'))
 
-  test('leaves the caller document unchanged', () => {
-    const doc = markdownToYDoc('Before.')
-    const state = Y.encodeStateVector(doc)
-    expect(documentEditUpdate(doc, { find: 'Before', replacement: 'After' })).not.toBeNull()
-    expect(Y.encodeStateVector(doc)).toEqual(state)
+    edited(doc, { find: 'Edit me.', replacement: 'Edited.' })
+
+    expect(markdownOf(doc)).toContain('Edited.')
+    expect(touched).toEqual([])
+    expect(list.getAttribute('start')).toBeUndefined()
   })
 })
 
@@ -120,7 +136,7 @@ describe('an edit merged with a person typing', () => {
   function replicas(markdown: string): { person: Y.Doc; agent: Y.Doc } {
     const person = markdownToYDoc(markdown)
     const agent = new Y.Doc()
-    Y.applyUpdate(agent, Y.encodeStateAsUpdate(person))
+    Y.applyUpdate(agent, state(person))
     return { person, agent }
   }
 
@@ -135,45 +151,42 @@ describe('an edit merged with a person typing', () => {
     return update!
   }
 
+  function merge(markdown: string, blockIndex: number, typed: string, edit: DocumentEdit): string {
+    const { person, agent } = replicas(markdown)
+    const typing = typeAtEnd(person, blockIndex, typed)
+    const update = documentEditUpdate(state(agent), edit)!
+    Y.applyUpdate(person, update)
+    Y.applyUpdate(agent, update)
+    Y.applyUpdate(agent, typing)
+    expect(markdownOf(agent)).toBe(markdownOf(person))
+    return markdownOf(person)
+  }
+
   test('keeps the person text in another block', () => {
-    const { person, agent } = replicas('# Plan\n\nPerson writes here.\n\nAgent edits here.')
-    const typed = typeAtEnd(person, 1, ' More from the person.')
-    const edit = documentEditUpdate(agent, { find: 'Agent edits here.', replacement: 'Agent edited this.' })!
-
-    Y.applyUpdate(person, edit)
-    Y.applyUpdate(agent, edit)
-    Y.applyUpdate(agent, typed)
-
-    const expected = '# Plan\n\nPerson writes here. More from the person.\n\nAgent edited this.'
-    expect(documentMarkdown(person)).toBe(expected)
-    expect(documentMarkdown(agent)).toBe(expected)
+    expect(merge(
+      '# Plan\n\nPerson writes here.\n\nAgent edits here.',
+      1,
+      ' More from the person.',
+      { find: 'Agent edits here.', replacement: 'Agent edited this.' },
+    )).toBe('# Plan\n\nPerson writes here. More from the person.\n\nAgent edited this.')
   })
 
   test('keeps the person text in the block the agent edits', () => {
-    const { person, agent } = replicas('Budget: 400 dollars for food')
-    const typed = typeAtEnd(person, 0, ' and drinks')
-    const edit = documentEditUpdate(agent, { find: '400', replacement: '450' })!
-
-    Y.applyUpdate(person, edit)
-    Y.applyUpdate(agent, edit)
-    Y.applyUpdate(agent, typed)
-
-    expect(documentMarkdown(person)).toBe('Budget: 450 dollars for food and drinks')
-    expect(documentMarkdown(agent)).toBe(documentMarkdown(person))
+    expect(merge('Budget: 400 dollars for food', 0, ' and drinks', { find: '400', replacement: '450' }))
+      .toBe('Budget: 450 dollars for food and drinks')
   })
 
   test('keeps the person text when the agent adds a section at the end', () => {
-    const { person, agent } = replicas('Intro.\n\nLast paragraph.')
-    const typed = typeAtEnd(person, 1, ' Still typing.')
-    const edit = documentEditUpdate(agent, { replacement: '## Added\n\nBy the agent.' })!
+    expect(merge('Intro.\n\nLast paragraph.', 1, ' Still typing.', { replacement: '## Added\n\nBy the agent.' }))
+      .toBe('Intro.\n\nLast paragraph. Still typing.\n\n## Added\n\nBy the agent.')
+  })
 
-    Y.applyUpdate(person, edit)
-    Y.applyUpdate(agent, edit)
-    Y.applyUpdate(agent, typed)
-
-    expect(documentMarkdown(person)).toBe(
-      'Intro.\n\nLast paragraph. Still typing.\n\n## Added\n\nBy the agent.',
-    )
-    expect(documentMarkdown(agent)).toBe(documentMarkdown(person))
+  test('keeps the person text when the agent splits the block they type in', () => {
+    const merged = merge('Budget: 400 dollars', 0, ' PERSON', {
+      find: 'Budget: 400 dollars',
+      replacement: 'Budget:\n\n400 dollars',
+    })
+    expect(merged).toContain('PERSON')
+    expect(merged).toContain('400 dollars')
   })
 })

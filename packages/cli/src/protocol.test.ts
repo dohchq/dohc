@@ -254,6 +254,15 @@ describe("document request schemas", () => {
     })).success).toBe(false);
   });
 
+  it("bounds each side of an edit by its UTF-8 bytes, not its characters", () => {
+    // Three bytes per character: 80,000 fit 256 KiB and 90,000 do not.
+    const edit = (replacement: string) =>
+      cliRequestSchema.safeParse(request("documentEdit", { path: "notes/a.md", replacement })).success;
+    expect(edit("日".repeat(80_000))).toBe(true);
+    expect(edit("日".repeat(90_000))).toBe(false);
+    expect(edit("a".repeat(256 * 1024))).toBe(true);
+  });
+
   it("parses document results and structured failures", () => {
     expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" }))
       .toEqual({ ok: true, path: "a.md", markdown: "# A" });

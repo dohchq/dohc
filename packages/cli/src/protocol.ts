@@ -112,8 +112,18 @@ const chatArgsSchema = z
 const channelsFullArgsSchema = z.object(argsBase).strict();
 
 const documentPathArg = z.string().min(1).max(4096);
-// Both sides of an edit fit one request, which the socket bounds at 1 MiB.
-const MAX_DOCUMENT_EDIT_CHARS = 256 * 1024;
+// Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
+// request line over 1 MiB, which JSON escaping of both sides can reach.
+export const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
+function fitsUtf8Bytes(value: string, limit: number): boolean {
+  if (value.length > limit) return false;
+  return value.length * 3 <= limit || new TextEncoder().encode(value).length <= limit;
+}
+export const documentEditTextSchema = z
+  .string()
+  .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
+    message: "Document edit text is at most 256 KiB as UTF-8.",
+  });
 // A name the calling agent gives itself, recorded as the author of its edits.
 // A slash is refused so no name can pass for an automation's id.
 export const documentAgentNameSchema = z
@@ -127,8 +137,8 @@ const documentEditArgsSchema = z
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
     path: documentPathArg,
-    find: z.string().min(1).max(MAX_DOCUMENT_EDIT_CHARS).optional(),
-    replacement: z.string().max(MAX_DOCUMENT_EDIT_CHARS),
+    find: documentEditTextSchema.min(1).optional(),
+    replacement: documentEditTextSchema,
   })
   .strict();
 

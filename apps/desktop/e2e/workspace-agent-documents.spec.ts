@@ -83,26 +83,70 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     const editor = page.getByTestId("markdown-editor");
     await editor.getByText("The person writes here.").click();
     await page.keyboard.press("End");
-    await page.keyboard.type(" Typed before the agent.");
+    await page.keyboard.type(" Typed before.");
+    await expect
+      .poll(async () => {
+        const read = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+        return read.ok && read.markdown.includes("Typed before.");
+      }, { timeout: 30_000 })
+      .toBe(true);
 
-    // The agent reads the open document, then edits another block and adds a
-    // section while the person's typing may not have settled yet.
-    const read = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
-    if (!read.ok) throw new Error(`documentRead failed: ${read.reason}`);
-    expect(read.markdown).toContain("The agent edits this line.");
-    const edited = await agentCli(temp, "documentEdit", {
+    // The person types once more, and the renderer then stops handling
+    // anything for a while: the typing waits in the editor's send batch, and
+    // no update from the person reaches main while the agent edits.
+    const holdMs = 10_000;
+    const heldUntil = await page.evaluate((hold) => {
+      const host = document.querySelector('[data-testid="markdown-editor"]') as
+        | (Element & {
+          editor?: {
+            state: { doc: { descendants(visit: (node: { isTextblock: boolean; textContent: string; nodeSize: number }, pos: number) => void): void } };
+            commands: { insertContentAt(position: number, text: string): boolean };
+          };
+        })
+        | null;
+      const tiptap = host?.editor;
+      if (!tiptap) throw new Error("The editor is not ready.");
+      let end = -1;
+      tiptap.state.doc.descendants((node, pos) => {
+        if (node.isTextblock && node.textContent.startsWith("The person writes here.")) end = pos + node.nodeSize - 1;
+      });
+      tiptap.commands.insertContentAt(end, " Queued.");
+      const until = Date.now() + hold;
+      // Scheduled after the send batch's own timer was armed and before it
+      // fires, so the batch stays queued.
+      setTimeout(() => {
+        while (Date.now() < until) { /* hold the renderer */ }
+      }, 0);
+      return until;
+    }, holdMs);
+
+    // The agent edits the paragraph the person is typing in and the line
+    // below it. Main has not seen the queued typing.
+    const during = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+    if (!during.ok) throw new Error(`documentRead failed: ${during.reason}`);
+    expect(during.markdown).toContain("The person writes here. Typed before.");
+    expect(during.markdown).not.toContain("Queued.");
+    await expect(agentCli(temp, "documentEdit", {
+      agent: "e2e-agent",
+      path: "notes/plan.md",
+      find: "person writes here",
+      replacement: "person wrote here",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(agentCli(temp, "documentEdit", {
       agent: "e2e-agent",
       path: "notes/plan.md",
       find: "The agent edits this line.",
       replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
-    });
-    expect(edited).toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    // Both edits landed while the renderer still held its batch.
+    expect(Date.now()).toBeLessThan(heldUntil);
 
+    // The renderer resumes, sends its typing, and takes the agent's edits.
     // The person keeps typing where the cursor was.
     await page.keyboard.type(" Typed after.");
 
     await expect(editor).toContainText(
-      "The person writes here. Typed before the agent. Typed after.",
+      "The person wrote here. Typed before. Queued. Typed after.",
     );
     await expect(editor).toContainText("The agent edited this line.");
     await expect(editor.getByRole("heading", { name: "Added by the agent" })).toBeVisible();
@@ -110,7 +154,7 @@ test("an agent's edit merges into a document the person is typing in", async ({}
 
     // Both people's text reaches the agent's next read and the file.
     const merged = [
-      "The person writes here. Typed before the agent. Typed after.",
+      "The person wrote here. Typed before. Queued. Typed after.",
       "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
     ];
     await expect

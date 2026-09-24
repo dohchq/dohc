@@ -33,7 +33,7 @@ import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
-import { documentEditUpdate, documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import type { DocumentProjection } from "../workspaces/documentProjection";
 
 // With no editor open, the file holds the document's settled text.
 async function settledMarkdown(rootPath: string, path: string): Promise<string> {
@@ -72,6 +72,7 @@ interface DesktopCliServerDependencies<State> {
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
   ): Promise<Result | null>;
   liveDocuments: LiveDocumentSessions;
+  documentProjection: DocumentProjection;
   chatWrites: ChatWrites;
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
@@ -101,6 +102,7 @@ export function createDesktopCliServer<State>(
     collectionEditContextFor,
     withEngineAdapter,
     liveDocuments,
+    documentProjection,
     chatWrites,
     startCliServer,
     stateDir,
@@ -242,19 +244,20 @@ export function createDesktopCliServer<State>(
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
-          const doc = live.doc ?? markdownToYDoc(await settledMarkdown(workspace.rootPath, live.path));
-          try {
-            return { path: live.path, markdown: documentMarkdown(doc) };
-          } finally {
-            doc.destroy();
-          }
+          const markdown = live.state
+            ? await documentProjection.run({ kind: "read", state: live.state })
+            : await documentProjection.run({
+                kind: "read-settled",
+                markdown: await settledMarkdown(workspace.rootPath, live.path),
+              });
+          return { path: live.path, markdown };
         },
         edit: ({ path, edit, origin }) =>
           liveDocuments.editDocument({
             workspaceId: workspace.workspaceId,
             path,
             origin,
-            change: (current) => documentEditUpdate(current, edit),
+            change: (state) => documentProjection.run({ kind: "edit", state, edit }),
           }),
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),

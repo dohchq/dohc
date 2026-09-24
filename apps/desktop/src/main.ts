@@ -108,6 +108,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
@@ -3107,6 +3108,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     readDocument: (input) => engineYDocSessionIpc.readDocument(input),
     editDocument: (input) => engineYDocSessionIpc.editDocument(input),
   },
+  documentProjection: createDocumentProjectionWorker(),
   chatWrites,
   startCliServer,
   stateDir,

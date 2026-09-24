@@ -24,10 +24,12 @@ check(
   existsSync(join(desktopDir, "dist/main/plugin-host.js")),
   "build output exists: dist/main/plugin-host.js",
 );
-check(
-  existsSync(join(desktopDir, "dist/main/workspace-database-worker.js")),
-  "build output exists: dist/main/workspace-database-worker.js",
-);
+for (const worker of ["workspace-database-worker", "document-projection-worker"]) {
+  check(
+    existsSync(join(desktopDir, `dist/main/${worker}.js`)),
+    `build output exists: dist/main/${worker}.js`,
+  );
+}
 for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png"]) {
   check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
 }
