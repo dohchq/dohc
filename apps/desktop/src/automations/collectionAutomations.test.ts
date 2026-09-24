@@ -39,8 +39,8 @@ async function world(options: {
   evaluator?: AutomationFormulaEvaluator;
   deadline?: (abort: () => void) => () => void;
   withRecordWrites?: (signal: AbortSignal, events: string[]) => Promise<void>;
-  /** The engine can take a waiting claim back, as engine claims round 2 adds. */
-  release?: boolean;
+  /** The engine gives no answer to settles until this is set false. */
+  unanswered?: { settle: boolean };
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -120,6 +120,7 @@ async function world(options: {
       return claim ? structuredClone(claim) : null;
     },
     settleAutomationClaim: async ({ claimId, state, error }) => {
+      if (options.unanswered?.settle) throw new Error("The workspace engine did not answer.");
       const claim = claims.get(claimId)!;
       claim.state = state;
       if (error === undefined) delete claim.error; else claim.error = error;
@@ -135,16 +136,15 @@ async function world(options: {
       return claim;
     },
     listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse() }),
-    ...(options.release ? {
-      releaseAutomationClaim: async ({ claimId }: { claimId: string }) => {
-        const claim = claims.get(claimId)!;
-        claim.state = "pending"; claim.attempts -= 1;
-        pending.push(claim);
-        events.push(`released ${claimId}`);
-        wake();
-        return claim;
-      },
-    } : {}),
+    releaseAutomationClaim: async ({ claimId }) => {
+      const claim = claims.get(claimId)!;
+      if (claim.state !== "running") throw new Error("Automation claim is not running.");
+      claim.state = "pending"; claim.attempts -= 1;
+      pending.push(claim);
+      events.push(`released ${claimId}`);
+      wake();
+      return claim;
+    },
   };
 
   const capture: CollectionRecordEditContext["capture"] = {
@@ -561,6 +561,24 @@ describe("Collection automations", () => {
     expect([...w.records.values()].filter((record) => record.collection === "Budget")).toHaveLength(1);
   });
 
+  it("clears the Allow notice when a held step stops again", async () => {
+    const spend = "  - id: spend\n    name: Spend\n    when: {field-changed: Status}\n    do: [{add-record: {Amount: 5}, collection: Budget}]\n";
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
+    const bob = { kind: "owner" as const, ownerUserId: "user-owner", grants: [editor("bob@dohc.test", ["Trip"])] };
+    w.setRoster(bob);
+    await w.executor.open();
+    await w.executor.automationsIn("Trip");
+    w.setRoster(OWNER);
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.holds()).toHaveLength(1);
+    const raised = w.holdsChanged();
+    // Bob gets Edit on Trip again, so the step stops, and its notice goes.
+    w.setRoster(bob);
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.holds()).toEqual([]);
+    expect(w.holdsChanged()).toBe(raised + 1);
+  });
+
   it("runs the definition it read before checking who can edit, not one that arrived during the check", async () => {
     const w = await world({ automations: { Tasks: "  - id: mark\n    name: Mark\n    when: {field-changed: Status}\n    do: [{set: {Mark: first}}]\n" } });
     await w.executor.open();
@@ -752,7 +770,7 @@ describe("Collection automations", () => {
   });
 
   it("hands a waiting claim back to the engine at the end of the drain, and holds nothing at close", async () => {
-    const w = await world({ release: true, automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
     w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
     const claim = w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
     await w.executor.open();
@@ -810,5 +828,132 @@ describe("Collection automations", () => {
     for (const claim of later) await w.settledClaim(claim);
     expect(later[0]!.error).not.toContain("switched off");
     expect(later[1]!.error).toContain('dohc switched off "Slow" after 3 runs in a row took too long.');
+  });
+  it("checks every field after a stop, so a later write does not replace someone's change", async () => {
+    const steps = "  - id: steps\n    name: Steps\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: a}}, {set: {Count: 2}}]\n";
+    const w = await world({ automations: { Tasks: steps } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    w.failOpenAt(1);
+    const claim = w.claim("collection:Tasks#steps", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    // Someone sets Count while the run waits for Try again.
+    task.doc.getMap("frontmatter").set("Count", 99);
+    await w.executor.retry({ automationId: "collection:Tasks#steps", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 99, Note: "a" });
+    const [run] = await w.executor.runs("collection:Tasks#steps");
+    expect(run!.writes.filter((write) => write.kind === "kept").map((write) => write.kind === "kept" && write.planned)).toEqual([1, 2]);
+  });
+
+  it("keeps a claim whose settle the engine did not take, and settles it later without running it again", async () => {
+    const unanswered = { settle: true };
+    const w = await world({ unanswered, automations: { Tasks: "  - id: bump\n    name: Bump\n    when: {field-changed: Status}\n    do: [{set: {Count: '=record.Count + 1'}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 1 });
+    const claim = w.claim("collection:Tasks#bump", task);
+    await w.executor.open();
+    await w.until(() => w.errors.some((entry) => entry.context === `settle automation claim "${claim.claimId}"`));
+    expect(claim.state).toBe("running");
+
+    unanswered.settle = false;
+    w.executor.notifyClaimed();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Count).toBe(2);
+    expect(w.journaled).toHaveLength(1);
+  });
+
+  it("does not run a failed claim again when the engine hands it out without a Try again", async () => {
+    const unanswered = { settle: true };
+    const w = await world({ unanswered, automations: { Tasks: "  - id: two\n    name: Two\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: a}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#two", task);
+    await w.executor.open();
+    await w.until(() => w.errors.some((entry) => entry.context === `settle automation claim "${claim.claimId}"`));
+    await w.executor.dispose();
+    // dohc stopped before the engine took the failure; its recovery hands the claim out again.
+    unanswered.settle = false;
+    claim.state = "pending";
+    w.requeue(claim);
+    await w.makeExecutor().open();
+    await w.until(() => claim.state === "failed");
+    expect(claim.error).toBe("The record is open in a live session elsewhere.");
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Count: 1 });
+  });
+
+  it("settles a finished run as done after the automation changed, instead of offering to start it over", async () => {
+    const unanswered = { settle: true };
+    const w = await world({ collections: ["Tasks", "Log"], unanswered, automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    const claim = w.claim(TASKS, task);
+    await w.executor.open();
+    await w.until(() => w.errors.some((entry) => entry.context === `settle automation claim "${claim.claimId}"`));
+    await w.executor.dispose();
+    await w.writeAutomations("Tasks", BUMP.replace("Title: Bumped", "Title: Changed"));
+    unanswered.settle = false;
+    claim.state = "pending";
+    w.requeue(claim);
+    await w.makeExecutor().open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+  it("writes nothing after a pause that lands while the run checks who can edit, and runs once the engine is back", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    await w.executor.open();
+    await w.until(() => w.idleDrains() >= 1);
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const paused = Promise.withResolvers<void>();
+    w.beforeNextRoster(async () => {
+      w.executor.pauseForEngineRestart();
+      paused.resolve();
+    });
+    const claim = w.claim("collection:Tasks#seen", task);
+    w.executor.notifyClaimed();
+    await paused.promise;
+    expect(claim.state).toBe("running");
+    expect(w.journaled).toEqual([]);
+    // The claim is still the executor's to hand back when the engine answers.
+    w.executor.resumeAfterEngineRestart();
+    await w.settledClaim(claim);
+    expect(w.events).toContain(`released ${claim.claimId}`);
+    expect(w.fieldsOf(task)).toEqual({ Status: "Done", Seen: true });
+    expect(w.journaled).toHaveLength(1);
+  });
+
+  it("hands back a claim when the workspace closes while its run checks who can edit", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    await w.executor.open();
+    await w.until(() => w.idleDrains() >= 1);
+    let closing: Promise<void> | undefined;
+    w.beforeNextRoster(async () => { closing = w.executor.dispose(); });
+    const claim = w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
+    w.executor.notifyClaimed();
+    await w.until(() => closing !== undefined);
+    await closing;
+    expect(claim.state).toBe("pending");
+    expect(w.journaled).toEqual([]);
+  });
+
+  it("refuses a run whose saved progress would outgrow what dohc reads back, before writing", async () => {
+    const big = "x".repeat(12_500);
+    const clear = "  - id: clear\n    name: Clear\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {A: 1, B: 1, C: 1, D: 1}\n        records: items\n";
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: clear } });
+    Array.from({ length: 50 }, (_, index) => w.addRecord("Items", `item-${index}`, { A: big, B: big, C: big, D: big }));
+    const claim = w.claim("collection:Tasks#clear", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.error).toBe("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
+    expect(w.journaled).toEqual([]);
+  });
+
+  it("records no reach for an automation dohc cannot run yet", async () => {
+    const notify = "  - id: tell\n    name: Tell\n    when: {field-changed: Status}\n    do: [{set: {X: 1}, records: null}, {notify: Hi, to: [user-1]}]\n".replace(", records: null", "");
+    const w = await world({ automations: { Tasks: notify } });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual([]);
   });
 });

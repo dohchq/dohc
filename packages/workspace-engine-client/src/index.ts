@@ -49,6 +49,7 @@ export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {
   VERSIONED_METHOD,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretMomentRecord,
   type VersionedComparisonRecord,

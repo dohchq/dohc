@@ -54,6 +54,7 @@ import {
   VERSIONED_METHOD,
   decodeVersionedResult,
   type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type SecretCompareEntry,
   type SecretMomentRecord,
@@ -391,7 +392,7 @@ export class VersionedLiveAdapter {
     text: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.write"]> {
     this.assertWorkspace(input.workspaceId);
@@ -425,7 +426,7 @@ export class VersionedLiveAdapter {
     path: string;
     bytes: Uint8Array;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
@@ -992,7 +993,7 @@ export class VersionedLiveAdapter {
     expectedObjectId?: string;
     requestId?: string;
     metadata: AdapterWriteMetadata;
-    author?: AgentAuthor | null;
+    author?: WriteAuthor | null;
     momentId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.delete"]> {
     this.assertWorkspace(input.workspaceId);

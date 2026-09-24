@@ -33,7 +33,7 @@ import {
   type RunRecord,
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster } from "./automationReach";
-import { MAX_RUN_FILE_BYTES, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
+import { RUN_PLAN_BUDGET_BYTES, type AutomationRunStore, type RunWrite, type StoredRun } from "./automationRunStore";
 
 // One run of one claim: check reach, read, evaluate, save the plan, then
 // apply the plan's effects in order, saving each one as it lands. The
@@ -46,6 +46,8 @@ export const DEFINITION_CHANGED_ERROR =
   "This automation changed after this run began. Try again to run the new version from the start.";
 export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/automations, so it did not run again. Move that folder aside, then try again.";
+export const COMPACTED_RUN_ERROR =
+  "This run failed too long ago for dohc to finish it. Change the records by hand, or wait for the automation's next run.";
 
 /** The engine reads a run makes. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationReads {
@@ -96,6 +98,8 @@ export type ClaimRuns =
   | { unreadable: true }
   | {
       unreadable: false;
+      /** A run that finished, under any definition. The claim needs only its settle. */
+      done: StoredRun | null;
       /** The run this definition continues. */
       current: StoredRun | null;
       /**
@@ -116,6 +120,7 @@ export async function runsForClaim(
   const live = runs.filter((run) => !run.superseded);
   return {
     unreadable: false,
+    done: live.find((run) => run.outcome?.state === "done") ?? null,
     current: live.find((run) => run.definitionHash === hash) ?? null,
     // A run is saved only once its plan is ready to write, so any saved run
     // of another definition may have written.
@@ -132,12 +137,17 @@ export async function runCollectionAutomation(
   const runs = await runsForClaim(store, claim, automation);
   // Never start over as if nothing had run.
   if (runs.unreadable) return failed(UNREADABLE_RUN_ERROR);
-  const { current, changedSince } = runs;
+  const { done, current, changedSince } = runs;
+  // It finished before this computer could settle the claim, whatever the
+  // automation says now.
+  if (done !== null) return { kind: "done" };
   // Running another definition from the start could repeat the changes the
   // earlier one made. A person has to choose that with Try again.
   if (current === null && changedSince !== null) return failed(DEFINITION_CHANGED_ERROR);
-  // It finished before this computer could settle the claim.
-  if (current?.outcome?.state === "done") return { kind: "done" };
+  if (current?.compacted) return failed(COMPACTED_RUN_ERROR);
+  // The engine handed the claim out again without a Try again, as after a
+  // crash before the failure reached it: the run stays failed.
+  if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) return failed(current.outcome.error);
 
   // Reach (ADR 0012), before anything is read. The targets are in the file,
   // so the check needs only the roster.
@@ -179,11 +189,13 @@ export async function runCollectionAutomation(
       applied: [],
       superseded: false,
       settled: false,
+      compacted: false,
       outcome: null,
     };
-    // Every effect's record must fit a saved run, so a plan that does not is
-    // refused before anything is written.
-    if (Buffer.byteLength(JSON.stringify(run)) > MAX_RUN_FILE_BYTES) {
+    // The run is saved again after every effect, so the plan with every
+    // effect recorded must fit, and one that does not is refused before
+    // anything is written.
+    if (Buffer.byteLength(JSON.stringify({ ...run, applied: projectedProgress(run.plan ?? []) })) > RUN_PLAN_BUDGET_BYTES) {
       return failed("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
     }
     // The plan is on disk before the first write, so a run that stops part
@@ -192,7 +204,7 @@ export async function runCollectionAutomation(
   }
   const outcome = await applyPlan(dependencies, input, run, resumed);
   if (outcome.kind === "failed") {
-    run.outcome = { state: "failed", error: outcome.error };
+    run.outcome = { state: "failed", error: outcome.error, run: claim.run };
   } else {
     run.outcome = { state: "done" };
     run.plan = null;
@@ -295,11 +307,13 @@ async function applyPlan(
   for (let index = firstUnrecorded; index < effects.length; index += 1) {
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
+    // After a stop, records may have changed while the run waited, so every
+    // effect checks each field before it writes. Only the first effect the
+    // run had not recorded may have landed before the stop.
+    const mode: EffectMode = !resumed ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
     let writes: RunWrite[];
     try {
-      // The first effect a resumed run has not recorded may have landed
-      // before the run stopped, so its writes check each field first.
-      writes = await applyEffect(dependencies, { run, author, signal, ordinal }, effect, resumed && index === firstUnrecorded);
+      writes = await applyEffect(dependencies, { run, author, signal, ordinal }, effect, mode);
     } catch (error) {
       return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
     }
@@ -310,6 +324,13 @@ async function applyPlan(
   return { kind: "done" };
 }
 
+/**
+ * How an effect writes: a fresh run writes as planned; after a stop, every
+ * effect writes only fields still at their planned before value, and the
+ * first effect the run had not recorded may already have landed.
+ */
+type EffectMode = "fresh" | "may-have-landed" | "resumed";
+
 // What a field write did, from the seam's answer. A field the seam kept
 // belongs to whoever changed it since the plan, so it is not the
 // automation's write, and Undo leaves it alone.
@@ -317,7 +338,7 @@ function fieldWrites(
   target: { recordId: string; path: string },
   fields: readonly PlannedField[],
   result: Pick<SetCollectionRecordFieldsResult, "replaced" | "kept">,
-  mayHaveLanded: boolean,
+  mode: EffectMode,
 ): RunWrite[] {
   const writes: RunWrite[] = [];
   for (const { field, before, after } of fields) {
@@ -326,19 +347,38 @@ function fieldWrites(
       writes.push({ kind: "field", ...base, before: (result.replaced[field] ?? null) as JsonValue, after });
     } else if (Object.hasOwn(result.kept, field)) {
       writes.push({ kind: "kept", ...base, planned: after, current: (result.kept[field] ?? null) as JsonValue });
-    } else if (mayHaveLanded && !isDeepStrictEqual(before, after)) {
+    } else if (mode === "may-have-landed" && !isDeepStrictEqual(before, after)) {
       // The earlier attempt wrote it before the run stopped.
       writes.push({ kind: "field", ...base, before, after });
+    } else if (mode === "resumed" && !isDeepStrictEqual(before, after)) {
+      // Someone else gave it the planned value while the run waited.
+      writes.push({ kind: "kept", ...base, planned: after, current: after });
     }
   }
   return writes;
+}
+
+/** Every effect's record if it lands as planned, to size a run before it writes. */
+function projectedProgress(plan: readonly PlannedStep[]): StoredRun["applied"] {
+  return plan.flatMap((step) => step.effects.map((effect) => {
+    if (effect.kind === "add") {
+      const path = `${effect.collectionPath}/${effect.name}.md`;
+      return { ordinal: step.ordinal, writes: [
+        { kind: "created" as const, recordId: effect.recordId, path },
+        ...effect.fields.map(({ field, value }) => ({ kind: "field" as const, recordId: effect.recordId, path, field, before: null, after: value })),
+      ] };
+    }
+    const target = "addedBy" in effect.target ? { recordId: "rec_".padEnd(30, "x"), path: "" } : effect.target;
+    return { ordinal: step.ordinal, writes: effect.fields.map(({ field, before, after }) =>
+      ({ kind: "field" as const, recordId: target.recordId, path: target.path, field, before, after })) };
+  }));
 }
 
 async function applyEffect(
   dependencies: CollectionAutomationRunDependencies,
   context: { run: StoredRun; author: ChangeAuthor; signal: AbortSignal; ordinal: number },
   effect: PlannedEffect,
-  mayHaveLanded: boolean,
+  mode: EffectMode,
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
   const key = stepKey(run.claimId, run.definitionHash, ordinal);
@@ -348,7 +388,7 @@ async function applyEffect(
       fields: Object.fromEntries(fields.map(({ field, after }) => [field, after])),
       author,
       idempotencyKeyPrefix: `${key}/${recordId}`,
-      ...(mayHaveLanded ? { expectedBefore: Object.fromEntries(fields.map(({ field, before }) => [field, before])) } : {}),
+      ...(mode === "fresh" ? {} : { expectedBefore: Object.fromEntries(fields.map(({ field, before }) => [field, before])) }),
     });
 
   if (effect.kind === "add") {
@@ -366,7 +406,7 @@ async function applyEffect(
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];
     if (fields.length === 0) return writes;
     const result = await dependencies.withRecordWrites(signal, (edit) => seam(edit, created.path, created.recordId, fields));
-    return [...writes, ...fieldWrites(created, fields, result, mayHaveLanded)];
+    return [...writes, ...fieldWrites(created, fields, result, mode)];
   }
 
   // Find the record again by its id: it may have moved since the plan, and
@@ -379,7 +419,7 @@ async function applyEffect(
   }
   const target = { recordId: planned.recordId, path };
   const result = await dependencies.withRecordWrites(signal, (edit) => seam(edit, path, planned.recordId, effect.fields));
-  return fieldWrites(target, effect.fields, result, mayHaveLanded);
+  return fieldWrites(target, effect.fields, result, mode);
 }
 
 function addedRecord(run: StoredRun, ordinal: number): { recordId: string; collectionPath: string; path: string } | null {

@@ -11,8 +11,8 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
     version: 1, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    superseded: false, settled,
-    outcome: state === null ? null : state === "done" ? { state } : { state, error: "No." },
+    superseded: false, settled, compacted: false,
+    outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }
 
@@ -49,7 +49,7 @@ describe("the automation run store", () => {
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
   });
 
-  it("drops the oldest settled runs and never a run a claim may still resume", async () => {
+  it("drops the oldest settled runs, never a run a claim may still resume, and compacts failures history no longer shows", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root);
     for (let index = 0; index < 30; index += 1) await store.save(run(`atc_done${index}`, "done", index));
@@ -57,20 +57,31 @@ describe("the automation run store", () => {
     await store.save(run("atc_unsettled", "done", 50, false));
     for (let index = 0; index < 12; index += 1) await store.save(run(`atc_failed${index}`, "failed", 100 + index));
     await store.save(run("atc_running", null, 200));
-    await store.prune(AUTOMATION);
-    const kept = new Set<string>();
+    // Run history lists every claim but the two oldest failures.
+    const listed = new Set(["atc_unsettled", "atc_running", ...Array.from({ length: 10 }, (_, index) => `atc_failed${index + 2}`)]);
+    let listings = 0;
+    await store.prune(AUTOMATION, async () => { listings += 1; return listed; });
+    const kept = new Map<string, boolean>();
     for (const claimId of [
       ...Array.from({ length: 30 }, (_, index) => `atc_done${index}`),
       "atc_unsettled", "atc_running",
       ...Array.from({ length: 12 }, (_, index) => `atc_failed${index}`),
     ]) {
-      if ((await store.runsOf(AUTOMATION, claimId)).runs.length > 0) kept.add(claimId);
+      const [saved] = (await store.runsOf(AUTOMATION, claimId)).runs;
+      if (saved) kept.set(claimId, saved.compacted);
     }
-    expect([...kept].filter((claimId) => claimId.startsWith("atc_done"))).toEqual(
+    expect([...kept.keys()].filter((claimId) => claimId.startsWith("atc_done"))).toEqual(
       Array.from({ length: 20 }, (_, index) => `atc_done${index + 10}`),
     );
-    expect(kept).toContain("atc_unsettled");
-    expect(kept).toContain("atc_running");
-    expect([...kept].filter((claimId) => claimId.startsWith("atc_failed"))).toHaveLength(12);
+    expect(kept.get("atc_unsettled")).toBe(false);
+    expect(kept.get("atc_running")).toBe(false);
+    // Every failure stays, but only the ones history shows keep their progress.
+    expect([...kept].filter(([claimId]) => claimId.startsWith("atc_failed"))).toEqual(
+      Array.from({ length: 12 }, (_, index) => [`atc_failed${index}`, index < 2]),
+    );
+    // The folder is read again only once it grows by the history bound.
+    await store.save(run("atc_done-next", "done", 300));
+    await store.prune(AUTOMATION, async () => { listings += 1; return listed; });
+    expect(listings).toBe(1);
   });
 });

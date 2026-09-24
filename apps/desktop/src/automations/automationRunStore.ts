@@ -19,14 +19,15 @@ import type { StoredReachVerdict } from "./reachVerdicts";
 // Every file is written to a temporary name, flushed to disk, and renamed
 // over the old one, so a crash leaves the old record or the new one.
 
-// A run of 200 field writes with values near the claim's value bound stays
-// under this. The executor refuses a larger plan before it writes anything.
-export const MAX_RUN_FILE_BYTES = 4 * 1024 * 1024;
+// The executor refuses a run whose plan, with every effect recorded as
+// planned, is larger than this, before it writes anything.
+export const RUN_PLAN_BUDGET_BYTES = 4 * 1024 * 1024;
+// The largest saved run this store writes or reads. It leaves room for
+// values other people changed that are larger than the plan expected.
+export const MAX_RUN_FILE_BYTES = 4 * RUN_PLAN_BUDGET_BYTES;
 // Run history keeps this many finished runs per automation. A run a claim
 // may still resume is never dropped.
 const KEEP_FINISHED_RUNS = 20;
-// Pruning reads every run of the automation, so it waits for this many.
-const PRUNE_AFTER_FILES = KEEP_FINISHED_RUNS * 2;
 
 // Values are this computer's own writes, read back as JSON.parse left them;
 // the write seam checks each one again before it writes.
@@ -80,9 +81,10 @@ const StoredRunSchema = z.object({
   applied: z.array(z.object({ ordinal: z.number().int().nonnegative(), writes: z.array(WriteSchema) })),
   superseded: z.boolean(),
   settled: z.boolean(),
+  compacted: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
-    z.object({ state: z.literal("failed"), error: z.string() }),
+    z.object({ state: z.literal("failed"), error: z.string(), run: z.number().int().positive() }),
   ]).nullable(),
 });
 
@@ -113,7 +115,13 @@ export interface StoredRun {
   superseded: boolean;
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
-  outcome: { state: "done" } | { state: "failed"; error: string } | null;
+  /**
+   * The run failed long ago, and run history no longer shows its claim, so
+   * its plan and progress were dropped. It cannot resume.
+   */
+  compacted: boolean;
+  /** A failed run names the claim's run it failed in: 1, plus one per Try again. */
+  outcome: { state: "done" } | { state: "failed"; error: string; run: number } | null;
 }
 
 const SubscriptionsSchema = z.object({
@@ -204,10 +212,15 @@ export interface AutomationRunStore {
    * start over as if it had none.
    */
   runsOf(automationId: string, claimId: string): Promise<{ runs: StoredRun[]; unreadable: boolean }>;
-  /** Saves a run before the executor goes on. */
+  /** Saves a run before the executor goes on. Refuses a run too large to read back. */
   save(run: StoredRun): Promise<void>;
-  /** Drops the oldest settled or superseded runs past the history bound. */
-  prune(automationId: string): Promise<void>;
+  /**
+   * Drops the oldest settled or superseded runs past the history bound, and
+   * compacts failed runs whose claims `listedClaims` no longer shows. It
+   * reads the folder only once it has grown by the history bound since the
+   * last prune.
+   */
+  prune(automationId: string, listedClaims: () => Promise<ReadonlySet<string> | null>): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   readReachVerdicts(): Promise<StoredReachVerdict[]>;
@@ -218,6 +231,8 @@ export interface AutomationRunStore {
 }
 
 export function createAutomationRunStore(rootPath: string): AutomationRunStore {
+  // The file count at which each automation's folder is pruned next.
+  const pruneAt = new Map<string, number>();
   // Writes queue behind each other, so two saves never race one rename.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -251,26 +266,39 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
     },
     save(run) {
       return serial(async () => {
+        if (Buffer.byteLength(JSON.stringify(run)) > MAX_RUN_FILE_BYTES) {
+          throw new Error("This run's progress is too large for dohc to save, so it stopped. Narrow its Find steps, or split it into smaller automations.");
+        }
         const folder = await runsFolder(run.automationId);
         await writeDurably(runFile(folder, run.claimId, run.definitionHash), run);
       });
     },
-    prune(automationId) {
+    prune(automationId, listedClaims) {
       return serial(async () => {
         const folder = await runsFolder(automationId);
         const names = (await readdir(folder)).filter((name) => name.endsWith(".json"));
-        if (names.length < PRUNE_AFTER_FILES) return;
+        if (names.length < (pruneAt.get(automationId) ?? KEEP_FINISHED_RUNS * 2)) return;
+        const listed = await listedClaims();
         const history: StoredRun[] = [];
+        let kept = names.length;
         for (const name of names) {
           const run = await readRun(join(folder, name), automationId);
+          if (!run) continue;
           // Only a run nothing can resume leaves: its claim settled done, or
           // a person chose to start it over.
-          if (run && ((run.settled && run.outcome?.state === "done") || run.superseded)) history.push(run);
+          if ((run.settled && run.outcome?.state === "done") || run.superseded) {
+            history.push(run);
+          } else if (listed !== null && run.outcome?.state === "failed" && !run.compacted && !listed.has(run.claimId)) {
+            // Run history no longer shows the claim, so only its failure stays.
+            await writeDurably(join(folder, name), { ...run, plan: null, applied: [], compacted: true });
+          }
         }
         history.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
         for (const run of history.slice(KEEP_FINISHED_RUNS)) {
           await rm(runFile(folder, run.claimId, run.definitionHash), { force: true });
+          kept -= 1;
         }
+        pruneAt.set(automationId, kept + KEEP_FINISHED_RUNS);
       });
     },
     async readSubscriptions() {
