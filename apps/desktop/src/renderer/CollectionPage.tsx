@@ -34,6 +34,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
+import { ipcErrorMessage } from "./ipcError";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -106,7 +107,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(error instanceof Error ? error.message : String(error));
+      setLoadError(ipcErrorMessage(error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {

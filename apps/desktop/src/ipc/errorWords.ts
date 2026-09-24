@@ -20,7 +20,7 @@ const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
   PROTOCOL_VERSION_UNSUPPORTED: null,
   MALFORMED_FRAME: null,
-  LIMIT_EXCEEDED: TOO_LARGE,
+  LIMIT_EXCEEDED: null,
   INVALID_ENVELOPE: null,
   METHOD_NOT_FOUND: null,
   INVALID_PARAMS: null,
@@ -44,7 +44,7 @@ const ENGINE_CODE_WORDS = {
   BLOB_MISSING: CONTENT_MISSING,
   BLOB_REFERENCE_MISSING: CONTENT_MISSING,
   BLOB_INVALID: "Some file contents are damaged.",
-  IDENTITY_REQUIRED: "Sign in to your server first.",
+  IDENTITY_REQUIRED: "Connect to your server first.",
   STREAM_IDENTITY_MISMATCH: null,
   AUTHORSHIP_MISMATCH: null,
   UNKNOWN_CHAT_OPERATION: null,
@@ -71,7 +71,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "*": null,
   },
-  EngineDaemonUnavailableError: { "*": "The workspace engine is not running. Restart dohc." },
+  EngineDaemonUnavailableError: { "*": "Restart dohc to try again." },
   EngineRequestDeadlineError: { "*": ENGINE_CODE_WORDS.DEADLINE_EXCEEDED },
   EngineWorkspaceRetryDeadlineError: { "*": "dohc could not reach this workspace in time. Try again." },
   EngineWorkspaceRebuildingError: { "*": "dohc is rebuilding this workspace's data store. Try again in a moment." },
@@ -121,11 +121,15 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
 // When nothing else applies and no caller said what failed.
 export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
-// Names for dohc's internals. The person's nouns are Collection and history.
-const INTERNAL_NOUNS = /\b(?:datasets?|journals?|materializations?|checkpoints?)\b/i;
+// The Collection worker's plain errors name its internals ("Dataset host is
+// closed.", "Reopen it from the journal."). Only replies on the Collection
+// channel are read this way, so a file or Collection named Journal keeps
+// its name everywhere.
+const COLLECTION_CHANNEL = "desktop:dataset";
+const WORKER_TEXT = /\bdatasets?\b|\bfrom the journal\b/i;
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
-const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
+const IPC_PREFIX = /^Error invoking remote method '([^']*)': /;
 const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
@@ -157,9 +161,11 @@ function parse(error: unknown) {
       ? error.message
       : `${error.name}${code === null ? "" : ` [${code}]`}: ${error.message}`;
   }
+  const channel = IPC_PREFIX.exec(text)?.[1];
   text = text.replace(IPC_PREFIX, "").trim();
   const match = CLASS_PREFIX.exec(text);
   return {
+    channel,
     text,
     name: match?.[1] ?? "Error",
     code: match?.[2],
@@ -170,23 +176,39 @@ function parse(error: unknown) {
 export interface ReadError {
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
+  /**
+   * The words come from the map above. They say why and what to do next,
+   * not what failed, so the caller's sentence goes first.
+   */
+  mapped: boolean;
   /** The error as it arrived, for Copy details; null when `words` says it all. */
   cause: string | null;
 }
 
 export function readError(error: unknown): ReadError {
-  const { text, name, code, message } = parse(error);
+  const { channel, text, name, code, message } = parse(error);
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const key = entry && [message, code, "*"].find(
     (candidate) => candidate !== undefined && Object.hasOwn(entry, candidate),
   );
-  if (entry && key !== undefined) return { words: entry[key] ?? null, cause: text };
-  if (!message) return { words: null, cause: null };
-  if (RAW_CODE.test(message) || INTERNAL_NOUNS.test(message)) {
-    return { words: null, cause: plain ? message : text };
+  if (entry && key !== undefined) {
+    const words = entry[key] ?? null;
+    return { words, mapped: words !== null, cause: text };
   }
-  return { words: message, cause: plain ? null : text };
+  if (!message) return { words: null, mapped: false, cause: null };
+  if (RAW_CODE.test(message) || (channel === COLLECTION_CHANNEL && WORKER_TEXT.test(message))) {
+    return { words: null, mapped: false, cause: plain ? message : text };
+  }
+  return { words: message, mapped: false, cause: plain ? null : text };
+}
+
+/** A caller's sentence, then the error's words when they add to it. */
+export function withErrorWords(sentence: string, error: unknown): string {
+  const { words } = readError(error);
+  return words && words !== sentence && !words.startsWith(`${sentence} `)
+    ? `${sentence} ${words}`
+    : words || sentence;
 }
 
 /** The engine refuses reads this way while it reads a new workspace's files. */

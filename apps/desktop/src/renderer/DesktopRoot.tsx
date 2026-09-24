@@ -11,6 +11,7 @@ import { bridge } from "./bridge";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import { ipcErrorMessage } from "./ipcError";
 
 export function DesktopRoot() {
   const [loaded, setLoaded] = useState(false);
@@ -133,7 +134,7 @@ export function DesktopRoot() {
       // never a permanently blank window.
       .catch((cause) => {
         if (request < committedRegistryRequest.current) return;
-        setLoadError(cause instanceof Error ? cause.message : String(cause));
+        setLoadError(ipcErrorMessage(cause));
         setLoaded(true);
       });
   }, []);

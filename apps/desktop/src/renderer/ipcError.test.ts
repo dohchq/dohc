@@ -14,7 +14,13 @@ describe("IPC error messages", () => {
   it("gives the class and code's words, or the fallback, instead of a raw code", () => {
     expect(ipcErrorMessage(new Error(
       "Error invoking remote method 'read': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
-    ), "Could not read.")).toBe("dohc is still reading this workspace's files. Try again when it finishes.");
+    ), "Could not read.")).toBe("Could not read. dohc is still reading this workspace's files. Try again when it finishes.");
+    expect(ipcErrorMessage(new Error(
+      "Error invoking remote method 'send': PersistentRuntimeError [worker_stopped]: The dataset worker stopped.",
+    ), "Could not send that message.")).toBe("Could not send that message. It stopped before it finished. Try again.");
+    expect(ipcErrorMessage(new Error(
+      "Error invoking remote method 'read': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ))).toBe("dohc is still reading this workspace's files. Try again when it finishes.");
     expect(ipcErrorMessage(new Error(
       "Error invoking remote method 'prepare': DaemonRefusalError [INVALID_PARAMS]: invalid-input",
     ), "dohc could not prepare this app. Try again.")).toBe("dohc could not prepare this app. Try again.");

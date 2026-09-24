@@ -12,6 +12,7 @@ import { bridge } from "../bridge";
 import { PrimaryButton } from "../ui/controls";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
+import { ipcErrorMessage } from "../ipcError";
 
 type AppsLoadState =
   | { status: "loading" }
@@ -36,7 +37,7 @@ function useApps(
       onError: (error) => {
         setState({
           status: "error",
-          message: error instanceof Error ? error.message : "Could not load apps.",
+          message: ipcErrorMessage(error, "Could not load apps."),
         });
       },
     },

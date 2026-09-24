@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readError, UNKNOWN_ERROR_WORDS } from "../../ipc/errorWords";
+import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
 type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
@@ -103,12 +103,9 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: "workspace-search",
     ) => {
-      const { words, cause } = readError(error);
+      const { cause } = readError(error);
       push({
-        message:
-          words && words !== fallback && !words.startsWith(`${fallback} `)
-            ? `${fallback} ${words}`
-            : words || fallback,
+        message: withErrorWords(fallback, error),
         ...(cause ? { cause } : {}),
         retry,
         ...(kind ? { kind } : {}),
@@ -139,8 +136,8 @@ export function useShellError(workspaceId: string) {
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
-      const { words, cause } = readError(error);
-      push({ message: words ? `${lane} ${words}` : lane, ...(cause ? { cause } : {}), retry });
+      const { cause } = readError(error);
+      push({ message: withErrorWords(lane, error), ...(cause ? { cause } : {}), retry });
     },
     [push],
   );

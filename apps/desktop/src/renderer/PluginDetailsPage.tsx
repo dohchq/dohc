@@ -1,6 +1,6 @@
 import { pluginKey } from "./workbench/pluginCatalog";
 import { useRequestSequence } from "./useRequestSequence";
-import { ipcErrorMessage } from "./ipcError";
+import { readError } from "../ipc/errorWords";
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
@@ -65,10 +65,9 @@ type ReadmeState =
   | { status: "absent" }
   | { status: "error"; message: string };
 
-// Electron wraps a rejected handler's error; the workspace surfaces strip the
-// wrapper before showing the reason (WorkspaceVersions precedent).
+// The reason after "dohc could not read …", in words, never the raw error.
 function readableReason(error: unknown): string {
-  return ipcErrorMessage(error, "Try again.");
+  return readError(error).words ?? "Try again.";
 }
 
 // ENOENT is the file system's own answer to "is it there", carried out on the

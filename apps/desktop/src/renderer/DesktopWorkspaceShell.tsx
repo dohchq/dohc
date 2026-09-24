@@ -41,6 +41,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
+import { readError } from "../ipc/errorWords";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -727,6 +728,8 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // The error as it arrived, for Copy details.
+    cause?: string;
     // Admission stopped on pending writes or retained failures from another
     // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
@@ -3336,11 +3339,12 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
-          const detail = error instanceof Error ? error.message.trim() : "";
+          const { words, cause } = readError(error);
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
-            message: detail || "dohc could not open this workspace.",
+            message: words ?? "dohc could not open this workspace.",
+            ...(cause ? { cause } : {}),
           });
         }
         return;
@@ -5625,6 +5629,7 @@ export function DesktopWorkspaceShell(props: {
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
+                  ["Cause", workspaceOpenFailure.cause],
                   ...reportFacts(),
                 ])
               }

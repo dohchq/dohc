@@ -7692,6 +7692,28 @@ describe("workspace shell errors", () => {
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 
+  it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(
+      "dohc is still reading this workspace's files. Try again when it finishes.",
+    );
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|OVERLOADED|invoking remote method/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
+      "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ]);
+  });
+
   it("retries a failed initial listing without reopening the workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Listing failed"));

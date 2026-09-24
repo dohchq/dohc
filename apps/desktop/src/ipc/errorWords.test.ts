@@ -3,7 +3,7 @@ import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
-import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError } from "./errorWords";
+import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError, withErrorWords } from "./errorWords";
 
 // What the renderer receives when a main-process handler rejects: Electron
 // sends `error.toString()` and prefixes the channel.
@@ -48,6 +48,7 @@ describe("error words", () => {
     );
     expect(readError(received)).toEqual({
       words: "dohc is still reading this workspace's files. Try again when it finishes.",
+      mapped: true,
       cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
     });
     expect(isWorkspaceUpdatingError(received)).toBe(true);
@@ -58,6 +59,7 @@ describe("error words", () => {
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {
     expect(readError(acrossIpc(refusal("INVALID_PARAMS", "invalid-input")))).toEqual({
       words: null,
+      mapped: false,
       cause: "DaemonRefusalError [INVALID_PARAMS]: invalid-input",
     });
     expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
@@ -67,6 +69,7 @@ describe("error words", () => {
   it("reads the app compiler and the Collection worker by their codes", () => {
     expect(readError(acrossIpc(new CompilerProcessError("exit", "Compiler exited (1).")))).toEqual({
       words: "The app's code did not build.",
+      mapped: true,
       cause: "CompilerProcessError [exit]: Compiler exited (1).",
     });
     const worker = new PersistentRuntimeError(
@@ -81,6 +84,7 @@ describe("error words", () => {
   it("keeps a sentence written for a person and drops only what is not", () => {
     expect(readError(acrossIpc(new Error("Sync this workspace before sharing.")))).toEqual({
       words: "Sync this workspace before sharing.",
+      mapped: false,
       cause: null,
     });
     const named = Object.assign(new Error("dohc could not open notes.md. It is being moved."), {
@@ -88,11 +92,8 @@ describe("error words", () => {
     });
     expect(readError(acrossIpc(named))).toEqual({
       words: "dohc could not open notes.md. It is being moved.",
+      mapped: false,
       cause: "YDocRemovalInProgressError: dohc could not open notes.md. It is being moved.",
-    });
-    expect(readError(acrossIpc(new Error("Dataset operation expired while waiting for a worker.")))).toEqual({
-      words: null,
-      cause: "Dataset operation expired while waiting for a worker.",
     });
     for (const raw of ["invalid-input", "EPIPE", "ENOENT: no such file or directory, open 'a.md'"]) {
       expect(readError(acrossIpc(new Error(raw))).words, raw).toBeNull();
@@ -100,12 +101,43 @@ describe("error words", () => {
     const denied = Object.assign(new Error("EACCES: permission denied, open 'a.md'"), { code: "EACCES" });
     expect(readError(acrossIpc(denied))).toEqual({
       words: "dohc does not have permission to use this file or folder.",
+      mapped: true,
       cause: "Error [EACCES]: EACCES: permission denied, open 'a.md'",
     });
     expect(readError(new TypeError("Cannot read properties of undefined"))).toEqual({
       words: null,
+      mapped: false,
       cause: "TypeError: Cannot read properties of undefined",
     });
-    expect(readError({})).toEqual({ words: null, cause: null });
+    expect(readError({})).toEqual({ words: null, mapped: false, cause: null });
+  });
+
+  it("hides the Collection worker's internal text only on the Collection channel", () => {
+    const worker = acrossIpc(new Error("Dataset operation expired while waiting for a worker."), "desktop:dataset");
+    expect(readError(worker)).toEqual({
+      words: null,
+      mapped: false,
+      cause: "Dataset operation expired while waiting for a worker.",
+    });
+    expect(readError(acrossIpc(new Error("The dataset worker stopped. Reopen it from the journal."), "desktop:dataset")).words)
+      .toBeNull();
+    // A person's own names and a cause written for them stay.
+    for (const [message, channel] of [
+      ["Journal.md changed on disk. Open it again.", "desktop:read-workspace-text"],
+      ["A Collection named Dataset already exists in Journal.", "desktop:create-collection"],
+      ["The server returned an invalid Collection checkpoint.", "desktop:dataset"],
+    ] as const) {
+      expect(readError(acrossIpc(new Error(message), channel)).words, message).toBe(message);
+    }
+  });
+
+  it("puts the caller's sentence before the words the map adds", () => {
+    const stopped = acrossIpc(new PersistentRuntimeError("worker_stopped", "The dataset worker stopped."));
+    expect(withErrorWords("Could not open this Collection.", stopped))
+      .toBe("Could not open this Collection. It stopped before it finished. Try again.");
+    expect(withErrorWords("Could not open this Collection.", acrossIpc(refusal("INTERNAL", "workspace operation failed"))))
+      .toBe("Could not open this Collection.");
+    expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
+      .toBe("Could not share. Sync this workspace before sharing.");
   });
 });

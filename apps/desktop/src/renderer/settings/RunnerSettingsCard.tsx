@@ -15,6 +15,7 @@ import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 import { SecondaryButton } from "../ui/controls";
+import { ipcErrorMessage } from "../ipcError";
 
 const RUNNER_COMMAND_PLACEHOLDER = "Enter the command that starts your agent";
 
@@ -169,13 +170,11 @@ export function RunnerSettingsCard(props: {
       });
     } catch (cause) {
       if (!requestVersionRef.isCurrent(version)) return;
-      props.onError?.(cause instanceof Error ? cause.message : "Runner self-test could not start.");
+      props.onError?.(ipcErrorMessage(cause, "Runner self-test could not start."));
       setSelfTest({
         status: "error",
         detail:
-          cause instanceof Error && cause.message
-            ? cause.message
-            : "Runner self-test could not start.",
+          ipcErrorMessage(cause, "Runner self-test could not start."),
       });
     }
   }, [commitDrafts, workspaceId]);
@@ -226,7 +225,7 @@ export function RunnerSettingsCard(props: {
             setProfile(value);
             setTimeoutDraft(String(timeoutMinutes));
             setSelfTest({ status: "idle" });
-            void queueSave({ ...runner, command: commandDraft.trim(), profile: value, timeoutMinutes }).catch((cause: unknown) => props.onError?.(cause instanceof Error ? cause.message : "Could not save the agent."));
+            void queueSave({ ...runner, command: commandDraft.trim(), profile: value, timeoutMinutes }).catch((cause: unknown) => props.onError?.(ipcErrorMessage(cause, "Could not save the agent.")));
           }} />
         <details className="mt-3" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
         <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
@@ -235,7 +234,7 @@ export function RunnerSettingsCard(props: {
           setProfile(undefined);
           setTimeoutDraft(String(timeoutMinutes));
           setSelfTest({ status: "idle" });
-          void queueSave({ ...runner, command: commandDraft.trim(), profile: undefined, timeoutMinutes }).catch((cause: unknown) => props.onError?.(cause instanceof Error ? cause.message : "Could not save the agent."));
+          void queueSave({ ...runner, command: commandDraft.trim(), profile: undefined, timeoutMinutes }).catch((cause: unknown) => props.onError?.(ipcErrorMessage(cause, "Could not save the agent.")));
         }}>Use saved command</SecondaryButton> : null}
         <label
           htmlFor="runner-command"

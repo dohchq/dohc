@@ -48,6 +48,7 @@ import {
   SETTINGS_SECTIONS,
   type SettingsSectionId,
 } from "./settingsRegistry";
+import { ipcErrorMessage } from "../ipcError";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -221,7 +222,7 @@ export function SettingsDialog(props: {
       })
       .catch((cause) => {
         if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError(ipcErrorMessage(cause));
         }
       });
     return () => {
@@ -269,7 +270,7 @@ export function SettingsDialog(props: {
       setUserResult(previous);
       applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving, userResult]);
 
@@ -324,7 +325,7 @@ export function SettingsDialog(props: {
         }
         setWorkspaceResult(previous);
         setSaveState("error");
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(ipcErrorMessage(cause));
       }
     },
     [markSaved, markSaving, props.workspaceId, workspaceResult],
@@ -350,7 +351,7 @@ export function SettingsDialog(props: {
       // "open Settings" would name the dialog the user is already in.
       setError(
         `${
-          cause instanceof Error ? cause.message : String(cause)
+          ipcErrorMessage(cause)
         } Use Reset user settings in the Advanced section, or repair the file.`,
       );
     }
@@ -369,7 +370,7 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
 
@@ -398,7 +399,7 @@ export function SettingsDialog(props: {
         return;
       }
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving, props.workspaceId]);
 

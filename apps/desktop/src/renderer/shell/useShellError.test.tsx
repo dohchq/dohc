@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
 
 afterEach(cleanup);
@@ -87,6 +88,19 @@ describe("useShellError", () => {
         message: "Version controls are unavailable right now.",
         cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
       },
+    ]);
+  });
+
+  it("keeps two failures with the same reason apart by what failed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const stopped = new Error(
+      "Error invoking remote method 'desktop:dataset': PersistentRuntimeError [worker_stopped]: The dataset worker stopped.",
+    );
+    act(() => result.current.showShellError(ipcErrorMessage(stopped, "Could not send that message."), stopped));
+    act(() => result.current.showShellError(ipcErrorMessage(stopped, "Could not load this chat."), stopped));
+    expect(result.current.shellErrors.map(({ message }) => message)).toEqual([
+      "Could not send that message. It stopped before it finished. Try again.",
+      "Could not load this chat. It stopped before it finished. Try again.",
     ]);
   });
 
