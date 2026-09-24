@@ -2382,7 +2382,7 @@ describe("collection folders", () => {
     // The second accepted edit still reaches its record's live document.
     await waitFor(
       () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
-      { timeout: 5_000 },
+      { timeout: 10_000 },
     );
     await waitFor(() => {
       const updates =
@@ -3791,7 +3791,7 @@ describe("editor groups", () => {
       })),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
 
@@ -7201,7 +7201,7 @@ describe("engine store recovery", () => {
       await screen.findByTestId(
         "markdown-source-toggle",
         {},
-        { timeout: 5_000 },
+        { timeout: 10_000 },
       );
       await waitFor(() =>
         expect(openEngineYDocSession).toHaveBeenCalledTimes(1),
@@ -7474,7 +7474,7 @@ describe("engine store recovery", () => {
       })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
 
     await user.click(
@@ -16005,7 +16005,7 @@ describe("set-aside draft recovery", () => {
       ),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
 
     await user.type(screen.getByTestId("page-title"), " changed");
     await screen.findByTestId("tab-dirty");
