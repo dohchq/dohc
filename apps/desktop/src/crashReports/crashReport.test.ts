@@ -117,6 +117,41 @@ describe("crash report scrubbing", () => {
     expect(scrub("rename 'Ice's notes' to 'Plans'")).toBe("rename '…' to '…'");
   });
 
+  it("removes any host name, after any error code, and keeps code file names", () => {
+    expect(scrub("connect ECONNABORTED relay.acme.internal:443")).toBe("connect ECONNABORTED <host>");
+    expect(scrub("connect EADDRNOTAVAIL relay:443")).toBe("connect EADDRNOTAVAIL <host>");
+    expect(scrub("Failed to connect to relay.acme.internal port 443")).toBe("Failed to connect to <host> port 443");
+    expect(scrub(
+      "Hostname/IP does not match certificate's altnames: Host: relay.acme.internal. is not in the cert's altnames: DNS:*.acme.com, DNS:acme.com",
+    )).toBe(
+      "Hostname/IP does not match certificate's altnames: Host: <host>. is not in the cert's altnames: DNS:<host>, DNS:<host>",
+    );
+    expect(scrub("WebSocket to RELAY.Acme.Internal:8443 closed")).toBe("WebSocket to <host> closed");
+    expect(scrub("Cannot find module index.js from package.json")).toBe("Cannot find module index.js from package.json");
+    // A document's name is not a code file, so it goes too.
+    expect(scrub("could not settle budget.md")).toBe("could not settle <host>");
+    // Stack frames keep their dotted function names.
+    expect(scrub("at Promise.all (index 0)")).toBe("at Promise.all (index 0)");
+    expect(scrub("at process.emit (node:events:517:28)")).toBe("at process.emit (node:events:517:28)");
+  });
+
+  it("removes a quoted value that is left open, however long", () => {
+    const long = `open '${"a".repeat(300)} Ice's ${"b".repeat(400)}' failed`;
+    expect(scrub(long)).toBe("open '…");
+    expect(scrub("Unexpected token 'h', \"hello wor…")).toBe("Unexpected token '…', \"…");
+    expect(scrub("rename 'Ice's notes' to 'Plans'")).toBe("rename '…' to '…'");
+  });
+
+  it("scrubs a long run in time that grows with its length", () => {
+    // Each of these once restarted at every character: 3 to 4 s at 50,000
+    // characters. Linear work is milliseconds, so allow 10 µs a character.
+    for (const hostile of ["a.".repeat(100_000), "a-".repeat(100_000), `${"a-".repeat(100_000)}x`]) {
+      const started = performance.now();
+      scrub(hostile);
+      expect(performance.now() - started).toBeLessThan(hostile.length * 0.01);
+    }
+  });
+
   it("keeps ordinary code words and version numbers", () => {
     expect(scrub("TypeError: engineDaemonLifecycle is not a function at node:internal/process/task_queues:95:5"))
       .toBe("TypeError: engineDaemonLifecycle is not a function at node:internal/process/task_queues:95:5");
@@ -186,6 +221,22 @@ describe("crash report formatting", () => {
       .toBe("at open (<dohc>/Resources/app.asar/out/main/index.js:4:2)");
     expect(crashReportRoot({ isPackaged: false, appPath: join(INSTALL, "apps", "desktop"), resourcesPath: "unused" }))
       .toBe(INSTALL);
+  });
+
+  it("never scrubs more than one line's worth, however long the error", () => {
+    const seen: number[] = [];
+    const measuring = (text: string) => {
+      seen.push(text.length);
+      return scrub(text);
+    };
+    const error = new Error(`open '${"x".repeat(200_000)}`);
+    error.stack = `Error: x\n    at ${"y".repeat(200_000)}\n`;
+    error.cause = "z".repeat(200_000);
+    const text = formatCrashEvent({ kind: "main-exception", error, origin: "uncaughtException" }, FACTS, measuring);
+    expect(seen).toHaveLength(3);
+    expect(Math.max(...seen)).toBeLessThanOrEqual(500);
+    expect(text).toContain("Error: Error: open '…");
+    expect(text).not.toContain("xxx");
   });
 
   it("bounds one problem and puts a header on the report", () => {

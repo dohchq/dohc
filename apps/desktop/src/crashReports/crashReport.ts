@@ -53,15 +53,17 @@ export function formatCrashEvent(
   scrub: (text: string) => string,
 ): string {
   const lines: string[] = [];
-  const fact = (label: string, value: string) => lines.push(`${label}: ${clip(oneLine(value), LINE_MAX_CHARS)}`);
+  const fact = (label: string, value: string) => lines.push(`${label}: ${bounded(value, LINE_MAX_CHARS)}`);
   fact("Time", new Date(facts.atMs).toISOString());
   if (event.kind === "main-exception") {
     fact("Process", "main");
     fact("What happened", event.origin === "unhandledRejection" ? "Unhandled promise rejection" : "Uncaught exception");
   } else if (event.kind === "process-gone") {
-    fact("Process", event.source === "utility" && event.name ? `utility (${scrub(event.name)})` : event.source);
+    // Chromium names the service and the reason, so neither holds a
+    // person's data, and a dotted service name is not a host.
+    fact("Process", event.source === "utility" && event.name ? `utility (${event.name})` : event.source);
     fact("What happened", "The process ended");
-    fact("Reason", scrub(event.reason));
+    fact("Reason", event.reason);
     fact("Exit code", String(event.exitCode));
   } else {
     fact("Process", "workspace engine");
@@ -96,22 +98,32 @@ function errorLines(error: unknown, scrub: (text: string) => string, withStack: 
     if (!(current instanceof Error)) {
       // A thrown string can be anything a person typed; an object is not
       // spelled out at all.
-      const value = typeof current === "string" ? scrub(current) : `a value of type ${current === null ? "null" : typeof current}`;
-      lines.push(`${label}: ${clip(oneLine(value), LINE_MAX_CHARS)}`);
+      const value = typeof current === "string"
+        ? bounded(current, LINE_MAX_CHARS, scrub)
+        : `a value of type ${current === null ? "null" : typeof current}`;
+      lines.push(`${label}: ${value}`);
       break;
     }
-    lines.push(`${label}: ${clip(oneLine(scrub(`${current.name}: ${current.message}`)), LINE_MAX_CHARS)}`);
+    lines.push(`${label}: ${bounded(`${current.name}: ${current.message}`, LINE_MAX_CHARS, scrub)}`);
     if (withStack) {
       const frames = (current.stack ?? "")
         .split("\n")
         .filter((line) => /^\s*at\s/.test(line))
         .slice(0, FRAMES_PER_ERROR)
-        .map((line) => `    ${clip(scrub(line.trim()), FRAME_MAX_CHARS)}`);
+        .map((line) => `    ${bounded(line.trim(), FRAME_MAX_CHARS, scrub)}`);
       lines.push(...frames);
     }
     current = current.cause;
   }
   return lines;
+}
+
+// One line of at most `max` characters. The text is clipped before the
+// scrub as well as after, so a scrub inside a crash handler never sees more
+// than one line's worth, however long the message was.
+function bounded(text: string, max: number, scrub?: (text: string) => string): string {
+  const line = oneLine(clip(text, max));
+  return clip(scrub ? scrub(line) : line, max);
 }
 
 function oneLine(text: string): string {
@@ -121,6 +133,15 @@ function oneLine(text: string): string {
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
+
+// A dotted name ending in letters, or a wildcard certificate name, not
+// inside a word, path, or placeholder. A label holds no dot, so the match
+// is linear.
+const HOST = /(?<![\w/\\.<>@-])(?:\*\.)?(?:[a-z0-9-]+\.)+([a-z]{2,})(?![\w-])(?::\d+)?/gi;
+const CODE_EXTENSIONS = new Set([
+  "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "json", "node", "asar",
+  "map", "wasm", "rs", "exe", "dll", "dylib", "so", "html", "css",
+]);
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -150,36 +171,47 @@ export function createCrashScrubber(roots: readonly string[], platform: NodeJS.P
         `(?:${spellings.map(escapeRegExp).join("|")})(?![\\w.-])((?:[\\\\/][^\\s'"()<>|]*)?)`,
         platform === "win32" ? "gi" : "g",
       );
+  // Rules that could start at every character of a long run have a
+  // lookbehind, so each run is tried once.
   return (text) => {
+    const frame = /^at\s/.test(text);
     let result = rootPattern
       ? text.replace(rootPattern, (_match, rest: string) => `<dohc>${rest.replace(/\\/g, "/")}`)
       : text;
     result = result
       // URLs, including file:// and dohc's own schemes, which carry paths.
-      .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"()<>]*/gi, "<url>")
+      .replace(/(?<![\w+.-])[a-z][a-z0-9+.-]*:\/\/[^\s'"()<>]*/gi, "<url>")
       // Node's network errors name the host after the error code, or after
       // the call when no code is given.
       .replace(/\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)(\s+)[^\s,;'"()<>]+/g, "$1$2<host>")
+      .replace(/\b((?:getaddrinfo|connect)\s+E[A-Z_]+)(\s+)[^\s,;'"()<>]+/g, "$1$2<host>")
       .replace(/\b(getaddrinfo|connect)(\s+)(?![A-Z][A-Z_]*\b)(?=[^\s,;'"()<>]*[.:])[^\s,;'"()<>]+/g, "$1$2<host>")
       .replace(/\b(attempted address:?\s*)[^\s,;'"()<>]+/gi, "$1<host>")
-      .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>")
+      .replace(/(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>")
       // A quote that opens after a word character is an apostrophe, and so
-      // is one inside a quoted value that a letter follows. The second rule
+      // is one inside a quoted value that a letter follows. The third rule
       // is bounded so a line of unclosed quotes stays linear.
       .replace(/(?<!\w)"[^"\n]*"(?!\w)/g, "\"…\"")
       .replace(/(?<!\w)'[^'\n]*'(?!\w)/g, "'…'")
       .replace(/(?<!\w)'(?:[^'\n]|'(?=\w)){1,500}'(?!\w)/g, "'…'")
       .replace(/(?<!\w)`[^`\n]*`(?!\w)/g, "`…`")
+      // A quote left open, as clipping leaves one, runs to the end of the
+      // line. A replaced value's own quotes are not openings.
+      .replace(/(?<![\w…])(['"`])(?!…['"`])[^\n]*/g, "$1…")
       // Windows drive and UNC paths run to the next quote or bracket, since
       // their folder names can hold spaces and apostrophes.
       .replace(/(?:\b[A-Za-z]:[\\/]|\\\\(?=[^\\\s]))(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
       // POSIX paths with at least two parts, not inside a word or a dohc path.
       .replace(/(?<![\w.:/<>-])\/(?:[^\s/'"()<>|]+\/)+(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
       .replace(/\b(bearer|basic)\s+[^\s'"]+/gi, "$1 <redacted>")
-      .replace(/\b([\w-]*(?:token|secret|password|passphrase|authorization|cookie|signature|api[_-]?key))(\s*[=:]\s*)[^\s,;&'"]+/gi, "$1$2<redacted>")
+      .replace(/(?<![\w-])([\w-]*(?:token|secret|password|passphrase|authorization|cookie|signature|api[_-]?key))(\s*[=:]\s*)[^\s,;&'"]+/gi, "$1$2<redacted>")
       // A JSON Web Token: its header always starts `{"`, which is `eyJ`.
       .replace(/\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, "<redacted>")
       .replace(/(?<![\w+=-])(?=[\w+=-]*\d)[\w+=-]{32,}/g, "<redacted>")
+      // Any other host name, with its port. A stack frame's dotted names are
+      // code, and a code file keeps its name.
+      .replace(HOST, (host: string, label: string) =>
+        frame || CODE_EXTENSIONS.has(label.toLowerCase()) ? host : "<host>")
       .replace(/(?<![\w:])(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/gi, "<ip>")
       .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>");
     return result;
