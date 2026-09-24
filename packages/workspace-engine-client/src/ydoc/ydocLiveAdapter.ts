@@ -686,16 +686,10 @@ export class YdocAdapterSession {
         () => Y.applyUpdate(this.doc, update, LOCAL_EDITOR_ORIGIN),
         undefined,
         true,
-      ).then(
-        (result) => {
-          this.lineage = "existing";
-          return result;
-        },
-        (error: unknown) => {
-          this.seedReserved = false;
-          throw error;
-        },
-      );
+      ).catch((error: unknown) => {
+        this.seedReserved = false;
+        throw error;
+      });
     } catch (error) {
       this.seedReserved = false;
       throw error;

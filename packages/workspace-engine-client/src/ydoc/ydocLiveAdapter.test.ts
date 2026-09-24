@@ -708,7 +708,8 @@ describe("YdocLiveAdapter", () => {
       code: "seed-not-permitted",
       message: "The session already has existing lineage.",
     });
-    expect(session.lineage).toBe("existing");
+    // The daemon resumed nothing: this session seeded its own lineage.
+    expect(session.lineage).toBe("absent");
 
     await expect(
       session.applyLocalUpdate(
@@ -3625,7 +3626,7 @@ describe("the ydoc.open deadline", () => {
     // close prunes those rows, so the next open reseeds from the file.
     await resurrected.close({ settle: false });
     const reseeded = await open();
-    expect(reseeded.lineage).toBe("existing");
+    expect(reseeded.lineage).toBe("absent");
     expect(reseeded.doc.getText("plainText").toString()).toBe("on disk");
     await reseeded.close({ settle: false });
   });
@@ -3781,7 +3782,7 @@ describe("the ydoc.open deadline", () => {
       path: OLD_PATH,
       contentKind: "plaintext",
     });
-    expect(reusedPath.lineage).toBe("existing");
+    expect(reusedPath.lineage).toBe("absent");
     expect(reusedPath.doc.getText("plainText").toString()).toBe(
       "a completely different file",
     );
@@ -3980,9 +3981,9 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    // The implicit settle pruned the old lineage. Reopening records a new
-    // captured-file seed, so the session immediately has existing lineage.
-    expect(reopened.lineage).toBe("existing");
+    // The implicit settle pruned the old lineage. Reopening resumes nothing;
+    // the open seeds a new lineage from the captured file.
+    expect(reopened.lineage).toBe("absent");
     await reopened.close({ settle: false });
     adapter.dispose();
   });
@@ -4011,7 +4012,7 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("existing");
+    expect(session.lineage).toBe("absent");
 
     // Two edits that net back to exactly the seeded object's own bytes, so
     // the lineage exists (an update was recorded) but nothing settled it.
@@ -4098,7 +4099,7 @@ describe("the ydoc.open deadline", () => {
       contentKind: "plaintext",
     });
     expect(recaptured.objectId).not.toBe(aObjectId);
-    expect(recaptured.lineage).toBe("existing");
+    expect(recaptured.lineage).toBe("absent");
     expect(recaptured.doc.getText("plainText").toString()).toBe(
       "a completely unrelated new file",
     );
@@ -4419,7 +4420,7 @@ describe("the ydoc.open deadline", () => {
       path: PATH,
       contentKind: "plaintext",
     });
-    expect(session.lineage).toBe("existing");
+    expect(session.lineage).toBe("absent");
     expect(session.doc.getText("plainText").toString()).toBe(
       "captured content",
     );

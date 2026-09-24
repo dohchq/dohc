@@ -729,7 +729,9 @@ it("keeps a locally promoted lineage after later updates change its full state",
       contentKind: "plaintext",
       path: options.path,
       head: "present",
-      lineage: "existing",
+      // The unclaimed open is a fresh local document; only the claimed
+      // replacement resumes durable state.
+      lineage: unclaimed ? "absent" : "existing",
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -1814,7 +1816,12 @@ async function daemonDeathCapture(
     }
     generations.push(doc);
     const reportLineage = (): "existing" | "absent" => {
-      const reported = state.lineage === "present" ? "existing" : "absent";
+      // Existing means durable state, as in the daemon: a lineage with no
+      // updates yet is absent.
+      const reported =
+        state.lineage === "present" && state.durableUpdates.length > 0
+          ? "existing"
+          : "absent";
       state.reportedLineage.push(reported);
       return reported;
     };
@@ -2143,12 +2150,11 @@ it("does not duplicate the document when the reopen finds no durable lineage", a
   // The first open seeds; every replacement declines, because the canonical doc
   // already holds the document and will replay it.
   expect(state.seedRequests).toEqual([true, false]);
-  // The fake told the truth about the state it models: it reported an existing
-  // lineage while it had one, and an absent lineage once the modelled crash
-  // took it. A fixture that hardcoded "existing" here would keep passing every
-  // assertion above while certifying the one condition it exists to stage.
-  expect(state.reportedLineage[0]).toBe("existing");
-  expect(state.reportedLineage.at(-1)).toBe("absent");
+  // The fake told the truth about the state it models: no durable state at the
+  // first open, and none again once the modelled crash took the lineage. A
+  // fixture that hardcoded "existing" here would keep passing every assertion
+  // above while certifying the one condition it exists to stage.
+  expect(state.reportedLineage).toEqual(["absent", "absent"]);
   await capture.stop();
 });
 
@@ -2967,7 +2973,8 @@ async function lockedRebindCapture(
       contentKind: "plaintext",
       path: options.path,
       head: "present" as const,
-      lineage: "existing" as const,
+      // The daemon reports a lineage only once it holds durable state.
+      lineage: state.journal.length > 0 ? "existing" : "absent",
       evict: async () => {
         state.evicts += 1;
       },
@@ -5734,13 +5741,14 @@ it("a rename after a symlink stand-down refuses instead of saving stale content"
   await capture.stop();
 }, 25_000);
 
-it("reopening a stood-down path without a real settle leaves the marker refusing", async () => {
+it("reopening a stood-down path whose settle writes nothing leaves the marker refusing", async () => {
   // An open alone used to clear the marker, but
   // it proves only that no conflicting lease survives — not that anything
-  // reached disk. Closing with settle:false runs no settle at all, so disk
-  // stays exactly as stale as the stand-down left it. Clearing here was the
-  // defect recreated: this exact sequence used to make the next rename
-  // record that stale artifact as landed.
+  // reached disk. The reopen's own settle commits without writing here, and
+  // closing with settle:false runs no settle at all, so disk stays exactly as
+  // stale as the stand-down left it. Clearing here was the defect recreated:
+  // this exact sequence used to make the next rename record that stale
+  // artifact as landed.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-standdown-noclear-",
   );
@@ -5767,13 +5775,14 @@ it("reopening a stood-down path without a real settle leaves the marker refusing
     capture.beginFileRename("note.md", "renamed.md"),
   ).rejects.toThrow(/dohc gave up on writing note\.md earlier/);
 
-  // The user reopens the path but the close that follows settles nothing.
-  state.unmaterialized = false;
+  // The user reopens the path. Its settle still writes nothing, and the close
+  // that follows settles nothing.
   const reopened = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
   });
   await reopened.close({ settle: false });
+  state.unmaterialized = false;
 
   // RED before the redesign: the open alone had already cleared the
   // marker, so this resolved instead of refusing.

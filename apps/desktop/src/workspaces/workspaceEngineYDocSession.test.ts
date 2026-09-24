@@ -842,7 +842,9 @@ it("refuses an uncaptured artifact that has content, without calling it missing"
   expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
 });
 
-it.each([false, true])("checks a retained document on reopen without writing, outside edit=%s", async (outsideEdit) => {
+// A crash between an edit and its settle leaves the edit only in the lineage,
+// which `evict` stands in for here: it ends the session and writes nothing.
+async function retainLineage(edit: string | null): Promise<void> {
   const previous = await openEngineYdocProviderSession({
     transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: PATH,
     contentKind: "richdoc", onRemoteUpdate: () => undefined, scheduleSettle: () => () => undefined,
@@ -850,21 +852,66 @@ it.each([false, true])("checks a retained document on reopen without writing, ou
   const editor = new Y.Doc();
   Y.applyUpdate(editor, previous.initialUpdate);
   const before = Y.encodeStateVector(editor);
-  if (outsideEdit) {
-    typeIntoBody(editor, "Retained human edit.");
+  if (edit !== null) {
+    typeIntoBody(editor, edit);
     await previous.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
   }
   await previous.evict();
   editor.destroy();
-  if (outsideEdit) await writeFile(join(root, PATH), "Outside edit.\n");
-  const settlesBeforeOpen = methodCount("ydoc.settle");
+}
+
+async function openRecordingStates() {
   const states: string[] = [];
+  let reportSaved!: () => void;
+  const saved = new Promise<void>((resolve) => { reportSaved = resolve; });
   const reopened = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined,
-    onSaveState: state => states.push(state)});
-  expect(states).toEqual(outsideEdit ? ["error"] : []);
+    onSaveState: (state) => {
+      states.push(state);
+      if (state === "saved") reportSaved();
+    }});
+  return {reopened, states, saved};
+}
+
+it("writes nothing and reports the error when a retained document reopens over an outside edit", async () => {
+  await retainLineage("Retained human edit.");
+  await writeFile(join(root, PATH), "Outside edit.\n");
+  const settlesBeforeOpen = methodCount("ydoc.settle");
+  const {reopened, states} = await openRecordingStates();
+  expect(states).toEqual(["error"]);
   expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
-  expect(await readFile(join(root, PATH), "utf8")).toBe(outsideEdit ? "Outside edit.\n" : INITIAL_MARKDOWN);
-  expect(reopened.doc.getXmlFragment("body").toString()).toContain(outsideEdit ? "Retained human edit." : "Start here.");
+  expect(await readFile(join(root, PATH), "utf8")).toBe("Outside edit.\n");
+  expect(reopened.doc.getXmlFragment("body").toString()).toContain("Retained human edit.");
+});
+
+// The open seeds a fresh document from its file, so the file already has its
+// text. Settling it would only cost a projection on every open.
+it("settles nothing when a fresh document opens", async () => {
+  const settlesBeforeOpen = methodCount("ydoc.settle");
+  const {states} = await openRecordingStates();
+  expect(states).toEqual([]);
+  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
+});
+
+it("settles an unedited retained document on reopen without writing it", async () => {
+  await retainLineage(null);
+  const {reopened, states, saved} = await openRecordingStates();
+  await saved;
+  expect(states).toEqual(["settling", "saved"]);
+  expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
+  expect(reopened.doc.getXmlFragment("body").toString()).toContain("Start here.");
+});
+
+// edges-04: the document showed the retained edit as Saved while its file
+// lacked it, and nothing wrote it until the next keystroke.
+it("writes a retained edit when its document reopens, and reports saved only after", async () => {
+  await retainLineage("Typed before the crash.");
+  expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
+  const {states, saved} = await openRecordingStates();
+  // Reported before the open returns, so the editor never shows Saved first.
+  expect(states).toEqual(["settling"]);
+  await saved;
+  expect(states).toEqual(["settling", "saved"]);
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed before the crash.");
 });
 
 it("opens a crash-orphaned draft the daemon resurrects, head absent and all", async () => {

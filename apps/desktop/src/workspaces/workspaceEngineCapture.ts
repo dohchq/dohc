@@ -4380,9 +4380,15 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
-        // A retained document can reopen over an outside edit. Check the file
-        // without settling: opening a document must not trigger a write retry.
-        if (head === "present" && lineage === "existing") {
+        // A document can open over an outside edit, and a resumed lineage can
+        // be ahead of its file: a crash between an edit and its settle leaves
+        // that edit only in the lineage. Check the file against the head first.
+        // After an outside edit, write nothing and report the error. Otherwise
+        // settle a resumed lineage now, so the document reads Saving… until the
+        // file has its text. The engine answers an unchanged lineage without
+        // writing. Scenes are left out: the daemon seeds a scene itself at open,
+        // so every scene lineage reads as resumed.
+        if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
           try {
@@ -4397,11 +4403,16 @@ export function createWorkspaceEngineCapture(
             // A failed read does not prove drift. Keep the existing state and
             // let the next ordinary settle report a retryable read failure.
           }
-          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
-            // The retained Y.Doc text is not a History moment yet, so the
-            // existing error state is the honest recovery surface. It carries
-            // no settle token because this report did not come from a settle.
-            reportSaveState("error", 0);
+          if (drifted) {
+            if (updatesSeen === openingUpdates && lastSettledSha === null) {
+              // The retained Y.Doc text is not a History moment yet, so the
+              // existing error state is the honest recovery surface. It carries
+              // no settle token because this report did not come from a settle.
+              reportSaveState("error", 0);
+            }
+          } else if (lineage === "existing" && session.contentKind !== "scene") {
+            // Its outcome reports through the settle channel like any other.
+            void session.settleNow().catch(() => undefined);
           }
         }
         return {

@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   engineDaemonPids,
+  hardKillAppTree,
   hardKillPid,
   waitForFreshEngineDaemon,
 } from "./helpers/daemonKill";
+import { ydocUpdateCount } from "./helpers/engineDb";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -282,6 +284,77 @@ test("an outage longer than the retry window still persists the text at quit", a
     expect(onDisk).toContain(preKill);
     expect(onDisk).toContain(postKill);
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// edges-04. The whole app dies after the engine journaled an edit but before
+// the debounced settle wrote the file. On relaunch the editor shows the edit
+// from the engine's copy, and nothing else reads it: an agent or another app
+// sees the old file. The document must not claim Saved until the file has the
+// text, and dohc must write it without waiting for another keystroke.
+test("a document reopened after an app crash reads Saved only once its file has the text", async () => {
+  test.setTimeout(150_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const docPath = "abuse/crash.md";
+  const file = join(temp.rootPath, docPath);
+  const crashed = "CRASHREC_UNSETTLED_5e1f";
+  const diskText = async () => await readFile(file, "utf8").catch(() => "");
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: docPath, contents: "# Crash\n\nAnchor paragraph.\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const appPid = desktop.app.process().pid;
+    if (appPid === undefined) throw new Error("Electron app has no pid.");
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, docPath);
+    await openEngineDoc(desktop.page, docPath);
+    await desktop.page.getByTestId("markdown-editor").click();
+    await desktop.page.keyboard.press("ControlOrMeta+End");
+
+    // A settled edit first, so the lineage has a settle for the crash to outrun.
+    await desktop.page.keyboard.type(" CRASHREC_SETTLED");
+    await expect.poll(diskText, { timeout: 20_000 }).toContain("CRASHREC_SETTLED");
+
+    // Crash once the engine has journaled the edit, inside the settle debounce.
+    const journaled = ydocUpdateCount(temp.rootPath);
+    await desktop.page.keyboard.insertText(` ${crashed}`);
+    await expect
+      .poll(() => ydocUpdateCount(temp.rootPath), { intervals: [20] })
+      .toBeGreaterThan(journaled);
+    await hardKillAppTree(appPid);
+    await desktop.close();
+    desktop = null;
+    expect(await diskText(), "the settle landed before the crash").not.toContain(crashed);
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    await expect(page.getByTestId("markdown-editor")).toContainText(crashed, {
+      timeout: 30_000,
+    });
+
+    // Read the mark before the disk: main reports saved only after it checked
+    // the file, so a mark read first can never outrun the text it vouches for.
+    const saveState = page.getByTestId("markdown-save-state");
+    const savedEarly: string[] = [];
+    await expect
+      .poll(
+        async () => {
+          const state = await saveState.getAttribute("data-state");
+          const disk = await diskText();
+          if (state === "saved" && !disk.includes(crashed)) savedEarly.push(disk);
+          return state === "saved" && disk.includes(crashed);
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+    expect(savedEarly, "the document read Saved before its file had the text").toEqual([]);
+    expect((await diskText()).match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

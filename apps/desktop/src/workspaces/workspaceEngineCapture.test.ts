@@ -1327,7 +1327,8 @@ describe("workspaceEngineCapture batch capture", () => {
         // an absent `head` would silently disable the absent-head refusal for
         // every drift case here.
         head: "present" as const,
-        lineage: "existing" as const,
+        // A fresh document: an existing lineage would settle once at open.
+        lineage: "absent" as const,
         evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
