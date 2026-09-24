@@ -5,6 +5,7 @@ import { initializeServiceActivationSchema } from "./serviceActivationSchema";
 import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import { initializeNoticeSchema } from "./noticeSchema";
+import { initializeCollectionWriteSchema } from "./collectionWrites";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -1188,6 +1189,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAppPublicationSchema(db);
     initializeAppCollectionSchema(db);
     initializeNoticeSchema(db);
+    initializeCollectionWriteSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
