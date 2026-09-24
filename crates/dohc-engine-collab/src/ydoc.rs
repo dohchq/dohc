@@ -1472,6 +1472,10 @@ enum MarkdownReading {
     /// Read a file as the desktop's importer reads it. Every GFM table is a
     /// table, and a list continues across blank lines.
     Source,
+    /// Read the projection of a document built with `Source`, to compare the
+    /// two. Every GFM table is a table, and a blank line ends a list, since
+    /// the projector writes one only between two lists.
+    ProjectedSource,
 }
 
 /// Whether `source` reads, block by block, as `projection` does. Both are
@@ -1479,11 +1483,15 @@ enum MarkdownReading {
 /// the engine keeps as written must then resolve to the same text and hold
 /// the same syntax in the same order. See [`read_text`].
 fn markdown_reads_alike(source: &str, projection: &str, reading: MarkdownReading) -> bool {
-    let blocks = |markdown: &str| {
+    let blocks = |markdown: &str, reading| {
         let (_, body) = split_markdown_frontmatter(markdown);
         parse_markdown_blocks(&body.replace("\r\n", "\n"), reading)
     };
-    blocks_read_alike(&blocks(source), &blocks(projection))
+    let projected = match reading {
+        MarkdownReading::Source => MarkdownReading::ProjectedSource,
+        reading => reading,
+    };
+    blocks_read_alike(&blocks(source, reading), &blocks(projection, projected))
 }
 
 fn blocks_read_alike(source: &[MdBlock], projection: &[MdBlock]) -> bool {
@@ -1600,6 +1608,36 @@ fn decoded_reference(name: &str) -> Option<char> {
     }
 }
 
+/// Whether renderers decode this reference, which the importer keeps as
+/// text, to a character a reader may not see as written: any numeric
+/// reference, which can name a control, format, or bidirectional character;
+/// a name with a capital letter, as in `&LT;` or `&ZeroWidthSpace;`; or a
+/// name for a space or an invisible character. `&copy;` stays text.
+fn rendered_reference(name: &str) -> bool {
+    name.starts_with('#')
+        || name.bytes().any(|byte| byte.is_ascii_uppercase())
+        || matches!(
+            name,
+            "nbsp"
+                | "ensp"
+                | "emsp"
+                | "emsp13"
+                | "emsp14"
+                | "numsp"
+                | "puncsp"
+                | "thinsp"
+                | "hairsp"
+                | "zwnj"
+                | "zwj"
+                | "lrm"
+                | "rlm"
+                | "shy"
+                | "af"
+                | "it"
+                | "ic"
+        )
+}
+
 /// HTML elements a Markdown renderer shows as HTML rather than text. A
 /// renderer hides a comment and may load what an element points at, so a
 /// source may not spell either where its projection holds text. A `<` before
@@ -1657,10 +1695,14 @@ fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
                     .map_or(rest.len(), |end| end + 1);
                 if rest[name_end..].starts_with(';') {
-                    if let Some(decoded) = decoded_reference(&rest[1..name_end]) {
+                    let name = &rest[1..name_end];
+                    if let Some(decoded) = decoded_reference(name) {
                         resolved.push(decoded);
                         rest = &rest[name_end + 1..];
                         continue;
+                    }
+                    if rendered_reference(name) {
+                        syntax.push(format!("at {}: reference {name}", resolved.len()));
                     }
                 }
             }
@@ -1677,25 +1719,37 @@ fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
     (resolved, syntax)
 }
 
-/// The HTML comment, element, or autolink that `text`, which starts with
-/// `<`, opens.
+/// The raw HTML or autolink that `text`, which starts with `<`, opens: a
+/// comment, a processing instruction, a declaration, CDATA, a tag whose name
+/// is an HTML element, or any other tag with attributes. Browsers and the
+/// renderers that show shared files hide or act on each of these. A tag with
+/// no attributes and another name, as in `Vec<T>` or `<file>`, is text.
 fn inline_syntax(text: &str) -> Option<String> {
-    if text.starts_with("<!--") {
+    let rest = &text[1..];
+    if rest.starts_with("!--") {
         return Some("comment".into());
     }
-    let tag = text[1..].strip_prefix('/').unwrap_or(&text[1..]);
+    if rest.starts_with('?')
+        || rest.starts_with("![CDATA[")
+        || rest
+            .strip_prefix('!')
+            .is_some_and(|declaration| declaration.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        return Some("declaration".into());
+    }
+    let tag = rest.strip_prefix('/').unwrap_or(rest);
     let name_end = tag
-        .find(|c: char| !c.is_ascii_alphanumeric())
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .unwrap_or(tag.len());
     let name = tag[..name_end].to_ascii_lowercase();
-    if HTML_ELEMENTS
+    let element = HTML_ELEMENTS
         .split_ascii_whitespace()
         .any(|element| element == name)
         && tag[name_end..]
             .chars()
             .next()
-            .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/')
-    {
+            .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
+    if element || html_tag_has_attributes(text) {
         return Some(format!("element {name}"));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
@@ -1717,6 +1771,78 @@ fn inline_syntax(text: &str) -> Option<String> {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
     });
     (uri || email).then(|| "autolink".into())
+}
+
+/// Whether `text` starts with a complete CommonMark open tag that has
+/// attributes: `<`, a tag name, attributes, optional whitespace and `/`, and
+/// `>`.
+fn html_tag_has_attributes(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+    let skip_space = |mut at: usize| {
+        while space(at) {
+            at += 1;
+        }
+        at
+    };
+    if !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    let mut at = 1;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        at += 1;
+    }
+    let mut attributes = false;
+    loop {
+        let name = skip_space(at);
+        if name == at
+            || !bytes
+                .get(name)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':'))
+        {
+            break;
+        }
+        at = name + 1;
+        while bytes.get(at).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
+        }) {
+            at += 1;
+        }
+        attributes = true;
+        let equals = skip_space(at);
+        if bytes.get(equals) != Some(&b'=') {
+            continue;
+        }
+        let value = skip_space(equals + 1);
+        at = match bytes.get(value) {
+            Some(quote @ (b'"' | b'\'')) => match text[value + 1..].find(char::from(*quote)) {
+                Some(close) => value + close + 2,
+                None => return false,
+            },
+            _ => {
+                let mut end = value;
+                while !space(end)
+                    && bytes.get(end).is_some_and(|byte| {
+                        !matches!(byte, b'"' | b'\'' | b'=' | b'<' | b'>' | b'`')
+                    })
+                {
+                    end += 1;
+                }
+                if end == value {
+                    return false;
+                }
+                end
+            }
+        };
+    }
+    let mut end = skip_space(at);
+    if bytes.get(end) == Some(&b'/') {
+        end += 1;
+    }
+    attributes && bytes.get(end) == Some(&b'>')
 }
 
 /// The block a Markdown reader starts on one line of a text run: a heading,
@@ -1839,7 +1965,7 @@ const QUOTE_FOLD_MAX_DEPTH: usize = 120;
 
 /// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
 fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) -> Vec<MdBlock> {
-    let source = reading == MarkdownReading::Source;
+    let tables = reading != MarkdownReading::Projection;
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
@@ -1918,7 +2044,11 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
         // A marker change starts a new bullet list. A numbered list keeps
         // its first number and ignores later numbers and delimiters, as the
         // importer and CommonMark do.
-        let blank_lines = if source { usize::MAX } else { 0 };
+        let blank_lines = if reading == MarkdownReading::Source {
+            usize::MAX
+        } else {
+            0
+        };
         if let Some((marker, item)) = parse_bullet_item(line) {
             let mut items = vec![item.to_string()];
             while let Some((at, (_, next))) =
@@ -1948,7 +2078,7 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
             continue;
         }
         let table = match parse_annotated_table(&lines[index..]) {
-            None if source => parse_table(&lines[index..], Vec::new()),
+            None if tables => parse_table(&lines[index..], Vec::new()),
             annotated => annotated,
         };
         if let Some((block, consumed)) = table {
@@ -1972,7 +2102,7 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
                 || parse_bullet_item(next).is_some()
                 || parse_heading(next).is_some()
                 || parse_ordered_item(next).is_some_and(|(start, _)| start == 1)
-                || (source && table_starts(&lines[index..]))
+                || (tables && table_starts(&lines[index..]))
             {
                 break;
             }
@@ -2176,23 +2306,25 @@ const TABLE_ENDING_HTML: &str =
 
 /// Whether marked ends a table before this line: indented code, an ATX
 /// heading, a quote, a fence, a thematic break, a bullet or a `1.` or `1)`
-/// item, or block HTML.
+/// item, or block HTML at the start of the line, in lowercase.
 fn ends_table(line: &str) -> bool {
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
-    if indent >= 4 {
+    let rest = &line[indent..];
+    if indent >= 4 || rest.starts_with('\t') {
         return true;
     }
-    let rest = &line[indent..];
     let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
     let heading = (1..=6).contains(&hashes)
         && rest[hashes..]
             .chars()
             .next()
             .is_none_or(char::is_whitespace);
-    let item = ["- ", "* ", "+ ", "1. ", "1) "]
-        .iter()
-        .any(|marker| rest.starts_with(marker));
-    let html = rest.strip_prefix('<').is_some_and(|tag| {
+    let item = rest
+        .strip_prefix(['-', '*', '+'])
+        .or_else(|| rest.strip_prefix("1."))
+        .or_else(|| rest.strip_prefix("1)"))
+        .is_some_and(|after| after.starts_with([' ', '\t']));
+    let html = line.strip_prefix('<').is_some_and(|tag| {
         ["script", "pre", "style", "textarea", "!--"]
             .iter()
             .any(|start| tag.starts_with(start))
@@ -2203,7 +2335,7 @@ fn ends_table(line: &str) -> bool {
                     .unwrap_or(tag.len());
                 TABLE_ENDING_HTML
                     .split_ascii_whitespace()
-                    .any(|element| element.eq_ignore_ascii_case(&tag[..end]))
+                    .any(|element| element == &tag[..end])
                     && (tag[end..].is_empty()
                         || tag[end..].starts_with([' ', '>'])
                         || tag[end..].starts_with("/>"))
@@ -6611,7 +6743,30 @@ mod projection_tests {
                 "| a |\n|---|\n| <br> |\n\n<img src=https://evil.example/p>",
                 "| a |\n|---|\n| &lt;br&gt; |\n\n<img src=https://evil.example/p>\n",
             ),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            // Raw HTML a renderer hides or acts on, although its name is no
+            // HTML element, and references a renderer decodes to characters
+            // a reader does not see as written. The document holds each as
+            // text.
+            [
+                "Approve <?and wire the deposit to 4471?> the invoice",
+                "Approve <!note text here> the invoice",
+                "Approve <![CDATA[wire the deposit]]> the invoice",
+                "a <x hidden>secret</x> b",
+                "<x-y style=\"background:url(https://evil.example/p)\">",
+                "<x onmouseover=alert(1)>hover</x>",
+                "<x hidden>\nsecret",
+                "invoice&#x202E;fdp.exe",
+                "a&#8203;b",
+                "a &LT;b&GT; c",
+                "&#49;&#48;&#48;",
+                "a&nbsp;b",
+            ]
+            .map(|text| (text, text)),
+        ) {
+            let forged = &format!("{forged}\n");
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown_as(
                 ContentKind::Richdoc,
@@ -6649,6 +6804,11 @@ mod projection_tests {
             "1. a\n3. b\n",
             // A cell's `<br>`, however it is spelled.
             "| a |\n|---|\n| x &lt;br&gt; y |\n",
+            // A tag without attributes and another name stays text.
+            "a <x> b </x-y>\n",
+            // Two lists, which the projector separates with a blank line,
+            // then a table.
+            "* a\n\n- b\n\n| x |\n|---|\n| y |\n",
         ] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown_as(
@@ -6689,7 +6849,8 @@ mod projection_tests {
             ]
         );
         for next in [
-            "> q", "- x", "1. x", "1) x", "***", "```", "    code", "<div> |", "</p>", "<!-- c",
+            "> q", "- x", "-\tx", "1. x", "1) x", "***", "```", "    code", "\tcode", "<div> |",
+            "</p>", "<!-- c",
         ] {
             assert_eq!(
                 blocks(&format!("| a |\n|---|\n{next}"))[0],
@@ -6697,15 +6858,16 @@ mod projection_tests {
                 "{next:?}"
             );
         }
-        // marked keeps inline HTML and other numbers as rows.
-        for next in ["<b>x</b>", "2. x", "Vec<T>"] {
+        // marked keeps inline HTML, block HTML it does not match, and other
+        // numbers as rows.
+        for next in ["<b>x</b>", "<DIV>", " <div>", "2. x", "Vec<T>"] {
             assert_eq!(
                 blocks(&format!("| a |\n|---|\n{next}"))[0],
-                table(&[&["a"], &[next]]),
+                table(&[&["a"], &[next.trim()]]),
                 "{next:?}"
             );
         }
-        for header in ["    a | b", "> a | b", "- a | b", "<b> | c"] {
+        for header in ["    a | b", "\ta | b", "> a | b", "- a | b", "<b> | c"] {
             assert!(
                 !blocks(&format!("{header}\n--- | ---"))
                     .iter()

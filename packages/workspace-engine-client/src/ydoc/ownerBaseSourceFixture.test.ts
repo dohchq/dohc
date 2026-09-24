@@ -73,6 +73,7 @@ const LEXICAL: Record<string, string> = {
   "angle-words": "Vec<T> and cmd <file>\n",
   "skipped-ordinals": "1. a\n3. b\n",
   "cell-break": "| Name |\n|---|\n| Ada&lt;br&gt;Lovelace |\n",
+  "lists-then-table": "* a\n\n- b\n\n| x |\n|---|\n| y |\n",
 };
 
 it("the lexical source fixtures come from the real captured Markdown seeder", async () => {
