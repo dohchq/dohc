@@ -4,6 +4,7 @@ import {
   act,
   cleanup,
   fireEvent,
+  getConfig,
   render,
   screen,
   waitFor,
@@ -1327,6 +1328,14 @@ describe("plugin web app tabs", () => {
         activeEditorGroup: "group-0",
       }),
     );
+    // The files exist, so the listing does not prune the restored tabs.
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: editorGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
     renderShell(bridge);
     await screen.findByTestId("tab-file-0.md");
 
@@ -2946,12 +2955,26 @@ describe("editor groups", () => {
           );
         expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
       },
-      { timeout: 2_000 },
     );
+    // Press Ctrl+W again the moment the first close shows, before React runs
+    // that commit's passive effects. A loaded machine produced this order.
+    const tabsLeftAfterFirstClose = new Promise<string[]>((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (within(right).queryByTestId("tab-b.md") !== null) return;
+        observer.disconnect();
+        clearTimeout(timeout);
+        const tabs = within(right).queryAllByRole("tab").map((tab) => tab.dataset.testid ?? "");
+        fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+        resolve(tabs);
+      });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("tab-b.md never closed"));
+      }, getConfig().asyncUtilTimeout);
+      observer.observe(right, { childList: true, subtree: true });
+    });
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
-    await waitFor(() => expect(within(right).queryByTestId("tab-b.md")).toBeNull());
-    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
-    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    expect(await tabsLeftAfterFirstClose).toEqual(["tab-a.md"]);
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
     );
