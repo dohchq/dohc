@@ -64,6 +64,10 @@ describe("WCAG AA contrast, both modes", () => {
     // at 4.27 — the physical ceiling while the mark itself holds 3:1 against
     // the selected-row bg (bold weight carries the remaining gap).
     { fg: "ink", bg: "match", min: 4.2 },
+    // Labels on filled buttons use the paper color: primary on accent, and
+    // destructive confirms on danger. White on dark-theme danger was 2.7:1.
+    { fg: "bg", bg: "accent", min: 4.5 },
+    { fg: "bg", bg: "danger", min: 4.5 },
   ];
 
   for (const mode of ["light", "dark"] as const) {

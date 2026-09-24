@@ -236,9 +236,13 @@ export function PageIdentity(props: PageIdentityProps) {
             </div>
           ) : null}
         </div>
-        <input
+        {/* A textarea so a long title wraps instead of clipping in a narrow
+            pane. The title stays one line: Enter moves to the body, and
+            pasted line breaks become spaces. */}
+        <textarea
           data-testid="page-title"
           aria-label="Page title"
+          rows={1}
           value={titleDraft}
           placeholder={props.filenameStem}
           spellCheck={false}
@@ -251,7 +255,7 @@ export function PageIdentity(props: PageIdentityProps) {
             setTitleDraft(title);
           }}
           onChange={(event) => {
-            const next = event.target.value;
+            const next = event.target.value.replace(/[\r\n]+/g, " ");
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
           }}

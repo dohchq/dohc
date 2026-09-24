@@ -35,7 +35,7 @@ describe("PageIdentity", () => {
           filenameStem="weekly"
         />,
       );
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Weekly Plan",
       );
     });
@@ -44,7 +44,7 @@ describe("PageIdentity", () => {
       render(
         <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="2026-plan" />,
       );
-      const input = screen.getByTestId("page-title") as HTMLInputElement;
+      const input = screen.getByTestId("page-title") as HTMLTextAreaElement;
       expect(input.value).toBe("");
       expect(input.placeholder).toBe("2026-plan");
     });
@@ -129,7 +129,7 @@ describe("PageIdentity", () => {
           readOnly
         />,
       );
-      expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
       expect(screen.queryByTestId("page-icon-add")).toBeNull();
     });
 
@@ -210,7 +210,7 @@ describe("PageIdentity", () => {
       frontmatter.set("title", "Shared");
 
       render(<PageIdentity ydoc={doc} filenameStem="note" />);
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe("Shared");
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe("Shared");
 
       await user.type(screen.getByTestId("page-title"), "!");
 

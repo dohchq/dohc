@@ -1160,7 +1160,7 @@ function PluginUninstallDialog(props: {
             data-testid="plugin-uninstall-confirm"
             disabled={uninstalling}
             onClick={catalog.confirmUninstall}
-            className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-bg disabled:opacity-50"
           >
             {installed
               ? actionLabel("uninstall", uninstalling)

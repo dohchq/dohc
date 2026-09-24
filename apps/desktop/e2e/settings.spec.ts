@@ -63,6 +63,35 @@ test("@settings-smoke opens settings and survives a basic appearance edit", asyn
   }
 });
 
+test("@settings-smoke draws a switch's thumb inside its track, on and off", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+
+  try {
+    desktop = await openWorkspace(temp);
+    const page = desktop.page;
+    await openSettings(page);
+    await page.getByTestId("settings-nav-privacy").click();
+    const toggle = page.getByRole("switch", { name: "Confirm external links" });
+    // Where the thumb sits: inside the track, at the end for its state.
+    const thumbPlace = () =>
+      toggle.evaluate((element) => {
+        const track = element.getBoundingClientRect();
+        const thumb = element.querySelector("span")!.getBoundingClientRect();
+        if (thumb.left < track.left || thumb.right > track.right) return "outside";
+        return thumb.left + thumb.width / 2 > track.left + track.width / 2 ? "end" : "start";
+      });
+
+    for (const [checked, place] of [["true", "end"], ["false", "start"]] as const) {
+      if ((await toggle.getAttribute("aria-checked")) !== checked) await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-checked", checked);
+      await expect.poll(thumbPlace).toBe(place);
+    }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("settings search, theme persistence, MCP config, and corrupt settings recovery", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
