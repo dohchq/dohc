@@ -77,7 +77,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import type { LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
+import { LiveDocumentEditUnsavedError, type LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -1663,41 +1663,44 @@ async function startFileChat(
   };
 }
 
-// The results of comments started with a caller's request id. A caller whose
-// request passed the socket deadline retries with the same id and gets the
-// first result instead of a second chat. Kept in memory for this app run.
-const MAX_REMEMBERED_FILE_CHATS = 256;
-const rememberedFileChats = new Map<string, { input: string; result: Promise<unknown> }>();
+// The results of requests a caller sent with a request id. A caller whose
+// request passed the socket deadline sends it again with the same id and gets
+// the first result instead of the work done twice. Kept in memory while dohc
+// runs. `run` says whether its work may have happened; a request that did
+// nothing is forgotten, so the same id may try again.
+const MAX_REMEMBERED_REQUESTS = 256;
+const rememberedRequests = new Map<string, { input: string; result: Promise<unknown> }>();
 
-async function startFileChatOnce(
+async function onceForRequestId(
   context: CliWorkspaceContext,
   requestId: string,
-  input: FileChatStart,
-  options: CliServerOptions,
+  input: unknown,
+  run: () => Promise<{ done: boolean; result: unknown }>,
 ): Promise<unknown> {
   const key = `${context.workspaceId}\u0000${requestId}`;
-  const inputKey = JSON.stringify([input.path, input.title, input.body, input.runId ?? null]);
-  const remembered = rememberedFileChats.get(key);
+  const inputKey = JSON.stringify(input);
+  const remembered = rememberedRequests.get(key);
   if (remembered) {
     if (remembered.input !== inputKey) {
-      return { ok: false as const, reason: `request id ${requestId} was already used for a different comment` };
+      return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
     }
     return await remembered.result;
   }
-  const started = startFileChat(context, input, options);
+  const started = run();
   const result = started.then((outcome) => outcome.result);
-  rememberedFileChats.set(key, { input: inputKey, result });
-  if (rememberedFileChats.size > MAX_REMEMBERED_FILE_CHATS) {
-    const oldest = rememberedFileChats.keys().next().value;
-    if (oldest !== undefined) rememberedFileChats.delete(oldest);
+  // A retry may never come to await it.
+  result.catch(() => undefined);
+  rememberedRequests.set(key, { input: inputKey, result });
+  if (rememberedRequests.size > MAX_REMEMBERED_REQUESTS) {
+    const oldest = rememberedRequests.keys().next().value;
+    if (oldest !== undefined) rememberedRequests.delete(oldest);
   }
   try {
     const outcome = await started;
-    // Nothing was created, so a retry with this id may try again.
-    if (!outcome.created) rememberedFileChats.delete(key);
+    if (!outcome.done) rememberedRequests.delete(key);
     return outcome.result;
   } catch (error) {
-    rememberedFileChats.delete(key);
+    rememberedRequests.delete(key);
     throw error;
   }
 }
@@ -2076,16 +2079,27 @@ async function dispatch(
       }
       const validated = validateUserWritePath(request.args.path);
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
-      try {
-        const outcome = await documents.edit({
-          path: validated.normalized,
-          edit: { find, replacement },
-          origin: documentEditOrigin(agent),
-        });
-        return { ok: true as const, ...outcome };
-      } catch (error) {
-        return mcpFailure(error, `failed to edit document: ${request.args.path}`);
-      }
+      const path = validated.normalized;
+      const edit = async (): Promise<{ done: boolean; result: unknown }> => {
+        try {
+          const outcome = await documents.edit({
+            path,
+            edit: { find, replacement },
+            origin: documentEditOrigin(agent),
+          });
+          return { done: true, result: { ok: true as const, ...outcome } };
+        } catch (error) {
+          return {
+            // An edit that reached the document but was not saved is
+            // remembered with its failure, so a retry does not apply it again.
+            done: error instanceof LiveDocumentEditUnsavedError,
+            result: mcpFailure(error, `failed to edit document: ${request.args.path}`),
+          };
+        }
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await edit()).result;
+      return await onceForRequestId(context, requestId, [path, find ?? null, replacement, agent ?? null], edit);
     }
 
     case "documentCreate": {
@@ -2137,7 +2151,15 @@ async function dispatch(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
-      return await startFileChatOnce(context, requestId, input, options);
+      return await onceForRequestId(
+        context,
+        requestId,
+        [input.path, input.title, input.body, input.runId ?? null],
+        async () => {
+          const started = await startFileChat(context, input, options);
+          return { done: started.created, result: started.result };
+        },
+      );
     }
   }
 

@@ -26,6 +26,18 @@ export interface DocumentProjection {
   ): Promise<DocumentProjectionResult<Request>>;
 }
 
+// A request's encoded state moves to the worker instead of being copied, so
+// main does not clone the document. The caller must not use it afterwards.
+export function transferList(value: unknown): ArrayBuffer[] {
+  const bytes = value instanceof Uint8Array
+    ? value
+    : typeof value === "object" && value !== null && "state" in value && value.state instanceof Uint8Array
+      ? value.state
+      : null;
+  if (!bytes || !(bytes.buffer instanceof ArrayBuffer)) return [];
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? [bytes.buffer] : [];
+}
+
 type WorkerMessage =
   | { id: number; ok: true; result: string | Uint8Array | null }
   | { id: number; ok: false; message: string };
@@ -122,7 +134,7 @@ export function createDocumentProjectionWorker(
       current.on("message", onMessage);
       current.on("error", onError);
       current.on("exit", onExit);
-      current.postMessage({ id, request });
+      current.postMessage({ id, request }, transferList(request));
     });
   }
 

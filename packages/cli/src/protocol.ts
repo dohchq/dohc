@@ -132,10 +132,16 @@ export const documentAgentNameSchema = z
 const documentReadArgsSchema = z
   .object({ ...argsBase, path: documentPathArg })
   .strict();
+// A key the caller chooses for one request. Sent again with the same key,
+// after a timeout for example, the request returns its first result while
+// dohc runs instead of doing its work twice.
+export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema.optional(),
     path: documentPathArg,
     find: documentEditTextSchema.min(1).optional(),
     replacement: documentEditTextSchema,
@@ -150,12 +156,10 @@ const documentCreateArgsSchema = z
   })
   .strict();
 // A comment on a file: a chat linked to it, started with its first message.
-// A caller's request id makes a retry return the first result.
-export const fileChatRequestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
 const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
-    requestId: fileChatRequestIdSchema.optional(),
+    requestId: requestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,
     title: z.string().min(1).max(200),
