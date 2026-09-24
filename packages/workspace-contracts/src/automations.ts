@@ -57,8 +57,8 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // `as` names a step's result for later steps and formulas. A find step binds
 // a list of records, an add-record step binds the one record it added, and a
 // run step binds the value its code returns. A name is a JavaScript
-// identifier. It cannot be a reserved word, a standard global such as Math,
-// or one of AUTOMATION_FORMULA_NAMES.
+// identifier that is not in AUTOMATION_RESERVED_NAMES: a formula name, a
+// reserved word, or a standard global such as Math.
 //
 // Fields, Groups, and Button fields are referenced by name. Collections are
 // workspace-relative folder paths. A code file is relative to the
@@ -112,7 +112,7 @@ export const MAX_AUTOMATIONS_FILE_BYTES = 256 * 1024;
 
 // The names every formula can use: the values record, previous, trigger,
 // person, and message (for a Group trigger), and the helpers. The evaluator
-// provides exactly these, and a binding cannot take one of them.
+// provides exactly these.
 export const AUTOMATION_FORMULA_NAMES = [
   "record",
   "previous",
@@ -135,6 +135,32 @@ export const AUTOMATION_FORMULA_NAMES = [
   "max",
   "round",
 ] as const;
+
+// Names a binding cannot take. A binding is a plain name in every later
+// formula, so one of these would change what those formulas mean: the
+// formula names, JavaScript's reserved words, including strict-mode ones,
+// and the properties of the global object in ECMA-262 (with Annex B) and
+// ECMA-402.
+export const AUTOMATION_RESERVED_NAMES: readonly string[] = [
+  ...AUTOMATION_FORMULA_NAMES,
+  ...[
+    "await break case catch class const continue debugger default delete do else enum",
+    "export extends false finally for function if implements import in instanceof",
+    "interface let new null package private protected public return static super switch",
+    "this throw true try typeof var void while with yield arguments",
+    "globalThis Infinity NaN undefined eval isFinite isNaN parseFloat parseInt decodeURI",
+    "decodeURIComponent encodeURI encodeURIComponent escape unescape AggregateError Array",
+    "ArrayBuffer AsyncDisposableStack BigInt BigInt64Array BigUint64Array Boolean DataView",
+    "Date DisposableStack Error EvalError FinalizationRegistry Float16Array Float32Array",
+    "Float64Array Function Int8Array Int16Array Int32Array Iterator Map Number Object",
+    "Promise Proxy RangeError ReferenceError RegExp Set SharedArrayBuffer String",
+    "SuppressedError Symbol SyntaxError TypeError Uint8Array Uint8ClampedArray Uint16Array",
+    "Uint32Array URIError WeakMap WeakRef WeakSet Atomics JSON Math Reflect Intl",
+  ]
+    .join(" ")
+    .split(" "),
+];
+const RESERVED_NAMES: ReadonlySet<string> = new Set(AUTOMATION_RESERVED_NAMES);
 
 type AutomationScalar = string | number | boolean | null;
 
@@ -319,28 +345,6 @@ const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const BINDING_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const DAY_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const HOUR_TIME_PATTERN = /^:[0-5]\d$/;
-
-// Names a binding cannot take because JavaScript already gives them a
-// meaning: reserved words, including strict-mode ones, and the global
-// object's properties in ECMA-262 and ECMA-402.
-const JAVASCRIPT_NAMES: ReadonlySet<string> = new Set(
-  [
-    "await break case catch class const continue debugger default delete do else enum",
-    "export extends false finally for function if implements import in instanceof",
-    "interface let new null package private protected public return static super switch",
-    "this throw true try typeof var void while with yield arguments eval",
-    "globalThis Infinity NaN undefined isFinite isNaN parseFloat parseInt decodeURI",
-    "decodeURIComponent encodeURI encodeURIComponent AggregateError Array ArrayBuffer",
-    "BigInt BigInt64Array BigUint64Array Boolean DataView Date Error EvalError",
-    "FinalizationRegistry Float32Array Float64Array Function Int8Array Int16Array",
-    "Int32Array Iterator Map Number Object Promise Proxy RangeError ReferenceError RegExp",
-    "Set SharedArrayBuffer String Symbol SyntaxError TypeError Uint8Array",
-    "Uint8ClampedArray Uint16Array Uint32Array URIError WeakMap WeakRef WeakSet Atomics",
-    "JSON Math Reflect Intl",
-  ]
-    .join(" ")
-    .split(" "),
-);
 
 const TRIGGER_OPTIONS = {
   "record-added": [],
@@ -789,8 +793,7 @@ function isBindingName(value: unknown): value is string {
   return (
     typeof value === "string" &&
     BINDING_NAME_PATTERN.test(value) &&
-    !JAVASCRIPT_NAMES.has(value) &&
-    !AUTOMATION_FORMULA_NAMES.some((name) => name === value)
+    !RESERVED_NAMES.has(value)
   );
 }
 

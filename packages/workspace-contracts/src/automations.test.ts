@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUTOMATION_DIAGNOSTIC_CODES,
   AUTOMATION_FORMULA_NAMES,
+  AUTOMATION_RESERVED_NAMES,
   MAX_AUTOMATION_ID_LENGTH,
   MAX_AUTOMATION_NAME_LENGTH,
   MAX_AUTOMATION_STEPS,
@@ -990,8 +991,18 @@ describe("automations.yaml diagnostics", () => {
     },
   );
 
-  it("refuses every formula name as a binding name", () => {
-    for (const name of AUTOMATION_FORMULA_NAMES) {
+  it("refuses every reserved name as a binding name", () => {
+    expect(AUTOMATION_RESERVED_NAMES).toEqual(
+      expect.arrayContaining([
+        ...AUTOMATION_FORMULA_NAMES,
+        ...["Object", "Array", "Math", "JSON", "Date", "String", "Number", "Boolean", "Symbol"],
+        ...["Promise", "Reflect", "Proxy", "Map", "Set", "WeakMap", "WeakSet", "RegExp", "Error"],
+        ...["TypeError", "RangeError", "AggregateError", "SuppressedError", "BigInt", "Intl"],
+        ...["globalThis", "Infinity", "NaN", "undefined", "eval", "isFinite", "isNaN"],
+        ...["parseInt", "parseFloat", "Float16Array", "escape"],
+      ]),
+    );
+    for (const name of AUTOMATION_RESERVED_NAMES) {
       expect(diagnosticsOf(withStep(`run: 'return 1'\nas: ${name}`))).toEqual([
         { code: "invalid-binding-name", path: at("/do/0/as") },
       ]);
