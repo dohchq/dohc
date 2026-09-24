@@ -40,7 +40,7 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
-The Linux runner also needs `xvfb-run` for the fuse smoke.
+The Linux runner also needs `xvfb-run` for the fuse smoke and the GitHub CLI, `gh`, for publishing.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 
@@ -53,11 +53,15 @@ Dispatch `Desktop Release` from `main` with `channel=latest` and the matching pa
 Use `dry_run=true` to check unsigned packaging without publication.
 For publication, use `dry_run=false`. Stable Windows and macOS builds require signing.
 
-Pushing a tag does not start a release. The publish job creates the version's release tag.
+Pushing a tag does not start a release.
+The publish job creates the release as a draft at the dispatched commit and uploads every file to it.
+Its last step publishes the draft, and GitHub then creates the version's tag.
+Updaters never read a draft.
+If a publish job stops before its last step, delete the draft release before you dispatch again.
 To build a nightly, dispatch `Desktop Release` from `main` with `channel=nightly`.
 A push to `main` starts no release.
-A second nightly dispatch cancels a nightly run in progress.
-A second stable dispatch waits for the running one to finish.
+A second dispatch on the same channel waits for the running one to finish.
+GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
 
 ## Choose an update feed
 

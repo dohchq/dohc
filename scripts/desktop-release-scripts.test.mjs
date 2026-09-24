@@ -344,17 +344,36 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
     step.includes("electron-builder")
   );
 
+  // A key can carry its value on the same line, as in `  push: {branches: [main]}`.
   assert.deepEqual(
-    [...onSection.matchAll(/^ {2}([\w-]+):\r?$/gm)].map((match) => match[1]),
+    [...onSection.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]),
     ["workflow_dispatch"],
     "a desktop release starts only when someone dispatches it",
+  );
+  assert.match(
+    topLevelSection(workflow, "concurrency"),
+    /^ {2}cancel-in-progress: false\r?$/m,
+    "a second dispatch waits instead of cancelling a publish in progress",
   );
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
 
+  // A cancelled or failed publish must leave only a draft, which updaters
+  // never read. The release becomes visible in the job's last step.
+  const publishSteps = stepBlocks(indentedSection(jobs, 2, "publish"));
+  const createRelease = publishSteps.find((step) => step.includes("softprops/action-gh-release"));
+  assert.ok(createRelease, "the publish job creates the release");
+  assert.match(createRelease, /^ {8}id: draft$/m);
+  assert.match(createRelease, /^ {10}draft: true$/m);
+  assert.match(createRelease, /^ {10}target_commitish: \$\{\{ github\.sha \}\}$/m);
+  const lastPublishStep = publishSteps.at(-1);
+  assert.match(lastPublishStep, /^ {6}- name: Publish draft release$/m);
+  assert.match(lastPublishStep, /RELEASE_ID: \$\{\{ steps\.draft\.outputs\.id \}\}/);
+  assert.match(lastPublishStep, /-F draft=false/);
+
   // Cloud runners stay off (AGENTS.md). The package matrix names each
   // platform's runner labels.
-  const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):\r?$/gm)].map((match) => match[1]);
+  const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]);
   const runsOn = [...jobs.matchAll(/^ {4}runs-on: (.+)$/gm)].map((match) => match[1].trim());
   assert.equal(runsOn.length, jobNames.length, "every job names its runner");
   const matrixRunners = [...jobs.matchAll(/^ {12}runner: (.+)$/gm)].map((match) => match[1].trim());

@@ -23,9 +23,11 @@ on:
         default: true
         type: boolean
 
+# A second dispatch on a channel waits. Cancelling a publish in progress
+# could leave a release with only some of its files.
 concurrency:
   group: desktop-release-${{ inputs.channel }}
-  cancel-in-progress: ${{ inputs.channel == 'nightly' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -365,11 +367,29 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub release
+      # Updaters never see a draft. The release stays a draft until every file
+      # is uploaded, so a run that stops early leaves nothing an app can fetch.
+      - name: Create draft GitHub release
+        id: draft
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ needs.preflight.outputs.release_name }}
+          draft: true
           prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
           make_latest: ${{ needs.preflight.outputs.make_latest == 'true' }}
           files: release-upload/**
+
+      - name: Publish draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          MAKE_LATEST: ${{ needs.preflight.outputs.make_latest }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -f make_latest="${MAKE_LATEST}" \
+            --jq '"Published \(.tag_name) at \(.html_url)"'
