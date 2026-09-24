@@ -21,6 +21,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes, type NamedShareTransportRoute } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
+import { createNoticeRoutes, type NoticeRoute } from "./noticeRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -154,6 +155,7 @@ type SyncRelayRoute =
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
   | { route: "workspaces" }
+  | NoticeRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
@@ -349,6 +351,13 @@ export function createSyncRelayHandler({
   const respondToKeyEnvelopes = createKeyEnvelopeRoutes(
     storage,
     nowMs,
+  );
+
+  const respondToNotices = createNoticeRoutes(
+    storage,
+    nowMs,
+    lookupUserDisplayName,
+    claimPendingShares,
   );
 
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
@@ -700,6 +709,15 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
+      if (route.route === "notices" || route.route === "notice-marks") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), "");
+        return await respondToNotices(request, route, actor.userId);
+      }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -863,6 +881,12 @@ function parseRoute(request: Request): SyncRelayRoute {
     return { route: "workspaces" };
   }
   if (parts[0] !== "sync" || !parts[1]) throw notFound();
+  // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
+  if (parts[1] === "notices") {
+    if (parts.length === 2) return { route: "notices" };
+    if (parts.length === 3 && parts[2] === "marks") return { route: "notice-marks" };
+    throw notFound();
+  }
   // "/sync/shares/..." is the share-scoped namespace; "shares" is reserved as
   // a workspace id (parseWorkspaceId) so the two can never collide.
   if (parts[1] === "shares") {

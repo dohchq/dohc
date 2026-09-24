@@ -361,3 +361,97 @@ export interface ShareProposalSettlement {
   proposalId: string;
   state: ShareProposalState;
 }
+
+// A Notice sent to a person lives in that person's notice list on the relay,
+// so it reaches every computer they sign in on. The relay derives who sent
+// it, what kind of sender it shows, and the sender's name. `recipients` says
+// who a kind may be sent to: "self" kinds describe the sender's own work, and
+// "readers" kinds may go to anyone who can read the notice's target path.
+export type NoticeSenderKind = "person" | "agent" | "automation";
+
+export const NOTICE_KINDS = {
+  mention: { senderKind: "person", recipients: "self" },
+  "agent-run": { senderKind: "agent", recipients: "self" },
+  "schedule-skipped": { senderKind: "automation", recipients: "self" },
+  "automation-failed": { senderKind: "automation", recipients: "readers" },
+  "automation-notify": { senderKind: "automation", recipients: "readers" },
+} as const satisfies Record<string, {
+  senderKind: NoticeSenderKind;
+  recipients: "self" | "readers";
+}>;
+
+export type NoticeKind = keyof typeof NOTICE_KINDS;
+
+// Code points, as a person counts them.
+export const NOTICE_TITLE_MAX_CHARS = 120;
+export const NOTICE_BODY_MAX_CHARS = 500;
+// The target as JSON, in UTF-8 bytes.
+export const NOTICE_TARGET_MAX_BYTES = 2_048;
+export const NOTICE_ID_MAX_CHARS = 512;
+export const NOTICE_MARKS_PER_REQUEST = 100;
+export const NOTICE_PAGE_MAX = 200;
+
+// What a notice points at. Every field is optional; a notice for someone
+// other than its sender must name a path both of them can read.
+export interface NoticeTarget {
+  path?: string;
+  record?: string;
+  thread?: string;
+  message?: string;
+  share?: string;
+  automation?: string;
+  run?: string;
+}
+
+export const NOTICE_TARGET_FIELDS = [
+  "path", "record", "thread", "message", "share", "automation", "run",
+] as const satisfies readonly (keyof NoticeTarget)[];
+
+// POST /sync/notices. A second post with the same `noticeId` for the same
+// recipient changes nothing, so two computers can post one notice.
+export interface PostNoticeRequest {
+  noticeId: string;
+  recipientUserId: string;
+  workspaceId: string;
+  kind: NoticeKind;
+  title: string;
+  body: string;
+  target: NoticeTarget;
+  originInstallId: string;
+}
+
+// One row of GET /sync/notices?since=<changeSeq>. `changeSeq` rises on every
+// change to the row, including read and dismissed, and counts per person.
+export interface RelayNotice {
+  noticeId: string;
+  changeSeq: number;
+  workspaceId: string;
+  // The share through which the recipient reads the target, when the
+  // recipient is not the workspace owner and the notice came from someone else.
+  recipientShareId: string | null;
+  kind: NoticeKind;
+  senderKind: NoticeSenderKind;
+  senderUserId: string;
+  senderLabel: string;
+  title: string;
+  body: string;
+  target: NoticeTarget;
+  originInstallId: string;
+  createdAtMs: number;
+  readAtMs: number | null;
+  dismissedAtMs: number | null;
+}
+
+export interface RelayNoticePage {
+  notices: RelayNotice[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+// POST /sync/notices/marks. Read and dismissed are one-way: marking a row
+// again, or a row the relay no longer holds, changes nothing.
+export type NoticeMark = "read" | "dismissed";
+
+export interface MarkNoticesRequest {
+  marks: { noticeId: string; mark: NoticeMark }[];
+}

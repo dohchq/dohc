@@ -1106,7 +1106,9 @@ fn expected_relay_error(code: &str) -> RelayError {
         "internal_error" => RelayError::ServerInternal,
         "invalid_channel" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "link_discussion_blocked" | "link_discussion_paused" => RelayError::Forbidden,
+        "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
+            RelayError::Forbidden
+        }
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
