@@ -4,6 +4,7 @@ import {
   act,
   cleanup,
   fireEvent,
+  getConfig,
   render,
   screen,
   waitFor,
@@ -2967,14 +2968,19 @@ describe("editor groups", () => {
     );
     // Press Ctrl+W again the moment the first close shows, before React runs
     // that commit's passive effects. A loaded machine produced this order.
-    const tabsLeftAfterFirstClose = new Promise<string[]>((resolve) => {
+    const tabsLeftAfterFirstClose = new Promise<string[]>((resolve, reject) => {
       const observer = new MutationObserver(() => {
         if (within(right).queryByTestId("tab-b.md") !== null) return;
         observer.disconnect();
+        clearTimeout(timeout);
         const tabs = within(right).queryAllByRole("tab").map((tab) => tab.dataset.testid ?? "");
         fireEvent.keyDown(window, { key: "w", ctrlKey: true });
         resolve(tabs);
       });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("tab-b.md never closed"));
+      }, getConfig().asyncUtilTimeout);
       observer.observe(right, { childList: true, subtree: true });
     });
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
