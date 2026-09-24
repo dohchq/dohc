@@ -1038,17 +1038,19 @@ export function DesktopWorkspaceShell(props: {
 
   // The one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
-  // the update. Loading stored state is the only setWb that bypasses this.
+  // the update. Loading stored state and restored-tab pruning are the only
+  // other writers, and they also set wbRef before setWb.
+  //
+  // wbRef holds the newest workbench, set with each write rather than after
+  // commit. Handlers read it to choose what to act on, and a keydown can
+  // arrive between a commit and React's passive effects.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
       // to every workbench write. Most writes here are not one: a panel resize
       // commits its final size, and the share-mount poll reaches this seam with
       // no user involved at all — cancelling on those would silently discard a
-      // DM the user had just clicked. The transition is
-      // computed from wbRef outside the functional updater, the idiom openFile
-      // and closeFileTab already use for their marks (updaters are
-      // side-effect-free by contract, so probing one is safe).
+      // DM the user had just clicked.
       const current = wbRef.current;
       const next = updater(current);
       if (next === current) return;
@@ -1059,7 +1061,8 @@ export function DesktopWorkspaceShell(props: {
         invalidateDmNavigation(dmNavigationRequest);
       }
       userTouchedWb.current = true;
-      setWb(updater);
+      wbRef.current = next;
+      setWb(next);
     },
     [],
   );
@@ -1236,7 +1239,6 @@ export function DesktopWorkspaceShell(props: {
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
-    wbRef.current = wb;
     if (!uiStateLoaded.current) return;
     const timer = setTimeout(() => {
       void bridge()
@@ -1309,7 +1311,8 @@ export function DesktopWorkspaceShell(props: {
     for (const groupId of groupsOpeningFiles) {
       rendererMarks.mark(fileOpenStartMark(groupId));
     }
-    setWb(prune);
+    wbRef.current = next;
+    setWb(next);
   }, [
     prepareRestoredTabPruning,
     listingsSettled,
@@ -2102,7 +2105,7 @@ export function DesktopWorkspaceShell(props: {
   // actually changes something (activeTab moves or a tab is added): a no-op
   // click on the already-active row/tab/overflow item triggers no remount, so
   // marking would leave a stale file-open-start that corrupts the next
-  // measure. The transition is computed from wbRef (synced post-commit) and
+  // measure. The transition is computed from wbRef and
   // the mark fires once, outside the functional updater — updaters must stay
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
