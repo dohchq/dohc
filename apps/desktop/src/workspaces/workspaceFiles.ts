@@ -335,11 +335,10 @@ export async function createFile(
 // included) plus how many sources could not land — callers surface both, so
 // an import is never silently smaller than what the user handed us.
 //
-// `interrupted` means the import stopped after some files landed. Importing
-// the same sources again would copy those files a second time under
-// collision names, so callers name what landed. `stop` says which file
-// stopped it, the filesystem's error code when there is one, and the raw
-// error text for a report.
+// `stop` means a copy failed and the import stopped there. `interrupted`
+// adds that some files landed first: importing the same sources again would
+// copy those a second time under collision names, so callers name what
+// landed.
 export interface ImportCopyOutcome {
   imported: string[];
   skipped: number;
@@ -347,15 +346,19 @@ export interface ImportCopyOutcome {
   stop?: ImportStop;
 }
 
+// Which file stopped an import, and why. A filesystem failure carries its
+// error code and raw text, for callers to put in the person's words and in a
+// report. A refusal dohc wrote itself carries that sentence as `reason`.
 export interface ImportStop {
   file: string;
   code?: string;
   detail?: string;
+  reason?: string;
 }
 
-// The longest raw error text an import result carries; the IPC contract
-// holds the same bound.
-export const IMPORT_STOP_DETAIL_MAX_CHARS = 500;
+// The longest error text an import result carries; the IPC contract holds
+// the same bound.
+export const IMPORT_STOP_TEXT_MAX_CHARS = 500;
 
 // Resolve + validate an import destination folder ("" / undefined = workspace
 // root). The folder must be a user-writable workspace-relative path (traversal
@@ -704,20 +707,21 @@ export async function copyIntoWorkspace(
     try {
       landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
     } catch (error) {
-      // A failure before anything landed is the whole import's failure. After
-      // that, the files already copied stay, and the result names them.
-      if (imported.length === 0) throw error;
+      // The import stops at the first failed copy. Files already copied
+      // stay, and the result names them.
       const code = (error as NodeJS.ErrnoException).code;
-      const detail = (error instanceof Error ? error.message : String(error)).trim();
+      const text = (error instanceof Error ? error.message : String(error))
+        .trim()
+        .slice(0, IMPORT_STOP_TEXT_MAX_CHARS);
+      const stop: ImportStop =
+        typeof code === "string" && code
+          ? { file: validated.normalized, code, ...(text ? { detail: text } : {}) }
+          : { file: validated.normalized, ...(text ? { reason: text } : {}) };
       return {
         imported,
         skipped,
-        interrupted: true,
-        stop: {
-          file: validated.normalized,
-          ...(typeof code === "string" && code ? { code } : {}),
-          ...(detail ? { detail: detail.slice(0, IMPORT_STOP_DETAIL_MAX_CHARS) } : {}),
-        },
+        ...(imported.length > 0 ? { interrupted: true as const } : {}),
+        stop,
       };
     }
     if (landed === null) {

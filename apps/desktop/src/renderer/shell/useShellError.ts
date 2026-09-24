@@ -120,18 +120,19 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
-  // A failure already worded for the person, with the raw cause kept for
-  // Copy details only.
+  // A failure already worded for the person. A raw cause, when there is
+  // one, goes into Copy details only. A kind makes a newer message replace
+  // the row of an older one, such as one import's result replacing the last.
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
       detail?: string | undefined;
-      retry: (() => void) | null;
+      retry?: (() => void) | null;
       kind?: ShellErrorKind;
     }) =>
       push({
         message: failure.message,
-        retry: failure.retry,
+        retry: failure.retry ?? null,
         ...(failure.detail ? { detail: failure.detail } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
       }),
@@ -168,11 +169,6 @@ export function useShellError(workspaceId: string) {
 
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
-  const showShellError = useCallback(
-    (message: string, kind?: ShellErrorKind) =>
-      push({ message, retry: null, ...(kind ? { kind } : {}) }),
-    [push],
-  );
   const showSuccessNotice = useCallback(
     (message: string, kind?: ShellErrorKind) =>
       push({ message, retry: null, tone: "success", ...(kind ? { kind } : {}) }),
@@ -207,7 +203,6 @@ export function useShellError(workspaceId: string) {
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
-    showShellError,
     showSuccessNotice,
     hideShellError,
     dismissShellError,

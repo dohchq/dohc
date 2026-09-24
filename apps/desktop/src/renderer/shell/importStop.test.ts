@@ -11,12 +11,17 @@ describe("importStopSentence", () => {
     );
     expect(importStopSentence({ file: "two.md", code: "ENOSPC" })).toBe("The disk is full.");
     expect(importStopSentence({ file: "two.md", code: "ENOENT" })).toBe(
-      "two.md was moved or deleted before dohc could copy it.",
+      "dohc could not find two.md or this folder anymore.",
     );
     expect(importStopSentence({ file: "two.md", code: "EIO", detail: "EIO: i/o error" })).toBe(
       "dohc could not copy two.md.",
     );
     expect(importStopSentence({ file: "two.md" })).toBe("dohc could not copy two.md.");
+  });
+
+  it("keeps a refusal dohc wrote itself as written", () => {
+    const reason = "dohc did not import a symbolic link. The file it points to is missing.";
+    expect(importStopSentence({ file: "link.md", reason })).toBe(reason);
   });
 });
 

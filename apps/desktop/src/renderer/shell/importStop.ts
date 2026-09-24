@@ -3,16 +3,19 @@ import type { ImportWorkspaceFilesResult } from "../../ipc/bridgeContract";
 type ImportStop = NonNullable<ImportWorkspaceFilesResult["stop"]>;
 
 // Why an import stopped, in the words a person uses. The filesystem's own
-// error text goes only into Copy details.
+// error text goes only into Copy details. A refusal dohc wrote itself is
+// already in those words.
 export function importStopSentence(stop: ImportStop): string {
+  if (stop.reason) return stop.reason;
   switch (stop.code) {
     case "EACCES":
     case "EPERM":
       return `dohc isn't allowed to read ${stop.file} or write to this folder.`;
     case "ENOSPC":
       return "The disk is full.";
+    // The source or the destination folder can be the missing side.
     case "ENOENT":
-      return `${stop.file} was moved or deleted before dohc could copy it.`;
+      return `dohc could not find ${stop.file} or this folder anymore.`;
     default:
       return `dohc could not copy ${stop.file}.`;
   }

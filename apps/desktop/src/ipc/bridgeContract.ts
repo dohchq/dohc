@@ -821,14 +821,15 @@ export const ImportWorkspaceFilesResult = z.object({
   // retry, and importing the same sources again would copy the landed files
   // a second time.
   interrupted: z.literal(true).optional(),
-  // What stopped an interrupted ordinary import: the source file's name, the
-  // filesystem's error code, and the raw error text, which only goes into
-  // copied details.
+  // An ordinary import stopped at a failed copy: the source file's name, and
+  // either the filesystem's error code with its raw text, which only goes
+  // into copied details, or a refusal dohc wrote itself (`reason`).
   stop: z
     .object({
       file: z.string().min(1).max(4096),
       code: z.string().min(1).max(64).optional(),
       detail: z.string().min(1).max(500).optional(),
+      reason: z.string().min(1).max(500).optional(),
     })
     .optional(),
 });

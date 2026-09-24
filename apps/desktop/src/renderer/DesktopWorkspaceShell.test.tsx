@@ -15369,6 +15369,26 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
   });
 
+  it("words a failed first copy the same way, with the raw error only in Copy details", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      stop: { file: "one.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'one.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not import files. The disk is full.");
+    expect(toast.textContent).not.toContain("ENOSPC");
+    expect(within(toast).getByTestId("workspace-shell-error-retry")).toBeTruthy();
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain("Cause: ENOSPC: no space left on device");
+  });
+
   it("asks for no files when the refresh before Try again fails", async () => {
     const bridge = sharedViewBridge([true, false]);
     renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });

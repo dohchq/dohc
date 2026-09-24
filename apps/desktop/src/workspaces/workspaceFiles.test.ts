@@ -878,9 +878,10 @@ describe("copyIntoWorkspace", () => {
     });
   });
 
-  // A copy that fails after others landed returns the landed files, so the
-  // shell can name them instead of letting a retry copy them again.
-  it("returns what landed when a later copy fails, and throws when nothing landed", async () => {
+  // A failed copy stops the import and says which file and why. Files that
+  // landed first come back too, so the shell can name them instead of
+  // letting a retry copy them again.
+  it("returns what landed and which file stopped the import", async () => {
     const outside = await createTestScratch("dohc-import-");
     await writeFile(join(outside, "one.md"), "one");
     const missing = join(outside, "gone.md");
@@ -891,7 +892,9 @@ describe("copyIntoWorkspace", () => {
     expect(outcome.stop?.detail).toContain("gone.md");
     expect(await readFile(join(root, "one.md"), "utf8")).toBe("one");
 
-    await expect(copyIntoWorkspace(root, [missing])).rejects.toThrow(/gone\.md/);
+    const first = await copyIntoWorkspace(root, [missing]);
+    expect(first).toMatchObject({ imported: [], skipped: 0, stop: { file: "gone.md", code: "ENOENT" } });
+    expect(first.interrupted).toBeUndefined();
   });
 
   it("fits collision variants within NAME_MAX for near-limit basenames", async () => {
@@ -1204,7 +1207,7 @@ describe("copy end-probe classification", () => {
 // Predicting from the budget silently counted that as `skipped`, and nobody
 // reads a skipped line.
 describe("import surfaces a vanished source instead of skipping it", () => {
-  it("throws rather than skipping when the source is gone in a deep folder", async () => {
+  it("stops at a vanished source rather than skipping it in a deep folder", async () => {
     const base = await mkdtemp(join(tmpdir(), "dohc-vanished-"));
     try {
       const root = join(
@@ -1218,8 +1221,10 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       expect(name.length).toBeGreaterThan(259 - root.length - 1);
       const missing = join(base, name); // validated by the dialog, then gone
 
-      await expect(copyIntoWorkspace(root, [missing])).rejects.toMatchObject({
-        code: "ENOENT",
+      expect(await copyIntoWorkspace(root, [missing])).toMatchObject({
+        imported: [],
+        skipped: 0,
+        stop: { code: "ENOENT" },
       });
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
@@ -1251,9 +1256,15 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       // The reason and the instruction come before the name: this renders in a
       // one-line truncate span, and a basename runs to 255 characters, so
       // leading with it truncates away everything the user needs.
-      await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
-        "dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is link.md.",
-      );
+      expect(await copyIntoWorkspace(root, [source])).toEqual({
+        imported: [],
+        skipped: 0,
+        stop: {
+          file: "link.md",
+          reason:
+            "dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is link.md.",
+        },
+      });
     } finally {
       await rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(
         () => undefined,

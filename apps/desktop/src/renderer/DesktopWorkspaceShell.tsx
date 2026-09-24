@@ -783,11 +783,17 @@ export function DesktopWorkspaceShell(props: {
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
-    showShellError,
     showSuccessNotice,
     dismissShellError,
     retryShellError,
   } = useShellError(workspaceId);
+  // For surfaces that report a failure as one sentence. One stable identity:
+  // ChatsView keys its polls and subscriptions off onError, so a fresh arrow
+  // per shell render tore them down and re-armed them every render.
+  const reportFailureMessage = useCallback(
+    (message: string) => reportShellFailure({ message }),
+    [reportShellFailure],
+  );
 
   // A connection failure from any panel that embeds CloudLogin. The notice
   // outlives the panel, so its Try again reopens the connection dialog with
@@ -2070,6 +2076,16 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
+      // The first copy failed, so nothing landed.
+      if (outcome.stop && !outcome.interrupted) {
+        reportShellFailure({
+          message: `Could not import files. ${importStopSentence(outcome.stop)}`,
+          detail: outcome.stop.detail,
+          retry,
+          kind: "import-files",
+        });
+        return;
+      }
       if (outcome.interrupted) {
         // Importing the same files again would land second copies under
         // collision names, so name what already landed.
@@ -2100,7 +2116,7 @@ export function DesktopWorkspaceShell(props: {
       // Every file was skipped for its name or kind; the same files would be
       // skipped again, so there is nothing to try again.
       if (count === 0) {
-        showShellError(`Nothing imported${skippedSuffix}.`, "import-files");
+        reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
         return;
       }
       showSuccessNotice(
@@ -2115,7 +2131,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showShellError, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3909,9 +3925,10 @@ export function DesktopWorkspaceShell(props: {
         return false;
       }
       if (outcome.collisionRecordQuarantined) {
-        showShellError(
-          "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-        );
+        reportShellFailure({
+          message:
+            "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+        });
       }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
@@ -4261,7 +4278,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={showShellError}
+        onError={reportFailureMessage}
         onNewCollection={setNewCollectionFolder}
       />
     </>
@@ -4279,12 +4296,6 @@ export function DesktopWorkspaceShell(props: {
         })),
     [props.workspaces],
   );
-  // Stable per-field identities (D2#5): ChatsView keys real work off these —
-  // its refresh callbacks depend on onError, so a fresh arrow per shell render
-  // tore down and re-armed its polls and activity subscription every render.
-  const onChatsError = useCallback((message: string) => {
-    showShellError(message);
-  }, [showShellError]);
   const openAgentSettings = useCallback(
     () => openSettings("agents"),
     [openSettings],
@@ -4307,7 +4318,7 @@ export function DesktopWorkspaceShell(props: {
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4342,7 +4353,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: onChatsError,
+    onError: reportFailureMessage,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
@@ -4923,7 +4934,7 @@ export function DesktopWorkspaceShell(props: {
                   beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={(message) => showShellError(message)}
+                  onError={reportFailureMessage}
                   {...(shareView
                     ? {}
                     : {
@@ -5491,7 +5502,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={onChatsError}
+                    onError={reportFailureMessage}
                   />
                 </Suspense>
               ) : (
@@ -5950,7 +5961,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
-            onError={showShellError}
+            onError={reportFailureMessage}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

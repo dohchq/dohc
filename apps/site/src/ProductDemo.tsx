@@ -216,7 +216,11 @@ function initialSidebarVisible(): boolean {
 }
 
 export function ProductDemo() {
-  const { shellErrors, showShellError, hideShellError, dismissShellError } = useShellError("marketing-demo");
+  const { shellErrors, reportShellFailure, hideShellError, dismissShellError } = useShellError("marketing-demo");
+  const reportFailureMessage = useCallback(
+    (message: string) => reportShellFailure({ message }),
+    [reportShellFailure],
+  );
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
   const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
   const [activePath, setActivePath] = useState(
@@ -588,7 +592,7 @@ export function ProductDemo() {
           onOpenDocument={openDocument}
           onCreateDocument={createDocument}
           onBeforeChanges={flushActiveDraft}
-          onError={showShellError}
+          onError={reportFailureMessage}
         />
 
         <section className="demo-editor-column" aria-label="Editable dohc document demo">
