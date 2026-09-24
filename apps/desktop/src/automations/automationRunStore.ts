@@ -107,10 +107,7 @@ export interface StoredRun {
   /** The engine automation id, "collection:<collection path>#<id>". */
   automationId: string;
   definitionHash: string;
-  /**
-   * What the run's idempotency keys and added record ids derive from: the
-   * definition hash, plus the claim's run when a person started it over.
-   */
+  /** What the run's idempotency keys and added record ids derive from: the definition hash and the claim's run. */
   keySeed: string;
   startedAtMs: number;
   updatedAtMs: number;
