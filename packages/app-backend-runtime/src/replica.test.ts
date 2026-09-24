@@ -14,7 +14,6 @@ import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { AppRuntimeLauncher } from "./protocol.js";
 
 const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
-vi.setConfig({testTimeout:30_000,hookTimeout:30_000});
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const scope={workspaceId:"workspace",datasetId:id(1)};
 const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL,secret TEXT NOT NULL);";

@@ -38,7 +38,7 @@ describe("dataset recovery transport", () => {
     expect(frames).toBeGreaterThan(200); expect(largest).toBeLessThanOrEqual(RECOVERY_CHUNK_BYTES + 5); expect(staged.files).toHaveLength(manifest.entries.length);
     for (const file of [staged.files[0]!, staged.files.at(-1)!]) { expect((await stat(file.path)).size).toBe(length); expect(await fileHash(file.path)).toBe(expectedHash); }
     await staged.dispose(); expect(await readdir(parent)).toEqual([]);
-  }, 30_000);
+  });
   it("accepts fragmented transport and cleans failed or cancelled staging", async () => {
     const { manifest, options } = fixture(), parent = await directory();
     async function* fragmented() { for await (const frame of writeDatasetRecovery(options)) for (let i = 0; i < frame.length; i += 7) yield frame.subarray(i, i + 7); }
@@ -49,7 +49,7 @@ describe("dataset recovery transport", () => {
     await expect(stageDatasetRecovery({ stream: parts([encoded[0]!, encoded[1]!, bad, ...encoded.slice(3)]), stagingParent: badParent, limits, authorize() {}, expectedManifestSha256: recoveryManifestSha256(manifest, limits) })).rejects.toThrow();
     expect(await readdir(badParent)).toEqual(["current.sqlite"]);
     expect(await readFile(join(badParent, "current.sqlite"), "utf8")).toBe("current data");
-  }, 30_000);
+  });
   it("cancels a stalled import and cleans its stage without waiting for transport", async () => {
     const { manifest, options } = fixture(), parent = await directory(), controller = new AbortController();
     const encoded = await collect(writeDatasetRecovery(options)); let index = 0, returned = false;
