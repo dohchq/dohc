@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -366,10 +366,10 @@ describe("Collection automations", () => {
     });
     const listed = await w.executor.automationsIn("Tasks");
     const hash = listed.status === "read" && listed.automations[0]?.valid ? listed.automations[0].definitionHash : "";
-    // Each field is its own effect, keyed by the claim, the definition, the step, the record, and the field.
+    // Each field is its own effect, keyed by the claim, the definition and the claim's run, the step, the record, and the field.
     expect(w.journaled.map((entry) => entry.idempotencyKey)).toEqual([
-      `${claim.claimId}/${hash}/0/${task.id}/Finished on`,
-      `${claim.claimId}/${hash}/0/${task.id}/Note`,
+      `${claim.claimId}/${hash}-1/0/${task.id}/Finished on`,
+      `${claim.claimId}/${hash}-1/0/${task.id}/Note`,
     ]);
     expect(w.journaled[0]).toMatchObject({
       actorOriginId: "collection:Tasks#stamp",
@@ -1145,5 +1145,47 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(w.journaled).toHaveLength(1);
+  });
+
+  it("gives a restart its own keys and records even after history dropped the run it replaces", async () => {
+    const stepsOf = (title: string) =>
+      `  - id: log\n    name: Log\n    when: {field-changed: Status}\n    do:\n      - set: {Count: '=record.Count + 1'}\n      - add-record: {Title: ${title}}\n        collection: Log\n      - set: {Note: done}\n`;
+    const A = stepsOf("A");
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: A } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    // A applies its first two steps, and its third cannot open the record.
+    w.failOpenAt(3);
+    const claim = w.claim("collection:Tasks#log", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const hashA = (await w.baseStore.runsOf("collection:Tasks#log", claim.claimId)).runs[0]!.definitionHash;
+    const reload = async (text: string) => {
+      await w.writeAutomations("Tasks", text);
+      const drained = w.idleDrains();
+      w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+      await w.until(() => w.idleDrains() > drained);
+    };
+    // A confirmed restart under B fails at its first write.
+    await reload(stepsOf("B"));
+    w.failures.openSession = 1;
+    await w.executor.retry({ automationId: "collection:Tasks#log", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "failed" && claim.run === 2);
+    // Pruning drops A's superseded run while B's failure stays.
+    const folder = join(w.root, ".dohc", "automations", "runs");
+    for (const automation of await readdir(folder)) {
+      for (const file of await readdir(join(folder, automation))) {
+        const saved = JSON.parse(await readFile(join(folder, automation, file), "utf8")) as { definitionHash: string };
+        if (saved.definitionHash === hashA) await rm(join(folder, automation, file));
+      }
+    }
+    // A comes back, and a restart under it is confirmed.
+    await reload(A);
+    await w.executor.retry({ automationId: "collection:Tasks#log", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done" || (claim.state === "failed" && claim.run === 3));
+    expect(claim.error).toBeUndefined();
+    expect(claim.state).toBe("done");
+    // The restart added its own record instead of taking the first run's.
+    expect([...w.records.values()].filter((record) => record.collection === "Log")).toHaveLength(2);
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 4, Note: "done" });
   });
 });

@@ -110,8 +110,6 @@ export type ClaimRuns =
        * one from the start could repeat what that one did.
        */
       changedSince: StoredRun | null;
-      /** A person chose to run this definition over from the start before. */
-      startedOver: boolean;
     };
 
 export async function runsForClaim(
@@ -130,7 +128,6 @@ export async function runsForClaim(
     // A run is saved only once its plan is ready to write, so any saved run
     // of another definition may have written.
     changedSince: live.find((run) => run.definitionHash !== hash) ?? null,
-    startedOver: runs.some((run) => run.superseded && run.definitionHash === hash),
   };
 }
 
@@ -143,7 +140,7 @@ export async function runCollectionAutomation(
   const runs = await runsForClaim(store, claim, automation);
   // Never start over as if nothing had run.
   if (runs.unreadable) return failed(UNREADABLE_RUN_ERROR);
-  const { done, current, changedSince, startedOver } = runs;
+  const { done, current, changedSince } = runs;
   // It finished before this computer could settle the claim, whatever the
   // automation says now.
   if (done !== null) return { kind: "done" };
@@ -177,9 +174,11 @@ export async function runCollectionAutomation(
 
   let run = current?.plan ? current : null;
   const resumed = run !== null;
-  // A run started over under a definition that ran before takes keys and
-  // record ids of its own, so the engine takes its writes as new ones.
-  const keySeed = startedOver ? `${definitionHash(automation)}-${claim.run}` : definitionHash(automation);
+  // A new plan's keys and added record ids come from the definition and the
+  // claim's run, never from what history kept: a start-over is a new run, so
+  // the engine takes its writes as new, and a crash requeue keeps the run,
+  // so it replays the same keys. A resumed plan keeps its own seed.
+  const keySeed = `${definitionHash(automation)}-${claim.run}`;
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
