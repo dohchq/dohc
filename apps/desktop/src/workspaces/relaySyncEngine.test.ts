@@ -485,7 +485,7 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-  it("does not push the next automatic pass out when a retry someone asked for fails", async () => {
+  it("keeps the automatic retry's deadline when a retry someone asked for fails", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock.mockRejectedValue(new RelayUnreachableError());
     const cap = capture();
@@ -493,19 +493,35 @@ describe("relaySyncEngine", () => {
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
-    // Automatic backoff: 500, then 1000.
+    // The automatic retry is due 500 ms after that failure.
+    await vi.advanceTimersByTimeAsync(200);
     await sync.retryNow();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
-    // The failed retry keeps 1000 for the next automatic pass...
-    await vi.advanceTimersByTimeAsync(999);
+    // The failed retry leaves it due 300 ms from now, not later.
+    await vi.advanceTimersByTimeAsync(299);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
-    // ...and that automatic failure is the one that doubles it.
+    // That automatic failure is the one that doubles the interval.
     await vi.advanceTimersByTimeAsync(999);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(1);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("schedules the next pass at the current interval when a retry fails with none due", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pullMock.mockRejectedValue(new RelayUnreachableError());
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    await sync.retryNow();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
     errorSpy.mockRestore();
     await sync.stop();
   });

@@ -4482,7 +4482,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const syncFailureNotice = useSyncFailureNotice({
     workspaceId,
-    failure: syncStatus?.syncFailure ?? null,
+    failure: syncStatus === null ? undefined : (syncStatus.syncFailure ?? null),
     retryCloudSync: retryCloudSyncCommand,
     report: reportSyncFailure,
     clear: clearSyncFailure,

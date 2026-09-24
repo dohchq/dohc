@@ -36,11 +36,11 @@ function unreachable(sinceMs: number, attempts: number): Failure {
 
 // The shell's two hooks together, as the shell wires them.
 function renderNotice(
-  initial: { workspaceId?: string; failure: Failure | null },
+  initial: { workspaceId?: string; failure: Failure | null | undefined },
   retryCloudSync = vi.fn(async (_id: string): Promise<SyncStatusResult> => HEALTHY),
 ) {
   const view = renderHook(
-    ({ workspaceId, failure }: { workspaceId: string; failure: Failure | null }) => {
+    ({ workspaceId, failure }: { workspaceId: string; failure: Failure | null | undefined }) => {
       const errors = useShellError(workspaceId);
       const notice = useSyncFailureNotice({
         workspaceId,
@@ -77,7 +77,7 @@ describe("useSyncFailureNotice", () => {
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
     expect(view.toasts()).toHaveLength(1);
     expect(view.toasts()[0]!.message).toBe(
-      "dohc could not reach the server. Your changes are saved on this machine.",
+      "dohc could not reach the server.",
     );
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
@@ -103,6 +103,33 @@ describe("useSyncFailureNotice", () => {
     second.rerender({ workspaceId: "ws-a", failure: null });
     second.rerender({ workspaceId: "ws-a", failure: unreachable(900, 1) });
     expect(second.rows()).toHaveLength(1);
+  });
+
+  // The shell remounts on every workspace switch, and its status starts
+  // unknown until the workspace answers. That is not a recovery.
+  it("keeps a dismissal through a remount that starts with the status still loading", () => {
+    const first = renderNotice({ failure: unreachable(100, 2) });
+    act(() => {
+      first.result.current.notice.noteDismissed();
+      first.result.current.errors.dismissShellError(first.rows()[0]!.id);
+    });
+    first.unmount();
+
+    const second = renderNotice({ failure: undefined });
+    expect(second.rows()).toEqual([]);
+    second.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
+    expect(second.rows()).toEqual([]);
+    expect(second.toasts()).toEqual([]);
+  });
+
+  it("does not toast again after a remount that starts with the status still loading", () => {
+    const first = renderNotice({ failure: unreachable(100, 2) });
+    expect(first.toasts()).toHaveLength(1);
+    first.unmount();
+    const second = renderNotice({ failure: undefined });
+    second.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
+    expect(second.rows()).toHaveLength(1);
+    expect(second.toasts()).toEqual([]);
   });
 
   it("does not toast again after a remount for a failure already toasted", () => {
@@ -156,8 +183,10 @@ describe("useSyncFailureNotice", () => {
     expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a");
   });
 
-  it("says the changes are saved only when the server was unreachable", () => {
-    expect(syncFailureMessage(unreachable(1, 1))).toContain("saved on this machine");
+  // A failed sync pass proves nothing about this machine's copy, so no
+  // message claims the changes are saved here.
+  it("never claims the changes are saved", () => {
+    expect(syncFailureMessage(unreachable(1, 1))).toBe("dohc could not reach the server.");
     expect(
       syncFailureMessage({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
     ).toBe("dohc could not sync this workspace.");

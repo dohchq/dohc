@@ -151,6 +151,7 @@ import {
   resetCollectionFieldWritesForTests,
 } from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
@@ -1183,6 +1184,9 @@ afterEach(async () => {
   // The collection write queue is module state on purpose too — a pending
   // head left by one test must not open sessions inside the next.
   resetCollectionFieldWritesForTests();
+  // What a sync failure already showed is module state too, so it holds
+  // across the shell's remounts.
+  forgetSyncFailureNoticesForTests();
 });
 
 describe("plugin panel tabs", () => {
@@ -15614,7 +15618,7 @@ describe("owner live documents", () => {
     act(() => bridge.emitWorkspaceActivity());
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "dohc could not reach the server. Your changes are saved on this machine.",
+      "dohc could not reach the server.",
     );
     expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
 
@@ -15630,6 +15634,56 @@ describe("owner live documents", () => {
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").dataset.state).toBe("synced"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
+    );
+  });
+
+  // The shell remounts on every workspace switch, with its status unknown
+  // until the workspace answers. Coming back to the same outage must not
+  // bring back a toast, or a row the person dismissed.
+  it("keeps a sync failure quiet across a remount once shown and dismissed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing: SyncStatusResult = {
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: down",
+        sinceMs: 1000,
+        attempts: 2,
+      },
+    };
+    // The status answers only when released, so the remount starts loading.
+    let answer: ((status: SyncStatusResult) => void) | null = null;
+    bridge.openWorkspace = vi.fn(async () => failing);
+    bridge.getSyncStatus = vi.fn(async () => failing);
+    const user = userEvent.setup();
+    const first = renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = await screen.findByText("dohc could not reach the server.");
+    const dismiss = row.closest("li")?.querySelector("[aria-label=\"Dismiss notice\"]");
+    if (!(dismiss instanceof HTMLElement)) throw new Error("no dismiss control on the row");
+    await user.click(dismiss);
+    first.unmount();
+
+    bridge.openWorkspace = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    bridge.getSyncStatus = vi.fn(
+      () => new Promise<SyncStatusResult>((resolve) => { answer = resolve; }),
+    );
+    renderShell(bridge);
+    await waitFor(() => expect(answer).not.toBeNull());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    act(() => answer?.(failing));
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
     );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     await user.click(screen.getByTestId("notice-center-toggle"));

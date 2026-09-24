@@ -118,6 +118,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  // When the pending backoff pass is due, so a failed retry someone asked for
+  // can keep that deadline instead of moving it.
+  let backoffDueAtMs: number | null = null;
   let retryQueued = false;
   let chain: Promise<void> = Promise.resolve();
 
@@ -138,12 +141,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  // `grow` is false after a pass someone asked for: their retry says nothing
-  // new about the outage, so it must not push the next automatic pass out.
-  function scheduleBackoff(grow = true): void {
+  // After a pass someone asked for fails, `keepDueAtMs` is the automatic
+  // pass it displaced: their retry says nothing new about the outage, so the
+  // next automatic pass stays where it was, and the interval does not grow.
+  function scheduleBackoff(options?: { manual: true; keepDueAtMs: number | null }): void {
     if (stopped || authExpired || backoffTimer !== undefined) return;
-    const delay = nextBackoffMs;
-    if (grow) nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
+    const keepDueAtMs = options?.keepDueAtMs ?? null;
+    const delay =
+      keepDueAtMs === null ? nextBackoffMs : Math.max(0, keepDueAtMs - Date.now());
+    if (!options?.manual) nextBackoffMs = Math.min(maxBackoffMs, nextBackoffMs * 2);
+    backoffDueAtMs = Date.now() + delay;
     retryQueued = true;
     backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
@@ -153,7 +160,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }, delay);
   }
 
-  function handleFailure(error: unknown, manual: boolean): void {
+  function handleFailure(error: unknown, displacedDueAtMs: number | null | undefined): void {
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
@@ -170,7 +177,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       attempts: (syncFailure?.attempts ?? 0) + 1,
     });
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
-    scheduleBackoff(!manual);
+    scheduleBackoff(
+      displacedDueAtMs === undefined
+        ? undefined
+        : { manual: true, keepDueAtMs: displacedDueAtMs },
+    );
   }
 
   async function doPass(): Promise<void> {
@@ -267,6 +278,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   function runPass(rethrow: boolean, manual = false): Promise<void> {
     const result = chain.then(async () => {
       if (stopped) return;
+      // A retry someone asked for keeps the automatic pass it displaces, in
+      // case it fails. `undefined` marks an automatic pass.
+      const displacedDueAtMs = manual
+        ? backoffTimer !== undefined
+          ? backoffDueAtMs
+          : null
+        : undefined;
       // This pass carries everything queued so far, so any timer waiting to
       // start another is now stale. Its own outcome sets the next one. Done
       // here, in the serialized lifecycle, so a pass that ends before this
@@ -279,7 +297,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       try {
         await doPass();
       } catch (error) {
-        handleFailure(error, manual);
+        handleFailure(error, displacedDueAtMs);
         if (rethrow) throw error;
       } finally {
         syncing = false;

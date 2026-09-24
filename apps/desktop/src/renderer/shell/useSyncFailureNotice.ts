@@ -5,11 +5,11 @@ type SyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
 
 type SyncFailureNotice = { message: string; detail: string; toast: boolean };
 
-// Only an unreachable server is known to leave this machine's copy untouched,
-// so only that message says the changes are saved here.
+// Neither message vouches for this machine's copy: a failed sync pass does
+// not prove local writes are healthy, and each document shows its own save.
 export function syncFailureMessage(failure: SyncFailure): string {
   return failure.cause === "server-unreachable"
-    ? "dohc could not reach the server. Your changes are saved on this machine."
+    ? "dohc could not reach the server."
     : "dohc could not sync this workspace.";
 }
 
@@ -31,7 +31,8 @@ export function forgetSyncFailureNoticesForTests(): void {
 // now; coming back online does the same without a toast of its own.
 export function useSyncFailureNotice(input: {
   workspaceId: string;
-  failure: SyncFailure | null;
+  // `undefined` while the status is still loading: unknown, not recovered.
+  failure: SyncFailure | null | undefined;
   retryCloudSync: (workspaceId: string) => Promise<SyncStatusResult>;
   report: (notice: SyncFailureNotice, retry: () => void) => void;
   clear: () => void;
@@ -94,10 +95,14 @@ export function useSyncFailureNotice(input: {
   }, [clear, file, retryCloudSync]);
   retryRef.current = retry;
 
+  const known = failure !== undefined;
   const sinceMs = failure?.sinceMs ?? null;
   const attempts = failure?.attempts ?? null;
   useEffect(() => {
     const current = failureRef.current;
+    // A status still loading says nothing. Only a status with no failure
+    // ends one, so a remount does not forget what was shown or dismissed.
+    if (current === undefined) return;
     if (current === null) {
       shownFailures.delete(workspaceId);
       filedRef.current = null;
@@ -118,13 +123,13 @@ export function useSyncFailureNotice(input: {
       { message: syncFailureMessage(current), detail: current.detail, toast },
       key,
     );
-  }, [attempts, clear, file, sinceMs, workspaceId]);
+  }, [attempts, clear, file, known, sinceMs, workspaceId]);
 
   // Back online after an outage: try now instead of waiting out the backoff.
   // Its outcome arrives as status, like any automatic pass.
   useEffect(() => {
     const onOnline = () => {
-      if (failureRef.current === null) return;
+      if (!failureRef.current) return;
       void retryCloudSync(workspaceRef.current).catch(() => undefined);
     };
     window.addEventListener("online", onOnline);

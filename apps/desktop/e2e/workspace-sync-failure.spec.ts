@@ -88,7 +88,7 @@ test("a sync the server cannot take names the server, offers Try again, and clea
     const notices = page.getByTestId("notice-center");
     await page.getByTestId("notice-center-toggle").click();
     await expect(notices).toContainText(
-      "dohc could not reach the server. Your changes are saved on this machine.",
+      "dohc could not reach the server.",
     );
 
     // Try again from the row, while the server is still down: the title bar
