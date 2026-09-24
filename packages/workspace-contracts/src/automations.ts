@@ -1079,9 +1079,8 @@ type TemplateProblem = "invalid-template" | "optional-chain-needs-parentheses";
 // acorn 8.18 reads a "/" after a keyword-named property that follows "?.",
 // as in "record?.of / 2", as the start of a regular expression. The text
 // up to where parsing stopped holds that pattern when this is the cause.
-// Spaces and block comments can sit between its parts.
-const OPTIONAL_PROPERTY_BEFORE_DIVISION =
-  /\?\.(?:\s|\/\*[\s\S]*?\*\/)*[\p{ID_Start}$_][\p{ID_Continue}$]*(?:\s|\/\*[\s\S]*?\*\/)*\/(?![/*])/u;
+// A comment inside the pattern gives plain invalid-template.
+const OPTIONAL_PROPERTY_BEFORE_DIVISION = /\?\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*\s*\/(?![/*])/u;
 
 function templateProblem(source: string, start: number, stop: number): TemplateProblem {
   return OPTIONAL_PROPERTY_BEFORE_DIVISION.test(source.slice(start, stop + 1))

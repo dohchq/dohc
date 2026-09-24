@@ -893,12 +893,17 @@ const AUTOMATION_CASES: AutomationCase[] = [
   {
     name: "a comment after an optional property, before a division",
     item: withStep("notify: '{record?.of /* c */ / 2}'\nto: [user_ana]"),
-    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+    expected: [{ code: "invalid-template", path: at("/do/0/notify") }],
   },
   {
     name: "a comment inside an optional property, before a division",
     item: withStep("notify: '{record?./* c */of / 2}'\nto: [user_ana]"),
-    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+    expected: [{ code: "invalid-template", path: at("/do/0/notify") }],
+  },
+  {
+    name: "many comments after an optional chain",
+    item: withStep(`notify: '{record?.${"/*c*/".repeat(30)}@}'\nto: [user_ana]`),
+    expected: [{ code: "invalid-template", path: at("/do/0/notify") }],
   },
   {
     name: "an unclosed template expression",
