@@ -290,10 +290,13 @@ export async function listFiles(
   return { files: entries, folders };
 }
 
+// An existing file at the path is left as it is. By default the create then
+// succeeds; with `exclusive` it rejects with the EEXIST error.
 export async function createFile(
   rootPath: string,
   relativePath: string,
   initialText: string,
+  options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
@@ -326,7 +329,9 @@ export async function createFile(
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
   await writeFile(target, initialText, { flag: "wx" }).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
   });
   return validated.normalized;
 }

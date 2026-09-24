@@ -230,7 +230,7 @@ describe("PluginAutomations", () => {
     ).toBeUndefined();
   });
 
-  it("exposes the run's authority — automation id, owner, depth + 1 — only while the handler runs, and only to its own plugin", async () => {
+  it("exposes the run's authority — automation id, owner, depth + 1, attempt — only while the handler runs, and only to its own plugin", async () => {
     const h = harness({
       runOnPlugin: async () => {
         const run = h.automations.activeRun({
@@ -242,6 +242,7 @@ describe("PluginAutomations", () => {
           automationId: "hello-plugin/triage",
           onBehalfOf: "local",
           depth: 1,
+          attempt: 1,
           writes: 0,
         });
         // Another plugin naming this claim resolves nothing.

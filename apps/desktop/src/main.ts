@@ -257,6 +257,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
+import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
@@ -3063,9 +3064,11 @@ async function requirePluginEngineCaptureForOperation(
 }
 
 // Workspace authority for one collection write: a writable workspace with a
-// running engine capture, plus the local engine adapter the adoption wait
-// reads through. Collection writes land on the physical workspace's own
-// engine (a received share view is refused as read-only before this).
+// running engine capture, plus the local engine adapter and capture
+// announcements the adoption wait reads through. Collection writes land on
+// the physical workspace's own engine (a received share view is refused as
+// read-only before this). Without a caller's signal, the write lives as long
+// as the workspace operation.
 async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
   editSignal?: AbortSignal,
@@ -3077,7 +3080,12 @@ async function collectionEditContextFor(
     capture,
     workspaceRoot: workspace.rootPath,
     withAdapter: (work) => withEngineAdapter(workspace, work),
-    ...(editSignal ? { signal: editSignal } : {}),
+    onCaptureSettled: (listener) => {
+      const daemon = desktopEngine.daemon;
+      if (!daemon) throw new Error("The workspace engine is not running.");
+      return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
+    },
+    signal: editSignal ?? operation.signal,
   };
 }
 
