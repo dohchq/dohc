@@ -2069,7 +2069,7 @@ export function DesktopWorkspaceShell(props: {
           }
           reportShellFailure({
             message:
-              "dohc did not open the file picker, because the shared view has not refreshed. Refresh it, then import the files that are still missing.",
+              "dohc did not start the import. Refresh the shared view before you import the files that are still missing.",
             kind: "import-files",
           });
         });

@@ -15408,7 +15408,7 @@ describe("file transfers", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-        "dohc did not open the file picker, because the shared view has not refreshed.",
+        "dohc did not start the import. Refresh the shared view before you import",
       ),
     );
     expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
@@ -15447,7 +15447,7 @@ describe("file transfers", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-        "dohc did not open the file picker, because the shared view has not refreshed.",
+        "dohc did not start the import. Refresh the shared view before you import",
       ),
     );
     expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
