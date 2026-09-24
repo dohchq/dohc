@@ -62,6 +62,7 @@ function seedStoredDraft(): void {
 // what it asserts on.
 function stubBridge(overrides: Record<string, unknown> = {}): void {
   vi.stubGlobal("dohcDesktop", {
+    platform: "linux" as const,
     onExitRound: () => () => undefined,
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,

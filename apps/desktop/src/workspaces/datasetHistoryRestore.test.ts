@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -11,7 +11,6 @@ import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetHistoryRestore } from "./datasetHistoryRestore";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
-vi.setConfig({ testTimeout: 20_000 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",

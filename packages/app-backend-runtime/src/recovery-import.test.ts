@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal, type DatasetCursor } from "./journal";
@@ -15,7 +15,6 @@ import { createRecoveryInstaller } from "./recovery-install";
 import { createDatasetAttempts, cancelDatasetAttempt, reviewDatasetAttempts, assertDatasetAttemptNotCancelled } from "./dataset-attempts";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
-vi.setConfig({ testTimeout: 30_000 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const schemaSql = "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL);";
 const source = "globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items')}};";
@@ -174,7 +173,7 @@ it("retains a marker-free materialized head for a fresh target epoch",async()=>{
   }finally{materialized.close();}
   const sha=createHash("sha256");for await(const chunk of readValidatedBlob(valid.headCheckpoint.blob))sha.update(chunk);
   expect(sha.digest("hex")).toBe(valid.headCheckpoint.sha256);expect(valid.headCheckpoint.cursor).toEqual(f.head());await valid.dispose();
-}, 30_000);
+});
 it("rejects source tampering even after the transport hash is replaced",async()=>{
   const f=await fixture(),staged=await f.stage();await alter(staged,"artifact:source",()=>Buffer.from("globalThis.operations={};"));
   await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("source artifact");
@@ -190,7 +189,7 @@ it("rejects malformed original artifacts, truncated history, and a changed chain
     const staged=await f.stage();await alter(staged,"history",mutation);await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow();
     await expect(readdir(staged.directory)).rejects.toThrow();
   }
-}, 30_000);
+});
 it("rejects attached bytes whose metadata differs from the original association",async()=>{
   const f=await fixture(),fileId="receipt_file_0001",event=f.add("first",[fileId]);const staged=await f.stage({fileId,bytes:Uint8Array.of(1,2,3),revision:event.cursor.revision});
   await alter(staged,`attachment:${fileId}`,()=>Uint8Array.of(9,9,9) as Buffer);

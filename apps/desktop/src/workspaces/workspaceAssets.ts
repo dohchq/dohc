@@ -71,7 +71,7 @@ const IMAGE_ASSET_EXTENSIONS = new Set([
 
 /** Validate the image-attachment contract and return its canonical path. */
 export function normalizeWorkspaceImageAssetPath(relativePath: string): string {
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(
       `Invalid image attachment path (${validated.reason}): ${relativePath}`,
@@ -109,7 +109,7 @@ async function resolveWorkspaceFileTarget(
 }> {
   const validated =
     access === "read"
-      ? validateUserReadPath(relativePath)
+      ? validateUserReadPath(relativePath, { platform: process.platform })
       : validateUserWritePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
@@ -144,7 +144,7 @@ export async function resolveWorkspaceMaterializePath(
   rootPath: string,
   relativePath: string,
 ): Promise<WorkspaceMaterializePath> {
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(
       `Invalid materialize path (${validated.reason}): ${relativePath}`,
@@ -1116,7 +1116,7 @@ async function writeContainedFile(
   const { exclusive = false, signal, resolvedPathPolicy } = options;
   assertWriteNotAborted(signal);
   const label = kind === "asset" ? "Asset" : "Restore";
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
   }

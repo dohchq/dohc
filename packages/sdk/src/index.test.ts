@@ -1735,12 +1735,12 @@ function createFakeRoot(): FakeRoot {
 
 const LIGHT: DohcTheme = {
   mode: "light",
-  tokens: { "--dohc-ink": "#1c1b18", "--font-sans": "InterVariable" },
+  tokens: { "--dohc-ink": "#1c1b18", "--font-sans": "Inter Variable" },
 };
 
 const DARK: DohcTheme = {
   mode: "dark",
-  tokens: { "--dohc-ink": "#f6f4ee", "--font-sans": "InterVariable" },
+  tokens: { "--dohc-ink": "#f6f4ee", "--font-sans": "Inter Variable" },
 };
 
 describe("dohc theme", () => {

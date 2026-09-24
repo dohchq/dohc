@@ -19,4 +19,4 @@ it("recognizes a refusal crossing separately bundled public entrypoints",async()
     expect(error.refusal).toEqual({code:"full",message:"No spaces remain."});
     expect(isAppBackendRuntimeError(Object.assign(new Error("forged"),{name:"AppBackendRuntimeError",code:"operation_refused",refusal:{code:"invalid code",message:"bad"}}))).toBe(false);
   }finally{await worker.close();await rm(root,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
-},15_000);
+});

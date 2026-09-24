@@ -52,6 +52,12 @@ _Avoid_: workflow, zap, plugin automation
 A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
 _Avoid_: private step, owner step
 
+### Chat
+
+**Group**:
+A named space with members where people and agents post, chat, or both.
+_Avoid_: channel, room, space. An editor group is the split pane, not a Group.
+
 ### Sharing
 
 **Share**:
@@ -63,7 +69,7 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:

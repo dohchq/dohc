@@ -649,12 +649,15 @@ fn read_required_text(
     Some(text.to_owned())
 }
 
+// Mirrors isNormalizedRelativePath in @dohc/workspace-contracts. A colon is
+// refused on every host: on Windows, "C:x" names a drive and "a:x" a stream.
 fn is_workspace_relative_collection_path(value: &str) -> bool {
     canonical_workspace_path_meets_shared_bounds(value)
         && !value.is_empty()
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains('\\')
+        && !value.contains(':')
         && !value.chars().any(|character| character.is_control())
         && value
             .split('/')
@@ -1888,6 +1891,25 @@ pub fn collection_value_exceeds_depth(value: &Value, maximum: usize) -> bool {
         }
     }
     false
+}
+
+/// A changed field's value travels whole, on `record.*` events and on
+/// automation claims, up to this many bytes of stored JSON.
+pub const MAX_FIELD_FACT_VALUE_BYTES: usize = 8 * 1024;
+
+/// A traveling value nests inside its envelope, so it may use only the
+/// depth the wire's frame limit leaves for it.
+pub const MAX_FIELD_FACT_VALUE_DEPTH: usize = 16;
+
+/// One stored field value parsed to travel whole, or `None` when it is
+/// larger or deeper than the bounds above. History keeps every value whole;
+/// the bounds cover the transport, not the data.
+pub fn field_fact_value(json: &str) -> Option<Value> {
+    if json.len() > MAX_FIELD_FACT_VALUE_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    (!collection_value_exceeds_depth(&value, MAX_FIELD_FACT_VALUE_DEPTH)).then_some(value)
 }
 
 fn json_text(value: &Value) -> Result<String, crate::DomainError> {
