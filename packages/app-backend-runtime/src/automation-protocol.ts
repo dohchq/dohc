@@ -1,17 +1,32 @@
 import type { JsonValue } from "./protocol.js";
 
+const KiB = 1024, MiB = 1024 * KiB;
+
 /**
  * Automation evaluation limits, each no looser than its dataset guest counterpart in `DEFAULT_LIMITS`.
- * Memory covers one request: one run's formulas, or one code step. The scope is host data, like `queryBytes`.
+ * The scope is host data, like `queryBytes`.
  */
 export const AUTOMATION_LIMITS = Object.freeze({
+  /** Processor time for one formula, including its fresh context. */
   formulaMs: 100,
+  /** Processor time for one code step. */
   codeMs: 1000,
-  memoryBytes: 16 * 1024 * 1024,
-  stackBytes: 256 * 1024,
-  sourceBytes: 64 * 1024,
-  scopeBytes: 256 * 1024,
-  resultBytes: 64 * 1024,
+  /** Wall time for one request, like the dataset guest's `deadlineMs`. Items it does not reach time out. */
+  requestMs: 8000,
+  /**
+   * The worker's whole WebAssembly memory. QuickJS itself uses about 7 MiB, so one formula or code step
+   * can use about 17 MiB, less its scope. QuickJS's own memory limit cannot measure allocations in this
+   * build, so this cap is the bound.
+   */
+  memoryBytes: 24 * MiB,
+  stackBytes: 256 * KiB,
+  /** One expression, code step, or message text's parts together. */
+  sourceBytes: 64 * KiB,
+  textParts: 1024,
+  scopeBytes: 256 * KiB,
+  resultBytes: 64 * KiB,
+  /** How deeply a result's lists and objects can nest. */
+  resultDepth: 64,
   formulasPerBatch: 64,
 });
 
@@ -67,11 +82,19 @@ export interface CodeStepReturn {
   output?: JsonValue;
 }
 
-export type AutomationWorkerRequest = { scope: AutomationScope } & (
-  | { kind: "formulas"; formulas: AutomationFormula[] }
-  | { kind: "code"; source: string }
-);
+export type AutomationWorkerItem = AutomationFormula | { kind: "code"; source: string };
+export type AutomationWorkerRequest = { scope: AutomationScope; items: AutomationWorkerItem[] };
+/**
+ * The worker answers each item in order with `result`. It sends `restart` after an item that broke its
+ * QuickJS module, and `refused` instead of any result when the scope binds a name QuickJS already defines.
+ */
 export type AutomationWorkerReply =
   | { kind: "ready" }
-  | { kind: "formulas"; results: AutomationOutcome<JsonValue>[] }
-  | { kind: "code"; result: AutomationOutcome<CodeStepReturn> };
+  | { kind: "result"; result: AutomationOutcome<JsonValue> }
+  | { kind: "restart" }
+  | { kind: "refused"; message: string };
+
+export const subjectOf = (item: { kind: AutomationWorkerItem["kind"] }) => item.kind === "code" ? "The code" : "The formula";
+export const itemLimitMs = (item: { kind: AutomationWorkerItem["kind"] }) =>
+  item.kind === "code" ? AUTOMATION_LIMITS.codeMs : AUTOMATION_LIMITS.formulaMs;
+export const failure = (code: AutomationErrorCode, message: string) => ({ ok: false, error: { code, message } }) as const;

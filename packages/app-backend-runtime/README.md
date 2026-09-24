@@ -240,28 +240,38 @@ const step = await evaluator.runCode(scope, 'return { set: { "Finished on": ctx.
 ### Isolation
 
 Evaluation runs in a worker thread, so it never blocks the caller's thread. Requests run one at a time.
-Each request gets a fresh QuickJS runtime with the dataset guest's controls: no network, files, module loader, host objects, or asynchronous work.
-One run's formulas share one context and one scope. Before the first formula runs, the evaluator freezes the scope, the helpers, the global object, and the global built-ins with their prototypes.
-A formula therefore cannot change what a later formula sees through them. A code step runs alone in its own request.
+Each formula and each code step gets its own QuickJS runtime and context with the dataset guest's controls: no network, files, module loader, host objects, or asynchronous work.
+A formula therefore cannot change what a later formula in the run sees. The evaluator also freezes the scope, the helpers, the global object, and the global built-ins with their prototypes.
 
 A worker thread is enough because evaluation runs only JavaScript and WebAssembly. The dataset guest uses a child process because it also runs SQLite.
-The worker exits after 30 seconds without work, which returns its QuickJS memory. The next request starts a new one.
+The worker's WebAssembly memory is capped at 24 MiB. QuickJS uses about 7 MiB of it, so one formula or code step can use about 17 MiB, less its scope.
+QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound. The worker adds about 15 MB to its process when idle and about 28 MB at the cap.
+The worker exits after 30 seconds without work, which returns that memory. The next request starts a new one.
 Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten` dependency and pass that file as `entryPath`.
 
 | Limit | Value | Dataset guest |
 |---|---|---|
 | Processor time for one formula | 100 ms | none |
 | Processor time for one code step | 1 s | 1 s of wall time for one operation |
-| Memory for one request | 16 MiB | 16 MiB for one operation |
+| Wall time for one request | 8 s | 8 s for one operation |
+| Memory for one formula or code step | about 17 MiB, from a 24 MiB cap | 16 MiB for one operation |
 | Stack | 256 KiB | 256 KiB |
 | Source of one formula or code step | 64 KiB | 256 KiB |
-| Result of one formula or code step, as JSON | 64 KiB | 256 KiB |
+| Parts of one message text | 1,024 | none |
+| Result of one formula or code step, as JSON | 64 KiB, nested at most 64 levels | 256 KiB |
 | Scope, as JSON | 256 KiB | 256 KiB of query results |
 | Formulas in one request | 64 | none |
+| Requests waiting or running | 16 | 8 operations running |
 
 The time limits count the worker thread's processor time, so a busy computer slows evaluation without stopping it.
 QuickJS checks them between bytecodes, so native work such as converting a huge BigInt to text can run past them.
-A watchdog replaces the worker when a request runs 2 seconds of wall time past its limits. That request's results are timeout errors.
+A result that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds of wall time past its limit.
+That formula times out and a new worker evaluates the ones after it. Formulas that the request reaches after 8 seconds time out without running.
+When 16 requests are waiting or running, a new request rejects at once instead of waiting.
+
+The scope and formulas must be plain JSON data: no functions, class instances, dates, maps, or cycles.
+Before the caller's thread copies anything to the worker, the evaluator refuses an oversized source, message text, or scope as `too_large`.
+It counts string lengths, which are lower bounds of UTF-8 sizes, and stops counting at the limit. The worker measures exact sizes.
 
 ### Scope
 
@@ -275,7 +285,7 @@ A watchdog replaces the worker when a request runs 2 seconds of wall time past i
 | `now` | The host passes the run's time as ISO 8601 with the running computer's UTC offset. Formulas read it through `now()` and `today()` |
 
 The host also passes `bindings`: earlier step results, each under the name its step binds with `as`.
-A formula reads each one as a name of its own, such as `tasks.length`. A binding cannot use a name in `AUTOMATION_SCOPE_NAMES`.
+A formula reads each one as a name of its own, such as `tasks.length`. A binding cannot use a name in `AUTOMATION_SCOPE_NAMES` or a QuickJS global, such as `Math`.
 Formulas use all these names directly. A code step reads them and the helpers from `ctx`, such as `ctx.record`, `ctx.tasks`, and `ctx.today()`.
 Everything in the scope is frozen, so an assignment fails with a `TypeError`.
 
@@ -337,7 +347,7 @@ The message is written for the person who reads the run.
 | `timeout` | It ran past its time limit |
 | `memory` | It used more memory or stack than the limits allow |
 | `too_large` | Its source, the scope, or its result is over its size limit |
-| `invalid_result` | It gave a function, a promise, a value JSON cannot hold, or a code step result of another shape |
+| `invalid_result` | It gave a function, a promise, a value JSON cannot hold, a value nested too deeply, or a code step result of another shape |
 
-The promise rejects only for executor mistakes and worker failures.
-Executor mistakes include more than 64 formulas, a malformed formula, a `now` without a valid UTC offset, a binding under a name the scope owns, and a call after `close`.
+The promise rejects for executor mistakes, a full queue, and a worker that cannot start.
+Executor mistakes include more than 64 formulas, a malformed formula, a scope that cannot be copied, such as one holding a function, a `now` without a valid UTC offset, a binding under a name the scope or QuickJS owns, and a call after `close`.

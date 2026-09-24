@@ -1,6 +1,9 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_LIMITS, createAutomationEvaluator } from "./automation.ts";
-import type { AutomationFormula, AutomationScope, AutomationTextPart } from "./automation.ts";
+import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject } from "./automation.ts";
 
 const threads = vi.hoisted(() => ({ started: 0, terminated: 0 }));
 vi.mock("node:worker_threads", async importOriginal => {
@@ -56,13 +59,14 @@ describe("formula helpers", () => {
   it("explains a date it cannot use", async () => {
     expect(await values([
       'dateAdd("2026-09-24", 1.5, "days")', 'dateAdd("2026-09-24", 1, "fortnights")', 'dateAdd("24/09/2026", 1, "days")',
-      'dateAdd("2026-02-30", 1, "days")', 'dateAdd("9999-12-31", 1, "day")',
+      'dateAdd("2026-02-30", 1, "days")', 'dateAdd("9999-12-31", 1, "day")', 'dateAdd("2026-09-24", 1e20, "days")',
+      'dateAdd("2026-09-24", -1e20, "days")', 'dateAdd("2026-09-24", 1e15, "months")', 'dateAdd(now(), -1e300, "hours")',
     ])).toEqual([
       { code: "runtime", message: "TypeError: dateAdd needs a whole number to add, such as 3." },
       { code: "runtime", message: "TypeError: dateAdd needs a unit: years, quarters, months, weeks, days, hours, or minutes." },
       { code: "runtime", message: "TypeError: dateAdd needs a date such as 2026-09-24 or 2026-09-24T09:30:00Z." },
       { code: "runtime", message: "RangeError: dateAdd needs a real date. 2026-02-30 is not one." },
-      { code: "runtime", message: "RangeError: dateAdd went outside the years 0000 to 9999." },
+      ...Array.from({ length: 5 }, () => ({ code: "runtime", message: "RangeError: dateAdd went outside the years 0000 to 9999." })),
     ]);
   });
 
@@ -106,13 +110,13 @@ describe("formula helpers", () => {
       "sum(1, 2, 3)", 'sum([1, 2], 3, null, "")', "sum()", 'sum("3")',
       "min(3, [1, 2])", "max(3, [1, 5])", "min()", "max(null)",
       "round(2.5)", "round(1.005, 2)", "round(1234, -2)", "round(-2.5)", "round(null)", 'round("1")', "round(1, 1.5)",
-      "round(record.Price * record.Quantity, 2)",
+      "round(record.Price * record.Quantity, 2)", "round(1e308, 2)", "round(-1e308, 2)", "round(1.7976931348623157e308, 15)", "round(1e-320, 15)",
     ])).toEqual([
       6, 6, 0, { code: "runtime", message: "TypeError: sum needs numbers." },
       1, 5, null, null,
       3, 1.01, 1200, -2, null, { code: "runtime", message: "TypeError: round needs a number." },
       { code: "runtime", message: "RangeError: round needs a whole number of places from -15 to 15." },
-      37.5,
+      37.5, 1e308, -1e308, 1.7976931348623157e308, 0,
     ]);
   });
 });
@@ -127,10 +131,6 @@ describe("formulas", () => {
     expect(await evaluator.evaluate(added, [expression("previous.Name"), expression("person"), expression("typeof total")])).toEqual([
       { ok: true, value: null }, { ok: true, value: null }, { ok: true, value: "undefined" },
     ]);
-    const shadowing = { ...scope, bindings: { Math: 3, JSON: "text", Object: null } };
-    expect(await evaluator.evaluate(shadowing, [expression("Math + 1"), expression("round(2.5)"), expression("JSON"), expression('join(["a", "b"])')])).toEqual([
-      { ok: true, value: 4 }, { ok: true, value: 3 }, { ok: true, value: "text" }, { ok: true, value: "a, b" },
-    ]);
     const posted = { trigger: { kind: "group-message", group: "Trip" }, message: { text: "/task Buy tickets" }, person: null, now: scope.now };
     expect(await evaluator.evaluate(posted, [expression("message.text"), expression("record")])).toEqual([
       { ok: true, value: "/task Buy tickets" }, { ok: true, value: null },
@@ -144,11 +144,17 @@ describe("formulas", () => {
   });
 
   it("cannot change what later formulas in the run see", async () => {
-    expect(await values(["(Array.prototype.first = 1, 1)", "(globalThis.leak = 1, 1)", "(JSON.stringify = () => 'x', 1)", "[].first", "typeof leak", "JSON.stringify([1])"]))
-      .toEqual([
-        expect.objectContaining({ code: "runtime" }), expect.objectContaining({ code: "runtime" }), expect.objectContaining({ code: "runtime" }),
-        null, "undefined", "[1]",
-      ]);
+    expect(await values([
+      // Each formula has its own context, so a change to a prototype that no global reaches stays in its formula.
+      "(Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true }; }, 1)", "sum(1, 2, 3)", "[...record.Tags]",
+      "(Object.getPrototypeOf(Uint8Array.prototype).fill = () => 0, 1)", "Array.from(new Uint8Array(2).fill(7))",
+      // The global built-ins, their prototypes, and the global object are frozen.
+      "(Array.prototype.first = 1, 1)", "(globalThis.leak = 1, 1)", "(JSON.stringify = () => 'x', 1)", "[].first", "typeof leak", "JSON.stringify([1])",
+    ])).toEqual([
+      1, 6, ["trip", "urgent"], 1, [7, 7],
+      expect.objectContaining({ code: "runtime" }), expect.objectContaining({ code: "runtime" }), expect.objectContaining({ code: "runtime" }),
+      null, "undefined", "[1]",
+    ]);
   });
 
   it("fill message text with values", async () => {
@@ -185,8 +191,12 @@ describe("formulas", () => {
     await expect(evaluator.evaluate(scope, [{ kind: "code" as "expression", source: "1" }])).rejects.toThrow("not an expression or message text");
     await expect(evaluator.evaluate(scope, [{ kind: "text", parts: [{ kind: "expression", text: "1" } as unknown as AutomationTextPart] }]))
       .rejects.toThrow("not an expression or message text");
-    for (const name of ["record", "today", "now", "message", "undefined", "not-a-name"]) {
+    for (const name of ["record", "today", "now", "message", "not-a-name"]) {
       await expect(evaluator.evaluate({ ...scope, bindings: { [name]: 1 } }, [expression("1")])).rejects.toThrow(`cannot bind the name "${name}"`);
+    }
+    for (const name of ["Math", "JSON", "Object", "Array", "undefined", "AggregateError", "globalThis"]) {
+      await expect(evaluator.evaluate({ ...scope, bindings: { [name]: 1 } }, [expression("1")]))
+        .rejects.toThrow(`The step result name "${name}" belongs to a JavaScript built-in.`);
     }
     expect(await evaluator.evaluate(scope, [])).toEqual([]);
   });
@@ -269,11 +279,16 @@ describe("limits", () => {
   });
 
   it("stop memory use at the limit", async () => {
-    expect(await values(['"x".repeat(1 << 25).length', "new Array(1e7).fill(0).length", "(function f() { return f() })()"])).toEqual([
-      { code: "memory", message: "The formula used more memory than it is allowed, so it stopped." },
-      { code: "memory", message: "The formula used more memory than it is allowed, so it stopped." },
-      { code: "memory", message: "The formula nested its calls too deeply, so it stopped." },
-    ]);
+    const memory = { code: "memory", message: "The formula used more memory than it is allowed, so it stopped." };
+    const before = process.memoryUsage().rss;
+    expect(await values([
+      // Each allocation is under 16 MiB. Together they would take 1.5 GB without the worker's capped memory.
+      "(() => { const k = []; for (let i = 0; i < 100; i++) k.push(new Uint8Array(15e6).fill(1)); return k.length })()",
+      "(() => { const k = []; for (let i = 0; i < 1000; i++) k.push(new Uint8Array(1 << 20).fill(1)); return k.length })()",
+      '"x".repeat(1 << 25).length', "new Array(1e7).fill(0).length", "(function f() { return f() })()",
+      "new Uint8Array(12 << 20).fill(1).length",
+    ])).toEqual([memory, memory, memory, memory, { code: "memory", message: "The formula nested its calls too deeply, so it stopped." }, 12 << 20]);
+    expect(process.memoryUsage().rss - before).toBeLessThan(256 * 1024 * 1024);
     expect(await evaluator.runCode(scope, "const rows = []; for (;;) rows.push({ rows });")).toEqual({ ok: false, error: expect.objectContaining({ code: "memory" }) });
     expect(await value('"x".repeat(1 << 20).length')).toEqual({ ok: true, value: 1 << 20 });
   });
@@ -291,12 +306,36 @@ describe("limits", () => {
     expect(await value(`"x".repeat(${AUTOMATION_LIMITS.resultBytes - 100})`)).toEqual({ ok: true, value: "x".repeat(AUTOMATION_LIMITS.resultBytes - 100) });
   });
 
-  it("replace a worker that stops answering", async () => {
+  it("refuse results nested too deeply", async () => {
+    const nested = (depth: number) => `(() => { let v = 1; for (let i = 0; i < ${depth}; i++) v = [v]; return v; })()`;
+    const [deepest, tooDeep, crossing, crashing] = await evaluator.evaluate(scope, [64, 65, 3000, 12000].map(depth => expression(nested(depth))));
+    expect(deepest!.ok).toBe(true);
+    const tooDeepError = { code: "invalid_result", message: `The formula nested lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.` };
+    expect([tooDeep, crossing]).toEqual([{ ok: false, error: tooDeepError }, { ok: false, error: tooDeepError }]);
+    expect(crashing!.ok).toBe(false);
+    expect(await evaluator.runCode(scope, `return { output: ${nested(100)} };`)).toEqual({ ok: false, error: expect.objectContaining({ code: "invalid_result" }) });
+  });
+
+  it("stop native work that finishes past its limit", async () => {
     const started = threads.started;
     // QuickJS checks its interrupt handler between bytecodes, not while native code converts a huge BigInt.
-    expect(await value("Array(16).fill(1n << 1048000n).map(String).length")).toEqual({ ok: false, error: { code: "timeout", message: expect.any(String) } });
-    expect(await value("1 + 1")).toEqual({ ok: true, value: 2 });
+    expect(await value("String(1n << 300000n).length")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
+    expect(threads.started).toBe(started);
+  });
+
+  it("replace a worker that stops answering and finish the run on a new one", async () => {
+    const started = threads.started;
+    const [stuck, next, last] = await evaluator.evaluate(scope, [expression("Array(16).fill(1n << 1048000n).map(String).length"), expression("1 + 1"), expression("2 + 2")]);
+    expect(stuck).toEqual({ ok: false, error: { code: "timeout", message: expect.stringContaining(`${AUTOMATION_LIMITS.formulaMs} ms`) } });
+    expect([next, last]).toEqual([{ ok: true, value: 2 }, { ok: true, value: 4 }]);
     expect(threads.started).toBe(started + 1);
+  }, 60_000);
+
+  it("stop a run at its total time limit", async () => {
+    const stuck = expression("Array(16).fill(1n << 1048000n).map(String).length");
+    const results = await evaluator.evaluate(scope, [stuck, stuck, stuck, stuck, stuck, expression("1 + 1")]);
+    expect(results.every(result => !result.ok && result.error.code === "timeout")).toBe(true);
+    expect(results.at(-1)).toEqual({ ok: false, error: { code: "timeout", message: `The formula did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.` } });
   }, 60_000);
 });
 
@@ -306,6 +345,67 @@ describe("evaluator lifetime", () => {
   it("answers requests in order", async () => {
     const results = await Promise.all([1, 2, 3].map(number => value(`${number} * 2`)));
     expect(results).toEqual([{ ok: true, value: 2 }, { ok: true, value: 4 }, { ok: true, value: 6 }]);
+  });
+
+  it("refuses a run when 16 are already waiting", async () => {
+    const waiting = Array.from({ length: 16 }, (_, index) => value(`${index}`));
+    await expect(value("16")).rejects.toThrow("already has 16 runs waiting");
+    expect(await Promise.all(waiting)).toEqual(Array.from({ length: 16 }, (_, index) => ({ ok: true, value: index })));
+  });
+
+  it("refuses oversized input without copying it to a worker", async () => {
+    const fresh = createAutomationEvaluator();
+    try {
+      const cyclic: JsonObject = {};
+      cyclic.self = cyclic;
+      const tooLarge = { ok: false, error: { code: "too_large", message: "The record and step results are larger than 256 KiB." } };
+      expect(await fresh.evaluate({ ...scope, record: cyclic }, [expression("1")])).toEqual([tooLarge]);
+      expect(await fresh.evaluate({ ...scope, record: { Notes: "x".repeat(AUTOMATION_LIMITS.scopeBytes) } }, [expression("1")])).toEqual([tooLarge]);
+      expect(await fresh.evaluate({ ...scope, record: { Rows: Array.from({ length: AUTOMATION_LIMITS.scopeBytes }, () => 0) } }, [expression("1")])).toEqual([tooLarge]);
+      expect(await fresh.evaluate(scope, [expression("1".repeat(AUTOMATION_LIMITS.sourceBytes + 1))]))
+        .toEqual([{ ok: false, error: { code: "too_large", message: "The formula is longer than 64 KiB." } }]);
+      const parts = Array.from({ length: AUTOMATION_LIMITS.textParts + 1 }, (): AutomationTextPart => ({ kind: "text", text: "a" }));
+      expect(await fresh.evaluate(scope, [{ kind: "text", parts }]))
+        .toEqual([{ ok: false, error: { code: "too_large", message: "The message has more than 1024 parts." } }]);
+      expect(await fresh.runCode(scope, "x".repeat(AUTOMATION_LIMITS.sourceBytes + 1)))
+        .toEqual({ ok: false, error: { code: "too_large", message: "The code is longer than 64 KiB." } });
+      expect(threads.started).toBe(0);
+    } finally { await fresh.close(); }
+  });
+
+  it("fails one item for a reply it cannot read, and moves on after a worker asks to restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "dohc-automation-worker-"));
+    const entryPath = join(directory, "worker.mjs");
+    // A stand-in worker: "deep" answers with a value too deeply nested to copy, and "restart" asks for a new worker.
+    await writeFile(entryPath, `import { parentPort } from "node:worker_threads";
+      const reply = message => parentPort.postMessage(message);
+      parentPort.on("message", ({ items }) => {
+        for (const item of items) {
+          if (item.source === "deep") {
+            let v = 1;
+            for (let i = 0; i < 3000; i++) v = [v];
+            reply({ kind: "result", result: { ok: true, value: v } });
+          } else if (item.source === "restart") {
+            reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } } });
+            return reply({ kind: "restart" });
+          } else reply({ kind: "result", result: { ok: true, value: item.source } });
+        }
+      });
+      reply({ kind: "ready" });`);
+    const standIn = createAutomationEvaluator({ entryPath });
+    try {
+      expect(await standIn.evaluate(scope, ["a", "deep", "b", "restart", "c"].map(expression))).toEqual([
+        { ok: true, value: "a" },
+        { ok: false, error: { code: "invalid_result", message: "The formula produced a value that cannot be read." } },
+        { ok: true, value: "b" },
+        { ok: false, error: { code: "memory", message: "Broken." } },
+        { ok: true, value: "c" },
+      ]);
+      expect(threads.started).toBe(2);
+    } finally {
+      await standIn.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("stops an idle worker and starts another when needed", async () => {

@@ -14,16 +14,15 @@ type GuestTextPart = { kind: "text"; text: string } | { kind: "expression"; expr
 export type GuestKind = "expression" | "text" | "code";
 
 /**
- * Prepares one run's scope inside a fresh QuickJS context. The returned function evaluates one formula
- * or code step against that scope and returns the outcome as JSON. For `text`, `source` is the parts as JSON.
+ * Evaluates one formula or code step inside a fresh QuickJS context and returns the outcome as JSON.
+ * For `text`, `source` is the parts as JSON. A reply longer than `resultChars` reports `too_large`.
  * The worker sends this function's source text to the guest, so it must not use anything declared outside it.
- * The client validates `scope.now` and the binding names before the call.
+ * The client validates `scope.now` and the worker refuses bindings named after globals before the call.
  */
-export function automationGuest(scopeJson: string): (kind: GuestKind, source: string) => string {
-  // Bound step results become globals and can take a built-in's name, so the guest keeps its own references.
-  const global = globalThis;
-  const { Array, Date, Error, Function, JSON, Math, Number, Object, RangeError, String, TypeError } = global;
+export function automationGuest(scopeJson: string, kind: GuestKind, source: string, resultChars: number): string {
   const freeze = Object.freeze, isArray = Array.isArray, stringify = JSON.stringify;
+  const subject = kind === "code" ? "The code" : "The formula";
+  const fail = (code: string, message: string) => stringify({ ok: false, error: { code, message } });
   const deepFreeze = <T>(value: T): T => {
     if (value && typeof value === "object") {
       for (const key of Object.keys(value)) deepFreeze((value as Record<string, unknown>)[key]);
@@ -31,7 +30,12 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
     }
     return value;
   };
-  const scope = JSON.parse(scopeJson) as GuestScope;
+  let scope: GuestScope;
+  try {
+    scope = deepFreeze(JSON.parse(scopeJson) as GuestScope);
+  } catch {
+    return fail("too_large", "The record and step results are too large or too deeply nested to read.");
+  }
 
   // Dates are ISO strings. A calendar date (2026-09-24) has no offset. A date with a time
   // keeps its own offset; one written without an offset uses the offset of `now`.
@@ -67,7 +71,7 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
   const format = ({ wall, offset }: Moment, helper: string) => {
     const date = new Date(wall);
     const year = date.getUTCFullYear();
-    if (year < 0 || year > 9999) throw new RangeError(`${helper} went outside the years 0000 to 9999.`);
+    if (!(year >= 0 && year <= 9999)) throw new RangeError(`${helper} went outside the years 0000 to 9999.`);
     const day = `${pad(year, 4)}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
     if (offset === null) return day;
     const zone = offset === 0 ? "Z" : `${offset < 0 ? "-" : "+"}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
@@ -178,31 +182,35 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
       if (value === null || value === undefined) return null;
       if (typeof value !== "number") throw new TypeError("round needs a number.");
       if (!Number.isInteger(places) || Math.abs(places as number) > 15) throw new RangeError("round needs a whole number of places from -15 to 15.");
-      return Number.isFinite(value) ? shift(Math.round(shift(value, places as number)), -(places as number)) : value;
+      const shifted = shift(value, places as number);
+      // A number too large to shift has no digits at that place, so it stays as it is.
+      return Number.isFinite(shifted) ? shift(Math.round(shifted), -(places as number)) : value;
     },
   });
   const names = {
-    record: deepFreeze(scope.record ?? null), previous: deepFreeze(scope.previous ?? {}), trigger: deepFreeze(scope.trigger),
-    person: deepFreeze(scope.person), message: deepFreeze(scope.message ?? null), ...deepFreeze(scope.bindings ?? {}), ...helpers,
+    record: scope.record ?? null, previous: scope.previous ?? {}, trigger: scope.trigger, person: scope.person,
+    message: scope.message ?? null, ...scope.bindings, ...helpers,
   };
 
-  // Formulas of one run share this context. Freezing the global built-ins and their prototypes keeps
-  // one formula from changing what the next one sees through them.
-  let sealed = false;
-  const seal = () => {
-    if (sealed) return;
-    sealed = true;
-    for (const [name, value] of Object.entries(names)) {
-      Object.defineProperty(global, name, { value, writable: false, enumerable: false, configurable: false });
-    }
-    for (const name of Object.getOwnPropertyNames(global)) {
-      const value: unknown = (global as Record<string, unknown>)[name];
-      if (typeof value === "function") freeze(value.prototype);
-      if (value !== null && (typeof value === "object" || typeof value === "function")) freeze(value);
-    }
-    freeze(global);
+  const describe = (error: unknown) => {
+    try {
+      if (typeof error === "string") return error.slice(0, 1024);
+      if (error instanceof Error) return `${String(error.name)}: ${String(error.message)}`.slice(0, 1024);
+    } catch { /* A thrown value's own getters can fail. */ }
+    return `${subject} threw a value that is not an error.`;
   };
-  const compile = (expression: string) => new Function(`"use strict"; return (${expression}\n);`) as () => unknown;
+  // QuickJS reports both limits as a catchable InternalError.
+  const failure = (error: unknown, code: string, prefix = "") => {
+    try {
+      if (error instanceof Error && error.name === "InternalError") {
+        if (error.message === "out of memory") return fail("memory", `${subject} used more memory than it is allowed, so it stopped.`);
+        if (error.message === "stack overflow") return fail("memory", `${subject} nested its calls too deeply, so it stopped.`);
+      }
+    } catch { /* A thrown value's own getters can fail. */ }
+    return fail(code, prefix + describe(error));
+  };
+  const compile = (expression: string) => new Function(`"use strict"; return (${expression}
+);`) as () => unknown;
   // Message text inserts each expression's value: a list as its items, an object as JSON, nothing for an empty value.
   const messageText = (json: string) => {
     const parts = (JSON.parse(json) as GuestTextPart[]).map(part => part.kind === "text" ? part.text : compile(part.expression));
@@ -215,60 +223,54 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
     }).join("");
   };
 
-  return (kind, source) => {
-    const subject = kind === "code" ? "The code" : "The formula";
-    const fail = (code: string, message: string) => stringify({ ok: false, error: { code, message } });
-    const describe = (error: unknown) => {
-      try {
-        if (typeof error === "string") return error.slice(0, 1024);
-        if (error instanceof Error) return `${String(error.name)}: ${String(error.message)}`.slice(0, 1024);
-      } catch { /* A thrown value's own getters can fail. */ }
-      return `${subject} threw a value that is not an error.`;
-    };
-    // QuickJS reports both limits as a catchable InternalError.
-    const failure = (error: unknown, code: string) => {
-      try {
-        if (error instanceof Error && error.name === "InternalError") {
-          if (error.message === "out of memory") return fail("memory", `${subject} used more memory than it is allowed, so it stopped.`);
-          if (error.message === "stack overflow") return fail("memory", `${subject} nested its calls too deeply, so it stopped.`);
-        }
-      } catch { /* A thrown value's own getters can fail. */ }
-      return fail(code, describe(error));
-    };
-
-    let run: () => unknown;
-    try {
-      if (kind === "code") {
-        const body = new Function("ctx", `"use strict";\n${source}\n`) as (ctx: unknown) => unknown;
-        const ctx = freeze(names);
-        run = () => body(ctx);
-      } else {
-        seal();
-        run = kind === "expression" ? compile(source) : messageText(source);
+  let run: () => unknown;
+  try {
+    // A formula reads the scope and helpers as globals; a code step reads them from `ctx`.
+    if (kind !== "code") {
+      for (const [name, value] of Object.entries(names)) {
+        Object.defineProperty(globalThis, name, { value, writable: false, enumerable: false, configurable: false });
       }
-    } catch (error) {
-      return failure(error, "syntax");
     }
+    // Frozen built-ins keep authored code from changing what this function uses after that code runs.
+    for (const name of Object.getOwnPropertyNames(globalThis)) {
+      const value: unknown = (globalThis as Record<string, unknown>)[name];
+      if (typeof value === "function") freeze(value.prototype);
+      if (value !== null && (typeof value === "object" || typeof value === "function")) freeze(value);
+    }
+    freeze(globalThis);
+    if (kind === "code") {
+      const body = new Function("ctx", `"use strict";
+${source}
+`) as (ctx: unknown) => unknown;
+      const ctx = freeze(names);
+      run = () => body(ctx);
+    } else {
+      run = kind === "expression" ? compile(source) : messageText(source);
+    }
+  } catch (error) {
+    return failure(error, "syntax");
+  }
 
-    let value: unknown;
-    try {
-      value = run();
-      if (value !== null && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function") {
-        return fail("invalid_result", `${subject} must finish without waiting. Remove async and await.`);
-      }
-    } catch (error) {
-      return failure(error, "runtime");
+  let value: unknown;
+  try {
+    value = run();
+    if (value !== null && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function") {
+      return fail("invalid_result", `${subject} must finish without waiting. Remove async and await.`);
     }
-    // A code step that returns nothing asks for nothing. A formula without a value is empty.
-    if (kind === "code") value ??= {};
-    else if (value === undefined) value = null;
-    if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
-      return fail("invalid_result", `${subject} must produce text, a number, true or false, a list, or an object.`);
-    }
-    try {
-      return `{"ok":true,"value":${stringify(value)}}`;
-    } catch (error) {
-      return fail("invalid_result", `${subject} produced a value that cannot be saved. ${describe(error)}`);
-    }
-  };
+  } catch (error) {
+    return failure(error, "runtime");
+  }
+  // A code step that returns nothing asks for nothing. A formula without a value is empty.
+  if (kind === "code") value ??= {};
+  else if (value === undefined) value = null;
+  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    return fail("invalid_result", `${subject} must produce text, a number, true or false, a list, or an object.`);
+  }
+  let json: string;
+  try {
+    json = `{"ok":true,"value":${stringify(value)}}`;
+  } catch (error) {
+    return failure(error, "invalid_result", `${subject} produced a value that cannot be saved. `);
+  }
+  return json.length > resultChars ? fail("too_large", `${subject} produced more than ${resultChars / 1024} KiB.`) : json;
 }
