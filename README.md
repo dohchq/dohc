@@ -128,7 +128,7 @@ Electron, React, Vite, Tailwind CSS, Tiptap, Yjs, Rust, SQLite, Better Auth, Pos
 
 dohc uses [AGPL-3.0-only](LICENSE) by default, including the desktop app, Rust engine, services, and brand package. You may self-host under its terms. Distribution requires the applicable source and notices; modified versions offered over a network must offer corresponding source to their users.
 
-The [SDK](packages/sdk/LICENSE), shared libraries with their own MIT `LICENSE` files, [generated TypeScript protocol types](crates/dohc-engine-protocol/generated/ts/LICENSE), and [agent-chat plugin](apps/desktop/plugins/agent-chat/LICENSE) use MIT. These can be reused in proprietary software with the required notices. Their licenses do not relicense AGPL code they use. Third-party code retains its own licenses.
+The [SDK](packages/sdk/LICENSE), shared libraries with their own MIT `LICENSE` files, and [generated TypeScript protocol types](crates/dohc-engine-protocol/generated/ts/LICENSE) use MIT. These can be reused in proprietary software with the required notices. Their licenses do not relicense AGPL code they use. Third-party code retains its own licenses.
 
 Your files, documents, data, and independently authored apps keep their own licenses. Using dohc or its MIT SDK does not itself make your work AGPL. Copying or combining AGPL code may carry obligations under that license.
 

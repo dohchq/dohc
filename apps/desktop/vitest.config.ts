@@ -18,7 +18,7 @@ export default defineConfig({
     "react-dom": dirname(require.resolve("react-dom/package.json")),
   } },
   test: {
-    include: ["src/**/*.test.{ts,tsx}", "plugins/**/src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
     css: { include: [/[?&]raw(?:&|$)/] },
     // Fills jsdom's missing hit-testing APIs. See the file for why an absent
     // document.elementFromPoint failed whole runs rather than single tests.
