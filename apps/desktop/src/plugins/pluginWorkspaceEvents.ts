@@ -11,9 +11,9 @@ import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
  * How many workspace subscriptions one owner may hold, across file watches
  * and collection record subscriptions combined.
  *
- * Measured against the plugins this repo has: the codex and claude-code
- * drivers watch nothing, and the sites conversion this primitive exists for
- * watches one prefix — the workspace root — in place of its refresh button.
+ * Measured against real plugins: an agent driver watches nothing, and the
+ * sites conversion this primitive exists for watches one prefix, the
+ * workspace root, in place of its refresh button.
  * 16 leaves more than five times the largest measured healthy use of three.
  * A plugin process and each panel have separate budgets of 16, so neither
  * owner can starve another. An owner that needs more is a measurement to

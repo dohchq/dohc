@@ -1,10 +1,7 @@
 import { pluginKey } from "./pluginCatalog";
-import { AlertTriangle, Blocks, Search } from "lucide-react";
+import { AlertTriangle, Search } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import type {
-  OfferedPluginRecord,
-  PluginStatusRecord,
-} from "../../ipc/bridgeContract";
+import type { PluginStatusRecord } from "../../ipc/bridgeContract";
 import { EmptyState, SectionLabel, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { PluginIcon } from "./PluginIcon";
 import {
@@ -21,11 +18,11 @@ import {
 
 // The plugin browser, in the side panel behind the activity bar's Plugins
 // item. VS Code's Extensions view is the model: a filter box pinned at the
-// top, Installed above what the workspace merely offers, and one quiet row
+// top, Installed above what the workspace only holds, and one quiet row
 // per plugin. A row says what a plugin IS — icon, name, what it does, who
 // publishes it, folder, status — and opens the plugin's details tab, which is
 // where everything a plugin can DO lives. Install is the one exception: it
-// stays here so a workspace's offered plugins can be taken up without a
+// stays here so a plugin already in the workspace can be installed without a
 // detour.
 //
 // Every line below the name is optional, because every manifest field behind
@@ -44,7 +41,6 @@ export function PluginsView(props: {
   onOpenDetails: (pluginId: string, directoryName: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
-  const offersLoad = catalog.offersLoad;
   const [filter, setFilter] = useState("");
 
   const plugins = catalog.load.status === "ready" ? catalog.load.plugins : [];
@@ -54,11 +50,6 @@ export function PluginsView(props: {
   );
   const installedPlugins = matched.filter(isInstalled);
   const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
-  const offersReady = offersLoad.status === "ready" ? offersLoad.offers : [];
-  const offers = useMemo(
-    () => offersReady.filter((offer) => matchesFilter(offer, filter)),
-    [offersReady, filter],
-  );
 
   function renderRow(plugin: PluginStatusRecord) {
     const busyAction = catalog.busy[pluginKey(plugin)];
@@ -170,59 +161,6 @@ export function PluginsView(props: {
     );
   }
 
-  function renderOfferRow(offer: OfferedPluginRecord) {
-    const busy = catalog.offerBusy[offer.directoryName] === true;
-    const error = catalog.offerErrors[offer.directoryName];
-    return (
-      <li key={offer.directoryName} className="list-none">
-        <div
-          data-testid="plugin-offer-row"
-          data-plugin-directory={offer.directoryName}
-          className="flex items-center gap-1 rounded-md pr-1.5"
-        >
-          <div className="flex min-w-0 flex-1 items-center gap-2.5 px-1.5 py-1.5">
-            <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-bg text-subtle">
-              <Blocks size={15} strokeWidth={1.9} aria-hidden />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-medium text-ink">
-                {offer.displayName ?? offer.directoryName}
-              </span>
-              {offer.description ? (
-                <span className="mt-0.5 block truncate text-[11px] text-muted">
-                  {offer.description}
-                </span>
-              ) : null}
-              {offer.publisher ? (
-                <span className="mt-0.5 block truncate text-[11px] text-subtle">
-                  {offer.publisher}
-                </span>
-              ) : null}
-            </span>
-          </div>
-          <PrimaryButton size="compact"
-            type="button"
-            data-testid="plugin-offer-add"
-            disabled={busy}
-            onClick={() => catalog.addOffer(offer)}
-            className="shrink-0"
-          >
-            {actionLabel("add", busy)}
-          </PrimaryButton>
-        </div>
-        {error ? (
-          <p
-            data-testid="plugin-action-error"
-            role="alert"
-            className="m-0 px-1.5 pb-1 text-[11px] text-danger"
-          >
-            {error}
-          </p>
-        ) : null}
-      </li>
-    );
-  }
-
   const sections: { testId: string; label: string; rows: ReactNode[] }[] = [
     {
       testId: "plugins-section-installed",
@@ -233,11 +171,6 @@ export function PluginsView(props: {
       testId: "plugins-section-available",
       label: "Available in this workspace",
       rows: candidatePlugins.map(renderRow),
-    },
-    {
-      testId: "plugins-section-offered",
-      label: "Built in",
-      rows: offers.map(renderOfferRow),
     },
   ].filter((section) => section.rows.length > 0);
 
@@ -277,21 +210,14 @@ export function PluginsView(props: {
             Retry
           </SecondaryButton>
         </div>
-      ) : plugins.length === 0 && offersLoad.status === "loading" ? (
-        // A workspace with no plugins of its own still waits on the offers
-        // fetch: painting "No plugins yet" here would flash and then get
-        // replaced the instant the built-in rows arrive.
-        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-          Loading plugins…
-        </div>
-      ) : plugins.length === 0 && offersReady.length === 0 && offersLoad.status !== "error" ? (
+      ) : plugins.length === 0 ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
             title="No plugins yet"
             hint="Ask your agent to add a plugin folder under plugins/."
           />
         </div>
-      ) : matched.length === 0 && offers.length === 0 && offersLoad.status !== "error" ? (
+      ) : matched.length === 0 ? (
         <div data-testid="plugins-filter-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
             title={`No plugins match "${filter.trim()}"`}
@@ -310,22 +236,6 @@ export function PluginsView(props: {
               <ul className="m-0 flex list-none flex-col p-0">{section.rows}</ul>
             </section>
           ))}
-          {offersLoad.status === "error" ? (
-            <section
-              data-testid="plugins-offers-error"
-              className={sections.length > 0 ? "mt-4" : undefined}
-            >
-              <SectionLabel className="block px-2 pb-1">Built in</SectionLabel>
-              <div className="flex flex-col items-start gap-2 px-2 py-1.5">
-                <p role="alert" className="m-0 text-[11px] text-danger">
-                  {offersLoad.message}
-                </p>
-                <SecondaryButton size="compact" type="button" onClick={catalog.reload} >
-                  Retry
-                </SecondaryButton>
-              </div>
-            </section>
-          ) : null}
         </div>
       )}
     </div>

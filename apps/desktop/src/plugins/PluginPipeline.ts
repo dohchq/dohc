@@ -101,10 +101,9 @@ export type PluginPipelineStatusEvent =
   // all) never gets a status entry of its own — seeding only fires for one
   // that was already installed — so its arrival or departure names no
   // pluginId either "changed" or "removed" could carry.
-  // list() still shows it directly from discovery either way, and an
-  // offer still has to hide behind or return to it, so this names the
-  // one honest fact available: discovery itself changed, not which
-  // plugin.
+  // list() still shows it directly from discovery either way, so this
+  // names the one honest fact available: discovery itself changed, not
+  // which plugin.
   | { kind: "discovery-changed" }
   // Emitted only where the pipeline itself has proven a rename — the same
   // id reappearing at a new directory within one watcher batch
@@ -653,22 +652,6 @@ export class PluginPipeline {
       left.directoryName.localeCompare(right.directoryName) ||
       left.id.localeCompare(right.id)
     );
-  }
-
-  /**
-   * The directory (if any) whose discovery entry just lost a duplicate-id
-   * collision to `pluginId` — read from discovery's own structured
-   * supersededPluginId marker, never from list()'s wire-shaped status
-   * (that crosses ListPluginsResult's strict IPC schema, which has no room
-   * for an internal-only field) and never by scanning diagnostic text
-   * (bounded and re-worded for display, not a stable machine-checked
-   * signal). addOfferedPlugin's own handler uses this to detect its copy
-   * having won a collision another directory already held the id under.
-   */
-  findDirectorySupersededBy(pluginId: string): string | null {
-    return this.discovery.find(
-      (entry) => entry.supersededPluginId === pluginId,
-    )?.directoryName ?? null;
   }
 
   /**
@@ -2987,7 +2970,6 @@ export class PluginPipeline {
       iconPath: null,
       diagnostics: status.diagnostics,
       valid: status.valid,
-      supersededPluginId: null,
     };
   }
 
@@ -3510,7 +3492,6 @@ export class PluginPipeline {
           iconPath: null,
           diagnostics: current.diagnostics,
           valid: current.valid,
-          supersededPluginId: null,
         },
         { error, valid: current.valid },
       );

@@ -505,8 +505,8 @@ let autoUpdateController: AutoUpdateController | null = null;
 // executing module's own directory (dist/main at runtime, exactly like
 // the plugin runtime factory's sibling plugin-host.js resolution below), so two
 // levels up reaches apps/desktop deterministically regardless of how
-// Electron was launched. Both dev-mode resolvers below walk from here, so
-// this one call site is the only place that encodes that layout.
+// Electron was launched. Every dev-mode resolver walks from here, so this
+// one call site is the only place that encodes that layout.
 function desktopPackageRootInDev(): string {
   return join(import.meta.dirname, "..", "..");
 }
@@ -515,14 +515,6 @@ function pluginResourcesBasePath(): string {
   return app.isPackaged
     ? process.resourcesPath
     : join(desktopPackageRootInDev(), "resources");
-}
-
-function builtinPluginsRoot(): string {
-  // Packaged plugin sources live in extraResources as a plain directory,
-  // staged from the repo's checked-in apps/desktop/plugins (electron-builder.yml).
-  return app.isPackaged
-    ? join(process.resourcesPath, "builtin-plugins")
-    : join(desktopPackageRootInDev(), "plugins");
 }
 
 function notifyPluginStatusChanged(
@@ -4535,7 +4527,6 @@ function registerIpcHandlers(): void {
     runtimes: pluginWorkspaceRuntimes,
     surfaces: pluginSurfaces,
     platform: {
-      builtinPluginsRoot,
       createPanelHostLease: createPluginPanelSurfaceHostLease,
       createWebAppContainer: createPluginWebAppContainer,
       createWebAppHostLease: createPluginWebAppHostLease,

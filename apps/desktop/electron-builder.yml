@@ -73,13 +73,6 @@ extraResources:
     to: plugin-tools
     filter:
       - "**/*"
-  # The built-in driver plugin's source stays outside app.asar so main can read
-  # them through the same plain-directory resolver used for plugin tools.
-  - from: plugins/agent-chat
-    to: builtin-plugins/agent-chat
-    filter:
-      - "**/*"
-      - "!node_modules/**"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

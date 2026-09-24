@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type {
-  OfferedPluginRecord,
   PluginPipelineError,
   PluginStatusChangedEvent,
   PluginStatusRecord,
@@ -25,31 +24,17 @@ type PluginAction =
   | "approve"
   | "rebuild"
   | "preflight"
-  | "uninstall"
-  | "add";
+  | "uninstall";
 
-// install/disable/enable/approve go through runAction's shared dispatch and
-// error composition; add has its own bridge call and its own error copy
-// (named by the offer's title, not a pluginId), and preflight/uninstall
-// already run their own dedicated flows below.
-type RunnablePluginAction = Exclude<PluginAction, "preflight" | "uninstall" | "add">;
+// install/disable/enable/approve/rebuild go through runAction's shared
+// dispatch and error composition; preflight/uninstall run their own
+// dedicated flows below.
+type RunnablePluginAction = Exclude<PluginAction, "preflight" | "uninstall">;
 
 type PluginLoadState =
   | { status: "loading" }
   | { status: "ready"; plugins: PluginStatusRecord[] }
   | { status: "error"; message: string };
-
-// Tagged with the workspace it was fetched for. usePluginCatalog's own
-// epoch/token guards stop a stale response from a previous workspace being
-// applied, but a re-render can still observe this hook's state one paint
-// behind a workspaceId prop change (React commits the new props before the
-// effect that resets this state runs) — the render-time reader below checks
-// this tag against the current workspaceId argument rather than trusting
-// that ordering.
-type OfferedPluginLoadState =
-  | { status: "loading" }
-  | { status: "ready"; workspaceId: string; offers: OfferedPluginRecord[] }
-  | { status: "error"; workspaceId: string; message: string };
 
 type PluginUninstallConfirmation = {
   plugin: PluginStatusRecord;
@@ -87,28 +72,6 @@ function applyStatusEvents(
     }
     return upsertPlugin(current, pending.event.plugin);
   }, [...plugins]);
-}
-
-// Drops any key not in `keys`, returning the same reference when nothing
-// changed. An offer's directoryName can equal an installed plugin's id (a
-// built-in's manifest name always does), so offer state prunes itself
-// against its own list here rather than sharing a namespace an installed
-// row also reads from.
-function pruneToKeys<T>(
-  map: Record<string, T>,
-  keys: readonly string[],
-): Record<string, T> {
-  const keep = new Set(keys);
-  const next: Record<string, T> = {};
-  let changed = false;
-  for (const [key, value] of Object.entries(map)) {
-    if (keep.has(key)) {
-      next[key] = value;
-    } else {
-      changed = true;
-    }
-  }
-  return changed ? next : map;
 }
 
 export function statusText(plugin: PluginStatusRecord): string {
@@ -155,7 +118,6 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
       rebuild: "Retry build",
       preflight: "Uninstall",
       uninstall: "Uninstall plugin",
-      add: "Add",
     };
     return labels[action];
   }
@@ -167,7 +129,6 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
     rebuild: "Retrying build",
     preflight: "Checking",
     uninstall: "Uninstalling",
-    add: "Adding",
   };
   return labels[action];
 }
@@ -291,12 +252,11 @@ export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
   return canServeSurfaces(plugin) && openableWebApps(plugin).length > 0;
 }
 
-// The reverse of Add: a plugin the workspace has never approved has no
-// running state to undo, only real workspace files to delete — Install
-// requires a valid manifest to run, but undoing an add must not, or a
-// broken copy would have no way back at all. This is the one action that
-// mirrors Uninstall's confirm shape for a plugin Uninstall's own gate
-// (approvedHash !== null) never reaches.
+// A plugin the workspace has never approved has no running state to undo,
+// only real workspace files to delete. Install requires a valid manifest to
+// run, but removing must not, or a broken copy would have no way out at all.
+// This is the one action that mirrors Uninstall's confirm shape for a plugin
+// Uninstall's own gate (approvedHash !== null) never reaches.
 export function canRemove(plugin: PluginStatusRecord): boolean {
   return plugin.approvedHash === null;
 }
@@ -327,16 +287,11 @@ export function pluginTitle(plugin: PluginStatusRecord): string {
 // Every name a plugin answers to, plus what it says it does. A reader
 // searching "agent" should find the plugin whose description says so, not
 // only the one whose folder happens to spell it.
-type PluginFilterRecord = Pick<
-  PluginStatusRecord,
-  "directoryName" | "displayName" | "description" | "publisher"
-> & { id?: string };
-
-export function matchesFilter(plugin: PluginFilterRecord, filter: string): boolean {
+export function matchesFilter(plugin: PluginStatusRecord, filter: string): boolean {
   const needle = filter.trim().toLowerCase();
   if (needle.length === 0) return true;
   return [
-    plugin.id ?? null,
+    plugin.id,
     plugin.directoryName,
     plugin.displayName,
     plugin.description,
@@ -365,19 +320,11 @@ interface PluginCatalog {
    * only ever cares whether its own (pluginId, directoryName) matches
    * `from`, and this list's own row already moved. */
   renamed: PluginRenamedFact | null;
-  /** Built-in driver plugins this workspace doesn't have yet. */
-  offersLoad: OfferedPluginLoadState;
-  /** Keyed by offer directoryName, never by a plugin id — an offer's error
-   * and busy state must never leak onto an installed row that later claims
-   * the same identity. */
-  offerBusy: Record<string, boolean>;
-  offerErrors: Record<string, string | undefined>;
   reload: () => void;
   runAction: (
     plugin: PluginStatusRecord,
     action: RunnablePluginAction,
   ) => void;
-  addOffer: (offer: OfferedPluginRecord) => void;
   openWebApp: (plugin: PluginStatusRecord, webAppId: string) => void;
   prepareUninstall: (plugin: PluginStatusRecord) => void;
   confirmUninstall: () => void;
@@ -420,16 +367,9 @@ export function usePluginCatalog(
   // exactly once per rename, the same "adjusting state when props change"
   // shape React's own docs use refs for.
   const [renamed, setRenamed] = useState<PluginRenamedFact | null>(null);
-  const [offersLoad, setOffersLoad] = useState<OfferedPluginLoadState>({ status: "loading" });
-  const [offerBusy, setOfferBusy] = useState<Record<string, boolean>>({});
-  const [offerErrors, setOfferErrors] = useState<Record<string, string | undefined>>({});
   // The request token orders list responses. The workspace epoch invalidates
-  // list and action responses after unmount or a workspace switch. Offers
-  // are a separate bridge call from the plugin list, so they order their own
-  // responses against their own token, but share the one epoch — a single
-  // workspace lifecycle governs both.
+  // list and action responses after unmount or a workspace switch.
   const listRequestToken = useRef(0);
-  const offersRequestToken = useRef(0);
   const workspaceEpoch = useRef(0);
   // Status events can arrive while the initial list is in flight. Keep the
   // newest event for each plugin and merge it over that list before painting.
@@ -437,14 +377,6 @@ export function usePluginCatalog(
   const pendingStatusEvents = useRef(new Map<string, PendingStatusEvent>());
   // A rename supplies the new directory identity, but no authoritative root.
   const pendingWebAppRoots = useRef(new Set<string>());
-  // The authoritative offered set as of the last successful loadOffers —
-  // read at Add's settle time, not captured in addOffer's own closure,
-  // which would still hold whatever was current when Add was CALLED. An
-  // offer can leave this list (added from elsewhere, its source deleted)
-  // while Add is still in flight; a refused response settling after that
-  // must not recreate an error key loadOffers already pruned for an offer
-  // that no longer exists to show it against.
-  const offeredDirectoryNames = useRef<ReadonlySet<string>>(new Set());
 
   // silent keeps whatever is already on screen while the fresh list is in
   // flight instead of resetting to "loading" first.
@@ -493,63 +425,6 @@ export function usePluginCatalog(
     }
   }
 
-  async function loadOffers() {
-    const requestToken = ++offersRequestToken.current;
-    const epoch = workspaceEpoch.current;
-    const forWorkspaceId = workspaceId;
-    // A background refresh (a "changed"/"removed" status event, or a manual
-    // reload while data already exists) keeps the current ready list on
-    // screen instead of flashing to loading: setStatus emits several
-    // "changed" events per action, and flipping the whole Built in section
-    // to loading on each would hide its rows and Add controls repeatedly.
-    // Only the very first load, with nothing to show yet for this
-    // workspace, presents as loading.
-    setOffersLoad((current) =>
-      current.status === "ready" && current.workspaceId === forWorkspaceId
-        ? current
-        : { status: "loading" },
-    );
-    try {
-      const result = await bridge().listOfferedPlugins({ workspaceId });
-      if (
-        requestToken !== offersRequestToken.current ||
-        epoch !== workspaceEpoch.current
-      ) {
-        return;
-      }
-      if (!result.ok) {
-        setOffersLoad({
-          status: "error",
-          workspaceId: forWorkspaceId,
-          message: `Offers could not load. ${result.error.message}`,
-        });
-        return;
-      }
-      setOffersLoad({ status: "ready", workspaceId: forWorkspaceId, offers: result.offers });
-      // An offer's error/busy state belongs to it only while it is still
-      // offered — once a refresh's authoritative list no longer includes a
-      // directoryName, whatever it recorded here is stale and must not
-      // survive to be misread against whatever claims that identity next.
-      const offeredNames = result.offers.map((offer) => offer.directoryName);
-      offeredDirectoryNames.current = new Set(offeredNames);
-      setOfferErrors((current) => pruneToKeys(current, offeredNames));
-      setOfferBusy((current) => pruneToKeys(current, offeredNames));
-    } catch (error) {
-      if (
-        requestToken !== offersRequestToken.current ||
-        epoch !== workspaceEpoch.current
-      ) {
-        return;
-      }
-      const reason = error instanceof Error ? error.message : "Try again.";
-      setOffersLoad({
-        status: "error",
-        workspaceId: forWorkspaceId,
-        message: `Offers could not load. ${reason}`,
-      });
-    }
-  }
-
   useEffect(() => {
     if (!enabled) return;
     const epoch = workspaceEpoch.current;
@@ -561,15 +436,10 @@ export function usePluginCatalog(
     // cleanup on the epoch guard, so this workspace clears it. Without this
     // every Open control here stays disabled for the rest of the session.
     setOpeningWebApp(null);
-    setOffersLoad({ status: "loading" });
-    setOfferBusy({});
-    setOfferErrors({});
-    offeredDirectoryNames.current = new Set();
     pendingStatusEvents.current.clear();
     pendingWebAppRoots.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
-    void loadOffers();
     const unsubscribe = bridge().onPluginStatusChanged((event) => {
       if (epoch !== workspaceEpoch.current || event.workspaceId !== workspaceId) {
         return;
@@ -579,11 +449,9 @@ export function usePluginCatalog(
         // "changed"/"removed" event could carry, so it never joins
         // pendingStatusEvents/applyStatusEvents — those exist to merge one
         // plugin's own transition, and this names no plugin at all.
-        // Discovery itself moved; both surfaces that read it directly
-        // (list() shows an invalid row, offers hide behind or return to
-        // one) re-check.
+        // Discovery itself moved, and list() shows an invalid row directly
+        // from it, so the list re-checks.
         void loadPlugins(true);
-        void loadOffers();
         return;
       }
       if (event.kind === "renamed") {
@@ -642,16 +510,6 @@ export function usePluginCatalog(
         loadRef.current = ready;
         return ready;
       });
-      if (event.kind === "removed" || event.kind === "changed") {
-        // A plugin's identity can move either direction: an uninstall frees
-        // a directory (removed) an offer might now fit again, and a fresh
-        // discovery can claim an id a built-in offer was suppressing under
-        // a different directory (changed) — a rename or a second copy this
-        // hook never directly caused. Offers have no per-event incremental
-        // merge the way plugins do, so any identity change re-fetches
-        // rather than guessing which offer (if any) is affected.
-        void loadOffers();
-      }
       if (event.kind === "changed") {
         // Installing this exact row invalidates a confirmation for an uninstalled copy.
         setConfirmation((current) =>
@@ -668,7 +526,6 @@ export function usePluginCatalog(
     return () => {
       unsubscribe();
       listRequestToken.current += 1;
-      offersRequestToken.current += 1;
       workspaceEpoch.current += 1;
       pendingStatusEvents.current.clear();
     };
@@ -852,10 +709,6 @@ export function usePluginCatalog(
               }
             : current,
         );
-        // Uninstall's own "removed" status event covers this too, but this
-        // caller already knows the outcome — no reason to wait for the event
-        // to round-trip back through main.
-        void loadOffers();
       } else {
         if (result.plugin) replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
         setErrors((current) => ({
@@ -877,77 +730,6 @@ export function usePluginCatalog(
     }
   }
 
-  // addOffer runs its own bridge call, busy map, and error copy, entirely
-  // separate from runAction's: an offer's directoryName can equal an
-  // installed plugin's id (a built-in's manifest name always does), so
-  // sharing busy/errors with plugin actions would let a refused Add's error
-  // reappear under an unrelated installed row once the offer's identity
-  // moved on.
-  async function addOffer(offer: OfferedPluginRecord) {
-    const epoch = workspaceEpoch.current;
-    const revisionAtStart = statusRevision.current;
-    const directoryName = offer.directoryName;
-    const title = offer.displayName ?? directoryName;
-    setOfferBusy((current) => ({ ...current, [directoryName]: true }));
-    setOfferErrors((current) => ({ ...current, [directoryName]: undefined }));
-    try {
-      const result = await bridge().addOfferedPlugin({ workspaceId, directoryName });
-      if (epoch !== workspaceEpoch.current) return;
-      if (result.ok) {
-        setOffersLoad((current) =>
-          current.status === "ready" && current.workspaceId === workspaceId
-            ? {
-                status: "ready",
-                workspaceId,
-                offers: current.offers.filter(
-                  (entry) => entry.directoryName !== directoryName,
-                ),
-              }
-            : current,
-        );
-        // Upserted in the same tick the offer disappears, so the plugin
-        // never spends a render in neither the offered nor the installed
-        // section.
-        replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
-      } else if (offeredDirectoryNames.current.has(directoryName)) {
-        // Bound to the offer's presence at settle time, not addOffer's own
-        // call-time closure: a refused response for an offer that already
-        // left the authoritative list (added elsewhere, its source gone)
-        // has no row left to show an error against, and setting one here
-        // would resurrect a key loadOffers already pruned.
-        setOfferErrors((current) => ({
-          ...current,
-          [directoryName]: `dohc could not add ${title}. ${result.error.message}`,
-        }));
-      }
-    } catch (error) {
-      if (epoch !== workspaceEpoch.current) return;
-      if (offeredDirectoryNames.current.has(directoryName)) {
-        const reason = error instanceof Error ? error.message : "Try again.";
-        setOfferErrors((current) => ({
-          ...current,
-          [directoryName]: `dohc could not add ${title}. ${reason}`,
-        }));
-      }
-    } finally {
-      if (epoch === workspaceEpoch.current) {
-        setOfferBusy((current) => ({ ...current, [directoryName]: false }));
-      }
-    }
-  }
-
-  // React commits a new workspaceId prop before this hook's own effect runs
-  // to reset offersLoad — a render can observe this state one paint behind
-  // the prop it was tagged for. Every non-"loading" variant carries the
-  // workspaceId it was fetched for, so this checks it against the current
-  // argument (always fresh — it's this render's own parameter) rather than
-  // trusting that the effect already ran. The renderer invariant: exposed
-  // data is for this workspace or it doesn't get exposed at all.
-  const offersLoadForWorkspace: OfferedPluginLoadState =
-    offersLoad.status !== "loading" && offersLoad.workspaceId !== workspaceId
-      ? { status: "loading" }
-      : offersLoad;
-
   return {
     load,
     busy,
@@ -956,15 +738,8 @@ export function usePluginCatalog(
     errors,
     confirmation,
     renamed,
-    offersLoad: offersLoadForWorkspace,
-    offerBusy,
-    offerErrors,
-    reload: () => {
-      void loadPlugins();
-      void loadOffers();
-    },
+    reload: () => void loadPlugins(),
     runAction: (plugin, action) => void runAction(plugin, action),
-    addOffer: (offer) => void addOffer(offer),
     openWebApp: (plugin, webAppId) => void openWebApp(plugin, webAppId),
     prepareUninstall: (plugin) => void prepareUninstall(plugin),
     confirmUninstall: () => void confirmUninstall(),

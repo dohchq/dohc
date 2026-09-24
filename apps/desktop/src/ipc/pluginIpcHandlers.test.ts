@@ -6,12 +6,8 @@ import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
 import { deferred } from "../testing/deferred";
 const directOperations = vi.hoisted(() => ({
-  addOffer: vi.fn(),
-  listOffers: vi.fn(),
   loadPanel: vi.fn(),
   loadWebApp: vi.fn(),
-  readBuiltinOfferManifest: vi.fn(),
-  removeOffer: vi.fn(),
 }));
 
 vi.mock("../plugins/pluginPanelRegistration", async (importOriginal) => ({
@@ -20,14 +16,6 @@ vi.mock("../plugins/pluginPanelRegistration", async (importOriginal) => ({
   >()),
   loadPluginPanelRegistration: directOperations.loadPanel,
   loadPluginWebAppRegistration: directOperations.loadWebApp,
-}));
-
-vi.mock("../plugins/pluginOffers", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../plugins/pluginOffers")>()),
-  addOfferedPlugin: directOperations.addOffer,
-  listOfferedPlugins: directOperations.listOffers,
-  readBuiltinPluginOfferManifest: directOperations.readBuiltinOfferManifest,
-  removeAddedOfferedPlugin: directOperations.removeOffer,
 }));
 
 const pluginStatus = {
@@ -103,8 +91,6 @@ const pluginChannels = [
   CHANNELS.setPluginWebAppBounds,
   CHANNELS.stopPluginWebApp,
   CHANNELS.listPlugins,
-  CHANNELS.listOfferedPlugins,
-  CHANNELS.addOfferedPlugin,
   CHANNELS.installPlugin,
   CHANNELS.disablePlugin,
   CHANNELS.enablePlugin,
@@ -164,11 +150,6 @@ const validPayloads: Record<string, unknown> = {
   },
   [CHANNELS.stopPluginWebApp]: baseWebAppPayload,
   [CHANNELS.listPlugins]: { workspaceId: "workspace-1" },
-  [CHANNELS.listOfferedPlugins]: { workspaceId: "workspace-1" },
-  [CHANNELS.addOfferedPlugin]: {
-    workspaceId: "workspace-1",
-    directoryName: "agent-chat",
-  },
   [CHANNELS.installPlugin]: baseActionPayload,
   [CHANNELS.disablePlugin]: baseActionPayload,
   [CHANNELS.enablePlugin]: baseActionPayload,
@@ -255,7 +236,6 @@ function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
       kind: "existing",
       value: { ok: true, plugin: pluginStatus },
     })),
-    findDirectorySupersededBy: vi.fn(() => null),
     getPluginSettings: vi.fn(async () => ({})),
     handleWatcherEvents: vi.fn(async () => undefined),
     host,
@@ -370,7 +350,6 @@ function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
   };
 
   const platform = {
-    builtinPluginsRoot: vi.fn(() => "C:\\desktop\\plugins"),
     createPanelHostLease: vi.fn(() => ({
       currentRecord: () => ({ id: "host-record" }),
       currentSpawnId: () => "spawn-1",
@@ -521,51 +500,9 @@ beforeEach(() => {
     manifest,
     webApp: manifest.webApps[0],
   });
-  directOperations.listOffers.mockReset().mockResolvedValue([]);
-  directOperations.readBuiltinOfferManifest.mockReset().mockImplementation(
-    async (directoryName: "agent-chat") => ({
-      directoryName,
-      pluginId: directoryName,
-      displayName: directoryName,
-      description: null,
-      publisher: null,
-    }),
-  );
-  directOperations.addOffer.mockReset().mockResolvedValue({
-    identity: { kind: "added" },
-    contentHash: "b".repeat(64),
-  });
-  directOperations.removeOffer.mockReset().mockResolvedValue(undefined);
 });
 
 describe("plugin IPC handlers", () => {
-  it("caches built-in offer manifests for the app session and invalidates on install and uninstall", async () => {
-    directOperations.listOffers.mockImplementation(
-      async (
-        _builtinRoot: string,
-        _workspaceRoot: string,
-        _existingPluginIds: ReadonlySet<string>,
-        readBuiltinManifest: (directoryName: "agent-chat") => Promise<unknown>,
-      ) => {
-        await readBuiltinManifest("agent-chat");
-        return [];
-      },
-    );
-    const harness = createHarness();
-
-    await harness.invoke(CHANNELS.listOfferedPlugins);
-    await harness.invoke(CHANNELS.listOfferedPlugins);
-    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(1);
-
-    await harness.invoke(CHANNELS.installPlugin);
-    await harness.invoke(CHANNELS.listOfferedPlugins);
-    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(2);
-
-    await harness.invoke(CHANNELS.uninstallPlugin);
-    await harness.invoke(CHANNELS.listOfferedPlugins);
-    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(3);
-  });
-
   it("holds workspace authority across an awaited plugin operation", async () => {
     const harness = createHarness();
     const pending = deferred<typeof harness.runtime>();
@@ -633,7 +570,7 @@ describe("plugin IPC handlers", () => {
   it("registers the complete plugin control plane once", () => {
     const harness = createHarness();
 
-    expect([...harness.handlers]).toHaveLength(22);
+    expect([...harness.handlers]).toHaveLength(20);
     expect([...harness.handlers.keys()]).toEqual(pluginChannels);
   });
 
@@ -676,7 +613,7 @@ describe("plugin IPC handlers", () => {
 
     harness.log.length = 0;
     harness.state.writable = false;
-    await expect(harness.invoke(CHANNELS.listOfferedPlugins)).resolves.toMatchObject({
+    await expect(harness.invoke(CHANNELS.listPlugins)).resolves.toMatchObject({
       ok: false,
     });
     expect(harness.log).toEqual([
@@ -684,12 +621,12 @@ describe("plugin IPC handlers", () => {
       "require-workspace",
       "assert-writable",
     ]);
-    expect(directOperations.listOffers).not.toHaveBeenCalled();
+    expect(harness.pipeline.list).not.toHaveBeenCalled();
   });
 
   it.each([
-    [CHANNELS.listOfferedPlugins, directOperations.listOffers],
-    [CHANNELS.addOfferedPlugin, directOperations.addOffer],
+    [CHANNELS.listPlugins, "list"],
+    [CHANNELS.installPlugin, "install"],
   ] as const)(
     "revalidates write authority after pipeline startup for %s",
     async (channel, effect) => {
@@ -704,7 +641,7 @@ describe("plugin IPC handlers", () => {
 
       await expect(request).resolves.toMatchObject({ ok: false });
       expect(harness.assertWritable).toHaveBeenCalledTimes(2);
-      expect(effect).not.toHaveBeenCalled();
+      expect(harness.pipeline[effect]).not.toHaveBeenCalled();
     },
   );
 
