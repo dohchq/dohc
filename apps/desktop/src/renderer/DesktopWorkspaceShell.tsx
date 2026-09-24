@@ -778,6 +778,8 @@ export function DesktopWorkspaceShell(props: {
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -4379,7 +4381,11 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
+        details: errorDetails([
+          [error.tone === "success" ? "Notice" : "Error", error.message],
+          ["Detail", error.detail],
+          ...reportFacts(),
+        ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,
@@ -4469,6 +4475,40 @@ export function DesktopWorkspaceShell(props: {
       });
   }, [reportShellError]);
   retryLiveDeliveryRef.current = retryLiveDelivery;
+  // A failed sync pass is one failure until a pass succeeds. It is reported
+  // when it starts and when its cause changes, and withdrawn when sync
+  // recovers. Try again runs a pass now; when that pass fails too, the answer
+  // reports it again, because the status alone would not change.
+  const syncFailure = syncStatus?.syncFailure ?? null;
+  const syncFailureRef = useRef(syncFailure);
+  syncFailureRef.current = syncFailure;
+  const retryCloudSyncRef = useRef<() => void>(() => undefined);
+  const retryCloudSync = useCallback(() => {
+    const askedFor = workspaceIdRef.current;
+    const retry = () => retryCloudSyncRef.current();
+    void bridge()
+      .retryCloudSync({ workspaceId: askedFor })
+      .then(
+        (status) => {
+          if (workspaceIdRef.current !== askedFor || !status.syncFailure) return;
+          reportSyncFailure(status.syncFailure, retry);
+        },
+        (error: unknown) => {
+          if (workspaceIdRef.current !== askedFor) return;
+          reportShellError("dohc could not retry sync for this workspace.", error, retry);
+        },
+      );
+  }, [reportShellError, reportSyncFailure]);
+  retryCloudSyncRef.current = retryCloudSync;
+  const syncFailureCause = syncFailure?.cause ?? null;
+  useEffect(() => {
+    const failure = syncFailureRef.current;
+    if (syncFailureCause === null || failure === null) {
+      clearSyncFailure();
+      return;
+    }
+    reportSyncFailure(failure, () => retryCloudSyncRef.current());
+  }, [clearSyncFailure, reportSyncFailure, syncFailureCause]);
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <div

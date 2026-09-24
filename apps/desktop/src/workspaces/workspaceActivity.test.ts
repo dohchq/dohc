@@ -256,7 +256,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      retryNow: async () => undefined,
       snapshot: () => ({
+        syncFailure: null,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -296,7 +298,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      retryNow: async () => undefined,
       snapshot: () => ({
+        syncFailure: null,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -345,7 +349,9 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           start: async () => undefined,
           queueSync: () => undefined,
+          retryNow: async () => undefined,
           snapshot: () => ({
+            syncFailure: null,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -400,7 +406,9 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineFor: () => ({
           start: async () => undefined,
           queueSync: () => undefined,
+          retryNow: async () => undefined,
           snapshot: () => ({
+            syncFailure: null,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -566,7 +574,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       engineFor: () => ({
         start: async () => undefined,
         queueSync: () => undefined,
+        retryNow: async () => undefined,
         snapshot: () => ({
+          syncFailure: null,
           syncing: false,
           lastSyncedAtMs: null,
           pendingChangeCount: 0,

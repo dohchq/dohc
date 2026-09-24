@@ -424,6 +424,9 @@ function makeBaseBridge(
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
+    retryCloudSync: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS,
+    ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -15556,6 +15559,61 @@ describe("owner live documents", () => {
       expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
       }),
+    );
+  });
+
+  // edges-05, share-09: a relay outage read "Saving…" for its whole length,
+  // and the row that came three failures later named no cause and offered
+  // nothing to do.
+  it("reports a failed sync with its cause, Try again and copy, and clears it on recovery", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failing: SyncStatusResult = {
+      ...SYNC_STATUS,
+      state: "sync-failed",
+      pendingChangeCount: 1,
+      syncFailure: {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: dohc could not reach the server.",
+      },
+    };
+    let status = failing;
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    // The first Try again meets the same outage; the second gets through.
+    bridge.retryCloudSync = vi
+      .fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => failing)
+      .mockImplementationOnce(async () => failing)
+      .mockImplementationOnce(async () => {
+        status = SYNC_STATUS;
+        return SYNC_STATUS;
+      });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not reach the server. Your changes are saved on this machine.",
+    );
+    expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable");
+    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(1));
+    // Still failing: the answer puts the failure back, with its Try again.
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("dohc could not reach the server.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(2));
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("synced"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(
+      "could not reach the server",
     );
   });
 

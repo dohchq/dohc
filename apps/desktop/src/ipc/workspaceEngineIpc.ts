@@ -47,6 +47,7 @@ export function createWorkspaceEngineIpc<
   localAgentDisplayName(): string;
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
+  retryCloudSync(workspaceId: string): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -215,6 +216,21 @@ export function createWorkspaceEngineIpc<
         assertWritableWorkspace(operation.workspace);
         dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
       });
+    });
+    // Answers with the status after the pass, so the notice that offered
+    // Try again can say whether it worked.
+    registerHandler(CHANNELS.retryCloudSync, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = WorkspaceIdPayload.parse(payload);
+      const workspace = requireWorkspace(input.workspaceId);
+      assertWritableWorkspace(workspace);
+      await dependencies.retryCloudSync(input.workspaceId);
+      return SyncStatusResult.parse(
+        await syncStatusWithOwnedProjection(
+          workspace,
+          activity.getStatus(input.workspaceId),
+        ),
+      );
     });
 
     registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {

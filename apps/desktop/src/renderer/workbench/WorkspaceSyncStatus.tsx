@@ -1,10 +1,12 @@
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
+// A pass in flight is syncing, never saving: the files are already on disk.
 const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   synced: "Local · saved",
-  syncing: "Saving…",
+  syncing: "Syncing…",
   "local-changes": "Local changes",
   conflict: "Conflict",
+  "sync-failed": "Sync failed",
   "cloud-disconnected": "Server disconnected",
 };
 
@@ -13,6 +15,7 @@ const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
   syncing: "bg-warning",
   "local-changes": "bg-warning",
   conflict: "bg-danger",
+  "sync-failed": "bg-danger",
   "cloud-disconnected": "bg-subtle",
 };
 
@@ -35,8 +38,16 @@ export function WorkspaceSyncStatus({ syncStatus }: {
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
-  const label = state
-    ? `${SYNC_LABEL[state]}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
+  // A failed sync names the server when the server is what failed.
+  const stateLabel =
+    state === "sync-failed" &&
+    syncStatus?.syncFailure?.cause === "server-unreachable"
+      ? "Server unreachable"
+      : state
+        ? SYNC_LABEL[state]
+        : null;
+  const label = stateLabel
+    ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.

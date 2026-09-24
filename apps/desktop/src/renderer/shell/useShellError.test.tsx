@@ -40,6 +40,41 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
   });
 
+  it("reports a sync failure as one row with its cause, detail and retry", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() =>
+      result.current.reportSyncFailure(
+        { cause: "unknown", detail: "Error: refused" },
+        retry,
+      ),
+    );
+    act(() =>
+      result.current.reportSyncFailure(
+        { cause: "server-unreachable", detail: "RelayUnreachableError: unreachable" },
+        retry,
+      ),
+    );
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      kind: "cloud-sync",
+      message: "dohc could not reach the server. Your changes are saved on this machine.",
+      detail: "RelayUnreachableError: unreachable",
+      seen: false,
+    });
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    act(() =>
+      result.current.reportSyncFailure({ cause: "unknown", detail: "Error: refused" }, retry),
+    );
+    expect(result.current.shellErrors[0]!.message).toBe(
+      "dohc could not sync this workspace. Your changes are saved on this machine.",
+    );
+    act(() => result.current.clearSyncFailure());
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("keeps a hidden row until it is dismissed, and clears on a workspace switch", () => {
     const { result, rerender } = renderHook(({ id }) => useShellError(id), {
       initialProps: { id: "ws-a" },

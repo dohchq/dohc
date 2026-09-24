@@ -1,7 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { SyncStatusResult } from "../../ipc/bridgeContract";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
-type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
+type ShellErrorKind =
+  | "singleton-tab-split"
+  | "tab-limit"
+  | "workspace-search"
+  | "cloud-sync";
+
+type CloudSyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
+
+// What a failed sync pass says. Only the cause dohc knows gets a why; either
+// way the person's work is on this machine, and Try again runs a pass now.
+const CLOUD_SYNC_FAILURE_MESSAGE: Record<CloudSyncFailure["cause"], string> = {
+  "server-unreachable":
+    "dohc could not reach the server. Your changes are saved on this machine.",
+  unknown: "dohc could not sync this workspace. Your changes are saved on this machine.",
+};
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -17,6 +32,8 @@ export interface ShellError {
   message: string;
   retry: (() => void) | null;
   kind?: ShellErrorKind;
+  // A technical fact the copied report carries under the message.
+  detail?: string;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -126,6 +143,18 @@ export function useShellError(workspaceId: string) {
     [reportShellError],
   );
   const clearSearchError = useCallback(() => clearKind("workspace-search"), [clearKind]);
+  // One failure until a pass succeeds: a new report replaces the last one.
+  const reportSyncFailure = useCallback(
+    (failure: CloudSyncFailure, retry: () => void) =>
+      push({
+        message: CLOUD_SYNC_FAILURE_MESSAGE[failure.cause],
+        detail: failure.detail,
+        retry,
+        kind: "cloud-sync",
+      }),
+    [push],
+  );
+  const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
   // Snapshot lanes share one surface. Keep the lane in the message so the
   // user can tell which value went stale, then show the cause and a retry.
   //
@@ -173,6 +202,8 @@ export function useShellError(workspaceId: string) {
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
+    reportSyncFailure,
+    clearSyncFailure,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,

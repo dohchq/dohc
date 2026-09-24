@@ -1,6 +1,7 @@
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  RelayUnreachableError,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -195,7 +196,7 @@ describe("relaySyncEngine", () => {
     expect(calls).toEqual(["commit", "after-pull"]);
     expect(afterSuccessfulPull).toHaveBeenCalledOnce();
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
-    expect(sync.snapshot().syncFailing).toBeFalsy();
+    expect(sync.snapshot().syncFailure).toBeNull();
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("post-pull work failed"),
       expect.any(Error),
@@ -231,7 +232,7 @@ describe("relaySyncEngine", () => {
     expect(syncSharedChannels).toHaveBeenCalledTimes(1);
     const snapshot = sync.snapshot();
     expect(snapshot.lastSyncedAtMs).toBe(12345);
-    expect(snapshot.syncFailing).toBeFalsy();
+    expect(snapshot.syncFailure).toBeNull();
     errorSpy.mockRestore();
     await sync.stop();
   });
@@ -393,7 +394,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
-    expect(sync.snapshot().syncFailing).toBeUndefined();
+    expect(sync.snapshot().syncFailure).toBeNull();
 
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
@@ -401,27 +402,76 @@ describe("relaySyncEngine", () => {
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
   });
 
-  it("raises syncFailing after three consecutive transient failures and clears on success", async () => {
-    let failuresRemaining = 3;
+  // edges-05: three failures had to pass before anyone heard, so a
+  // 25-second outage never surfaced at all.
+  it("reports the first failed pass with its cause and clears it on success", async () => {
+    let failuresRemaining = 2;
     const changes = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock.mockImplementation(async () => {
       if (failuresRemaining > 0) {
         failuresRemaining -= 1;
-        throw new Error("network");
+        throw failuresRemaining === 1 ? new RelayUnreachableError() : new Error("relay said no");
       }
       return pullResult();
     });
     const sync = engine({ capture: capture(), onChange: changes });
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
+    expect(sync.snapshot().syncFailure).toEqual({
+      cause: "server-unreachable",
+      detail: "RelayUnreachableError: dohc could not reach the server.",
+    });
     await vi.advanceTimersByTimeAsync(500);
-    await vi.advanceTimersByTimeAsync(1000);
-    await vi.advanceTimersByTimeAsync(1999);
-    expect(sync.snapshot().syncFailing).toBe(true);
+    expect(sync.snapshot().syncFailure).toEqual({
+      cause: "unknown",
+      detail: "Error: relay said no",
+    });
     const changesAtFailure = changes.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(1);
-    expect(sync.snapshot().syncFailing).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sync.snapshot().syncFailure).toBeNull();
     expect(changes.mock.calls.length).toBeGreaterThan(changesAtFailure);
+    errorSpy.mockRestore();
+  });
+
+  it("runs a pass at once for Try again instead of waiting out the backoff", async () => {
+    let fail = true;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pullMock.mockImplementation(async () => {
+      if (fail) throw new RelayUnreachableError();
+      return pullResult();
+    });
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(sync.snapshot().syncFailure?.cause).toBe("server-unreachable");
+
+    fail = false;
+    await sync.retryNow();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    // The backoff it replaced does not run a pass of its own later.
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("drops an older failure when the sign-in expires", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pullMock
+      .mockRejectedValueOnce(new RelayUnreachableError())
+      .mockRejectedValueOnce(new RelayUnauthorizedError());
+    const sync = engine({ capture: capture() });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sync.snapshot().syncFailure).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sync.snapshot().authExpired).toBe(true);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    errorSpy.mockRestore();
   });
 
   it("re-reads open-conflict truth each pass so resolved conflicts clear the snapshot", async () => {

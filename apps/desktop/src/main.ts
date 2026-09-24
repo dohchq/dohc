@@ -1880,6 +1880,12 @@ const activity = {
       workspaceActivity.queueCloudSync(lease.state.activity),
     );
   },
+  // Starts the pass under the lease and waits for it outside, so a pass that
+  // waits on an unreachable server holds no workspace authority.
+  retryCloudSync: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.retryCloudSync(lease.state.activity),
+    ),
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.setAgentRun(
@@ -4026,6 +4032,7 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
+    retryCloudSync: workspaceId => activity.retryCloudSync(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,

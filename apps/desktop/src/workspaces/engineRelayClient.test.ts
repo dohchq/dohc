@@ -10,6 +10,8 @@ import {
   MAX_REPORTED_REFUSALS,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
+  RelayUnreachableError,
+  RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
@@ -1991,6 +1993,34 @@ describe("EngineRelayClient", () => {
     });
     expect(viewPulls).toBe(2);
     await view.commitCursor();
+    await sessions.closeAll();
+  });
+
+  // The engine answers an unreachable relay and a relay without the workspace
+  // with one code. The sync pass names the first; the enable flow keeps its
+  // own reading of both.
+  it("names an unreachable relay for the sync pass only", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push" || request.method === "sync.claim") {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterReconnect" },
+          new Error("refused"),
+        );
+      }
+      if (request.method === "sync.pull") {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "workspace operation failed", retry: "afterReconnect" },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
+      RelayWorkspaceUnavailableError,
+    );
+    await expect(client.claim()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
     await sessions.closeAll();
   });
 

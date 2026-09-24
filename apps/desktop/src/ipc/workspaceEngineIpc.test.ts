@@ -133,6 +133,7 @@ async function harness() {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
+  const retryCloudSync = vi.fn(async (_workspaceId: string) => undefined);
   const registrations = createWorkspaceEngineIpc({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
@@ -142,7 +143,7 @@ async function harness() {
       return missingAdapter ? null : work(adapter);
     },
     requireEngineCapture, localAgentDisplayName: displayName, notifyRenderer: notify,
-    retryOwnerLiveDelivery,
+    retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -162,14 +163,15 @@ async function harness() {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, setMissingAdapter: () => { missingAdapter = true; },
   };
 }
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords,
   CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, CHANNELS.retryOwnerLiveDelivery, CHANNELS.rebuildEngineStore,
+  CHANNELS.getSyncStatus, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
   CHANNELS.engineYDocPrepareOwnerHandoff,
@@ -185,6 +187,18 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => {throw new Error("readonly");});
     await expect(h.invoke(CHANNELS.retryOwnerLiveDelivery)).rejects.toThrow("readonly");
     expect(h.retryOwnerLiveDelivery).toHaveBeenCalledTimes(1);
+  });
+  it("runs a sync pass for a writable workspace and answers with the status after it", async () => {
+    const h = await harness();
+    const order: string[] = [];
+    h.retryCloudSync.mockImplementation(async () => { order.push("pass"); });
+    h.getStatus.mockImplementation(() => { order.push("status"); return healthy; });
+    await expect(h.invoke(CHANNELS.retryCloudSync)).resolves.toMatchObject({ state: "synced" });
+    expect(h.retryCloudSync).toHaveBeenCalledWith("workspace");
+    expect(order).toEqual(["pass", "status"]);
+    h.writable.mockImplementation(() => {throw new Error("readonly");});
+    await expect(h.invoke(CHANNELS.retryCloudSync)).rejects.toThrow("readonly");
+    expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
   });
   it("registers the four groups in order and rejects untrusted callers before parsing", async () => {
     const h = await harness();

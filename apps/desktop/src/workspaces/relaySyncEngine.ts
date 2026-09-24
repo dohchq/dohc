@@ -1,6 +1,7 @@
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
+  RelayUnreachableError,
   type PullWorkspaceFromRelayResult,
   type MaterializeRelayPullPage,
   type PushWorkspaceToRelayResult,
@@ -57,8 +58,24 @@ export interface CloudSyncEngineOptions {
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
-  failureNoticeThreshold?: number;
   nowMs?: () => number;
+}
+
+// Why the last pass failed, as far as dohc knows. "server-unreachable" means
+// no connection reached the server; every other failure is "unknown", and its
+// detail is the only account of it. Cleared by the next pass that succeeds.
+export interface CloudSyncFailure {
+  cause: "server-unreachable" | "unknown";
+  detail: string;
+}
+
+function syncFailureOf(error: unknown): CloudSyncFailure {
+  const detail =
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return {
+    cause: error instanceof RelayUnreachableError ? "server-unreachable" : "unknown",
+    detail,
+  };
 }
 
 export interface CloudSyncSnapshot {
@@ -69,12 +86,15 @@ export interface CloudSyncSnapshot {
   authExpired: boolean;
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
-  syncFailing?: boolean;
+  syncFailure: CloudSyncFailure | null;
 }
 
 export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
+  // Runs a pass now instead of waiting out the backoff, and settles when it
+  // ends. The outcome is in the next snapshot, not in the promise.
+  retryNow(): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -84,7 +104,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   const debounceMs = options.debounceMs ?? 1500;
   const initialBackoffMs = options.initialBackoffMs ?? 5000;
   const maxBackoffMs = options.maxBackoffMs ?? 5 * 60_000;
-  const failureNoticeThreshold = options.failureNoticeThreshold ?? 3;
   const nowMs = options.nowMs ?? (() => Date.now());
 
   let syncing = false;
@@ -94,20 +113,24 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
   let authExpired = false;
-  let syncFailing = false;
+  let syncFailure: CloudSyncFailure | null = null;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
-  let consecutiveFailures = 0;
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   let retryQueued = false;
   let chain: Promise<void> = Promise.resolve();
 
-  function setSyncFailing(value: boolean): void {
-    if (syncFailing === value) return;
-    syncFailing = value;
+  function setSyncFailure(value: CloudSyncFailure | null): void {
+    if (
+      syncFailure?.cause === value?.cause &&
+      syncFailure?.detail === value?.detail
+    ) {
+      return;
+    }
+    syncFailure = value;
     options.onChange();
   }
 
@@ -139,12 +162,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
+      // The expired sign-in is the state now; an older failure is not.
+      syncFailure = null;
       clearTimers();
       options.onChange();
       return;
     }
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= failureNoticeThreshold) setSyncFailing(true);
+    setSyncFailure(syncFailureOf(error));
     console.error(`[desktop] relay sync failed for ${options.rootDir}:`, error);
     scheduleBackoff();
   }
@@ -227,9 +251,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     ownerAdmissionPending = passOwnerPending;
     pendingChangeCount = Math.max(ownerAdmissionPending.length, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
-    consecutiveFailures = 0;
     nextBackoffMs = initialBackoffMs;
-    setSyncFailing(false);
+    setSyncFailure(null);
     if (ownerAdmissionPending.length > 0) scheduleBackoff();
     // The bootstrap pull done, immediately queue the first normal pass so
     // local identity/journal ops reconcile without waiting for an edit.
@@ -280,6 +303,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }, debounceMs);
     },
 
+    retryNow() {
+      if (authExpired || stopped) return Promise.resolve();
+      clearTimers();
+      retryQueued = false;
+      return runPass(false);
+    },
+
     snapshot() {
       return {
         syncing,
@@ -289,7 +319,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         authExpired,
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
-        ...(syncFailing ? { syncFailing: true } : {}),
+        syncFailure: syncFailure ? { ...syncFailure } : null,
       };
     },
 

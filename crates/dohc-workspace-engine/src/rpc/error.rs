@@ -176,6 +176,12 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
         }
+        // The same code as a relay that answered "not found", so retries treat
+        // them alike. The message is what lets the desktop tell a person which
+        // one happened: the server could not be reached at all.
+        RuntimeError::Relay(RelayError::Partitioned) => {
+            return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
+        }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(
                 ErrorCode::Overloaded,
@@ -917,6 +923,14 @@ mod tests {
             map_relay_code(RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
         );
+        // A relay that answered "not found" and one nobody could reach share
+        // the code; only the message tells the desktop which to name.
+        let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
+        assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
+        assert_eq!(unreachable.message, "relay-unreachable");
+        let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
+        assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);
+        assert_ne!(missing.message, "relay-unreachable");
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,

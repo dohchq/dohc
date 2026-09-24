@@ -163,6 +163,7 @@ export function createWorkspaceActivity(
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: conflictCount > 0,
+      syncFailed: (snap?.syncFailure ?? null) !== null,
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and
@@ -182,7 +183,7 @@ export function createWorkspaceActivity(
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
-      syncFailing: snap?.syncFailing ?? false,
+      ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
       liveSessionsGeneration,
     };
     if (historyCaptureFailure) {
@@ -451,6 +452,13 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queueSync();
   }
 
+  // The person asked to sync now, from a sync failure's Try again. Runs a
+  // pass without waiting out the backoff and settles when it ends; the
+  // outcome is in the status. No-op when the workspace has no engine.
+  function retryCloudSync(state: WorkspaceActivityState): Promise<void> {
+    return state.entry?.engine?.retryNow() ?? Promise.resolve();
+  }
+
   // Sets (or clears) the active agent run for an open workspace. The engine
   // capture reads this slot when a batch settles, so writes made during the
   // run are attributed to the agent. Throws if the workspace isn't open — a
@@ -586,6 +594,7 @@ export function createWorkspaceActivity(
     getStatus,
     isOpen,
     queueCloudSync,
+    retryCloudSync,
     setAgentRun,
     claimAgentRun,
     clearAgentRun,
