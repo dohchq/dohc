@@ -411,11 +411,44 @@ describe("keeping the roster current", () => {
     expect(() => r.pullStarting(WORKSPACE)).toThrow(
       "dohc did not pull because it could not save the share roster's pull mark to the workspace registry: disk full",
     );
-    // No pull ran, so nothing reached this computer past the cached roster.
-    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    const diskFull = unchecked("Check that your disk has free space, then try again.");
+    expect(await r.forRun(WORKSPACE)).toEqual(diskFull);
+    expect(await r.forRun(WORKSPACE), "the write failure resolved itself").toEqual(diskFull);
+    // A mark that saves resolves it. The listing still fails after a pull.
     fail = false;
     r.pullStarting(WORKSPACE)();
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+  });
+
+  it("resolves a failed mark write when a listing answers", async () => {
+    seed();
+    const { list, rosters: r } = rosters(async () => failing, store.setShareRoster, () => {
+      throw new Error("disk full");
+    });
+    expect(() => r.pullStarting(WORKSPACE)).toThrow("disk full");
+    list.mockImplementation(async () => answered({ grants: [ana] }));
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+  });
+
+  it("lists again before a run when a pull followed the listing, and only while the relay answers", async () => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    await r.forRun(WORKSPACE);
+    await r.forRun(WORKSPACE);
+    expect(list).toHaveBeenCalledTimes(1);
+    r.pullStarting(WORKSPACE)();
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(list, "a run used a listing a pull followed").toHaveBeenCalledTimes(2);
+    await r.forRun(WORKSPACE);
+    expect(list).toHaveBeenCalledTimes(2);
+
+    // Once listings fail, retries keep their pace of once a minute.
+    list.mockImplementation(async () => failing);
+    now += SHARE_ROSTER_FRESH_MS;
+    r.pullStarting(WORKSPACE)();
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+    r.pullStarting(WORKSPACE)();
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+    expect(list).toHaveBeenCalledTimes(3);
   });
 
   it("clears the mark when the next listing answers, unless a pull ran during it", async () => {

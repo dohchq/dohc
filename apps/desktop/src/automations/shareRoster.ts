@@ -281,6 +281,9 @@ interface RosterState {
   // many are still running.
   pullStarts: number;
   pullsRunning: number;
+  // A pull mark could not be saved. The roster is unknown until a mark or an
+  // answered listing is saved.
+  markFailed: boolean;
   // Set while listings get no answer, and cleared only when one answers.
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
@@ -322,7 +325,7 @@ export function createShareRosters(dependencies: {
     let state = states.get(workspaceId);
     if (!state) {
       state = {
-        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0,
+        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0, markFailed: false,
         noAnswer: null, unsaved: null, running: null, again: false,
       };
       states.set(workspaceId, state);
@@ -335,6 +338,7 @@ export function createShareRosters(dependencies: {
     try {
       dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.pulledAfter);
       state.unsaved = null;
+      state.markFailed = false;
     } catch (error) {
       dependencies.logError(workspaceId, error);
     }
@@ -347,20 +351,26 @@ export function createShareRosters(dependencies: {
       state.unsaved.pulledAfter = true;
       dependencies.saveRoster(workspaceId, state.unsaved.listing, true);
       state.unsaved = null;
-      return;
+    } else {
+      const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
+      if (stored && !stored.pulledAfter) dependencies.markRosterPulled(workspaceId);
     }
-    const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
-    if (!stored || stored.pulledAfter) return;
-    dependencies.markRosterPulled(workspaceId);
+    state.markFailed = false;
   }
 
-  // The latest listing got no answer, and the roster it would fall back to
-  // may be missing an editor.
-  function stale(workspaceId: string, state: RosterState): boolean {
-    if (state.noAnswer === null) return false;
-    if (state.noAnswer.partial) return true;
+  // A pull followed the latest listing, so it may have brought changes the
+  // listing did not see.
+  function pulledSinceListing(workspaceId: string, state: RosterState): boolean {
     if (state.unsaved) return state.unsaved.pulledAfter;
     return dependencies.findWorkspace(workspaceId)?.shareRoster?.pulledAfter === true;
+  }
+
+  // The roster may be missing an editor: a pull mark could not be saved, or
+  // the latest listing got no answer and a pull followed the one before it.
+  function stale(workspaceId: string, state: RosterState): boolean {
+    if (state.markFailed) return true;
+    if (state.noAnswer === null) return false;
+    return state.noAnswer.partial || pulledSinceListing(workspaceId, state);
   }
 
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
@@ -414,16 +424,21 @@ export function createShareRosters(dependencies: {
   async function forRun(workspaceId: string): Promise<ReachRoster> {
     const state = stateFor(workspaceId);
     // While the cached roster stands in, the relay is answering nothing, so a
-    // run does not wait on another listing.
+    // run does not wait on another listing. While the relay answers, a pull
+    // since the last listing means the run lists again first.
     const cacheStandsIn = state.noAnswer !== null && !stale(workspaceId, state);
+    const pulledSince = state.noAnswer === null && pulledSinceListing(workspaceId, state);
     if (state.running) await state.running;
-    else if (due(state) && !cacheStandsIn) await refresh(workspaceId);
+    else if ((due(state) || pulledSince) && !cacheStandsIn) await refresh(workspaceId);
     save(workspaceId, state);
     const entry = dependencies.findWorkspace(workspaceId);
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && noAnswer && stale(workspaceId, state)) {
-      return { kind: "unknown", problem: { kind: "unchecked", next: noAnswer.next } };
+    if (entry.remote && !entry.shareView && stale(workspaceId, state)) {
+      const next = state.markFailed
+        ? "Check that your disk has free space, then try again."
+        : noAnswer?.next ?? "Try again in a moment.";
+      return { kind: "unknown", problem: { kind: "unchecked", next } };
     }
     return reachRosterFor({
       entry,
@@ -479,6 +494,7 @@ export function createShareRosters(dependencies: {
       try {
         markPulled(workspaceId, state);
       } catch (error) {
+        state.markFailed = true;
         throw new Error(
           `dohc did not pull because it could not save the share roster's pull mark to the workspace registry: ${
             error instanceof Error ? error.message : String(error)
