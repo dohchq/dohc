@@ -1778,6 +1778,28 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
+            // The lineage's first update names who created it.
+            if outcome.seq == 1
+                && !outcome.deduped
+                && let Some(creator) = dohc_engine_domain::moment_author_json(
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                )
+            {
+                tx.execute(
+                    "UPDATE ydoc_docs SET creator_author_json = ?4 \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![
+                        journal_key.workspace_id,
+                        journal_key.version_id,
+                        journal_key.object_id,
+                        creator
+                    ],
+                )
+                .map_err(|error| {
+                    dohc_engine_collab::CollabError::Storage(StorageError::persist_public(error))
+                })?;
+            }
             dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &journal_key,
@@ -1913,41 +1935,19 @@ pub(super) fn ydoc_record_update_on_store(
     }
 }
 
-/// The author a settle's moment records: the actor of the lineage's newest
-/// update, when it declared an agent or an automation. A record an
-/// automation creates through a document session is then added as that
-/// automation's change, at its depth.
-fn newest_update_author_json(
+/// Who created a lineage: the author its first update declared, kept on the
+/// lineage so compaction cannot fold it away. The settle that creates the
+/// lineage's file records it, so a record an automation creates in a
+/// document session is added as that automation's change, at its depth.
+fn lineage_creator_json(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<String>, dohc_engine_domain::DomainError> {
     tx.query_row(
-        "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth FROM ydoc_updates \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-         ORDER BY seq DESC LIMIT 1",
+        "SELECT creator_author_json FROM ydoc_docs \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![key.workspace_id, key.version_id, key.object_id],
-        |row| {
-            let kind: Option<String> = row.get(1)?;
-            let Some(actor_kind) = kind
-                .as_deref()
-                .and_then(dohc_engine_domain::ChangeActorKind::parse)
-            else {
-                return Ok(None);
-            };
-            let depth: Option<i64> = row.get(3)?;
-            let attribution = ChangeAttribution {
-                actor_kind,
-                on_behalf_of: row.get(2)?,
-                depth: depth
-                    .and_then(|depth| u32::try_from(depth).ok())
-                    .unwrap_or(0),
-            };
-            let actor: Option<String> = row.get(0)?;
-            Ok(dohc_engine_domain::moment_author_json(
-                actor.as_deref(),
-                Some(&attribution),
-            ))
-        },
+        |row| row.get(0),
     )
     .optional()
     .map(Option::flatten)
@@ -2543,7 +2543,13 @@ pub(super) fn ydoc_settle_on_store(
             "moment-ydoc-{}",
             dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
         );
-        let author_json = newest_update_author_json(tx, key)?;
+        // A settle that creates the file is the lineage creator's change.
+        // One that edits an existing file names no author, as before.
+        let author_json = if current.snapshot.is_none() {
+            lineage_creator_json(tx, key)?
+        } else {
+            None
+        };
         let result = write_projected_text_in_tx(
             tx,
             ProjectedWriteText {

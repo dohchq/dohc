@@ -2135,10 +2135,11 @@ CREATE INDEX idx_automation_claims_automation
 /// may now hold a third trigger shape. SQLite cannot change a CHECK in
 /// place, so the claims table is rebuilt with every row kept. Capture now
 /// looks up the record a written file is bound to, so bindings gain an index
-/// by object. The live host finds the attribution of its own drafts by
-/// digest, so outbox entries gain an index by digest. `merged_moments` names
-/// the moments a merge wrote: they replay another version's changes, which
-/// claimed where they were made.
+/// by object. `merged_moments` names the moments a merge wrote: they replay
+/// another version's changes, which claimed where they were made. A Y.Doc
+/// lineage keeps the author of its first update in `creator_author_json`,
+/// so the settle that creates its file names that author after compaction
+/// folds the update away.
 const V2_AUTOMATION_RECORD_LIFECYCLE_DDL: &str = "\
 CREATE TABLE automation_claims_next (
     workspace_id          TEXT    NOT NULL,
@@ -2198,13 +2199,13 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 CREATE INDEX collection_records_by_object
     ON collection_records(workspace_id, version_id, object_id);
-CREATE INDEX owner_ydoc_outbox_entries_by_digest
-    ON owner_ydoc_outbox_entries(update_digest);
 CREATE TABLE merged_moments (
     workspace_id TEXT    NOT NULL,
     moment_order INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, moment_order)
 ) STRICT;
+ALTER TABLE ydoc_docs ADD COLUMN creator_author_json TEXT
+    CHECK (creator_author_json IS NULL OR json_valid(creator_author_json));
 ";
 
 /// The frozen, ordered list of migrations this build knows.
@@ -2503,7 +2504,7 @@ mod tests {
             ),
             (
                 "v2-automation-record-lifecycle",
-                "3b866e945c1e7dac18f19955802dce9d48ef8b99f496f2b9060bdd5fe2a3fbf1",
+                "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
