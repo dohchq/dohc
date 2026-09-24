@@ -10,7 +10,7 @@ const backend = { entryPath: "app/backend.ts", schemaPath: "app/schema.sql", dat
   operations: [{ name: "register", access: "link", readOnly: false }, { name: "list", access: "owner", readOnly: true }],
   tables: [{ name: "registrations", primaryKey: "id", readOperation: "list", writeOperation: "register" }] };
 function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promise<DatasetRevision>) {
-  const declaration = { entryPath: "app/main.ts", inputs: ["app/main.ts", "app/backend.ts", "app/schema.sql", "app/rules.ts"], packageMap: {}, backend };
+  const declaration = { entryPath: "main.ts", inputs: ["main.ts", "backend.ts", "schema.sql", "rules.ts"], packageMap: {}, backend };
   const sources = new Map([
     ["app/app.publish.json", Buffer.from(JSON.stringify(declaration))],
     ["app/main.ts", Buffer.from("document.body.textContent = 'Register';")],
@@ -22,6 +22,8 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
   const capturePaths: string[][] = [];
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
+    if (request.method === "versionedText.list") return { id: request.id, result: { nextAfterPath: null, files: [...sources].map(([path, bytes]) => ({ path, objectId: path,
+      contentKind: "text", sha256: hash(bytes), byteLength: bytes.byteLength, binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
     if (request.method === "versionedText.captureSources") {
       const paths = params.paths as string[];
       capturePaths.push(paths);
@@ -38,8 +40,8 @@ function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promis
   } }, "owner", { workspaceId: "w" });
   const compile = vi.fn(compileClosedApp);
   const controller = new AbortController();
-  const prepare = () => prepareOwnerAppPublication({ workspaceId: "w", appRoot: "app", shareId: "s", grantId: "g" },
-    { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null } },
+  const prepare = (appRoot = "app", shared = [appRoot]) => prepareOwnerAppPublication({ workspaceId: "w", appRoot, shareId: "s", grantId: "g" },
+    { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: shared, versionId: null } },
     { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision });
   return { declaration, sources, compile, capturePaths, prepare, controller,
     setDeclaration(value: unknown) { sources.set("app/app.publish.json", Buffer.from(JSON.stringify(value))); } };
@@ -49,6 +51,44 @@ it("refuses retired app-owned backend declarations before compilation", async ()
   const h = harness();
   await expect(h.prepare()).rejects.toThrow(/Invalid app publication declaration/);
   expect(h.compile).not.toHaveBeenCalled();
+});
+
+describe("app.publish.json paths", () => {
+  const manifest = { entryPath: "main.ts", inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"], packageMap: { greeting: "deps/greeting.js" } };
+  const place = (h: ReturnType<typeof harness>, root: string, parent: string, value: unknown = manifest) => {
+    h.sources.clear();
+    h.sources.set(`${root}/app.publish.json`, Buffer.from(JSON.stringify(value)));
+    h.sources.set(`${root}/main.ts`, Buffer.from("import greeting from 'greeting'; import '../shared/theme.css'; document.body.textContent = greeting;"));
+    h.sources.set(`${root}/deps/greeting.js`, Buffer.from("export default 'Hello';"));
+    h.sources.set(`${parent}shared/theme.css`, Buffer.from("body { color: teal }"));
+  };
+
+  it.each([["app", ""], ["trip/app", "trip/"]])("resolves every path from the app folder at %s, so a moved folder publishes unchanged", async (root, parent) => {
+    const h = harness(); place(h, root, parent);
+    const { candidate, files } = await h.prepare(root, [root, `${parent}shared`]);
+    expect(candidate.entryPath).toBe(`${root}/main.ts`);
+    expect(candidate.inputs.map(file => file.path)).toEqual([`${root}/app.publish.json`, `${root}/deps/greeting.js`, `${root}/main.ts`, `${parent}shared/theme.css`].sort());
+    expect(candidate.packageMap).toEqual({ greeting: `${root}/deps/greeting.js` });
+    expect(files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
+  });
+
+  it("names a listed file that does not exist, such as a path written from the workspace root", async () => {
+    const h = harness(); place(h, "app", "", { entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {} });
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json lists app/app/main.ts, which does not exist. Write its paths relative to app.");
+    expect(h.capturePaths).toEqual([["app/app.publish.json"]]);
+  });
+
+  it.each(["../../main.ts", "/main.ts", ""])("refuses %j, which leaves the workspace or names no file", async entryPath => {
+    const h = harness(); place(h, "app", "", { entryPath, inputs: [entryPath], packageMap: {} });
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("Invalid app publication sources.");
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("says when the folder has no app.publish.json", async () => {
+    const h = harness(); h.sources.delete("app/app.publish.json");
+    await expect(h.prepare()).rejects.toThrow("dohc found no app.publish.json in app. Add one to publish this app.");
+    expect(h.capturePaths).toEqual([]);
+  });
 });
 
 describe("owner dataset publication", () => {
@@ -65,7 +105,7 @@ describe("owner dataset publication", () => {
     } };
   const binding: AppDatasetBinding = { kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
     revisionSha256: approved.revisionSha256, operationIds: [id(4)] };
-  const declaration = { entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {}, dataset: binding };
+  const declaration = { entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset: binding };
 
   it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
     const resolve = vi.fn(async () => approved);

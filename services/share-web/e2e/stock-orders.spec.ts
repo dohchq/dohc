@@ -1,8 +1,9 @@
 import { test, expect } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
 import { createLocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
@@ -19,6 +20,14 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
   const context = await browser.newContext();
   const sources = new Map<string,Uint8Array>();
   const adapter: AppPublicationPreparationDependencies["adapter"] = {
+    async listTextFileMetadata() {
+      const root = fileURLToPath(new URL("../../../examples/stock-orders",import.meta.url));
+      const entries = await readdir(root,{recursive:true,withFileTypes:true});
+      return entries.filter(entry=>entry.isFile()).map(entry=>{
+        const path = `stock-orders/${relative(root,join(entry.parentPath,entry.name)).replaceAll("\\","/")}`;
+        return {path,objectId:path,contentKind:"text" as const,sha256:"0".repeat(64),byteLength:0,binarySha256:null,updatedAtMs:1,latestMomentId:"source",metadataOrigin:"disk",hasYdocMarker:false};
+      });
+    },
     async captureSourceMetadata({workspaceId,versionId,paths}) {
       const files = await Promise.all([...paths].sort().map(async path => {
         const bytes = await readFile(new URL(`../../../examples/${path}`,import.meta.url));sources.set(path,bytes);

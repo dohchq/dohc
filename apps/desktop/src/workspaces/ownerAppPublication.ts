@@ -3,6 +3,7 @@ import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-valu
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { parseDatasetBindingReference, resolveAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { posix } from "node:path";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 
@@ -11,7 +12,7 @@ const inputBounds = { maxInputFiles: 512, maxInputBytes: 128 * 1024 * 1024 };
 const manifestLimit = 64 * 1024;
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
 export interface OwnerPublicationGrant { shareId: string; grantId: string; generation: number; status: "active" | "revoked"; revokedAtMs: number | null; selector: { paths: string[]; versionId: string | null } | null }
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata">;
 export interface AppPublicationPreparationDependencies {
   adapter: SourceAdapter;
   signal: AbortSignal;
@@ -20,24 +21,29 @@ export interface AppPublicationPreparationDependencies {
   /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
   resolveDatasetRevision?(binding: AppDatasetBinding): Promise<DatasetRevision>;
 }
-function declaration(bytes: Uint8Array) {
+/** Paths in app.publish.json are relative to the app folder, so the folder can move. */
+function declaration(bytes: Uint8Array, appRoot: string) {
   if (bytes.byteLength > manifestLimit) throw new Error("The app publication declaration is too large.");
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   if (!value || typeof value !== "object" || Array.isArray(value) || !["entryPath,inputs,packageMap", "collection,entryPath,inputs,packageMap", "dataset,entryPath,inputs,packageMap"].includes(Object.keys(value).sort().join())) throw new Error("Invalid app publication declaration.");
   const row = value as Record<string, unknown>;
-  if (!isShareablePath(row.entryPath) || !Array.isArray(row.inputs) || row.inputs.length === 0 || row.inputs.length >= inputBounds.maxInputFiles ||
-      !row.inputs.every(isShareablePath) || new Set(row.inputs).size !== row.inputs.length || !row.inputs.includes(row.entryPath) ||
+  // "../" may reach files beside the folder; the resolved path must still be an ordinary workspace path.
+  const resolve = (path: unknown) => typeof path === "string" && path !== "" && !path.startsWith("/") ? posix.normalize(`${appRoot}/${path}`) : null;
+  const entryPath = resolve(row.entryPath);
+  const inputs = Array.isArray(row.inputs) ? row.inputs.map(resolve) : [];
+  if (!isShareablePath(entryPath) || inputs.length === 0 || inputs.length >= inputBounds.maxInputFiles || !inputs.every(isShareablePath) ||
+      new Set(inputs).size !== inputs.length || !inputs.includes(entryPath) ||
       !row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap)) throw new Error("Invalid app publication sources.");
-  const entries = Object.entries(row.packageMap);
-  const inputs = row.inputs;
+  const entries = Object.entries(row.packageMap).map(([name, path]) => [name, resolve(path)] as const);
   if (entries.length > inputBounds.maxInputFiles || entries.some(([name, path]) => name.length > 256 || !isShareablePath(path) || !inputs.includes(path))) throw new Error("Invalid app publication packages.");
   let collection;
   if (Object.hasOwn(row, "collection")) {
     if (!row.collection || typeof row.collection !== "object" || Array.isArray(row.collection) || Object.hasOwn(row.collection, "schemaSha256")) throw new Error("Invalid collection declaration.");
-    collection = parseAppCollectionCapability({ ...row.collection, schemaSha256: "0".repeat(64) });
+    const declared = row.collection as Record<string, unknown>;
+    collection = parseAppCollectionCapability({ ...declared, collectionPath: resolve(declared.collectionPath), schemaSha256: "0".repeat(64) });
   }
   const dataset = Object.hasOwn(row, "dataset") ? parseDatasetBindingReference(row.dataset) : undefined;
-  return { entryPath: row.entryPath, inputs: row.inputs as string[], packageMap: Object.fromEntries(entries) as Record<string, string>, collection, dataset };
+  return { entryPath, inputs, packageMap: Object.fromEntries(entries) as Record<string, string>, collection, dataset };
 }
 
 /** Source capture grants no publication authority. The relay repeats the grant check at commit. */
@@ -72,12 +78,18 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
     assertCurrent();
     return { metadata, files };
   };
+  assertCurrent(); signal.throwIfAborted();
+  const listed = new Set((await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId })).map(file => file.path));
+  assertCurrent(); signal.throwIfAborted();
+  if (!listed.has(manifestPath)) throw new Error(`dohc found no app.publish.json in ${input.appRoot}. Add one to publish this app.`);
   const first = await capture([manifestPath], manifestLimit);
-  const declared = declaration(first.files[0]!.bytes);
+  const declared = declaration(first.files[0]!.bytes, input.appRoot);
   const schemaPath = declared.collection && `${declared.collection.collectionPath}/collection.yaml`;
   if (declared.collection && !allowed(declared.collection.collectionPath)) throw new Error("The collection is outside this link's shared files.");
   const paths = [...new Set([manifestPath, ...declared.inputs, ...(schemaPath ? [schemaPath] : [])])];
   if (paths.some(path => !allowed(path))) throw new Error("An app source is outside this link's shared files.");
+  const missing = paths.find(path => !listed.has(path));
+  if (missing) throw new Error(`${manifestPath} lists ${missing}, which does not exist. Write its paths relative to ${input.appRoot}.`);
   const selected = await capture(paths, inputBounds.maxInputBytes);
   if (selected.files.find(file => file.path === manifestPath)?.sha256 !== first.files[0]!.sha256) throw new Error("The app declaration changed. Prepare the app again.");
   const capabilities: AppPublicationCandidate["capabilities"] = [];

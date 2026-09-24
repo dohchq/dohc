@@ -1,11 +1,11 @@
 {
-  "entryPath": "fundraiser/frontend.ts",
+  "entryPath": "frontend.ts",
   "inputs": [
-    "fundraiser/frontend.ts",
-    "fundraiser/frontend.css",
-    "fundraiser/client.ts",
-    "fundraiser/ui-types.ts",
-    "fundraiser/recovery.ts"
+    "frontend.ts",
+    "frontend.css",
+    "client.ts",
+    "ui-types.ts",
+    "recovery.ts"
   ],
   "packageMap": {},
   "dataset": {

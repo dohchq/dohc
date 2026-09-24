@@ -37,12 +37,17 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     manifestBytes = Buffer.from(JSON.stringify(manifest));
   }
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
-  for (const path of manifest.inputs as string[]) sources.set(path, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/${path}`, import.meta.url)));
+  // app.publish.json paths are relative to the app folder.
+  for (const path of manifest.inputs as string[]) sources.set(`fundraiser/${path}`, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/fundraiser/${path}`, import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
       async resolveDatasetRevision() { return revision; },
       adapter: {
+        async listTextFileMetadata() {
+          return [...sources].map(([path,bytes])=>({path,objectId:path,contentKind:"text" as const,sha256:sha(bytes),byteLength:bytes.byteLength,binarySha256:null,
+            updatedAtMs:1,latestMomentId:"fixture-source",metadataOrigin:"disk",hasYdocMarker:false}));
+        },
         async captureSourceMetadata({workspaceId,versionId,paths}) {
           const files = [...paths].sort().map(path => {
             const bytes=sources.get(path);if(!bytes)throw Error(`Missing captured source ${path}`);

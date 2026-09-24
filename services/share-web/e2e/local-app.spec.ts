@@ -48,6 +48,8 @@ async function prepare(host: LocalDatasetHost) {
   const blobs = new Map<string, Uint8Array>();
   const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
+    if (request.method === "versionedText.list") return { id: request.id, result: { nextAfterPath: null, files: [...sources].map(([path, bytes]) => ({ path, objectId: path,
+      contentKind: "text", sha256: hash(bytes), byteLength: bytes.byteLength, binarySha256: null, updatedAtMs: 1, latestMomentId: "m", metadataOrigin: "disk", hasYdocMarker: false })) } };
     if (request.method === "versionedText.captureSources") {
       const files = [...params.paths as string[]].sort().map(path => {
         const bytes = sources.get(path)!, sha256 = hash(bytes); blobs.set(sha256, bytes);
@@ -61,7 +63,7 @@ async function prepare(host: LocalDatasetHost) {
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   const dataset = { kind: "dataset", datasetId: definition.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
-  sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {}, dataset })));
+  sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
   return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
 }
 

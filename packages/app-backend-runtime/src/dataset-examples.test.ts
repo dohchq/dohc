@@ -28,7 +28,8 @@ async function fixture(app = "fundraiser") {
   const declaration = JSON.parse(read(app, app === "fundraiser" ? "app.publish.json" : "app.binding.json"));
   const binding: AppDatasetBinding = declaration.dataset ?? declaration;
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
-  if (declaration.inputs) expect(declaration.inputs).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
+  // app.publish.json paths are relative to the app folder; the dataset's private sources stay out of them.
+  if (declaration.inputs) expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(expect.arrayContaining([definition.schemaPath, definition.operationsPath]));
   const directory = await mkdtemp(join(tmpdir(), "dohc-example-dataset-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE attachments(file_id TEXT PRIMARY KEY);");
