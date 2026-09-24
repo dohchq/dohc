@@ -1,6 +1,6 @@
 # App backend runtime
 
-Reader: engineers connecting published app operations to authoritative storage.
+Reader: engineers connecting published app operations to authoritative storage, and engineers running automation formulas and code steps.
 
 Transactional Collections use this package's host journal and [persistent materialization](#persistent-materialization).
 The trusted host authorizes and commits changes; isolated workers evaluate approved JavaScript and apply committed events.
@@ -8,6 +8,8 @@ See [the operator guide](../../docs/how-to/app-backend.md) to create and manage 
 
 The package also exposes a snapshot evaluator that returns candidate bytes, a changeset, JSON, and attached file identifiers.
 That evaluator does not commit shared state or authorize callers. The snapshot-specific limits below do not describe persistent dataset capacity.
+
+The [automation evaluator](#automation-formulas-and-code-steps) runs the formulas and code steps of Collection automations in the same kind of sealed QuickJS guest.
 
 The host must validate the publication, operation, caller, and files before evaluation.
 The host must recheck authority when it atomically commits the candidate and retry receipt.
@@ -220,3 +222,118 @@ Configured relay deployments do the same under their deployment writer lock. Unl
 Maintenance reads at most 100 manifests per page and yields between pages. Each deletion refunds its reservation in the same transaction.
 It preserves all active checkpoints and stages referenced by recovery imports, including installed imports awaiting a claim.
 Transfer archives, receipts, and recovery-import state have separate lifecycles and are not swept by checkpoint maintenance.
+
+## Automation formulas and code steps
+
+`@dohc/app-backend-runtime/automation` evaluates the formulas and code steps of Collection automations.
+It returns values and requested changes. It never writes; the executor applies each change with its own checks.
+
+```ts
+const evaluator = createAutomationEvaluator();
+const [ready, note] = await evaluator.evaluate(scope, [
+  { kind: "expression", source: 'record.Status == "Done"' },
+  { kind: "text", source: "Finished {record.Name} on {formatDate(today())}" },
+]);
+const step = await evaluator.runCode(scope, 'return { set: { "Finished on": ctx.today() } };');
+```
+
+### Isolation
+
+Evaluation runs in a worker thread, so it never blocks the caller's thread. Requests run one at a time.
+Each request gets a fresh QuickJS runtime with the dataset guest's controls: no network, files, module loader, host objects, or asynchronous work.
+One run's formulas share one context and one scope. Before the first formula runs, the evaluator freezes the scope, the helpers, the global object, and the global built-ins with their prototypes.
+A formula therefore cannot change what a later formula sees through them. A code step runs alone in its own request.
+
+A worker thread is enough because evaluation runs only JavaScript and WebAssembly. The dataset guest uses a child process because it also runs SQLite.
+The worker exits after 30 seconds without work, which returns its QuickJS memory. The next request starts a new one.
+Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten` dependency and pass that file as `entryPath`.
+
+| Limit | Value | Dataset guest |
+|---|---|---|
+| Time for one formula | 100 ms | none |
+| Time for one code step | 1 s | 1 s for one operation |
+| Memory for one request | 16 MiB | 16 MiB for one operation |
+| Stack | 256 KiB | 256 KiB |
+| Source of one formula or code step | 64 KiB | 256 KiB |
+| Result of one formula or code step, as JSON | 64 KiB | 256 KiB |
+| Scope, as JSON | 256 KiB | 256 KiB of query results |
+| Formulas in one request | 64 | none |
+
+QuickJS checks its time limit between bytecodes, so native work such as converting a huge BigInt to text can run past it.
+A watchdog replaces the worker when a request runs 2 seconds past its time limits. That request's results are timeout errors.
+
+### Scope
+
+| Name | Contents |
+|---|---|
+| `record` | The triggering record's field values, by field name |
+| `previous` | The field values before the change. It is empty when the trigger has no earlier values, such as a new record or a button |
+| `trigger` | The trigger's `kind` and its facts |
+| `results` | The outputs of earlier steps, by step name |
+| `person` | `{ id, name }` of the person who made the change, or `null` |
+| `now` | The host passes the run's time as ISO 8601 with the running computer's UTC offset. Formulas read it through `now()` and `today()` |
+
+Formulas use these names directly. A code step reads them and the helpers from `ctx`, such as `ctx.record` and `ctx.today()`.
+Everything in the scope is frozen, so an assignment fails with a `TypeError`.
+
+An `expression` formula is one JavaScript expression, such as `record.Status == "Done"`.
+A `text` formula is text with expressions in braces, such as `Hi {record.Name}`. A list in braces becomes its items joined with `, `, an object becomes JSON, and an empty value becomes nothing.
+Write `{{` and `}}` for literal braces. A formula without a value, such as a missing field, gives `null`.
+
+### Helpers
+
+Dates are ISO strings in and out. A calendar date such as `2026-09-24` has no time zone.
+A date with a time keeps its UTC offset; one written without an offset uses the offset of `now`.
+`now` is the time on the computer that runs the automation, so `today()` is that computer's calendar date.
+
+| Helper | Returns |
+|---|---|
+| `today()` | The calendar date of `now`, such as `2026-09-24` |
+| `now()` | The run's time with its offset, such as `2026-09-24T09:30:00.000+08:00`. Every call in a run returns the same time |
+| `dateAdd(date, amount, unit)` | `date` moved by a whole `amount` of `years`, `quarters`, `months`, `weeks`, `days`, `hours`, or `minutes`. A month that lacks the day uses its last day, so January 31 plus 1 month is February 28. Hours and minutes added to a calendar date start at its midnight on the clock of `now` |
+| `dateBetween(a, b, unit)` | The whole units from `b` to `a`, counted toward zero. It is negative when `a` is earlier. Both dates are read on the clock of `now` |
+| `formatDate(date, format)` | `date` as text, `MMMM D, YYYY` (`September 24, 2026`) by default. Parts: `YYYY` `YY` `MMMM` `MMM` `MM` `M` `DD` `D` `dddd` `ddd` `HH` `H` `hh` `h` `mm` `ss` `A`. Text in `[brackets]` stays as written. Names are English |
+| `lower(text)`, `upper(text)`, `trim(text)` | The changed text. An empty value gives `""` |
+| `contains(value, search)` | Whether text contains `search`, or a list has an item equal to it |
+| `join(list, separator)` | The list's items as text, separated by `, ` by default. Empty items are skipped |
+| `length(value)` | The characters in text or the items in a list. An empty value gives 0 |
+| `sum(...values)`, `min(...values)`, `max(...values)` | The total, lowest, or highest of the numbers given, including numbers in lists. Empty values are skipped. `sum` of nothing is 0; `min` and `max` of nothing are `null` |
+| `round(number, places)` | The number rounded to `places` decimal places, 0 by default. Halves round up |
+
+Units can also be singular, such as `day`.
+
+### Code steps
+
+A code step is a function body that receives `ctx` and returns synchronously. Every key of its result is optional:
+
+```js
+return {
+  set: { "Finished on": ctx.today() },
+  records: [
+    { action: "add", collection: "Trip/Tasks", fields: { Name: "Book hotel" } },
+    { action: "change", collection: "Trip/Tasks", id: "record-7", fields: { Status: "Open" } },
+  ],
+  output: { total: 50 },
+};
+```
+
+`set` names fields of the triggering record. `records` adds records to, or changes records in, the Collection at a workspace path.
+`output` is any JSON value; later steps read it from `results`. Returning nothing asks for nothing.
+The evaluator validates this shape. An unknown key or another shape gives `invalid_result`.
+
+### Errors
+
+Each formula and code step gives `{ ok: true, value }` or `{ ok: false, error: { code, message } }`.
+The message is written for the person who reads the run.
+
+| Code | Cause |
+|---|---|
+| `syntax` | The formula or code does not parse |
+| `runtime` | It threw. A thrown string becomes the message |
+| `timeout` | It ran past its time limit |
+| `memory` | It used more memory or stack than the limits allow |
+| `too_large` | Its source, the scope, or its result is over its size limit |
+| `invalid_result` | It gave a function, a promise, a value JSON cannot hold, or a code step result of another shape |
+
+The promise rejects only for executor mistakes and worker failures.
+Executor mistakes include more than 64 formulas, an unknown formula kind, a `now` without a valid UTC offset, and a call after `close`.
