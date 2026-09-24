@@ -13,8 +13,13 @@ export const AUTOMATION_LIMITS = Object.freeze({
   formulaMs: 100,
   /** Time for one code step once its scope is ready. */
   codeMs: 1000,
-  /** Wall time for one request, like the dataset guest's `deadlineMs`. Items it does not reach time out. */
+  /**
+   * Time one request's formulas and code steps can run, not counting reading the scope, like the dataset
+   * guest's `deadlineMs`. Items that start after it is spent do not run.
+   */
   requestMs: 8000,
+  /** Time one request can spend reading the scope, over all its formulas. Items that start after it is spent do not run. */
+  prepareRequestMs: 8000,
   /**
    * One request's WebAssembly memory. Each request gets a fresh one, so no request reads memory another used.
    * QuickJS itself uses about 7 MiB, so one formula or code step can use about 17 MiB, less its scope.
@@ -27,7 +32,7 @@ export const AUTOMATION_LIMITS = Object.freeze({
   textParts: 1024,
   scopeBytes: 256 * KiB,
   resultBytes: 64 * KiB,
-  /** How deeply a result's lists and objects can nest. */
+  /** How deeply a result's lists and objects can nest. A value in the scope can nest as deeply. */
   resultDepth: 64,
   formulasPerBatch: 64,
   /** Requests waiting or running. When the queue is full, a new request returns `busy` for every item. */
@@ -87,14 +92,17 @@ export interface CodeStepReturn {
 }
 
 export type AutomationWorkerItem = AutomationFormula | { kind: "code"; source: string };
-export type AutomationWorkerRequest = { scope: AutomationScope; items: AutomationWorkerItem[] };
+/** Time a request has spent reading its scope and running its items, in milliseconds. */
+export interface AutomationTimeSpent { prepareMs: number; runMs: number }
+/** `spent` is the time earlier workers spent on this request, before one was replaced. */
+export type AutomationWorkerRequest = { scope: AutomationScope; items: AutomationWorkerItem[]; spent: AutomationTimeSpent };
 /**
- * The worker answers each item in order with `result`. It sends `restart` after an item that broke its
- * QuickJS module, and `refused` instead of any result when the scope binds a name QuickJS already defines.
+ * The worker answers each item in order with `result` and the time the item took. It sends `restart` after an
+ * item that broke its QuickJS module, and `refused` instead of any result for a scope it cannot evaluate.
  */
 export type AutomationWorkerReply =
   | { kind: "ready" }
-  | { kind: "result"; result: AutomationOutcome<JsonValue> }
+  | ({ kind: "result"; result: AutomationOutcome<JsonValue> } & AutomationTimeSpent)
   | { kind: "restart" }
   | { kind: "refused"; message: string };
 
@@ -104,3 +112,19 @@ export const itemLimitMs = (item: { kind: AutomationWorkerItem["kind"] }) =>
 /** The worker refuses a request whose scope it cannot turn into JSON. */
 export const NOT_JSON = "The automation scope must hold only JSON values.";
 export const failure = (code: AutomationErrorCode, message: string) => ({ ok: false, error: { code, message } }) as const;
+
+/** The scope object and its `record` or `bindings` object add two levels to the nesting of the values in them. */
+export const SCOPE_DEPTH = AUTOMATION_LIMITS.resultDepth + 2;
+export const scopeTooLarge = () => failure("too_large", `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / 1024} KiB.`);
+export const scopeTooDeep = () => failure("too_large", `The record and step results nest lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`);
+
+/** The failure for an item that starts after its request spent one of its time budgets, or nothing. */
+export function notReached(item: AutomationWorkerItem, spent: AutomationTimeSpent) {
+  if (spent.runMs >= AUTOMATION_LIMITS.requestMs) {
+    return failure("timeout", `${subjectOf(item)} did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`);
+  }
+  if (spent.prepareMs >= AUTOMATION_LIMITS.prepareRequestMs) {
+    return failure("timeout", `${subjectOf(item)} did not run because reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareRequestMs / 1000} s in all.`);
+  }
+  return undefined;
+}

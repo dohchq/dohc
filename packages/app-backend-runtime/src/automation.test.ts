@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_LIMITS, createAutomationEvaluator } from "./automation.ts";
-import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject } from "./automation.ts";
+import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject, JsonValue } from "./automation.ts";
+import { evaluateItem, newQuickJS } from "./automation-evaluate.ts";
 
 const threads = vi.hoisted(() => ({ started: 0, terminated: 0 }));
 vi.mock("node:worker_threads", async importOriginal => {
@@ -27,6 +28,13 @@ const scope: AutomationScope = {
   now: "2026-09-24T09:30:00.000+08:00",
 };
 const expression = (source: string): AutomationFormula => ({ kind: "expression", source });
+const nested = (depth: number): JsonValue => {
+  let value: JsonValue = 1;
+  for (let level = 0; level < depth; level++) value = [value];
+  return value;
+};
+const tooLarge = { code: "too_large", message: "The record and step results are larger than 256 KiB." };
+const tooDeep = { code: "too_large", message: "The record and step results nest lists or objects more than 64 levels deep." };
 const evaluator = createAutomationEvaluator();
 afterAll(() => evaluator.close());
 
@@ -419,7 +427,12 @@ describe("scope preparation", () => {
 
   it("refuses a scope with values JSON cannot hold", async () => {
     const started = threads.started;
-    const cases: Array<[unknown, string]> = [[1n, "bigint"], [new Date(0), "Date"], [new Map(), "Map"], [() => 1, "function"], [[{ deep: [Symbol("s")] }], "symbol"]];
+    class CustomArray extends Array {}
+    class Point { x = 1; }
+    const cases: Array<[unknown, string]> = [
+      [1n, "bigint"], [new Date(0), "Date"], [new Map(), "Map"], [() => 1, "function"], [[{ deep: [Symbol("s")] }], "symbol"],
+      [CustomArray.from([1, 2]), "CustomArray"], [{ rows: [new Point()] }, "Point"], [new Uint8Array(2), "Uint8Array"],
+    ];
     for (const [bad, kind] of cases) {
       await expect(evaluator.evaluate({ ...scope, record: { Bad: bad as JsonObject } }, Array.from({ length: 64 }, () => expression("1"))))
         .rejects.toThrow(`The automation scope must hold only JSON values. It holds a value of type ${kind}.`);
@@ -427,15 +440,93 @@ describe("scope preparation", () => {
     expect(threads.started).toBe(started);
   });
 
-  it("has the worker refuse a scope it cannot turn into JSON, and keep serving", async () => {
+  it("has the worker refuse a scope it cannot turn into JSON or that nests too deeply, and keep serving", async () => {
     const worker = new Worker(fileURLToPath(new URL("../dist/automation-worker.mjs", import.meta.url)));
     try {
       await once(worker, "message");
-      worker.postMessage({ scope: { ...scope, record: { Bad: 1n } }, items: [expression("1")] });
+      const spent = { prepareMs: 0, runMs: 0 };
+      worker.postMessage({ scope: { ...scope, record: { Bad: 1n } }, items: [expression("1")], spent });
       expect((await once(worker, "message"))[0]).toEqual({ kind: "refused", message: "The automation scope must hold only JSON values." });
-      worker.postMessage({ scope, items: [expression("1 + 1")] });
-      expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: true, value: 2 } });
+      worker.postMessage({ scope: { ...scope, bindings: { rows: nested(65) } }, items: [expression("1")], spent });
+      expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: false, error: tooDeep }, prepareMs: 0, runMs: 0 });
+      worker.postMessage({ scope, items: [expression("1 + 1")], spent });
+      expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: true, value: 2 }, prepareMs: expect.any(Number), runMs: expect.any(Number) });
     } finally { await worker.terminate(); }
+  });
+
+  it("refuses a scope nested too deeply before copying it", async () => {
+    const fresh = createAutomationEvaluator();
+    try {
+      const cyclic: JsonObject = {};
+      cyclic.self = cyclic;
+      for (const deep of [{ ...scope, bindings: { rows: nested(65) } }, { ...scope, record: { Rows: nested(3000) } }, { ...scope, record: cyclic }]) {
+        expect(await fresh.evaluate(deep, [expression("1"), expression("2")])).toEqual([{ ok: false, error: tooDeep }, { ok: false, error: tooDeep }]);
+      }
+      expect(threads.started).toBe(0);
+      // A bound step result can nest as deeply as a result can.
+      expect(await fresh.evaluate({ ...scope, bindings: { rows: nested(64) }, record: { Rows: nested(64) } }, [expression("rows.flat(Infinity)[0] + record.Rows.flat(Infinity)[0]")]))
+        .toEqual([{ ok: true, value: 2 }]);
+    } finally { await fresh.close(); }
+  });
+
+  it("counts escaped UTF-8 bytes of keys and strings at the size limit", async () => {
+    const fresh = createAutomationEvaluator();
+    try {
+      // Quotes, backslashes, and control characters are escaped; a lone surrogate is written as six bytes.
+      const tricky: JsonObject = {
+        "é\"\n\u0001😀": "\u0000\u001f\t\\\"é€😀\u2028\ud800",
+        [`key${"\u0000".repeat(10)}`]: ["\ud83d", "\udc00", "x\u007f"],
+      };
+      const sized = (padding: number): AutomationScope => ({ ...scope, record: { ...tricky, Notes: "x".repeat(padding) } });
+      const bytes = (input: AutomationScope) => Buffer.byteLength(JSON.stringify(input));
+      const padding = AUTOMATION_LIMITS.scopeBytes - bytes(sized(0));
+      expect(bytes(sized(padding))).toBe(AUTOMATION_LIMITS.scopeBytes);
+      expect(await fresh.evaluate(sized(padding + 1), [expression("1")])).toEqual([{ ok: false, error: tooLarge }]);
+      // 150,000 NUL characters serialize to 900 KB.
+      expect(await fresh.evaluate({ ...scope, record: { Notes: "\u0000".repeat(150_000) } }, [expression("1")])).toEqual([{ ok: false, error: tooLarge }]);
+      expect(await fresh.evaluate({ ...scope, record: { ["\u0000".repeat(50_000)]: 1 } }, [expression("1")])).toEqual([{ ok: false, error: tooLarge }]);
+      expect(threads.started).toBe(0);
+      expect(await fresh.evaluate(sized(padding), [expression('Object.keys(record).join("|").length')]))
+        .toEqual([{ ok: true, value: Object.keys(sized(padding).record!).join("|").length }]);
+    } finally { await fresh.close(); }
+  });
+
+  it("spends a request's time reading its scope apart from the time its formulas run", async () => {
+    const worker = new Worker(fileURLToPath(new URL("../dist/automation-worker.mjs", import.meta.url)));
+    try {
+      await once(worker, "message");
+      type Reply = { result: unknown; prepareMs: number; runMs: number };
+      const ask = async (input: AutomationScope, count: number, spent: { prepareMs: number; runMs: number }) => {
+        worker.postMessage({ scope: input, items: Array.from({ length: count }, () => expression("record.Rows.length")), spent });
+        const replies: Reply[] = [];
+        for (let index = 0; index < count; index++) replies.push((await once(worker, "message"))[0] as Reply);
+        return replies;
+      };
+      // The formulas have 100 ms left to run. Reading the large scope 20 times takes longer than that, and does not count.
+      const large: AutomationScope = { ...scope, record: { Rows: Array.from({ length: 12_000 }, (_, index) => ({ id: `row-${index}` })) } };
+      const replies = await ask(large, 20, { prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs - 100 });
+      expect(replies.map(reply => reply.result)).toEqual(Array.from({ length: 20 }, () => ({ ok: true, value: 12_000 })));
+      expect(replies.reduce((total, reply) => total + reply.prepareMs, 0)).toBeGreaterThan(100);
+      // Each budget, once spent, stops the items after it.
+      expect((await ask(large, 1, { prepareMs: 0, runMs: AUTOMATION_LIMITS.requestMs }))[0]!.result).toEqual({ ok: false, error: {
+        code: "timeout", message: "The formula did not run because the run took longer than 8 s." } });
+      expect((await ask(large, 1, { prepareMs: AUTOMATION_LIMITS.prepareRequestMs, runMs: 0 }))[0]!.result).toEqual({ ok: false, error: {
+        code: "timeout", message: "The formula did not run because reading the record and step results took longer than 8 s in all." } });
+    } finally { await worker.terminate(); }
+  });
+
+  it("times out reading a scope that finishes after its limit", async () => {
+    const quickjs = await newQuickJS();
+    // The clock reads 0 when the item starts and 10 s after that, as if reading the scope took 10 s without an interrupt.
+    const jumping = () => { let readings = 0; return () => readings++ === 0 ? 0 : 10_000; };
+    const late = { code: "timeout", message: `Reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareMs} ms.` };
+    expect(evaluateItem(quickjs, JSON.stringify(scope), expression("1 + 1"), jumping()).result).toEqual({ ok: false, error: late });
+    // A scope the guest cannot read gives an error, and a timeout past the limit.
+    expect(evaluateItem(quickjs, "not JSON", expression("1"), jumping()).result).toEqual({ ok: false, error: late });
+    // The same instance still works, so the timeouts released their QuickJS values.
+    expect(evaluateItem(quickjs, JSON.stringify(scope), expression("1 + 1")).result).toEqual({ ok: true, value: 2 });
+    expect(evaluateItem(quickjs, "not JSON", expression("1")).result)
+      .toEqual({ ok: false, error: { code: "too_large", message: "The record and step results are too large or too deeply nested to read." } });
   });
 });
 
@@ -447,9 +538,13 @@ describe("evaluator lifetime", () => {
     expect(results).toEqual([{ ok: true, value: 2 }, { ok: true, value: 4 }, { ok: true, value: 6 }]);
   });
 
-  it("returns busy when 16 runs are already waiting", async () => {
+  it("returns busy for every item when 16 runs are already waiting", async () => {
     const waiting = Array.from({ length: 16 }, (_, index) => value(`${index}`));
-    expect(await value("16")).toEqual({ ok: false, error: { code: "busy", message: "The evaluator already has 16 runs waiting. Try this run again later." } });
+    const busy = { ok: false, error: { code: "busy", message: "The evaluator already has 16 runs waiting. Try this run again later." } };
+    expect(await value("16")).toEqual(busy);
+    expect(await evaluator.evaluate(scope, [expression("1"), expression("1".repeat(AUTOMATION_LIMITS.sourceBytes + 1))])).toEqual([busy, busy]);
+    const oversized = { ...scope, record: { Notes: "x".repeat(AUTOMATION_LIMITS.scopeBytes) } };
+    expect(await evaluator.evaluate(oversized, [expression("1"), expression("2")])).toEqual([busy, busy]);
     expect(await Promise.all(waiting)).toEqual(Array.from({ length: 16 }, (_, index) => ({ ok: true, value: index })));
     expect(await value("16")).toEqual({ ok: true, value: 16 });
   });
@@ -457,12 +552,8 @@ describe("evaluator lifetime", () => {
   it("refuses oversized input without copying it to a worker", async () => {
     const fresh = createAutomationEvaluator();
     try {
-      const cyclic: JsonObject = {};
-      cyclic.self = cyclic;
-      const tooLarge = { ok: false, error: { code: "too_large", message: "The record and step results are larger than 256 KiB." } };
-      expect(await fresh.evaluate({ ...scope, record: cyclic }, [expression("1")])).toEqual([tooLarge]);
-      expect(await fresh.evaluate({ ...scope, record: { Notes: "x".repeat(AUTOMATION_LIMITS.scopeBytes) } }, [expression("1")])).toEqual([tooLarge]);
-      expect(await fresh.evaluate({ ...scope, record: { Rows: Array.from({ length: AUTOMATION_LIMITS.scopeBytes }, () => 0) } }, [expression("1")])).toEqual([tooLarge]);
+      expect(await fresh.evaluate({ ...scope, record: { Notes: "x".repeat(AUTOMATION_LIMITS.scopeBytes) } }, [expression("1")])).toEqual([{ ok: false, error: tooLarge }]);
+      expect(await fresh.evaluate({ ...scope, record: { Rows: Array.from({ length: AUTOMATION_LIMITS.scopeBytes }, () => 0) } }, [expression("1")])).toEqual([{ ok: false, error: tooLarge }]);
       expect(await fresh.evaluate(scope, [expression("1".repeat(AUTOMATION_LIMITS.sourceBytes + 1))]))
         .toEqual([{ ok: false, error: { code: "too_large", message: "The formula is longer than 64 KiB." } }]);
       const parts = Array.from({ length: AUTOMATION_LIMITS.textParts + 1 }, (): AutomationTextPart => ({ kind: "text", text: "a" }));

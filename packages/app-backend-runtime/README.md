@@ -256,13 +256,14 @@ Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten
 | Time to read the scope into one formula or code step's context | 1 s | none |
 | Time for one formula | 100 ms | none |
 | Time for one code step | 1 s | 1 s for one operation |
-| Wall time for one request | 8 s | 8 s for one operation |
+| Time one request's formulas and code steps run, not counting reading the scope | 8 s | 8 s for one operation |
+| Time one request reads the scope, over all its formulas | 8 s | none |
 | Memory for one formula or code step | about 17 MiB, from a 24 MiB cap | 16 MiB for one operation |
 | Stack | 256 KiB | 256 KiB |
 | Source of one formula or code step | 64 KiB | 256 KiB |
 | Parts of one message text | 1,024 | none |
 | Result of one formula or code step, as JSON | 64 KiB, nested at most 64 levels | 256 KiB |
-| Scope, as JSON | 256 KiB | 256 KiB of query results |
+| Scope, as JSON | 256 KiB, and each value in it nested at most 64 levels | 256 KiB of query results |
 | Formulas in one request | 64 | none |
 | Requests waiting or running | 16 | 8 operations running |
 
@@ -270,14 +271,18 @@ The time limits count wall time, as the dataset guest's limits do. A formula's t
 Windows counts a thread's processor time by clock ticks, and on a busy machine it counted 47 ms for 570 ms of work, so processor time cannot bound a formula.
 The worker evaluates one formula as it starts, so a cold worker's first formula does not spend its time compiling QuickJS's code paths.
 QuickJS checks the limits between bytecodes, so native work such as converting a huge BigInt to text can run past them.
-A result that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limit.
-That formula times out and a new worker evaluates the ones after it. Formulas that the request reaches after 8 seconds time out without running.
-When 16 requests are waiting or running, a new request returns `busy` for every item at once. The caller runs the automation again later.
+A result or a read scope that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limits.
+That formula times out and a new worker evaluates the ones after it.
+A request keeps two totals: the time its formulas run, and the time it spends reading the scope.
+Reading a 256 KiB scope takes 15 to 25 ms on a desktop, so 64 formulas can spend several seconds reading it. That time never cuts off a formula's run time.
+Formulas that start after either total passes 8 seconds time out without running. Each total passes 8 seconds only by the item running when it did, so one request takes at most about 21 seconds.
+When 16 requests are waiting or running, a new request returns `busy` for every item at once, before any other check. The caller runs the automation again later.
 
-The scope and formulas must be plain JSON data: no bigints, functions, symbols, dates, maps, or other class instances.
-Before the caller's thread copies anything to the worker, the evaluator rejects a scope with such a value and refuses an oversized source, message text, or scope as `too_large`.
-It counts the scope's JSON size exactly, except that a string with escapes or characters beyond ASCII counts less than its UTF-8 size. It stops counting at the limit, so a cycle is `too_large`.
-The worker measures exact sizes, and it refuses a scope it cannot turn into JSON.
+The scope and formulas must be plain JSON data: no bigints, functions, symbols, or class instances such as dates, maps, and `Array` subclasses.
+Before the caller's thread copies anything to the worker, the evaluator rejects a scope with such a value. It refuses an oversized source or message text, and an oversized or deeply nested scope, as `too_large`.
+It counts the UTF-8 bytes `JSON.stringify` would write for the scope, including escapes, and stops at the limits, so a cycle is `too_large`.
+Values in the scope, such as a field value or a bound step result, can nest 64 levels deep, as a result can. The scope and its `record` or `bindings` object add two levels.
+The worker measures size and nesting again from the JSON, and it refuses a scope it cannot turn into JSON.
 
 ### Scope
 
@@ -352,9 +357,9 @@ The message is written for the person who reads the run.
 | `runtime` | It threw. A thrown string becomes the message |
 | `timeout` | It, or reading its scope, ran past its time limit |
 | `memory` | It used more memory or stack than the limits allow |
-| `too_large` | Its source, the scope, or its result is over its size limit |
+| `too_large` | Its source, the scope, or its result is over its size limit, or the scope nests too deeply |
 | `invalid_result` | It gave a function, a promise, a value JSON cannot hold, a value nested too deeply, or a code step result of another shape |
-| `busy` | The evaluator already had 16 requests waiting or running. Nothing ran; run the automation again later |
+| `busy` | The evaluator already had 16 requests waiting or running. Every item of the request gets it and nothing ran; run the automation again later |
 
 The promise rejects for executor mistakes and a worker that cannot start.
-Executor mistakes include more than 64 formulas, a malformed formula, a scope with a value JSON cannot hold, a `now` without a valid UTC offset, a binding under a name the scope or QuickJS owns, and a call after `close`.
+Executor mistakes include more than 64 formulas, a malformed formula, a scope with a value JSON cannot hold, which the message names by type, a `now` without a valid UTC offset, a binding under a name the scope or QuickJS owns, and a call after `close`.

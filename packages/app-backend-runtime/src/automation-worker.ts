@@ -1,150 +1,18 @@
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { parentPort } from "node:worker_threads";
-import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC } from "quickjs-emscripten";
 import type { QuickJSWASMModule } from "quickjs-emscripten";
-import { en } from "zod/locales";
-import * as z from "zod/mini";
-import { automationGuest } from "./automation-guest.js";
-import { AUTOMATION_LIMITS, failure, itemLimitMs, NOT_JSON, subjectOf } from "./automation-protocol.js";
-import type { AutomationError, AutomationOutcome, AutomationWorkerItem, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
-import type { JsonValue } from "./protocol.js";
-
-const GUEST_SOURCE = `(${automationGuest})`;
-const KiB = 1024, MiB = KiB * KiB, WASM_PAGE = 64 * KiB;
-/** The QuickJS build declares 16 MiB of initial memory, so a smaller memory cannot hold it. */
-const INITIAL_MEMORY_BYTES = 16 * MiB;
-
-// zod/mini keeps the worker small; English messages explain an invalid code step result.
-z.config(en());
-const nonEmpty = () => z.string().check(z.minLength(1));
-const fieldValues = z.record(nonEmpty(), z.json());
-const codeStepReturn: z.ZodMiniType<CodeStepReturn> = z.strictObject({
-  set: z.optional(fieldValues),
-  records: z.optional(z.array(z.discriminatedUnion("action", [
-    z.strictObject({ action: z.literal("add"), collection: nonEmpty(), fields: fieldValues }),
-    z.strictObject({ action: z.literal("change"), collection: nonEmpty(), id: nonEmpty(), fields: fieldValues }),
-  ]))),
-  output: z.optional(z.json()),
-});
-
-const codes = new Set<unknown>(["syntax", "runtime", "timeout", "memory", "too_large", "invalid_result"] satisfies AutomationError["code"][]);
-
-/** Guest code can reach the guest's own built-ins, so the worker checks the reply's shape instead of trusting it. */
-function outcome(reply: string): AutomationOutcome<JsonValue> | undefined {
-  let parsed: { ok?: unknown; value?: JsonValue; error?: { code?: unknown; message?: unknown } };
-  try { parsed = JSON.parse(reply); } catch { return undefined; }
-  if (parsed?.ok === true && parsed.value !== undefined) return { ok: true, value: parsed.value };
-  const { code, message } = parsed?.error ?? {};
-  if (parsed?.ok === false && codes.has(code) && typeof message === "string") return failure(code as AutomationError["code"], message.slice(0, 1024));
-  return undefined;
-}
-
-/** How deeply a JSON text nests lists and objects, read without parsing it. */
-function jsonDepth(json: string): number {
-  let depth = 0, deepest = 0, quoted = false;
-  for (let index = 0; index < json.length; index++) {
-    const code = json.charCodeAt(index);
-    if (quoted) {
-      if (code === 0x5c) index++;
-      else if (code === 0x22) quoted = false;
-    } else if (code === 0x22) quoted = true;
-    else if (code === 0x5b || code === 0x7b) deepest = Math.max(deepest, ++depth);
-    else if (code === 0x5d || code === 0x7d) depth--;
-  }
-  return deepest;
-}
-
-const sourceBytes = (item: AutomationWorkerItem) => item.kind === "text"
-  ? item.parts.reduce((total, part) => total + Buffer.byteLength(part.kind === "text" ? part.text : part.expression), 0)
-  : Buffer.byteLength(item.source);
-
-/** Evaluates one formula or code step in its own QuickJS runtime and context, as the dataset guest does for each operation. */
-function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, item: AutomationWorkerItem): AutomationOutcome<JsonValue> {
-  const subject = subjectOf(item), limitMs = itemLimitMs(item);
-  if (sourceBytes(item) > AUTOMATION_LIMITS.sourceBytes) {
-    return failure("too_large", `${subject} is longer than ${AUTOMATION_LIMITS.sourceBytes / KiB} KiB.`);
-  }
-  const runtime = quickjs.newRuntime();
-  try {
-    runtime.setMaxStackSize(AUTOMATION_LIMITS.stackBytes);
-    runtime.removeModuleLoader();
-    // Reading the scope has its own limit. The item's limit starts once the scope is ready.
-    let deadline = performance.now() + AUTOMATION_LIMITS.prepareMs;
-    runtime.setInterruptHandler(() => performance.now() >= deadline);
-    const vm = runtime.newContext();
-    try {
-      const guest = vm.evalCode(GUEST_SOURCE, "automation.js");
-      let prepared = guest;
-      if (!guest.error) {
-        const args = [vm.newString(scopeJson), vm.newString(item.kind)];
-        prepared = vm.callFunction(guest.value, vm.undefined, ...args);
-        for (const handle of [guest.value, ...args]) handle.dispose();
-      }
-      if (prepared.error) {
-        // No authored code has run yet, so only the scope's size can exhaust the limits.
-        prepared.error.dispose();
-        return performance.now() >= deadline
-          ? failure("timeout", `Reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareMs} ms.`)
-          : failure("too_large", "The record and step results are too large to read.");
-      }
-      if (vm.typeof(prepared.value) !== "function") {
-        try { return outcome(vm.typeof(prepared.value) === "string" ? vm.getString(prepared.value) : "") ?? failure("too_large", "The record and step results cannot be read."); }
-        finally { prepared.value.dispose(); }
-      }
-      const timeout = () => failure("timeout", `${subject} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`);
-      const source = item.kind === "text" ? JSON.stringify(item.parts) : item.source;
-      const args = [vm.newString(source), vm.newNumber(AUTOMATION_LIMITS.resultBytes)];
-      deadline = performance.now() + limitMs;
-      const result = vm.callFunction(prepared.value, vm.undefined, ...args);
-      for (const handle of [prepared.value, ...args]) handle.dispose();
-      if (result.error) {
-        // Only an interrupt or exhausted memory escapes the guest's own error handling.
-        result.error.dispose();
-        return performance.now() >= deadline ? timeout() : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
-      }
-      try {
-        // Native work, such as converting a huge BigInt, can finish past the limit without an interrupt.
-        if (performance.now() >= deadline) return timeout();
-        const reply = vm.typeof(result.value) === "string" ? vm.getString(result.value) : "";
-        if (Buffer.byteLength(reply) > AUTOMATION_LIMITS.resultBytes) {
-          return failure("too_large", `${subject} produced more than ${AUTOMATION_LIMITS.resultBytes / KiB} KiB.`);
-        }
-        // The envelope adds one level. Deeper values cannot cross to the caller's thread.
-        if (jsonDepth(reply) > AUTOMATION_LIMITS.resultDepth + 1) {
-          return failure("invalid_result", `${subject} nested lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`);
-        }
-        return outcome(reply) ?? failure("invalid_result", `${subject} produced a value that cannot be saved.`);
-      } finally { result.value.dispose(); }
-    } finally { vm.dispose(); }
-  } finally { runtime.dispose(); }
-}
-
-function codeStep(outcome: AutomationOutcome<JsonValue>): AutomationOutcome<JsonValue> {
-  if (!outcome.ok) return outcome;
-  const parsed = codeStepReturn.safeParse(outcome.value);
-  if (parsed.success) return { ok: true, value: parsed.data as JsonValue };
-  const problems = parsed.error.issues.map(issue => `${issue.path.length ? `${issue.path.join(".")}: ` : ""}${issue.message}`);
-  return failure("invalid_result", `The code returned something the automation cannot use. ${problems.join("; ")}`.slice(0, 1024));
-}
+import { evaluateItem, jsonDepth, newQuickJS } from "./automation-evaluate.js";
+import type { Evaluated } from "./automation-evaluate.js";
+import { AUTOMATION_LIMITS, failure, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
+import type { AutomationWorkerReply, AutomationWorkerRequest } from "./automation-protocol.js";
 
 const port = parentPort;
 if (!port) throw new Error("The automation worker must run in a worker thread.");
-// The worker compiles QuickJS once. Each request instantiates it with a fresh memory, so no request reads memory
-// another request used. QuickJS's own memory limit cannot measure allocations in this build, so the memory's cap
-// bounds every request.
-const wasmPath = createRequire(fileURLToPath(import.meta.resolve("quickjs-emscripten"))).resolve("@jitl/quickjs-wasmfile-release-sync/wasm");
-const wasmModule = await WebAssembly.compile(await readFile(wasmPath));
-const newModule = () => newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, {
-  wasmModule,
-  wasmMemory: new WebAssembly.Memory({ initial: INITIAL_MEMORY_BYTES / WASM_PAGE, maximum: AUTOMATION_LIMITS.memoryBytes / WASM_PAGE }),
-}));
+
 // A binding named after one of QuickJS's globals would hide a built-in, so the worker refuses it.
 const globals = await (async () => {
-  const quickjs = await newModule();
+  const quickjs = await newQuickJS();
   // A first evaluation compiles QuickJS's code paths, so a cold worker's first formula does not spend its time on that.
-  evaluate(quickjs, JSON.stringify({ trigger: { kind: "button" }, person: null, now: "2026-01-01T00:00:00Z" }), { kind: "expression", source: "today()" });
+  evaluateItem(quickjs, JSON.stringify({ trigger: { kind: "button" }, person: null, now: "2026-01-01T00:00:00Z" }), { kind: "expression", source: "today()" });
   const vm = quickjs.newContext();
   try {
     const names = vm.unwrapResult(vm.evalCode("Object.getOwnPropertyNames(globalThis)"));
@@ -155,33 +23,45 @@ const globals = await (async () => {
 const reply = (message: AutomationWorkerReply) => port.postMessage(message);
 // Requests run one at a time: the next message waits until this one has replied for every item.
 let requests = Promise.resolve();
-port.on("message", (request: AutomationWorkerRequest) => { requests = requests.then(() => answer(request)); });
+// An unexpected failure asks for a new worker, so the request's remaining items still get results.
+port.on("message", (request: AutomationWorkerRequest) => {
+  requests = requests.then(() => answer(request)).catch(() => reply({ kind: "restart" }));
+});
 
-async function answer({ scope, items }: AutomationWorkerRequest): Promise<void> {
+async function answer({ scope, items, spent }: AutomationWorkerRequest): Promise<void> {
   const taken = Object.keys(scope.bindings ?? {}).find(name => globals.has(name));
   if (taken !== undefined) {
     return reply({ kind: "refused", message: `The step result name ${JSON.stringify(taken)} belongs to a JavaScript built-in. Bind it with another name.` });
   }
   let scopeJson: string;
   try { scopeJson = JSON.stringify(scope); } catch { return reply({ kind: "refused", message: NOT_JSON }); }
-  const scopeTooLarge = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes;
+  const scopeFailure = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes ? scopeTooLarge()
+    : jsonDepth(scopeJson) > SCOPE_DEPTH ? scopeTooDeep() : undefined;
+  // Each request gets its own QuickJS instance and memory, so no request reads memory another used.
   let quickjs: QuickJSWASMModule;
-  try { quickjs = await newModule(); } catch { return reply({ kind: "restart" }); }
+  try { quickjs = await newQuickJS(); } catch { return reply({ kind: "restart" }); }
+  let { prepareMs, runMs } = spent;
   for (const item of items) {
-    let result: AutomationOutcome<JsonValue>;
-    try {
-      result = scopeTooLarge
-        ? failure("too_large", `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / KiB} KiB.`)
-        : evaluate(quickjs, scopeJson, item);
-      if (item.kind === "code") result = codeStep(result);
-    } catch (error) {
-      // An aborted QuickJS module cannot evaluate again. Report this item and ask for a new worker.
-      reply({ kind: "result", result: error instanceof WebAssembly.RuntimeError
-        ? failure("memory", `${subjectOf(item)} used more memory than it is allowed, so it stopped.`)
-        : failure("runtime", `The evaluator failed while it ran ${subjectOf(item).toLowerCase()}.`) });
-      return reply({ kind: "restart" });
+    const skipped = scopeFailure ?? notReached(item, { prepareMs, runMs });
+    let evaluated: Evaluated;
+    if (skipped) evaluated = { result: skipped, prepareMs: 0, runMs: 0 };
+    else {
+      const began = performance.now();
+      try {
+        evaluated = evaluateItem(quickjs, scopeJson, item);
+      } catch (error) {
+        // An aborted QuickJS module cannot evaluate again. Report this item and ask for a new worker.
+        reply({
+          kind: "result", prepareMs: 0, runMs: performance.now() - began, result: error instanceof WebAssembly.RuntimeError
+            ? failure("memory", `${subjectOf(item)} used more memory than it is allowed, so it stopped.`)
+            : failure("runtime", `The evaluator failed while it ran ${subjectOf(item).toLowerCase()}.`),
+        });
+        return reply({ kind: "restart" });
+      }
     }
-    reply({ kind: "result", result });
+    prepareMs += evaluated.prepareMs;
+    runMs += evaluated.runMs;
+    reply({ kind: "result", ...evaluated });
   }
 }
 reply({ kind: "ready" });

@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, subjectOf } from "./automation-protocol.js";
-import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
+import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
+import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
 export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
@@ -21,7 +21,7 @@ export interface AutomationEvaluatorOptions {
 }
 
 /**
- * The scope and formulas must be plain JSON data: no functions, class instances, dates, maps, or cycles.
+ * The scope and formulas must be plain JSON data: no bigints, functions, symbols, class instances, or cycles.
  * When the queue is full, every item returns `busy`; the caller runs the automation again later.
  */
 export interface AutomationEvaluator {
@@ -56,40 +56,68 @@ const isFormula = (formula: AutomationFormula) => formula.kind === "expression" 
   : formula.kind === "text" && Array.isArray(formula.parts) && formula.parts.every(isTextPart);
 
 /**
- * Measures the scope's JSON size and stops past the limit, so this thread never walks or copies much more
- * than the limit allows. Punctuation, numbers, and literals count exactly. A string counts its length, which
- * is exact for plain ASCII and otherwise a lower bound of its UTF-8 size; the worker measures exactly.
- * A value JSON cannot hold, such as a bigint or a date, is a problem for the caller to fix.
+ * The UTF-8 bytes JSON.stringify writes for a string, with its quotes. It stops counting past `limit`.
+ * Quotes, backslashes, and control characters are escaped, and a lone surrogate is written as \uXXXX.
  */
-function measureScope(scope: AutomationScope): "fits" | "too_large" | { problem: string } {
+function jsonStringBytes(text: string, limit: number): number {
+  let bytes = text.length + 2;
+  if (bytes > limit) return bytes;
+  bytes = 2;
+  for (let index = 0; index < text.length && bytes <= limit; index++) {
+    const code = text.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) bytes += 2;
+    else if (code < 0x20) bytes += 6;
+    else if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) { bytes += 4; index++; }
+    else if (code >= 0xd800 && code <= 0xdfff) bytes += 6;
+    else bytes += 3;
+  }
+  return bytes;
+}
+
+const typeName = (value: unknown) => {
+  if (typeof value !== "object" || value === null) return typeof value;
+  const name: unknown = Object.getPrototypeOf(value)?.constructor?.name;
+  return typeof name === "string" && name !== "" ? name : Object.prototype.toString.call(value).slice(8, -1);
+};
+
+/**
+ * Measures the scope's JSON size in UTF-8 bytes and its nesting, and stops past either limit, so this thread
+ * never walks or copies much more than the limits allow. The worker measures both again from the JSON text.
+ * A value JSON cannot hold, such as a bigint, a date, or an instance of an Array subclass, is a problem for the
+ * caller to fix.
+ */
+function measureScope(scope: AutomationScope): "fits" | "too_large" | "too_deep" | { problem: string } {
+  const limit = AUTOMATION_LIMITS.scopeBytes;
   let size = 0;
-  const pending: unknown[] = [scope];
+  const pending: Array<[value: unknown, depth: number]> = [[scope, 1]];
   while (pending.length > 0) {
-    const value = pending.pop();
-    if (typeof value === "string") size += value.length + 2;
+    const [value, depth] = pending.pop()!;
+    if (typeof value === "string") size += jsonStringBytes(value, limit - size);
     else if (typeof value === "number") size += Number.isFinite(value) ? String(value).length : 4;
     else if (typeof value === "boolean") size += value ? 4 : 5;
     // JSON.stringify writes null, and `undefined` in a list, as null. It leaves out an undefined property.
     else if (value === null || value === undefined) size += 4;
-    else if (Array.isArray(value)) {
+    else if (Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype) {
+      if (depth > SCOPE_DEPTH) return "too_deep";
       size += Math.max(2, value.length + 1);
-      for (let index = 0; index < value.length && size <= AUTOMATION_LIMITS.scopeBytes; index++) pending.push(value[index]);
-    } else if (typeof value === "object" && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1]);
+    } else if (typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      if (depth > SCOPE_DEPTH) return "too_deep";
       let keys = 0;
       for (const key in value) {
         const item = (value as Record<string, unknown>)[key];
         if (item === undefined) continue;
         keys++;
-        size += key.length + 4;
-        if (size > AUTOMATION_LIMITS.scopeBytes) break;
-        pending.push(item);
+        // The key, its colon, and the comma after its value.
+        size += jsonStringBytes(key, limit - size) + 2;
+        if (size > limit) break;
+        pending.push([item, depth + 1]);
       }
       size += keys === 0 ? 2 : 1;
-    } else {
-      const kind = typeof value === "object" ? Object.prototype.toString.call(value).slice(8, -1) : typeof value;
-      return { problem: `${NOT_JSON} It holds a value of type ${kind}.` };
-    }
-    if (size > AUTOMATION_LIMITS.scopeBytes) return "too_large";
+    } else return { problem: `${NOT_JSON} It holds a value of type ${typeName(value)}.` };
+    if (size > limit) return "too_large";
   }
   return "fits";
 }
@@ -134,16 +162,18 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     thread.on("message", onReady).on("error", onError).on("exit", onExit);
   });
 
-  /** Sends items to the worker and reports each result. It resolves early when the worker is replaced. */
-  async function dispatch(scope: AutomationScope, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, budget: { deadline?: number }): Promise<void> {
+  /**
+   * Sends items to the worker and reports each result. It adds the time each item took to `spent`, and resolves
+   * early when the worker is replaced.
+   */
+  async function dispatch(scope: AutomationScope, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
     if (closed) throw new Error("The automation evaluator is closed.");
     clearTimeout(idle);
     const thread = worker ??= start();
     thread.catch(() => { if (worker === thread) worker = undefined; });
     const active = await thread;
-    const deadline = budget.deadline ??= performance.now() + AUTOMATION_LIMITS.requestMs;
     return new Promise((resolve, reject) => {
-      let received = 0;
+      let received = 0, itemStarted = performance.now();
       let watchdog: NodeJS.Timeout | undefined;
       const settle = () => {
         clearTimeout(watchdog);
@@ -154,7 +184,10 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
         idle = setTimeout(() => void stop(thread), idleMs);
         idle.unref();
       };
-      const accept = (result: AutomationOutcome<JsonValue>) => {
+      // Without the worker's own times, the item's whole wait counts as running time.
+      const accept = (result: AutomationOutcome<JsonValue>, times?: AutomationTimeSpent) => {
+        spent.prepareMs += times?.prepareMs ?? 0;
+        spent.runMs += times?.runMs ?? performance.now() - itemStarted;
         report(received++, result);
         if (received < items.length) arm();
         else { rest(); resolve(); }
@@ -163,20 +196,20 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       const replace = (result: AutomationOutcome<JsonValue>) => {
         settle();
         void stop(thread);
+        spent.runMs += performance.now() - itemStarted;
         report(received, result);
         resolve();
       };
       // Guest limits stop runaway JavaScript. This catches native work that never checks them.
       const arm = () => {
         clearTimeout(watchdog);
-        const item = items[received]!, limitMs = itemLimitMs(item), waitMs = AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS;
-        watchdog = setTimeout(() => replace(performance.now() >= deadline
-          ? failure("timeout", `${subjectOf(item)} stopped because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`)
-          : failure("timeout", `${subjectOf(item)} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`)),
-        Math.max(0, Math.min(waitMs, deadline - performance.now())));
+        itemStarted = performance.now();
+        const item = items[received]!, limitMs = itemLimitMs(item);
+        watchdog = setTimeout(() => replace(failure("timeout", `${subjectOf(item)} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`)),
+          AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS);
       };
       const onMessage = (reply: AutomationWorkerReply) => {
-        if (reply.kind === "result") accept(reply.result);
+        if (reply.kind === "result") accept(reply.result, reply);
         else if (reply.kind === "restart") { settle(); void stop(thread); resolve(); }
         else if (reply.kind === "refused") { rest(); reject(new Error(reply.message)); }
       };
@@ -189,7 +222,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       };
       active.on("message", onMessage).on("messageerror", onMessageError).on("error", onFailure).on("exit", onFailure);
       arm();
-      try { active.postMessage({ scope, items }); } catch (error) { rest(); reject(error); }
+      try { active.postMessage({ scope, items, spent: { ...spent } }); } catch (error) { rest(); reject(error); }
     });
   }
 
@@ -199,27 +232,23 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     if (problem) throw new Error(problem);
     const measured = measureScope(scope);
     if (typeof measured === "object") throw new Error(measured.problem);
-    const results = measured === "too_large"
-      ? items.map(() => failure("too_large", `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / KiB} KiB.`))
-      : items.map(tooLarge);
-    if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
     if (queued >= AUTOMATION_LIMITS.queuedRequests) {
-      const busy = failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`);
-      return results.map(result => result ?? busy);
+      return items.map(() => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
     }
+    const results = measured === "too_large" ? items.map(scopeTooLarge) : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(tooLarge);
+    if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
     queued++;
     const done = queue.then(async () => {
-      const budget: { deadline?: number } = {};
+      const spent: AutomationTimeSpent = { prepareMs: 0, runMs: 0 };
       for (;;) {
         const waiting = results.flatMap((result, index) => result ? [] : [index]);
         if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
-        if (budget.deadline !== undefined && performance.now() >= budget.deadline) {
-          for (const index of waiting) {
-            results[index] = failure("timeout", `${subjectOf(items[index]!)} did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`);
-          }
+        // After a replaced worker, items past the request's time budgets do not start another worker.
+        if (notReached(items[waiting[0]!]!, spent)) {
+          for (const index of waiting) results[index] = notReached(items[index]!, spent)!;
           continue;
         }
-        await dispatch(scope, waiting.map(index => items[index]!), (offset, result) => { results[waiting[offset]!] = result; }, budget);
+        await dispatch(scope, waiting.map(index => items[index]!), (offset, result) => { results[waiting[offset]!] = result; }, spent);
       }
     }).finally(() => { queued--; });
     queue = done.catch(() => undefined);
