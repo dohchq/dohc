@@ -387,7 +387,7 @@ export const NOTICE_BODY_MAX_CHARS = 500;
 // The relay's display-name limit for a sender.
 export const NOTICE_SENDER_LABEL_MAX_CHARS = 40;
 // The target as JSON, in UTF-8 bytes.
-export const NOTICE_TARGET_MAX_BYTES = 2_048;
+const NOTICE_TARGET_MAX_BYTES = 2_048;
 export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
 // The id a sender posts.
 export const NOTICE_POSTED_ID_MAX_CHARS = 256;
@@ -438,7 +438,7 @@ export interface NoticeTarget {
   run?: string;
 }
 
-export const NOTICE_TARGET_FIELDS = [
+const NOTICE_TARGET_FIELDS = [
   "path", "record", "thread", "message", "share", "automation", "run",
 ] as const satisfies readonly (keyof NoticeTarget)[];
 
@@ -520,7 +520,3 @@ export interface RelayNoticePage {
 // POST /sync/notices/marks. Read and dismissed are one-way: marking a row
 // again, or a row the relay no longer holds, changes nothing.
 export type NoticeMark = "read" | "dismissed";
-
-export interface MarkNoticesRequest {
-  marks: { noticeId: string; mark: NoticeMark }[];
-}
