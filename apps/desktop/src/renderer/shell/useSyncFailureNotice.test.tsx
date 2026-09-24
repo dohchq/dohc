@@ -34,6 +34,22 @@ function unreachable(sinceMs: number, attempts: number): Failure {
   };
 }
 
+// A person's retry whose failed answer the test sends when it chooses.
+function pendingRetry() {
+  let resolve: ((status: SyncStatusResult) => void) | null = null;
+  const retryCloudSync = vi.fn(
+    (_id: string, _reason: "person" | "reconnect") =>
+      new Promise<SyncStatusResult>((settle) => {
+        resolve = settle;
+      }),
+  );
+  return {
+    retryCloudSync,
+    answer: (failure: Failure) =>
+      resolve?.({ ...HEALTHY, state: "sync-failed", syncFailure: failure }),
+  };
+}
+
 // The shell's two hooks together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; failure: Failure | null | undefined },
@@ -210,6 +226,32 @@ describe("useSyncFailureNotice", () => {
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     await waitFor(() => expect(retryCloudSync).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(view.rows()).toEqual([]));
+  });
+
+  // #1233 review: the retry's answer and the status keyed the same failed
+  // pass differently, so the status refiled the row and the toast remounted.
+  it("files a failed retry once when the status repeats its answer", async () => {
+    const retry = pendingRetry();
+    const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
+    act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
+    await act(async () => retry.answer(unreachable(100, 2)));
+    expect(view.toasts()).toHaveLength(1);
+    const toastId = view.toasts()[0]!.id;
+    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
+    expect(view.rows()).toHaveLength(1);
+    expect(view.toasts()[0]!.id).toBe(toastId);
+  });
+
+  it("files a failed retry once when the status reports it before the answer", async () => {
+    const retry = pendingRetry();
+    const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
+    act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
+    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
+    expect(view.toasts()).toHaveLength(1);
+    const toastId = view.toasts()[0]!.id;
+    await act(async () => retry.answer(unreachable(100, 2)));
+    expect(view.rows()).toHaveLength(1);
+    expect(view.toasts()[0]!.id).toBe(toastId);
   });
 
   it("files a failed retry request as the sync failure, so recovery clears it", async () => {

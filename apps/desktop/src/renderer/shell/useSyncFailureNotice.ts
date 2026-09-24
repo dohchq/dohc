@@ -13,6 +13,13 @@ export function syncFailureMessage(failure: SyncFailure): string {
     : "dohc could not sync this workspace.";
 }
 
+// One failed pass, named the same way whether the retry's answer or the
+// status reports it, so the two file one row. A reconnect retry changes the
+// cause or detail without counting an attempt, and still needs a new key.
+function failedPassKey(failure: SyncFailure): string {
+  return `${failure.sinceMs}:${failure.attempts}:${failure.cause}:${failure.detail}`;
+}
+
 // What one failure has already shown, per workspace. Module state, because
 // the shell remounts on every workspace switch and a dismissed failure must
 // not come back when the person returns.
@@ -55,14 +62,14 @@ export function useSyncFailureNotice(input: {
   }, []);
   const failureRef = useRef(failure);
   failureRef.current = failure;
-  // The failed pass this mount last filed, so a status read that repeats it
-  // does not file it twice.
-  const filedRef = useRef<string | null>(null);
+  // The failed pass this mount last filed, and whether it toasted, so a
+  // status read or a retry's answer that repeats it does not file it twice.
+  const filedRef = useRef<{ key: string; toast: boolean } | null>(null);
 
   const retryRef = useRef<() => void>(() => undefined);
   const file = useCallback(
     (notice: SyncFailureNotice, key: string) => {
-      filedRef.current = key;
+      filedRef.current = { key, toast: notice.toast };
       report(notice, () => retryRef.current());
     },
     [report],
@@ -80,6 +87,9 @@ export function useSyncFailureNotice(input: {
           clear();
           return;
         }
+        // The status already toasted this failed pass.
+        const key = failedPassKey(next);
+        if (filedRef.current?.key === key && filedRef.current.toast) return;
         // The person asked and it failed: say so, whatever was shown before.
         const shown = shownFailures.get(askedFor);
         if (shown?.sinceMs === next.sinceMs) {
@@ -90,7 +100,7 @@ export function useSyncFailureNotice(input: {
         }
         file(
           { message: syncFailureMessage(next), detail: next.detail, toast: true },
-          `${next.sinceMs}:${next.attempts}`,
+          key,
         );
       },
       (error: unknown) => {
@@ -124,10 +134,10 @@ export function useSyncFailureNotice(input: {
       clear();
       return;
     }
-    // A reconnect retry changes the cause or detail without counting an
-    // attempt; refiling keeps the row in step and cannot raise a toast.
-    const key = `${current.sinceMs}:${current.attempts}:${current.cause}:${current.detail}`;
-    if (filedRef.current === key) return;
+    // Refiling after a reconnect retry keeps the row in step and cannot
+    // raise a toast, because the attempts did not grow.
+    const key = failedPassKey(current);
+    if (filedRef.current?.key === key) return;
     let shown = shownFailures.get(workspaceId);
     if (shown?.sinceMs !== current.sinceMs) {
       shown = { sinceMs: current.sinceMs, toasted: false, dismissed: false };
