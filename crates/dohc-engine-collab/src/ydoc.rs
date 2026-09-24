@@ -6790,6 +6790,32 @@ mod projection_tests {
         }
     }
 
+    /// The relay's `renderedReferences` checks the same vectors.
+    #[test]
+    fn references_read_by_the_rule_the_relay_shares() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            text: String,
+            references: Vec<String>,
+        }
+        let vectors: Vec<Vector> = serde_json::from_str(include_str!(
+            "../tests/owner-source/rendered-references.json"
+        ))
+        .expect("vectors");
+        for vector in vectors {
+            let references: Vec<String> = read_text(&vector.text, TextPlace::Inline)
+                .1
+                .iter()
+                .filter_map(|syntax| {
+                    syntax
+                        .split_once(": reference ")
+                        .map(|(_, name)| name.to_owned())
+                })
+                .collect();
+            assert_eq!(references, vector.references, "{:?}", vector.text);
+        }
+    }
+
     #[test]
     fn a_source_whose_text_reads_as_plain_text_is_preserved() {
         for source in [
