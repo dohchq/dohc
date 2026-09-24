@@ -35,6 +35,15 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
       fsp.stat = async (path, ...args) => controlled && snapshots.has(resolve(path))
         ? new Promise((resolveStat, reject) => pending.push({ path: resolve(path), resolve: resolveStat, reject }))
         : realStat(path, ...args);
+      // The same notifications make chokidar reread the directory. On a loaded
+      // host that reread can lstat the target after rm and drop its watch before
+      // the trailing sweep runs. Holding rereads leaves the sweep as the only
+      // path that can observe the deletion.
+      const realReaddir = fsp.readdir;
+      const heldReads = [];
+      fsp.readdir = (path, ...args) => controlled && resolve(path) === root
+        ? new Promise(release => heldReads.push(() => release(realReaddir(path, ...args))))
+        : realReaddir(path, ...args);
       syncBuiltinESMExports();
       const { watch } = await import(process.argv[1]);
       const watcher = watch(root, { ignoreInitial: true });
@@ -67,6 +76,7 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         assert.equal(await deleted, target);
       } finally {
         controlled = false;
+        for (const release of heldReads) release();
         for (const request of pending) request.resolve(snapshots.get(request.path));
         await watcher.close();
         await fsp.rm(root, { recursive: true, force: true });
