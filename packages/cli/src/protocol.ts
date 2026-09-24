@@ -137,7 +137,7 @@ const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
 
 const collectionPathArg = z.string().min(1).max(4096);
 const collectionFieldNameArg = z.string().min(1).max(200);
-// The engine mints record ids; the CLI only bounds the claim.
+// The engine owns record ids; the CLI only bounds the claim.
 const collectionRecordIdArg = z.string().min(1).max(200);
 const MAX_COLLECTION_QUERY_SORTS = 8;
 const MAX_COLLECTION_FIELD_WRITES = 64;

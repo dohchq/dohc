@@ -14,7 +14,7 @@ import type { RegisteredPlugin } from "./pluginPanelRegistration";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
-import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -132,12 +132,15 @@ async function fixture() {
     ensureWorkspaceActivityOpen: vi.fn(async () => activityStatus),
     activity: { engineCaptureFor: () => captureAvailable ? capture : null },
     collectionEditContextFor: vi.fn<Dependencies["collectionEditContextFor"]>(async (operation, signal) => ({
-      workspaceRoot: operation.workspace.rootPath, capture, signal,
-      withAdapter: async work => work({ queryCollectionRecords: async () => ({
-        collection: { path: "tasks", status: "valid", reasons: [] },
-        records: [{ id: "created-record", path: "tasks/new.md", conflicted: false, values: [] }],
-        groups: null, nextCursor: null,
-      }) }),
+      workspaceRoot: operation.workspace.rootPath, capture, signal: signal ?? operation.signal,
+      // The engine has adopted tasks/new.md, under the id its file carries, once the file exists.
+      withAdapter: async work => work({ getCollectionRecord: async ({ recordId }) => {
+        const text = await readFile(join(operation.workspace.rootPath, "tasks", "new.md"), "utf8").catch(() => "");
+        if (!text.includes(`id: ${recordId}`)) throw new Error("collection-record-not-found");
+        return { collection: { path: "tasks", status: "valid", reasons: [] },
+          record: { id: recordId, path: "tasks/new.md", conflicted: false, values: [] }, history: [], nextBeforeHistoryId: null };
+      } }),
+      onCaptureSettled: () => () => undefined,
     })),
     requirePluginEngineCaptureForOperation: vi.fn<Dependencies["requirePluginEngineCaptureForOperation"]>(async operation => {
       operation.assertCurrent();
@@ -295,9 +298,9 @@ describe("desktop plugin SDK runtime ownership", () => {
       expect(f.dependencies.collectionEditContextFor).not.toHaveBeenCalled();
       await f.invoke("collections.setFields", { path: "tasks/one.md", fields: { status: "done" }, author: { depth: 99 }, idempotencyKey: "forged" }, { automationClaimId: "claim" });
       await mkdir(join(f.workspace.rootPath, "tasks"));
-      await expect(f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" })).resolves.toEqual({ path: "tasks/new.md", recordId: "created-record" });
+      await expect(f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" })).resolves.toEqual({ path: "tasks/new.md", recordId: derivedRecordId("claim/1") });
       expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin/triage",
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/${ordinal}` })));
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}` })));
       expect(f.documents.map(doc => doc.getMap("frontmatter").toJSON())).toEqual([{ status: "done" }, { title: "Created" }]);
       expect(vi.mocked(f.dependencies.collectionEditContextFor).mock.calls.map(call => call[1])).toEqual(
         vi.mocked(f.dependencies.workerDatabaseReader).mock.calls.slice(1).map(call => call[0]));

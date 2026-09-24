@@ -87,7 +87,9 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_FTS_CANDIDATES = 50_000;
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
-const REQUEST_DEADLINE_MS = 15_000;
+// A CLI request that has not answered by now loses its socket; work done for
+// it, such as waiting for a created record, ends at the same bound.
+export const CLI_REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
 const RUN_MESSAGE_LINK_ATTEMPTS = 3;
 const RUN_MESSAGE_LINK_RETRY_MS = 25;
@@ -151,7 +153,8 @@ export interface CliRegistryWorkspace {
 // behavior-bearing actor kind; the request never supplies one. Field values
 // are plain JSON: they land in the record's frontmatter Y.Doc map. Both
 // functions throw on refusal (invalid path, engine off, "id" field, a held
-// doc session, adoption timeout).
+// doc session, a taken record name, adoption not done by the request
+// deadline).
 export interface CliCollectionWriteSeam {
   setFields(input: {
     recordPath: string;
@@ -2463,7 +2466,7 @@ function attachSocketHandler(
   socket.setEncoding("utf8");
   let buffer = "";
   let handled = false;
-  const deadline = setTimeout(() => socket.destroy(), REQUEST_DEADLINE_MS);
+  const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
   const failOversized = () => {
     handled = true;

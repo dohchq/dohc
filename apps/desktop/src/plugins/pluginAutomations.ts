@@ -419,6 +419,7 @@ export class PluginAutomations {
       // the same principal plugin writes already act for.
       onBehalfOf: "local",
       depth: claim.depth + 1,
+      attempt: claim.attempts,
       writes: 0,
     });
     let attempt:

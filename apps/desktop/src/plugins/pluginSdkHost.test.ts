@@ -14,6 +14,7 @@ import {
 } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 
+import { derivedRecordId } from "../workspaces/collectionRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
 interface AuthoredWrite {
   path: string;
@@ -418,7 +419,7 @@ describe("invokePluginSdkHost", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("attributes an automation run's collection writes to the automation with the claim id plus write ordinal as the key", async () => {
+  it("attributes an automation run's collection writes to the automation, keyed by claim, attempt, and write ordinal", async () => {
     const root = await createTestScratch("dohc-plugin-sdk-host-");
     const calls: unknown[] = [];
     const tasksCollection = {
@@ -436,6 +437,7 @@ describe("invokePluginSdkHost", () => {
         automationId: "hello-plugin/triage",
         onBehalfOf: "local",
         depth: 1,
+        attempt: 2,
         writes: 0,
       },
       reads: {
@@ -472,14 +474,18 @@ describe("invokePluginSdkHost", () => {
       expect.objectContaining({
         recordPath: "tasks/one.md",
         author: automationAuthor,
-        idempotencyKey: "claim-7/0",
+        idempotencyKey: "claim-7/2/0",
       }),
+      // The record id names the claim's second write in every attempt, so
+      // a re-run finds the record an earlier attempt created.
       expect.objectContaining({
         collectionPath: "tasks",
         author: automationAuthor,
-        idempotencyKey: "claim-7/1",
+        idempotencyKey: "claim-7/2/1",
+        recordId: derivedRecordId("claim-7/1"),
       }),
     ]);
+    expect(calls[0]).not.toHaveProperty("recordId");
 
     // A read in the same run context stays a read: no author override applies.
     await expect(
