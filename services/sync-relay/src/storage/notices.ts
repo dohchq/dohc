@@ -6,8 +6,10 @@ import {
   NOTICE_KINDS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
+  NOTICE_TITLE_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
+  type PostableNoticeKind,
   type NoticeMark,
   type NoticeReach,
   type NoticeTarget,
@@ -15,10 +17,17 @@ import {
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { badRequest, relayError } from "../errors";
+import { badRequest, relayError, RelayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
-import { fileSideOf, visibleSharePath, type ShareSelector } from "../shareFilter";
+import {
+  fileSideOf,
+  parseStoredAnyShareSelectorJson,
+  visibleSharePath,
+  type ShareSelector,
+} from "../shareFilter";
 import type { StorageContext } from "./context";
+import { readCurrentShareGrant } from "./currentShareGrant";
+import type { SyncRelayShareRow } from "./types";
 import {
   NOTICE_REMOVED_RETENTION_MS,
   NOTICE_REMOVED_ROW_LIMIT,
@@ -32,7 +41,7 @@ export interface PostNoticeInput {
   noticeId: string;
   recipientUserId: string;
   reach: NoticeReach;
-  kind: NoticeKind;
+  kind: PostableNoticeKind;
   title: string;
   body: string;
   target: NoticeTarget;
@@ -117,37 +126,124 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
 
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
-    storage.db.prepare(
-      `INSERT INTO sync_relay_notices (
-         recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
-         kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
-         origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
-    ).run(
-      input.recipientUserId,
-      noticeId,
-      nextChangeSeq(storage, input.recipientUserId),
-      placement.workspaceId,
-      placement.recipientShareId,
-      input.kind,
-      NOTICE_KINDS[input.kind].senderKind,
-      input.senderUserId,
-      input.senderLabel,
-      input.title,
-      input.body,
-      JSON.stringify(input.target),
-      input.originInstallId,
-      input.nowMs,
-      input.nowMs + NOTICE_UNREAD_RETENTION_MS,
-    );
-    // A row placed through a share was checked against the grants of this
-    // moment, which a stored digest may not describe, so the next pull
-    // checks access again.
-    if (placement.recipientShareId !== null) {
-      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
-        .run(input.recipientUserId);
-    }
+    insertNotice(storage, { ...input, noticeId, placement });
   });
+}
+
+export interface NoticeShareReceivedInput {
+  grantId: string;
+  // The granter's name, derived by the relay.
+  senderLabel: string;
+  nowMs: number;
+}
+
+/**
+ * Tells a person that a share reached them: one notice per grant, from the
+ * granter, placed through the share. Only a current named grant that a user
+ * holds gets one; a grant opened from a public link does not, because its
+ * holder opened the link. A list with no room for it gets none, and the
+ * share is unaffected.
+ */
+export function noticeShareReceived(storage: StorageContext, input: NoticeShareReceivedInput): void {
+  try {
+    storage.tx(() => {
+      const current = readCurrentShareGrant(storage, { grantId: input.grantId });
+      if (!current || current.grant.principalKind !== "user" || current.grant.parentGrantId !== null) return;
+      const { share, grant } = current;
+      const recipientUserId = grant.principalUserId!;
+      const noticeId = noticeIdFrom(share.granterUserId, `share-received:${grant.grantId}`);
+      const existing = storage.db
+        .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+        .get(recipientUserId, noticeId);
+      const title = shareReceivedTitle(storage, share, input.senderLabel);
+      if (existing || title === null) return;
+      sweepExpiredNotices(storage, recipientUserId, input.nowMs);
+      makeRoom(storage, recipientUserId, share.granterUserId, input.nowMs);
+      insertNotice(storage, {
+        recipientUserId,
+        noticeId,
+        placement: { workspaceId: null, recipientShareId: share.shareId },
+        kind: "share-received",
+        senderUserId: share.granterUserId,
+        senderLabel: input.senderLabel,
+        title,
+        body: "",
+        target: { share: share.shareId },
+        originInstallId: "relay",
+        nowMs: input.nowMs,
+      });
+    });
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "notice_list_full") return;
+    throw error;
+  }
+}
+
+// "Ana shared Trip with you", naming what the share holds and shortening the
+// name to fit. A direct message arrives as a message request.
+function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow, senderLabel: string): string | null {
+  const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+  if (!selector) return null;
+  if (!("paths" in selector)) {
+    const channelKind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
+    if (channelKind === "dm") return `${senderLabel} sent you a message request`;
+    return channelKind === "channel" ? `${senderLabel} shared a channel with you` : null;
+  }
+  const { paths } = selector;
+  const what = paths.length === 0 ? "a version"
+    : paths.length === 1 ? paths[0]!.split("/").at(-1)!
+    : `${paths.length} items`;
+  const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
+  const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;
+  return `${senderLabel} shared ${name} with you`;
+}
+
+interface NoticeRowInput {
+  recipientUserId: string;
+  noticeId: string;
+  placement: Placement;
+  kind: NoticeKind;
+  senderUserId: string;
+  senderLabel: string;
+  title: string;
+  body: string;
+  target: NoticeTarget;
+  originInstallId: string;
+  nowMs: number;
+}
+
+// Adds a row to a list that has room for it.
+function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
+  storage.db.prepare(
+    `INSERT INTO sync_relay_notices (
+       recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
+       kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
+       origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
+  ).run(
+    row.recipientUserId,
+    row.noticeId,
+    nextChangeSeq(storage, row.recipientUserId),
+    row.placement.workspaceId,
+    row.placement.recipientShareId,
+    row.kind,
+    NOTICE_KINDS[row.kind].senderKind,
+    row.senderUserId,
+    row.senderLabel,
+    row.title,
+    row.body,
+    JSON.stringify(row.target),
+    row.originInstallId,
+    row.nowMs,
+    row.nowMs + NOTICE_UNREAD_RETENTION_MS,
+  );
+  // A row placed through a share was checked against the grants of this
+  // moment, which a stored digest may not describe, so the next pull checks
+  // access again.
+  if (row.placement.recipientShareId !== null) {
+    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
+      .run(row.recipientUserId);
+  }
 }
 
 /**

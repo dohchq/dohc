@@ -531,6 +531,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     noticeStorage.markNotices(this, input);
   }
 
+  noticeShareReceived(input: noticeStorage.NoticeShareReceivedInput): void {
+    noticeStorage.noticeShareReceived(this, input);
+  }
+
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
     return publicationStorage.publishAppPublication(this, input);
   }
@@ -844,7 +848,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return handoffStorage.redeemLinkHandoffCode(this, input);
   }
 
-  claimPendingSharesForEmail(email: string, userId: string): number {
+  claimPendingSharesForEmail(email: string, userId: string): string[] {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
 

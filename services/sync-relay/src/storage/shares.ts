@@ -651,19 +651,19 @@ export function incrementActiveDependentGenerations(storage: StorageContext, par
       .run(parentGrantId);
   }
 
-export function claimPendingSharesForEmail(storage: StorageContext, email: string, userId: string): number {
+// Returns the ids of the grants it claimed.
+export function claimPendingSharesForEmail(storage: StorageContext, email: string, userId: string): string[] {
     const normalized = email.trim().toLowerCase();
-    if (!normalized) return 0;
-    return storage.tx(() => {
-      const result = storage.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
-           SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
-           WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
-        )
-        .run(userId, normalized);
-      return Number(result.changes ?? 0);
-    });
+    if (!normalized) return [];
+    return storage.tx(() => storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
+         SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
+         WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'
+         RETURNING grant_id`,
+      )
+      .all(userId, normalized)
+      .map((row) => String(row.grant_id)));
   }
 
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {

@@ -574,6 +574,7 @@ export interface SyncRelayStorage {
   postNotice(input: import("./notices").PostNoticeInput): void;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   markNotices(input: import("./notices").MarkNoticesInput): void;
+  noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
   acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
@@ -875,7 +876,7 @@ export interface SyncRelayStorage {
   // changing the grant principal from email to user. Idempotent; the email
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
-  claimPendingSharesForEmail(email: string, userId: string): number;
+  claimPendingSharesForEmail(email: string, userId: string): string[];
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(
     shareId: string,

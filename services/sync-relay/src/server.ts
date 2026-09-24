@@ -32,7 +32,8 @@ import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceB
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
-import { createDiscussionRoutes } from "./discussionRoutes";
+import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
+import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -290,13 +291,39 @@ export function createSyncRelayHandler({
     historicalSharedBlob,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
+  // A granter's name on the notice a share sends: their display name, or
+  // the email the recipient already sees beside the share.
+  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+    const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
+    if (name !== null) return name;
+    const email = await lookupUserEmail?.(granterUserId);
+    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
+  };
+
+  // Tells the person a share reached that it arrived. Best effort: the grant
+  // is already durable, so a failed notice never fails the share.
+  const noticeShareReceived = async (grantId: string): Promise<void> => {
+    try {
+      const grant = storage.getShareGrant(grantId);
+      const share = grant ? storage.getShare(grant.shareId) : null;
+      if (!share) return;
+      const senderLabel = await shareSenderLabel(share.granterUserId);
+      storage.noticeShareReceived({ grantId, senderLabel, nowMs: nowMs() });
+    } catch (error) {
+      console.error("[sync-relay] share notice failed", error);
+    }
+  };
+
   // Claim email invites only after the authenticated account verifies its address.
   const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
     signal?.throwIfAborted();
     if (!lookupVerifiedUserEmail) return;
     const email = await lookupVerifiedUserEmail(userId);
     signal?.throwIfAborted();
-    if (email) storage.claimPendingSharesForEmail(email, userId);
+    if (!email) return;
+    for (const grantId of storage.claimPendingSharesForEmail(email, userId)) {
+      await noticeShareReceived(grantId);
+    }
   };
 
   function requireShareAction(
@@ -438,6 +465,7 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
+    noticeShareReceived,
     publicEditRelease,
   );
 
