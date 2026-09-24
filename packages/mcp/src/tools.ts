@@ -1682,6 +1682,7 @@ async function detectSiteAt(
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
+  const hasPublishManifest = files.has("app.publish.json");
   // Whether any script exists is a materially looser test than whether
   // one actually names a web dependency or a recognizable web-tool token —
   // the shared hasWebScript predicate is the same one desktop's own
@@ -1780,6 +1781,7 @@ async function detectSiteAt(
   if (
     explicitNonSite &&
     !hasIndex &&
+    !hasPublishManifest &&
     !hasPackageSignal &&
     !frameworkConfig &&
     detectedBuildOutputs.length === 0
@@ -1795,7 +1797,7 @@ async function detectSiteAt(
     });
   }
 
-  if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
+  if (!configPath && !hasIndex && !hasPublishManifest && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
     return null;
   }
 
@@ -1805,7 +1807,7 @@ async function detectSiteAt(
   // either one is a high-confidence signal on its own, same as an actual
   // index.html file — the desktop Apps view and MCP's detect_sites must
   // describe the same project the same way.
-  const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
+  const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
   // counts toward high confidence when it explicitly declares type: "site"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
@@ -1820,7 +1822,7 @@ async function detectSiteAt(
   const confidence: SiteConfidence =
     validType === "site"
       ? "high"
-      : hasIndex || frameworkConfig
+      : hasIndex || hasPublishManifest || frameworkConfig
         ? "high"
         : hasPackageSignal || uniqueBuildOutputs.length > 0
           ? "medium"
