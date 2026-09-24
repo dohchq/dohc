@@ -17,7 +17,7 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { editKeptFrontmatterKeys, loadMarkdownFrontmatter } from './frontmatter.js'
+import { loadMarkdownFrontmatter, setFrontmatterValue } from './frontmatter.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -403,8 +403,8 @@ describe('Y.Doc markdown import/export', () => {
       })
       expect(yDocToMarkdown(doc)).toBe(written)
       const frontmatter = doc.getMap('frontmatter')
-      frontmatter.set('title', 'Porto')
-      frontmatter.set('status', 'booked')
+      setFrontmatterValue(doc, 'title', 'Porto')
+      setFrontmatterValue(doc, 'status', 'booked')
       expect(yDocToMarkdown(doc)).toBe([
         '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
         'zero: -0', 'tags:', '- a', 'status: booked', '---', '', 'Body',
@@ -417,16 +417,14 @@ describe('Y.Doc markdown import/export', () => {
         'rating: 5', 'status: booked', '---', '', 'Body',
       ].join('\n'))
     } finally { doc.destroy() }
-    // A rename from the Properties panel keeps the place and comments.
-    const renamed = markdownToYDoc(written)
+    // A writer that sets the key directly gets the entry in place without the
+    // comments above it, because the key no longer holds the item the text was
+    // written for.
+    const raw = markdownToYDoc(written)
     try {
-      renamed.transact(() => {
-        renamed.getMap('frontmatter').delete('title')
-        renamed.getMap('frontmatter').set('heading', 'Lisbon')
-        editKeptFrontmatterKeys(renamed.getMap('meta'), { renamed: [{ from: 'title', to: 'heading', value: 'Lisbon' }] })
-      })
-      expect(yDocToMarkdown(renamed)).toBe(written.replace('title:   Lisbon', 'heading: Lisbon'))
-    } finally { renamed.destroy() }
+      raw.getMap('frontmatter').set('title', 'Porto')
+      expect(yDocToMarkdown(raw)).toBe(written.replace('# Trip\ntitle:   Lisbon', 'title: Porto'))
+    } finally { raw.destroy() }
   })
 
   it.each([
@@ -435,7 +433,7 @@ describe('Y.Doc markdown import/export', () => {
       markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody',
       deleted: 'wifi',
       added: ['wifi', 'new'] as const,
-      settled: '---\nbudget: 100\nwifi: new\n---\n\nBody',
+      settled: '---\nwifi: new\nbudget: 100\n---\n\nBody',
     },
     {
       name: 'a deleted key whose value comes back',
@@ -444,16 +442,21 @@ describe('Y.Doc markdown import/export', () => {
       added: ['featured', true] as const,
       settled: '---\ntitle: A\nfeatured: true\n---\n\nBody',
     },
-  ])('never brings back the comments of $name', ({ markdown, deleted, added, settled }) => {
-    const doc = markdownToYDoc(markdown)
-    try {
-      doc.transact(() => {
-        doc.getMap('frontmatter').delete(deleted)
-        editKeptFrontmatterKeys(doc.getMap('meta'), { deleted: [deleted] })
-      })
-      doc.getMap('frontmatter').set(added[0], added[1])
-      expect(yDocToMarkdown(doc)).toBe(settled)
-    } finally { doc.destroy() }
+  ])('never brings back the comments of $name, whoever writes it', ({ markdown, deleted, added, settled }) => {
+    // Plain Y.Map writes in separate updates, in one update, and through the
+    // helper that keeps an edited key's comments.
+    for (const write of ['separate', 'together', 'helper'] as const) {
+      const doc = markdownToYDoc(markdown)
+      try {
+        const frontmatter = doc.getMap('frontmatter')
+        const add = () => write === 'helper'
+          ? setFrontmatterValue(doc, added[0], added[1])
+          : frontmatter.set(added[0], added[1])
+        if (write === 'together') doc.transact(() => { frontmatter.delete(deleted); add() })
+        else { frontmatter.delete(deleted); add() }
+        expect(yDocToMarkdown(doc), write).toBe(settled)
+      } finally { doc.destroy() }
+    }
   })
 
   // A collaborator can write any frontmatter source. One too deep, too large,
@@ -486,30 +489,20 @@ describe('Y.Doc markdown import/export', () => {
     expect(loadMarkdownFrontmatter(markdown)).toBeUndefined()
   })
 
-  // Two devices delete different keys offline. The kept text is one value, so
-  // after the merge it holds one device's rewrite and still names the other
-  // device's key. Adding that key again strips its old entry first.
+  // Two devices delete different keys offline, then one adds both back. The
+  // kept text still names both keys and their comments, but neither key holds
+  // the item the text was written for.
   it('never brings back a comment when a key deleted on another device returns', () => {
     const base = markdownToYDoc('---\n# x note\nx: 1\n# y note\ny: 2\nz:   3\n---\n\nBody')
     const [a, b] = [new Y.Doc(), new Y.Doc()]
     try {
       for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
-      const forget = (doc: Y.Doc, key: string) => doc.transact(() => {
-        doc.getMap('frontmatter').delete(key)
-        editKeptFrontmatterKeys(doc.getMap('meta'), { deleted: [key] })
-      })
-      forget(a, 'x')
-      forget(b, 'y')
+      a.getMap('frontmatter').delete('x')
+      b.getMap('frontmatter').delete('y')
       Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
-      expect(a.getMap('meta').get('dohcFrontmatterSource')).toMatch(/# [xy] note/)
-      a.transact(() => {
-        const frontmatter = a.getMap('frontmatter')
-        for (const key of ['x', 'y']) {
-          if (!frontmatter.has(key)) editKeptFrontmatterKeys(a.getMap('meta'), { deleted: [key] })
-          frontmatter.set(key, 'new')
-        }
-      })
-      expect(yDocToMarkdown(a)).toBe('---\nz:   3\nx: new\ny: new\n---\n\nBody')
+      expect(a.getMap('meta').get('dohcFrontmatterSource')).toMatch(/# x note[\s\S]*# y note/)
+      for (const key of ['x', 'y']) a.getMap('frontmatter').set(key, 'new')
+      expect(yDocToMarkdown(a)).toBe('---\nx: new\ny: new\nz:   3\n---\n\nBody')
     } finally { base.destroy(); a.destroy(); b.destroy() }
   })
 

@@ -32,6 +32,8 @@ import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
+  recordFrontmatterSourceItems,
+  writtenFrontmatterKeys,
   isFrontmatterMap,
   normalizeFrontmatterValue,
   orderFrontmatter,
@@ -265,6 +267,9 @@ export function markdownToYDoc(markdown: string): Y.Doc {
       ? {}
       : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
   })
+  if (frontmatterSource !== undefined) {
+    recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD))
+  }
 
   const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
@@ -479,6 +484,9 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
       ? {}
       : { [FRONTMATTER_SOURCE_META_KEY]: frontmatterSource }),
   })
+  if (frontmatterSource !== undefined) {
+    recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD))
+  }
   doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
 
   return doc
@@ -499,6 +507,7 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
     body,
     usesCrlf ? '\r\n' : '\n',
+    writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), internalMeta),
   )}${restoreLineEndings(body)}`
 }
 

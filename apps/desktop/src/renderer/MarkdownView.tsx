@@ -37,7 +37,10 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
-import { frontmatterBlockFor } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterBlockFor,
+  writtenFrontmatterKeys,
+} from "@dohc/ydoc-projection/frontmatter";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -742,8 +745,16 @@ export function MarkdownView(props: {
       engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
     ) as Record<string, unknown>;
     // The frontmatter text the settle keeps, so a copy matches the file.
-    const source = engine.doc.getMap("meta").get("dohcFrontmatterSource");
-    return `${frontmatterBlockFor(orderFrontmatter(liveMeta), source, body, "\n")}${body}`;
+    const meta = engine.doc.getMap("meta");
+    const written = writtenFrontmatterKeys(engine.doc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
+    const block = frontmatterBlockFor(
+      orderFrontmatter(liveMeta),
+      meta.get("dohcFrontmatterSource"),
+      body,
+      "\n",
+      written,
+    );
+    return `${block}${body}`;
   };
 
   const hasSetAsideEdit =

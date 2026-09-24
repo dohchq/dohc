@@ -1,4 +1,4 @@
-import { editKeptFrontmatterKeys } from "@dohc/ydoc-projection/frontmatter";
+import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -84,27 +84,14 @@ export function PageIdentity(props: PageIdentityProps) {
   function writeField(key: "title" | "icon", value: string | undefined) {
     if (readOnly) return;
     if (ydoc) {
-      ydoc.transact(() => {
-        const map = ydoc.getMap(FRONTMATTER_FIELD);
-        if (value === undefined || value === "") {
-          map.delete(key);
-          // The kept frontmatter text forgets the key and its comments.
-          editKeptFrontmatterKeys(ydoc.getMap("meta"), { deleted: [key] });
-        }
-        else {
-          // A new key gets no written text an offline delete left behind.
-          if (!map.has(key)) editKeptFrontmatterKeys(ydoc.getMap("meta"), { deleted: [key] });
-          map.set(key, value);
-        }
-      });
+      if (value === undefined || value === "") ydoc.getMap(FRONTMATTER_FIELD).delete(key);
+      else setFrontmatterValue(ydoc, key, value);
       return;
     }
     const next = { ...parseFrontmatter(body).meta };
     if (value === undefined || value === "") delete next[key];
     else next[key] = value;
-    props.onChange?.(
-      applyFrontmatter(body, orderFrontmatter(next), value ? {} : { deleted: [key] }),
-    );
+    props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
   }
 
   // The title keeps its own draft so typing stays smooth; it re-syncs from

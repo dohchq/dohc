@@ -13,7 +13,7 @@ import {
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
-import { frontmatterBlockFor } from '@dohc/ydoc-projection/frontmatter'
+import { frontmatterBlockFor, writtenFrontmatterKeys } from '@dohc/ydoc-projection/frontmatter'
 import {
   orderFrontmatter,
   parseFrontmatter,
@@ -99,8 +99,9 @@ export function yDocToMarkdown(doc: Y.Doc): string {
   const body = yDocBodyToMarkdown(doc).trimEnd()
   const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc))
   // The frontmatter text the settle keeps, so the source view shows it too.
-  const source = doc.getMap(META_FIELD).get('dohcFrontmatterSource')
-  return `${frontmatterBlockFor(frontmatter, source, body, '\n')}${body}`
+  const meta = doc.getMap(META_FIELD)
+  const written = writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), meta)
+  return `${frontmatterBlockFor(frontmatter, meta.get('dohcFrontmatterSource'), body, '\n', written)}${body}`
 }
 
 export function replaceYDocWithMarkdown(doc: Y.Doc, markdown: string): void {

@@ -1,6 +1,5 @@
 import * as yaml from "js-yaml";
 import {
-  type FrontmatterKeyEdit,
   loadMarkdownFrontmatter,
   writeMarkdownFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
@@ -65,7 +64,7 @@ export function frontmatterEntries(markdown: string): FrontmatterEntry[] {
 export function applyFrontmatter(
   markdown: string,
   props: Record<string, unknown>,
-  edit?: FrontmatterKeyEdit,
+  renamed?: ReadonlyMap<string, string>,
 ): string {
-  return writeMarkdownFrontmatter(markdown, props, edit);
+  return writeMarkdownFrontmatter(markdown, props, renamed);
 }

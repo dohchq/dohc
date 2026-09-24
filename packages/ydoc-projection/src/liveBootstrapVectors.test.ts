@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { editKeptFrontmatterKeys } from './frontmatter.js'
+import { setFrontmatterValue } from './frontmatter.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import frontmatterFixtures from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
@@ -30,12 +30,12 @@ const numericSamples = [0, -0, 1, -1, 1.25, Number.MIN_VALUE, Number.MAX_VALUE,
   Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 2 ** 53, 1e-6, 1e-7, 1e20, 1e21]
   .map((value, index) => ({ name: `number-${index}`, markdown: 'Body', values: { value } }))
 type Sample = {
-  name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>
-  // Typed at the end of the body, keys removed, and a replacement frontmatter source.
+  // `values` are set the way the desktop's editors set them, which keeps an
+  // edited key's comments; `raw` values are plain Y.Map writes. Keys in
+  // `remove` are deleted first.
+  name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>; raw?: Record<string, unknown>
+  // Typed at the end of the body, and a replacement frontmatter source.
   typed?: string; remove?: string[]; source?: string
-  // Keys deleted and renamed the way the Properties panel does it, with the
-  // kept frontmatter text updated in the same transaction. Applied first.
-  forget?: string[]; renames?: { from: string; to: string }[]
   // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean
 }
@@ -104,17 +104,16 @@ const settleSamples: Sample[] = [
   // Removing the key under a kept blank line would change the block
   // scalar's value, so the settle writes canonical frontmatter.
   { name: 'settle-key-after-keep-block-scalar-removed', markdown: KEEP_BLOCK_SCALAR, remove: ['c'] },
-  { name: 'settle-key-renamed', markdown: WRITTEN_FRONTMATTER, renames: [{ from: 'title', to: 'heading' }] },
-  { name: 'settle-key-renamed-and-key-added', markdown: WRITTEN_FRONTMATTER, renames: [{ from: 'title', to: 'heading' }], values: { status: 'booked' } },
+  { name: 'settle-key-renamed', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon' } },
+  { name: 'settle-key-renamed-and-key-added', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon', status: 'booked' } },
+  // A key written directly keeps its place but not the comments above it.
+  { name: 'settle-key-set-directly', markdown: WRITTEN_FRONTMATTER, raw: { title: 'Porto' } },
   // A deleted key's comment never returns: not when its name comes back, and
   // not when another key takes its value.
-  { name: 'settle-key-deleted-then-name-reused', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', forget: ['wifi'], values: { wifi: 'new' } },
-  { name: 'settle-key-deleted-then-value-reused', markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody\n', forget: ['draft'], values: { featured: true } },
-  { name: 'settle-last-key-forgotten', markdown: '---\nz: 1\n---\n\nBody\n', forget: ['z'] },
-  // A delete from a client that leaves the kept text alone drops the key's
-  // lines at the settle, and a new key goes after the others.
-  // A new key with another value is not a rename, so the removed key's
-  // comment goes with it.
+  { name: 'settle-key-deleted-then-name-reused', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { wifi: 'new' } },
+  { name: 'settle-key-deleted-then-name-reused-directly', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], raw: { wifi: 'new' } },
+  { name: 'settle-key-deleted-then-value-reused', markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody\n', remove: ['draft'], values: { featured: true } },
+  { name: 'settle-last-key-forgotten', markdown: '---\nz: 1\n---\n\nBody\n', remove: ['z'] },
   { name: 'settle-key-replaced', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { note: 'x' } },
   { name: 'settle-keep-block-scalar-last-key-added', markdown: '---\nb: |+\n  keeps\n\n---\n\nBody\n', values: { c: 1 } },
   { name: 'settle-keep-block-scalar-changed', markdown: KEEP_BLOCK_SCALAR, values: { b: 'other\n\n' } },
@@ -163,19 +162,10 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
   const vectors: Vector[] = samples.map(sample => {
     const doc = markdownToYDoc(sample.markdown)
     try {
-      doc.transact(() => {
-        for (const key of sample.forget ?? []) doc.getMap('frontmatter').delete(key)
-        const renamed = (sample.renames ?? []).map(({ from, to }) => {
-          const value = doc.getMap('frontmatter').get(from)
-          doc.getMap('frontmatter').delete(from)
-          doc.getMap('frontmatter').set(to, value)
-          return { from, to, value }
-        })
-        editKeptFrontmatterKeys(doc.getMap('meta'), { deleted: sample.forget ?? [], renamed })
-      })
-      if (sample.edit) doc.getMap('frontmatter').set('priority', 'low')
-      if (sample.values) for (const [key, value] of Object.entries(sample.values)) doc.getMap('frontmatter').set(key, value)
       for (const key of sample.remove ?? []) doc.getMap('frontmatter').delete(key)
+      if (sample.edit) doc.getMap('frontmatter').set('priority', 'low')
+      for (const [key, value] of Object.entries(sample.values ?? {})) setFrontmatterValue(doc, key, value)
+      for (const [key, value] of Object.entries(sample.raw ?? {})) doc.getMap('frontmatter').set(key, value)
       if (sample.source !== undefined) doc.getMap('meta').set('dohcFrontmatterSource', sample.source)
       if (sample.typed !== undefined) {
         const body = doc.getXmlFragment('body')

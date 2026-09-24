@@ -7,6 +7,7 @@ import { TableCell, TableHeader } from '@tiptap/extension-table'
 import { getExtensionField } from '@tiptap/core'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
+import { setFrontmatterValue } from './frontmatter.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
@@ -420,7 +421,7 @@ describe('public Markdown schema', () => {
   })
   it('accepts frontmatter text that a later frontmatter edit left behind', () => {
     const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
-      doc.getMap('frontmatter').set('title', 'B')
+      setFrontmatterValue(doc, 'title', 'B')
     }))
     expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText')
   })

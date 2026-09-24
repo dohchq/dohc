@@ -62,6 +62,11 @@ const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
 /// The frontmatter text a document was imported with, kept while it reads as
 /// the current frontmatter. See [`frontmatter_yaml::kept`].
 const FRONTMATTER_SOURCE_META_KEY: &str = "dohcFrontmatterSource";
+/// The item each frontmatter key held when its text was kept: a JSON object
+/// from key to `client:clock`. Writing a key creates a new item, so a key
+/// written since, by any writer, no longer matches and its kept text and
+/// comments are not written back.
+const FRONTMATTER_SOURCE_ITEMS_META_KEY: &str = "dohcFrontmatterSourceItems";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
@@ -542,6 +547,7 @@ impl Ydoc {
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
                         FRONTMATTER_SOURCE_META_KEY
+                            | FRONTMATTER_SOURCE_ITEMS_META_KEY
                             | MARKDOWN_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_SHA_META_KEY
                             | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
@@ -555,12 +561,17 @@ impl Ydoc {
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
             return Err(invalid());
         }
-        if matches!(
-            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
-            Some(Out::Any(Any::String(source)))
-                if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
-        ) {
-            return Err(invalid());
+        for key in [
+            FRONTMATTER_SOURCE_META_KEY,
+            FRONTMATTER_SOURCE_ITEMS_META_KEY,
+        ] {
+            if matches!(
+                meta.get(&txn, key),
+                Some(Out::Any(Any::String(text)))
+                    if text.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+            ) {
+                return Err(invalid());
+            }
         }
         let source_fields = [
             MARKDOWN_SOURCE_META_KEY,
@@ -925,7 +936,8 @@ impl Ydoc {
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
-            if let Some(kept) = frontmatter_yaml::kept(&source, &rendered) {
+            let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
+            if let Some(kept) = frontmatter_yaml::kept(&source, &rendered, &written) {
                 let mut preserved = ProjectionBuffer::new();
                 preserved.push_str(&kept)?;
                 // A closing delimiter at the end of the file needs a line
@@ -1038,14 +1050,6 @@ impl Ydoc {
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
-                    match &source {
-                        Some(source) => {
-                            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source.as_str());
-                        }
-                        None => {
-                            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
-                        }
-                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1058,6 +1062,7 @@ impl Ydoc {
                     for (key, value) in &frontmatter {
                         map.insert(txn, key.as_str(), json_to_any(value));
                     }
+                    keep_frontmatter_source(&map, &meta, txn, source.as_deref());
                     let len = frag.len(txn);
                     if len > 0 {
                         frag.remove_range(txn, 0, len);
@@ -1081,12 +1086,9 @@ impl Ydoc {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.with_delta(|txn| {
-            // A key the map does not have gets no written text: an offline
-            // device's delete may have left an older entry for it.
-            if !map.contains_key(txn, key) {
-                forget_kept_frontmatter_key(&meta, txn, key);
-            }
+            let before = map.entry_id(txn, key);
             map.insert(txn, key, value);
+            carry_frontmatter_source_item(&map, &meta, txn, key, before);
         })
     }
 
@@ -1158,14 +1160,15 @@ impl Ydoc {
                     .cloned()
                     .collect(),
             );
-            Some(self.with_delta(|txn| {
-                map.insert(txn, key, json_to_any(&retained));
-            }))
-        } else if value.as_str() == Some(target_record_id) {
             let meta = self.doc.get_or_insert_map(ROOT_META);
             Some(self.with_delta(|txn| {
+                let before = map.entry_id(txn, key);
+                map.insert(txn, key, json_to_any(&retained));
+                carry_frontmatter_source_item(&map, &meta, txn, key, before);
+            }))
+        } else if value.as_str() == Some(target_record_id) {
+            Some(self.with_delta(|txn| {
                 map.remove(txn, key);
-                forget_kept_frontmatter_key(&meta, txn, key);
             }))
         } else {
             None
@@ -1338,16 +1341,10 @@ impl Ydoc {
             }
             None => None,
         };
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
-        match source {
-            Some(source) => {
-                meta.insert(&mut txn, FRONTMATTER_SOURCE_META_KEY, source);
-            }
-            None => {
-                meta.remove(&mut txn, FRONTMATTER_SOURCE_META_KEY);
-            }
-        }
+        keep_frontmatter_source(&map, &meta, &mut txn, source.as_deref());
         Ok(())
     }
 
@@ -1374,22 +1371,91 @@ impl Ydoc {
     }
 }
 
-/// Remove `key`'s lines and the comments above them from the frontmatter
-/// text the document keeps, in the caller's transaction. Text that cannot be
-/// rewritten is dropped.
-fn forget_kept_frontmatter_key(meta: &yrs::MapRef, txn: &mut yrs::TransactionMut, key: &str) {
-    let Some(Out::Any(Any::String(source))) = meta.get(txn, FRONTMATTER_SOURCE_META_KEY) else {
+fn item_text(id: yrs::ID) -> String {
+    format!("{}:{}", id.client.get(), id.clock)
+}
+
+/// Keep `source` as the document's frontmatter text, with the item each
+/// frontmatter key holds now, in the caller's transaction. `None` removes both.
+fn keep_frontmatter_source(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &mut yrs::TransactionMut,
+    source: Option<&str>,
+) {
+    let Some(source) = source else {
+        meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
+        meta.remove(txn, FRONTMATTER_SOURCE_ITEMS_META_KEY);
         return;
     };
-    match frontmatter_yaml::without_key(&source, key) {
-        Some(next) if next == *source => {}
-        Some(next) => {
-            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, next);
-        }
-        None => {
-            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
-        }
+    let items: serde_json::Map<String, Value> = map
+        .keys(txn)
+        .filter_map(|key| {
+            map.entry_id(txn, key)
+                .map(|id| (key.to_owned(), Value::String(item_text(id))))
+        })
+        .collect();
+    meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source);
+    meta.insert(
+        txn,
+        FRONTMATTER_SOURCE_ITEMS_META_KEY,
+        Value::Object(items).to_string(),
+    );
+}
+
+fn frontmatter_source_items<T: ReadTxn>(
+    meta: &yrs::MapRef,
+    txn: &T,
+) -> serde_json::Map<String, Value> {
+    match meta.get(txn, FRONTMATTER_SOURCE_ITEMS_META_KEY) {
+        Some(Out::Any(Any::String(items))) => match serde_json::from_str(&items) {
+            Ok(Value::Object(items)) => items,
+            _ => serde_json::Map::new(),
+        },
+        _ => serde_json::Map::new(),
     }
+}
+
+/// The frontmatter keys still held by the items their kept text was written for.
+fn written_frontmatter_keys<T: ReadTxn>(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &T,
+) -> BTreeSet<String> {
+    frontmatter_source_items(meta, txn)
+        .into_iter()
+        .filter(|(key, item)| {
+            map.entry_id(txn, key)
+                .is_some_and(|id| item.as_str() == Some(item_text(id).as_str()))
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// After an edit writes `key`, move its kept text to the new item when the
+/// replaced item was the one the text was written for, so an edited value
+/// keeps its place and comments. A key that was absent, or written by someone
+/// else since, stays unmatched.
+fn carry_frontmatter_source_item(
+    map: &yrs::MapRef,
+    meta: &yrs::MapRef,
+    txn: &mut yrs::TransactionMut,
+    key: &str,
+    before: Option<yrs::ID>,
+) {
+    let mut items = frontmatter_source_items(meta, txn);
+    let (Some(before), Some(after)) = (before, map.entry_id(txn, key)) else {
+        return;
+    };
+    if items.get(key).and_then(Value::as_str) != Some(item_text(before).as_str()) {
+        return;
+    }
+    items.insert(key.to_owned(), Value::String(item_text(after)));
+    meta.insert(
+        txn,
+        FRONTMATTER_SOURCE_ITEMS_META_KEY,
+        Value::Object(items).to_string(),
+    );
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -6271,12 +6337,14 @@ fn main() {}
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
             .unwrap();
         let meta = doc.doc.get_or_insert_map(ROOT_META);
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
         {
             let mut txn = doc.doc.transact_mut();
-            meta.insert(
+            keep_frontmatter_source(
+                &frontmatter,
+                &meta,
                 &mut txn,
-                FRONTMATTER_SOURCE_META_KEY,
-                "---\npriority: !custom high\n---\n\n",
+                Some("---\npriority: !custom high\n---\n\n"),
             );
         }
         assert!(doc.project_richdoc().unwrap().contains("!custom"));
@@ -6290,6 +6358,7 @@ fn main() {}
         );
         let txn = doc.doc.transact();
         assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
+        assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_ITEMS_META_KEY));
     }
 
     /// A collaborator can write any frontmatter source. One too deep, too
@@ -6359,49 +6428,79 @@ fn main() {}
         }
     }
 
-    /// Dropping a single relation deletes its key, and the kept frontmatter
-    /// text forgets the key and its comment, so a key of the same name added
-    /// later does not bring the comment back.
+    /// Writes a frontmatter key the way a client with no knowledge of the
+    /// kept text does: a plain map write.
+    fn write_key_directly(doc: &Ydoc, key: &str, value: Option<&str>) {
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let mut txn = doc.doc.transact_mut();
+        match value {
+            Some(value) => {
+                frontmatter.insert(&mut txn, key, value);
+            }
+            None => {
+                frontmatter.remove(&mut txn, key);
+            }
+        }
+    }
+
+    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody";
+
+    /// A key deleted and written again, by any writer and in any number of
+    /// updates, no longer holds the item its kept text was written for, so
+    /// its old comment never comes back.
     #[test]
-    fn a_dropped_relation_takes_its_comment_with_it() {
+    fn a_deleted_key_written_again_never_brings_back_its_comment() {
+        let expected = "---\nwifi: new\n# Monthly\nbudget: 100\n---\n\nBody";
+        // A plain writer, in two updates and then in one.
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(
-            ContentKind::Richdoc,
-            "---
-# owner until handover
-owner: rec_a
-status:   open
----
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        write_key_directly(&doc, "wifi", None);
+        write_key_directly(&doc, "wifi", Some("new"));
+        assert_eq!(doc.project_richdoc().unwrap(), expected);
+        let together = Ydoc::wire();
+        together
+            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        let frontmatter = together.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = together.doc.transact_mut();
+            frontmatter.remove(&mut txn, "wifi");
+            frontmatter.insert(&mut txn, "wifi", "new");
+        }
+        assert_eq!(together.project_richdoc().unwrap(), expected);
+        // The engine's own writers.
+        let engine = Ydoc::wire();
+        engine
+            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        write_key_directly(&engine, "wifi", None);
+        engine.frontmatter_set("wifi", "new");
+        assert_eq!(engine.project_richdoc().unwrap(), expected);
+    }
 
-Body",
-        )
-        .unwrap();
-        doc.frontmatter_drop_relation_target("owner", "rec_a", false)
-            .expect("the relation is dropped");
+    /// The engine's edits keep an edited key's comment; a plain writer's edit
+    /// keeps the key's place but not its comment.
+    #[test]
+    fn an_edited_key_keeps_its_comment_only_through_the_engine_edit() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
+            .unwrap();
+        doc.frontmatter_set("budget", "200");
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---
-status:   open
----
-
-Body"
+            "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody"
         );
-        doc.frontmatter_set("owner", "rec_b");
+        write_key_directly(&doc, "wifi", Some("changed"));
         assert_eq!(
             doc.project_richdoc().unwrap(),
-            "---
-status:   open
-owner: rec_b
----
-
-Body"
+            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody"
         );
     }
 
-    /// Two devices drop different relations offline. The kept text is one
-    /// value, so after the merge it holds one device's rewrite and still
-    /// names the other device's key. Setting that key again strips its old
-    /// entry first, so its comment does not come back.
+    /// Two devices drop different relations offline, and one sets both keys
+    /// again. Neither key holds the item the kept text was written for, so
+    /// neither comment comes back.
     #[test]
     fn a_key_dropped_on_another_device_returns_without_its_comment() {
         let base = Ydoc::wire();
@@ -6418,12 +6517,42 @@ Body"
         b.frontmatter_drop_relation_target("editor", "rec_b", false)
             .expect("editor dropped");
         a.apply(&b.encode_full_state()).unwrap();
+        assert_eq!(
+            a.project_richdoc().unwrap(),
+            "---\nstatus:   open\n---\n\nBody"
+        );
         a.frontmatter_set("owner", "rec_c");
         a.frontmatter_set("editor", "rec_d");
         assert_eq!(
             a.project_richdoc().unwrap(),
-            "---\nstatus:   open\neditor: rec_d\nowner: rec_c\n---\n\nBody"
+            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody"
         );
+    }
+
+    /// Settling reads each key's item once. Prints the time to settle a
+    /// document with 2,000 written frontmatter keys, with and without kept text.
+    #[test]
+    fn settling_a_large_kept_frontmatter_stays_fast() {
+        let keys: String = (0..2_000)
+            .map(|index| format!("# note {index}\nkey{index}:   {index}\n"))
+            .collect();
+        let written = format!("---\n{keys}---\n\nBody");
+        let canonical: String = (0..2_000)
+            .map(|index| format!("key{index}: {index}\n"))
+            .collect();
+        for (name, markdown) in [
+            ("kept", written),
+            ("canonical", format!("---\n{canonical}---\n\nBody")),
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                .unwrap();
+            doc.frontmatter_set("key1000", "edited");
+            let started = std::time::Instant::now();
+            let settled = doc.project_richdoc().unwrap();
+            println!("settle with {name} frontmatter: {:?}", started.elapsed());
+            assert!(settled.contains("key1000: edited"));
+        }
     }
 
     #[test]

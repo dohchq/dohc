@@ -1540,9 +1540,9 @@ const MAX_FRONTMATTER_NODES: usize = 262_144;
 const MAX_FRONTMATTER_STRING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FRONTMATTER_ALIASES: usize = 256;
 
-/// Text both loaders refuse before parsing: a directive, a second document's
-/// start marker, or a carriage return that does not end a line. A `%TAG`
-/// directive would otherwise copy its prefix into every tagged node.
+/// Text both loaders refuse before parsing: a `%TAG` directive, which would
+/// copy its prefix into every tagged node, a second document's start marker,
+/// or a carriage return that does not end a line.
 fn frontmatter_yaml_is_refused(yaml: &str) -> bool {
     let bytes = yaml.as_bytes();
     bytes
@@ -1550,10 +1550,11 @@ fn frontmatter_yaml_is_refused(yaml: &str) -> bool {
         .enumerate()
         .any(|(index, byte)| *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
         || yaml.split_inclusive('\n').any(|line| {
-            line.starts_with('%')
-                || line.strip_prefix("---").is_some_and(|rest| {
+            ["%TAG", "---"].iter().any(|marker| {
+                line.strip_prefix(marker).is_some_and(|rest| {
                     rest.is_empty() || rest.starts_with([' ', '\t', '\r', '\n'])
                 })
+            })
         })
 }
 

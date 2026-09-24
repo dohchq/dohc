@@ -243,15 +243,19 @@ describe("PropertiesPanel", () => {
     expect(frontmatter.get("status")).toBe("ready");
   });
 
-  it("removes a deleted shared property's lines and comment from the kept frontmatter text", async () => {
+  it("keeps an edited shared property's comment and never brings back a removed one's", async () => {
     const user = userEvent.setup();
-    const doc = markdownToYDoc("---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody");
+    const doc = markdownToYDoc(
+      "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody",
+    );
 
     render(<PropertiesPanel ydoc={doc} />);
+    await user.clear(screen.getByDisplayValue("100"));
+    await user.type(screen.getByLabelText("Property budget value"), "200");
     await user.click(screen.getByLabelText("Remove property wifi"));
     doc.getMap("frontmatter").set("wifi", "new");
 
-    expect(yDocToMarkdown(doc)).toBe("---\nbudget: 100\nwifi: new\n---\n\nBody");
+    expect(yDocToMarkdown(doc)).toBe("---\nwifi: new\n# Monthly\nbudget: '200'\n---\n\nBody");
     doc.destroy();
   });
 

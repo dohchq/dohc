@@ -953,7 +953,15 @@ const frontmatter = [
     expected: null,
   },
   {
-    name: "yaml-directive-is-rejected",
+    name: "separated-floats-stay-text",
+    markdown: "---\na: 1_0.5\nb: 1_000.5\nc: !!float 1_0.5\n---",
+  },
+  {
+    name: "scalars-tagged-as-collections-keep-their-text",
+    markdown: "---\nseq: !!seq x\nmap: !!map x\nempty: !!seq\n---",
+  },
+  {
+    name: "yaml-directive-without-a-document-start-is-rejected",
     markdown: "---\n%YAML 1.2\na: 1\n---",
     expected: null,
   },

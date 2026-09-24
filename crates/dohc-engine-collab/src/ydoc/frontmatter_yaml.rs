@@ -274,18 +274,25 @@ pub(super) fn source(
     Ok((prefix != canonical).then(|| prefix.to_owned()))
 }
 
-/// The frontmatter a person wrote, kept through a settle. While it still
-/// reads as the current frontmatter, the text comes back unchanged.
-/// Otherwise a key whose value did not change keeps its lines and the
-/// comments above them, a changed key gets its canonical entry in place, a
-/// removed key loses its lines, and a new key is added after the others. A
-/// new key with the same value as a removed key is a rename and takes its
-/// place. `None` when the source is too large or unreadable, when no key or
-/// comment is left, or when the result would not read back as the current
-/// frontmatter; the caller then writes canonical frontmatter. `rendered` holds
-/// each current key's canonical entry. The desktop keeps frontmatter the same
-/// way (`keptFrontmatter` in packages/ydoc-projection/src/frontmatter.ts).
-pub(super) fn kept(source: &str, rendered: &BTreeMap<String, String>) -> Option<String> {
+/// The frontmatter a person wrote, kept through a settle. `written` names the
+/// keys still held by the items the text was written for. While the text
+/// still reads as the current frontmatter and every key is written, it comes
+/// back unchanged. Otherwise a written key whose value did not change keeps
+/// its lines and the comments above them, and a changed written key gets its
+/// canonical entry in place. A key written again since, by any writer, gets
+/// its canonical entry in place without the comments above it, so a deleted
+/// and re-added key never brings back old text. A removed key loses its lines
+/// and comments, and a new key is added after the others. `None` when the
+/// source is too large or unreadable, when no key or comment is left, or when
+/// the result would not read back as the current frontmatter; the caller then
+/// writes canonical frontmatter. `rendered` holds each current key's
+/// canonical entry. The desktop keeps frontmatter the same way
+/// (`keptFrontmatter` in packages/ydoc-projection/src/frontmatter.ts).
+pub(super) fn kept(
+    source: &str,
+    rendered: &BTreeMap<String, String>,
+    written: &BTreeSet<String>,
+) -> Option<String> {
     if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
         return None;
     }
@@ -297,7 +304,7 @@ pub(super) fn kept(source: &str, rendered: &BTreeMap<String, String>) -> Option<
     };
     let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
     let parsed = rendered_entries(&block.value);
-    if reads_as_current(&parsed) {
+    if reads_as_current(&parsed) && block.value.keys().all(|key| written.contains(key)) {
         return Some(source.to_owned());
     }
     let entries = block.entries.as_ref()?;
@@ -324,10 +331,17 @@ pub(super) fn kept(source: &str, rendered: &BTreeMap<String, String>) -> Option<
         let region = &yaml[entry.line..end];
         let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
         if let Some(current) = rendered.get(&entry.key) {
-            kept.push_str(lead);
-            if parsed.get(entry.key.as_str()) == Some(&Some(current.clone())) {
+            if !written.contains(&entry.key) {
+                kept.extend(
+                    lead.split_inclusive('\n')
+                        .filter(|line| line.trim().is_empty()),
+                );
+                kept.push_str(&crlf(current));
+            } else if parsed.get(entry.key.as_str()) == Some(&Some(current.clone())) {
+                kept.push_str(lead);
                 kept.push_str(text);
             } else {
+                kept.push_str(lead);
                 kept.push_str(&crlf(current));
             }
         }
@@ -347,43 +361,6 @@ pub(super) fn kept(source: &str, rendered: &BTreeMap<String, String>) -> Option<
     let reread = markdown_frontmatter_block(&candidate)?;
     (only_line_breaks(reread.body) && reads_as_current(&rendered_entries(&reread.value)))
         .then_some(candidate)
-}
-
-/// The frontmatter text a document keeps, without `key`'s lines and the
-/// comments above them, for an edit that deletes the key. `None` when the
-/// text cannot be rewritten or nothing of it would remain; the caller then
-/// drops it. The desktop rewrites the text the same way
-/// (`editKeptFrontmatterKeys` in packages/ydoc-projection/src/frontmatter.ts).
-pub(super) fn without_key(source: &str, key: &str) -> Option<String> {
-    let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
-    if !block.value.contains_key(key) {
-        return Some(source.to_owned());
-    }
-    let entries = block.entries.as_ref()?;
-    let yaml = block.yaml;
-    let mut kept = String::new();
-    let mut lead = &yaml[..entries.first()?.line];
-    for (index, entry) in entries.iter().enumerate() {
-        let end = entries.get(index + 1).map_or(yaml.len(), |next| next.line);
-        let region = &yaml[entry.line..end];
-        let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
-        if entry.key != key {
-            kept.push_str(lead);
-            kept.push_str(text);
-        }
-        lead = trivia;
-    }
-    kept.push_str(lead);
-    if kept.trim().is_empty() {
-        return None;
-    }
-    let candidate = format!("{}{kept}{}", block.open, block.closing);
-    let mut expected = block.value.clone();
-    expected.remove(key);
-    let reread = markdown_frontmatter_block(&candidate)?;
-    (only_line_breaks(reread.body)
-        && rendered_entries(&reread.value) == rendered_entries(&expected))
-    .then_some(candidate)
 }
 
 /// Each parsed value rendered once, to compare with the current entries.

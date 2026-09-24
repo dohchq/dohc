@@ -1,7 +1,4 @@
-import {
-  editKeptFrontmatterKeys,
-  type FrontmatterKeyEdit,
-} from "@dohc/ydoc-projection/frontmatter";
+import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
@@ -118,24 +115,22 @@ function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> 
   return values;
 }
 
-/** The keys a change deletes, and the keys it renames with their values. */
-function keyEdit(
+/** Each renamed property's old key and new key. */
+function renamedKeys(
   previousEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
-): FrontmatterKeyEdit {
+): Map<string, string> {
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
-  const renamed = nextEntries.flatMap((entry) => {
-    const from = entry.sourceKey;
+  const renamed = new Map<string, string>();
+  for (const entry of nextEntries) {
     const to = propertyKey(entry);
-    return from !== undefined && to !== null && from !== to && previous.has(from) && !next.has(from)
-      ? [{ from, to, value: entryValue(entry) }]
-      : [];
-  });
-  const deleted = [...previous.keys()].filter(
-    (key) => !next.has(key) && !renamed.some((rename) => rename.from === key),
-  );
-  return { deleted, renamed };
+    if (entry.sourceKey !== undefined && to !== null && entry.sourceKey !== to
+      && previous.has(entry.sourceKey) && !next.has(entry.sourceKey)) {
+      renamed.set(entry.sourceKey, to);
+    }
+  }
+  return renamed;
 }
 
 function applySharedFrontmatterPatch(
@@ -146,25 +141,15 @@ function applySharedFrontmatterPatch(
   const map = doc.getMap(FRONTMATTER_FIELD);
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
-  // A key the map does not have yet gets no written text: another device's
-  // offline delete may have left an older entry for it.
-  const added = [...next.keys()].filter((key) => !map.has(key));
 
   for (const key of previous.keys()) {
     if (!next.has(key)) map.delete(key);
   }
   for (const [key, value] of next) {
     if (!previous.has(key) || !Object.is(previous.get(key), value)) {
-      map.set(key, value);
+      setFrontmatterValue(doc, key, value);
     }
   }
-  // The frontmatter text the document keeps forgets a deleted key and moves
-  // a renamed one, so a later settle cannot bring either back.
-  const edit = keyEdit(previousEntries, nextEntries);
-  editKeptFrontmatterKeys(doc.getMap("meta"), {
-    deleted: [...(edit.deleted ?? []), ...added],
-    renamed: edit.renamed,
-  });
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
@@ -204,7 +189,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       return;
     }
     props.onChange?.(
-      applyFrontmatter(body, buildProperties(sourceEntries, next), keyEdit(previous, next)),
+      applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
     );
   }
 
