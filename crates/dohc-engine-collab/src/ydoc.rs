@@ -1483,6 +1483,10 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
+    // Every line that closes a fence, found in one pass when the first fence
+    // opens. Scanning to the end for each unclosed opener made a body of
+    // openers quadratic.
+    let mut closers: Option<Vec<usize>> = None;
     while index < lines.len() {
         let line = lines[index];
         if line.is_empty() {
@@ -1490,23 +1494,14 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
             continue;
         }
         if let Some(fence_language) = line.strip_prefix("```") {
-            let mut content = Vec::new();
-            let mut cursor = index + 1;
-            let mut closed = false;
-            while cursor < lines.len() {
-                if lines[cursor] == "```" {
-                    closed = true;
-                    break;
-                }
-                content.push(lines[cursor]);
-                cursor += 1;
-            }
-            if closed {
+            let closers = closers
+                .get_or_insert_with(|| (0..lines.len()).filter(|&at| lines[at] == "```").collect());
+            if let Some(&closer) = closers.get(closers.partition_point(|&at| at <= index)) {
                 blocks.push(MdBlock::CodeBlock {
                     language: fence_language.to_string(),
-                    content: content.join("\n"),
+                    content: lines[index + 1..closer].join("\n"),
                 });
-                index = cursor + 1;
+                index = closer + 1;
                 continue;
             }
             // An unclosed fence is not a code block: fall through to text.
@@ -6616,6 +6611,72 @@ fn main() {}
                 "a {levels}-level quote must roundtrip byte-identically"
             );
         }
+    }
+
+    /// The fold before fences were found in one pass, reduced to the lines
+    /// the test alphabet holds: blanks, paragraphs and fences.
+    fn forward_scan_blocks(lines: &[&str]) -> Vec<MdBlock> {
+        let mut blocks = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
+            if line.is_empty() {
+                index += 1;
+                continue;
+            }
+            if let Some(language) = line.strip_prefix("```") {
+                if let Some(offset) = lines[index + 1..].iter().position(|next| *next == "```") {
+                    let closer = index + 1 + offset;
+                    blocks.push(MdBlock::CodeBlock {
+                        language: language.to_owned(),
+                        content: lines[index + 1..closer].join("\n"),
+                    });
+                    index = closer + 1;
+                    continue;
+                }
+            }
+            let start = index;
+            index += 1;
+            while index < lines.len()
+                && !lines[index].is_empty()
+                && !lines[index].starts_with("```")
+            {
+                index += 1;
+            }
+            blocks.push(MdBlock::Paragraph(lines[start..index].join("\n")));
+        }
+        blocks
+    }
+
+    #[test]
+    fn fences_close_where_a_forward_scan_closes_them() {
+        const ALPHABET: [&str; 4] = ["```", "```x", "a", ""];
+        for length in 1..=7_u32 {
+            for mut code in 0..ALPHABET.len().pow(length) {
+                let mut lines = Vec::new();
+                for _ in 0..length {
+                    lines.push(ALPHABET[code % ALPHABET.len()]);
+                    code /= ALPHABET.len();
+                }
+                let body = lines.join("\n");
+                assert_eq!(
+                    parse_markdown_blocks(&body),
+                    forward_scan_blocks(&lines),
+                    "{body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_of_unclosed_fences_parses_in_one_pass() {
+        // Each unclosed opener used to rescan every line after it.
+        let body = "```x\n".repeat(200_000);
+        let blocks = parse_markdown_blocks(&body);
+        assert_eq!(blocks.len(), 200_000);
+        assert!(blocks
+            .iter()
+            .all(|block| *block == MdBlock::Paragraph("```x".to_owned())));
     }
 }
 
