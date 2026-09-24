@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_FROM_PREFIX,
+  NOTICE_ID_MAX_CHARS,
   NOTICE_KINDS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
@@ -13,7 +15,7 @@ import {
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { relayError } from "../errors";
+import { badRequest, relayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { fileSideOf, visibleSharePath, type ShareSelector } from "../shareFilter";
 import type { StorageContext } from "./context";
@@ -21,7 +23,7 @@ import { NOTICE_ROWS_PER_SENDER, NOTICE_SWEEP_BATCH } from "./limits";
 
 export interface PostNoticeInput {
   // As the sender posted it. A notice for someone else is stored under
-  // `from:<senderUserId>:<noticeId>`.
+  // `noticeIdFrom(senderUserId, noticeId)`.
   noticeId: string;
   recipientUserId: string;
   reach: NoticeReach;
@@ -79,11 +81,16 @@ type Placement = { workspaceId: string; recipientShareId: null } | { workspaceId
 const NOTICE_COLUMNS = `notice_id, change_seq, workspace_id, recipient_share_id, kind,
   sender_kind, sender_user_id, sender_label, title, body, target_json,
   origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms`;
-// Read and dismissed rows go before unread ones, then the oldest.
-const EVICTION_ORDER = "(read_at_ms IS NULL AND dismissed_at_ms IS NULL), created_at_ms, notice_id";
+// Making room removes a tenth of the limit's read and dismissed rows at once,
+// so a full list removes rows, and sends every computer the whole list, only
+// once in many posts. Unread rows go one at a time.
+const LIST_EVICTION_BATCH = NOTICE_LIST_ROW_LIMIT / 10;
+const SENDER_EVICTION_BATCH = NOTICE_ROWS_PER_SENDER / 10;
 
+// The sender is percent-encoded, so it holds no colon and the id after the
+// second colon is exactly what the sender posted.
 export function noticeIdFrom(senderUserId: string, noticeId: string): string {
-  return `${NOTICE_FROM_PREFIX}${senderUserId}:${noticeId}`;
+  return `${NOTICE_FROM_PREFIX}${encodeURIComponent(senderUserId)}:${noticeId}`;
 }
 
 /**
@@ -91,12 +98,13 @@ export function noticeIdFrom(senderUserId: string, noticeId: string): string {
  * "readers" kind, a sender who owns the workspace or holds a named grant, and
  * a target path both people can read; anything else is `notice_refused`,
  * whatever the reason. A notice id the list already holds changes nothing.
- * A sender who would have to remove someone else's rows to make room gets
- * `notice_rate_limited` and removes nothing.
+ * When the list is full and only other senders' unread rows could make room,
+ * the post gets `notice_list_full` and removes nothing.
  */
 export function postNotice(storage: StorageContext, input: PostNoticeInput): void {
   const self = input.recipientUserId === input.senderUserId;
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
+  if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
   storage.tx(() => {
     const placement = self ? ownPlacement(input.reach) : sharedPlacement(storage, input);
     const existing = storage.db
@@ -105,7 +113,7 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
     if (existing) return;
 
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
-    makeRoom(storage, input, self);
+    makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId);
     storage.db.prepare(
       `INSERT INTO sync_relay_notices (
          recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
@@ -129,55 +137,52 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
       input.nowMs,
       input.nowMs + NOTICE_UNREAD_RETENTION_MS,
     );
+    // Your own notice through a share is not checked when posted, so the
+    // next pull checks access again.
+    if (self && placement.recipientShareId !== null) {
+      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
+        .run(input.recipientUserId);
+    }
   });
 }
 
 /**
  * The recipient's rows that changed after the cursor, oldest change first.
- * First, a row whose recipient lost access to its target moves to another
- * share that still admits it, or loses its target; either is a new change.
+ * First, if the recipient's grants changed since the last check, a row
+ * whose recipient lost access to its target moves to another share that
+ * still admits it, or loses its target; either is a new change.
  *
- * A cursor below a removed row's change missed that removal, and a cursor
- * past the head comes from another relay history: both get the whole list
+ * A cursor below `floor_seq` missed an expired row's last change, a cursor
+ * below `evicted_seq` may hold a row that left to make room, and a cursor
+ * past the head comes from another relay history. Each gets the whole list
  * with `replace` set, paged under a cursor that remembers the head the pull
- * began at. That pull starts over only if rows are removed after it began.
+ * began at. That pull starts over only if rows leave after it began.
  */
 export function readNoticeChanges(
   storage: StorageContext,
   input: ReadNoticeChangesInput,
 ): RelayNoticePage {
-  if (storage.readTx(() => lostReach(storage, input.recipientUserId).length > 0)) {
-    storage.tx(() => {
-      for (const { noticeId, movedTo } of lostReach(storage, input.recipientUserId)) {
-        storage.db.prepare(
-          `UPDATE sync_relay_notices
-           SET recipient_share_id = COALESCE(?, recipient_share_id),
-               target_json = CASE WHEN ? IS NULL THEN NULL ELSE target_json END,
-               change_seq = ?
-           WHERE recipient_user_id = ? AND notice_id = ?`,
-        ).run(movedTo, movedTo, nextChangeSeq(storage, input.recipientUserId), input.recipientUserId, noticeId);
-      }
-    });
-  }
+  settleLostReach(storage, input.recipientUserId);
   return storage.readTx(() => {
     const list = storage.db.prepare(
-      "SELECT change_seq, floor_seq, removed_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?",
+      "SELECT change_seq, floor_seq, evicted_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?",
     ).get(input.recipientUserId);
     const head = Number(list?.change_seq ?? 0);
+    const floor = Number(list?.floor_seq ?? 0);
+    const evicted = Number(list?.evicted_seq ?? 0);
     const cursor = input.cursor;
     let replace: boolean;
     if (cursor === null) {
       replace = true;
     } else if (cursor.snapshotHead !== null) {
-      replace = cursor.snapshotHead > head || cursor.seq > head ||
-        Number(list?.removed_seq ?? 0) > cursor.snapshotHead;
+      replace = cursor.snapshotHead > head || cursor.seq > head || Math.max(floor, evicted) > cursor.snapshotHead;
     } else {
-      // Rows past retention that no post has swept yet count as removed.
+      // Rows past retention that no post has swept yet count as swept.
       const expired = Number(storage.db.prepare(
         `SELECT COALESCE(MAX(change_seq), 0) AS seq FROM sync_relay_notices
          WHERE recipient_user_id = ? AND expires_at_ms <= ?`,
       ).get(input.recipientUserId, input.nowMs)?.seq ?? 0);
-      replace = cursor.seq > head || cursor.seq < Math.max(Number(list?.floor_seq ?? 0), expired);
+      replace = cursor.seq > head || cursor.seq < evicted || cursor.seq < Math.max(floor, expired);
     }
     const since = replace ? 0 : cursor!.seq;
     const snapshotHead = replace ? head : cursor!.snapshotHead;
@@ -304,69 +309,119 @@ function shareAdmitting(
   return null;
 }
 
-// Rows read through a share whose recipient no longer reads the target
-// there. Each moves to another share that admits its path, or loses its
-// target (`movedTo` null). Grants are checked once per share.
-function lostReach(
-  storage: StorageContext,
-  recipientUserId: string,
-): { noticeId: string; movedTo: string | null }[] {
+// A digest of everything that decides what `userId` reads through a share:
+// each of their grants and its parent, the share's selector, and whether
+// the granter still owns the workspace. Selectors never change after a
+// share is made, and a group's channel only ever becomes readable.
+function grantToken(storage: StorageContext, userId: string): string {
   const rows = storage.db.prepare(
-    `SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
-     WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
-     ORDER BY change_seq`,
-  ).all(recipientUserId);
-  const sides = new Map<string, ShareSelector[] | null>();
-  const changes = [];
-  for (const row of rows) {
-    const shareId = String(row.recipient_share_id);
-    const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
-    if (!sides.has(shareId)) sides.set(shareId, fileSidesOn(storage, recipientUserId, shareId));
-    const current = sides.get(shareId)!;
-    if (path === undefined ? current !== null : admits(current, path)) continue;
-    const workspaceId = storage.getShare(shareId)?.workspaceId;
-    const movedTo = path === undefined || workspaceId === undefined
-      ? null
-      : shareAdmitting(storage, recipientUserId, workspaceId, path);
-    changes.push({ noticeId: String(row.notice_id), movedTo });
-  }
-  return changes;
+    `SELECT g.grant_id, g.status, g.generation, g.access, g.parent_grant_id,
+            s.workspace_id, s.granter_user_id, s.selector_json,
+            EXISTS (SELECT 1 FROM sync_relay_workspaces AS w
+                    WHERE w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id) AS granter_owns,
+            p.status AS parent_status, p.access AS parent_access, p.generation AS parent_generation
+     FROM sync_relay_share_grants AS g
+     JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+     LEFT JOIN sync_relay_share_grants AS p ON p.grant_id = g.parent_grant_id
+     WHERE g.principal_kind = 'user' AND g.principal_user_id = ?
+     ORDER BY g.grant_id`,
+  ).all(userId);
+  return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
-// Makes room for one more row. Another sender first gives up its own oldest
-// rows past its share of the list, and may take room only from itself.
-function makeRoom(storage: StorageContext, input: PostNoticeInput, self: boolean): void {
-  const count = (bySender: boolean) => Number(storage.db.prepare(
+// Rechecks rows read through a share, in one pass inside the write
+// transaction, and only when the recipient's grants changed since the last
+// check. Each row whose recipient no longer reads its target there moves
+// to another share that admits its path, or loses its target.
+function settleLostReach(storage: StorageContext, recipientUserId: string): void {
+  const stale = storage.readTx(() => {
+    const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+      .get(recipientUserId);
+    return list !== undefined && list.reach_token !== grantToken(storage, recipientUserId);
+  });
+  if (!stale) return;
+  storage.tx(() => {
+    const rows = storage.db.prepare(
+      `SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
+       WHERE recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
+       ORDER BY change_seq`,
+    ).all(recipientUserId);
+    const sides = new Map<string, ShareSelector[] | null>();
+    const move = storage.db.prepare(
+      `UPDATE sync_relay_notices
+       SET recipient_share_id = COALESCE(?, recipient_share_id),
+           target_json = CASE WHEN ? IS NULL THEN NULL ELSE target_json END,
+           change_seq = ?
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    for (const row of rows) {
+      const shareId = String(row.recipient_share_id);
+      const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
+      if (!sides.has(shareId)) sides.set(shareId, fileSidesOn(storage, recipientUserId, shareId));
+      const current = sides.get(shareId)!;
+      if (path === undefined ? current !== null : admits(current, path)) continue;
+      const workspaceId = storage.getShare(shareId)?.workspaceId;
+      const movedTo = path === undefined || workspaceId === undefined
+        ? null
+        : shareAdmitting(storage, recipientUserId, workspaceId, path);
+      move.run(movedTo, movedTo, nextChangeSeq(storage, recipientUserId), recipientUserId, String(row.notice_id));
+    }
+    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
+      .run(grantToken(storage, recipientUserId), recipientUserId);
+  });
+}
+
+// Makes room for one more row. A sender first gives up its own rows past its
+// share of another person's list. A full list then gives up read and
+// dismissed rows from any sender, oldest first, and after those only unread
+// rows the poster may remove: any for a post to yourself, its own for a post
+// to someone else. Rows that leave to make room raise the list's
+// `evicted_seq`.
+function makeRoom(storage: StorageContext, recipientUserId: string, senderUserId: string | null): void {
+  const count = (sender: string | null) => Number(storage.db.prepare(
     `SELECT COUNT(*) AS count FROM sync_relay_notices
-     WHERE recipient_user_id = ? ${bySender ? "AND sender_user_id = ?" : ""}`,
-  ).get(input.recipientUserId, ...(bySender ? [input.senderUserId] : []))?.count ?? 0);
-  if (!self) {
-    removeOldest(storage, input.recipientUserId, input.senderUserId, count(true) - NOTICE_ROWS_PER_SENDER + 1);
+     WHERE recipient_user_id = ? ${sender === null ? "" : "AND sender_user_id = ?"}`,
+  ).get(recipientUserId, ...(sender === null ? [] : [sender]))?.count ?? 0);
+  let removed = 0;
+  if (senderUserId !== null) {
+    const excess = count(senderUserId) - NOTICE_ROWS_PER_SENDER + 1;
+    removed += freeRows(storage, recipientUserId, senderUserId, senderUserId, excess, SENDER_EVICTION_BATCH);
   }
-  const excess = count(false) - NOTICE_LIST_ROW_LIMIT + 1;
-  if (excess <= 0) return;
-  const removed = removeOldest(storage, input.recipientUserId, self ? null : input.senderUserId, excess);
-  if (removed < excess) throw relayError("notice_rate_limited");
+  const excess = count(null) - NOTICE_LIST_ROW_LIMIT + 1;
+  const freed = freeRows(storage, recipientUserId, null, senderUserId, excess, LIST_EVICTION_BATCH);
+  if (freed < excess) throw relayError("notice_list_full");
+  removed += freed;
+  if (removed > 0) {
+    storage.db.prepare(
+      `UPDATE sync_relay_notice_lists SET change_seq = change_seq + 1, evicted_seq = change_seq + 1
+       WHERE recipient_user_id = ?`,
+    ).run(recipientUserId);
+  }
 }
 
-// Removes up to `limit` rows, read and oldest first, from one sender's rows
-// when `senderUserId` is set.
-function removeOldest(
+// Removes at least `needed` rows when it can: up to `batch` read or
+// dismissed rows from `markedSender`'s rows (anyone's when null), then
+// unread rows from `unreadSender`'s (anyone's when null), oldest first.
+function freeRows(
   storage: StorageContext,
   recipientUserId: string,
-  senderUserId: string | null,
-  limit: number,
+  markedSender: string | null,
+  unreadSender: string | null,
+  needed: number,
+  batch: number,
 ): number {
-  if (limit <= 0) return 0;
-  const bySender = senderUserId === null ? "" : "AND sender_user_id = ?";
-  const removed = storage.db.prepare(
+  if (needed <= 0) return 0;
+  const remove = (sender: string | null, state: string, limit: number) => Number(storage.db.prepare(
     `DELETE FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id IN (
-       SELECT notice_id FROM sync_relay_notices WHERE recipient_user_id = ? ${bySender}
-       ORDER BY ${EVICTION_ORDER} LIMIT ?)
-     RETURNING recipient_user_id, change_seq`,
-  ).all(recipientUserId, recipientUserId, ...(senderUserId === null ? [] : [senderUserId]), limit);
-  raiseFloors(storage, removed);
-  return removed.length;
+       SELECT notice_id FROM sync_relay_notices
+       WHERE recipient_user_id = ? ${sender === null ? "" : "AND sender_user_id = ?"} AND ${state}
+       ORDER BY created_at_ms, notice_id LIMIT ?)`,
+  ).run(recipientUserId, recipientUserId, ...(sender === null ? [] : [sender]), limit).changes);
+  let removed = remove(markedSender, "(read_at_ms IS NOT NULL OR dismissed_at_ms IS NOT NULL)", Math.max(needed, batch));
+  if (removed < needed) {
+    removed += remove(unreadSender, "read_at_ms IS NULL AND dismissed_at_ms IS NULL", needed - removed);
+  }
+  return removed;
 }
 
 // Retention runs with each post, as the relay's other expiring rows do: this
@@ -385,8 +440,7 @@ function sweepExpiredNotices(storage: StorageContext, recipientUserId: string, n
   ).all(nowMs, NOTICE_SWEEP_BATCH));
 }
 
-// A removal is a change to its list: the list's floor rises to the newest
-// change among its removed rows, and the removal takes the next change.
+// Each list's floor rises to the newest change among its swept rows.
 function raiseFloors(storage: StorageContext, removed: readonly Record<string, unknown>[]): void {
   const floors = new Map<string, number>();
   for (const row of removed) {
@@ -394,16 +448,15 @@ function raiseFloors(storage: StorageContext, removed: readonly Record<string, u
     floors.set(recipient, Math.max(floors.get(recipient) ?? 0, Number(row.change_seq)));
   }
   const raise = storage.db.prepare(
-    `UPDATE sync_relay_notice_lists
-     SET floor_seq = max(floor_seq, ?), change_seq = change_seq + 1, removed_seq = change_seq + 1
-     WHERE recipient_user_id = ?`,
+    "UPDATE sync_relay_notice_lists SET floor_seq = max(floor_seq, ?) WHERE recipient_user_id = ?",
   );
   for (const [recipient, floor] of floors) raise.run(floor, recipient);
 }
 
 function nextChangeSeq(storage: StorageContext, recipientUserId: string): number {
   const row = storage.db.prepare(
-    `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, removed_seq) VALUES (?, 1, 0, 0)
+    `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, evicted_seq, reach_token)
+     VALUES (?, 1, 0, 0, NULL)
      ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = change_seq + 1
      RETURNING change_seq`,
   ).get(recipientUserId);

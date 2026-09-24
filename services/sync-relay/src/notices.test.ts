@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT } from "@dohc/security-contract/share-discussion";
 import {
@@ -15,6 +15,7 @@ import { NOTICE_ROWS_PER_SENDER } from "./storage/limits";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import type { PostNoticeInput } from "./storage/notices";
+import { authorizeShareGrantAction } from "./shareAuthorization";
 import {
   claimWorkspace,
   closeTestStorage,
@@ -34,6 +35,12 @@ import {
   testStorage,
   type HandlerOverrides,
 } from "./testing";
+
+// Counts access checks; every call still runs the real check.
+vi.mock("./shareAuthorization", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./shareAuthorization")>();
+  return { ...actual, authorizeShareGrantAction: vi.fn(actual.authorizeShareGrantAction) };
+});
 
 afterEach(closeTestStorages);
 
@@ -335,6 +342,20 @@ describe("notices for someone else", () => {
     expect(squat.status).toBe(400);
   });
 
+  it("keeps notice ids apart for senders whose ids contain a colon", async () => {
+    const { h } = await sharedTrip();
+    const aShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "a" });
+    const abShare = await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "a:b" });
+    const toAna = (shareId: string, noticeId: string) =>
+      notice({ recipientUserId: "ana", workspaceId: undefined, shareId, noticeId });
+    expect((await post(h, "a:b", toAna(abShare, "c"))).status).toBe(200);
+    expect((await post(h, "a", toAna(aShare, "b:c"))).status).toBe(200);
+    expect((await pullAll(h, "ana")).map((row) => [row.noticeId, row.senderUserId]).sort()).toEqual([
+      ["from:a%3Ab:c", "a:b"],
+      ["from:a:b:c", "a"],
+    ]);
+  });
+
   it("claims pending email grants only for a post to someone else", async () => {
     const setup = await relay();
     const counted = countStorageCalls(setup.storage, "claimPendingSharesForEmail");
@@ -370,29 +391,53 @@ describe("limits on notices from other people", () => {
     for (let index = 0; index < NOTICE_ROWS_PER_SENDER; index += 1) {
       expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status).toBe(200);
     }
-    // A computer of Ana's pulled everything, then Ana read n5 elsewhere.
-    const laggingCursor = (await pull(h, "ana", undefined, 200)).nextCursor;
     await mark(h, "ana", [{ noticeId: "from:owner:n5", mark: "read" }]);
+    // A computer of Ana's holds every row, including n0 and n5.
+    const cursor = (await pull(h, "ana", undefined, 200)).nextCursor;
 
     expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status).toBe(200);
+    expect((await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n101" }))).status).toBe(200);
     const ids = (await pullAll(h, "ana")).map((row) => row.noticeId);
     expect(ids).toHaveLength(NOTICE_ROWS_PER_SENDER + 1);
     expect(ids).toContain("ana-own");
-    expect(ids).toContain("from:owner:n100");
+    expect(ids).toContain("from:owner:n101");
+    // The read row goes first, then the oldest unread.
     expect(ids).not.toContain("from:owner:n5");
-    // The removed row changed after the lagging cursor, so that computer
-    // takes the whole list again.
-    expect((await pull(h, "ana", laggingCursor)).replace).toBe(true);
+    expect(ids).not.toContain("from:owner:n0");
+    // That computer still holds rows the relay removed, so it takes the
+    // whole list again.
+    const next = await pull(h, "ana", cursor, 200);
+    expect(next.replace).toBe(true);
+    expect(next.notices.map((row) => row.noticeId)).not.toContain("from:owner:n0");
   });
 
-  it("refuses a sender who could only make room by removing someone else's rows", async () => {
+  it("makes room in a list full of read rows for anyone who may send", async () => {
+    const { h, storage } = await sharedTrip();
+    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "ana", `own-${index}`, clock + index);
+    for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 100) {
+      await mark(h, "ana", Array.from({ length: 100 }, (_, offset) => ({ noticeId: `own-${index + offset}`, mark: "read" as const })));
+    }
+    clock += NOTICE_LIST_ROW_LIMIT;
+
+    expect((await post(h, "owner", notice({ recipientUserId: "ana" }))).status).toBe(200);
+    // A tenth of the list goes at once, oldest first, so the next posts
+    // remove nothing.
+    const ids = (await pullAll(h, "ana")).map((row) => row.noticeId);
+    expect(ids).toHaveLength(NOTICE_LIST_ROW_LIMIT - NOTICE_LIST_ROW_LIMIT / 10 + 1);
+    expect(ids).toContain("from:owner:automation-failed:run-1");
+    expect(ids).not.toContain(`own-${NOTICE_LIST_ROW_LIMIT / 10 - 1}`);
+    expect(ids).toContain(`own-${NOTICE_LIST_ROW_LIMIT / 10}`);
+  });
+
+  it("refuses a sender when only other senders' unread rows could make room", async () => {
     const { h, storage } = await sharedTrip();
     for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) stored(storage, "ana", `own-${index}`, clock + index);
     clock += NOTICE_LIST_ROW_LIMIT;
 
-    await expectRateLimited(await post(h, "owner", notice({ recipientUserId: "ana" })));
+    const refused = await post(h, "owner", notice({ recipientUserId: "ana" }));
+    expect(refused.status).toBe(409);
+    expect(await json(refused)).toMatchObject({ ok: false, code: "notice_list_full" });
     expect(countRows(storagePath(storage), "sync_relay_notices")).toBe(NOTICE_LIST_ROW_LIMIT);
-    expect((await pullAll(h, "ana")).some((row) => row.noticeId === "own-0")).toBe(true);
 
     // Ana's own notice still makes room, oldest first.
     expect((await post(h, "ana", notice({ recipientUserId: "ana", kind: "mention", noticeId: "own-new" }))).status).toBe(200);
@@ -411,6 +456,8 @@ describe("limits on notices from other people", () => {
       await post(h, "owner", notice({ kind: "mention", noticeId: id }));
     }
 
+    // The first post takes both marked rows, which leaves room for the
+    // second. The third takes the oldest unread row.
     expect(countRows(storagePath(storage), "sync_relay_notices")).toBe(NOTICE_LIST_ROW_LIMIT);
     const ids = new Set((await pullAll(h, "owner")).map((row) => row.noticeId));
     expect(["n500", "n700", "n0"].filter((id) => ids.has(id))).toEqual([]);
@@ -516,7 +563,7 @@ describe("pulling changes", () => {
       [false, ["n2", "n3"]],
       [false, ["n5"]],
     ]);
-    expect(pages.at(-1)!.nextCursor).toBe("8");
+    expect(pages.at(-1)!.nextCursor).toBe("7");
 
     // A row removed while a whole-list pull is under way starts it over.
     const first = await pull(h, "owner", "1", 2);
@@ -568,6 +615,27 @@ describe("notices after access ends", () => {
     expect(storage.revokeShare(tasksShare, clock)).toBe(true);
     const last = await pull(h, "ana", after.nextCursor);
     expect(last.notices.map((row) => [row.noticeId, row.target])).toEqual([["from:owner:tasks", null]]);
+  });
+
+  it("checks access again only when the recipient's grants change, once per share", async () => {
+    const { h, shareId } = await sharedTrip();
+    await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "tasks" }));
+    await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "notes", target: { path: "trip/notes" } }));
+    const checks = vi.mocked(authorizeShareGrantAction);
+    const checksDuring = async (work: () => Promise<unknown>) => {
+      const before = checks.mock.calls.length;
+      await work();
+      return checks.mock.calls.length - before;
+    };
+
+    // Both rows come through one share with one grant: one check.
+    expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
+    expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
+    expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
+    await createShare(h, "owner", WORKSPACE, { paths: ["budget"], recipientUserId: "ana" });
+    expect(await checksDuring(() => pull(h, "ana"))).toBe(1);
+    expect(await checksDuring(() => pull(h, "ana"))).toBe(0);
+    expect((await pull(h, "ana")).notices.map((row) => row.recipientShareId)).toEqual([shareId, shareId]);
   });
 
   it("drops the target of a notice you sent yourself through a share you lost", async () => {

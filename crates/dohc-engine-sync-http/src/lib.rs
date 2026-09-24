@@ -1043,6 +1043,7 @@ define_server_error_codes! {
     "link_read_rate_limited" => |_| RelayError::LinkReadRateLimited,
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
     "not_found" => unavailable,
+    "notice_list_full" => |_| RelayError::Conflict,
     "notice_rate_limited" => |_| RelayError::HttpStatus(429),
     "notice_refused" => |_| RelayError::Forbidden,
     "payload_too_large" => |_| RelayError::PayloadTooLarge,

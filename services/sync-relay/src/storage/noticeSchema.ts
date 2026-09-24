@@ -5,12 +5,13 @@ export const NOTICES = "sync_relay_notices";
 const MARKER = "notices-v1";
 
 // One list per person. `change_seq` is the list's change counter and never
-// goes back, so a pull cursor stays valid after rows go. `floor_seq` is the
-// highest change of any row removed from the list: a cursor below it missed
-// a removal and must take the whole list again. `removed_seq` is the change
-// at which the list last lost rows, so a pull that is taking the whole list
-// starts over only when rows go after it began. All count per person so a
-// cursor says nothing about anyone else's notices.
+// goes back, so a pull cursor stays valid after rows go. A cursor below
+// `floor_seq`, the newest change of any expired row swept away, missed that
+// row's last change. A cursor below `evicted_seq`, the change at which rows
+// last left to make room, may hold a row the relay no longer has. Either
+// takes the whole list again. The counters are per person so a cursor says
+// nothing about anyone else's notices. `reach_token` digests the person's
+// grants when their notices' access was last checked.
 //
 // A notice row names the workspace the recipient may see (`workspace_id`)
 // or the share the recipient reads it through (`recipient_share_id`), never
@@ -21,7 +22,8 @@ const NOTICE_SCHEMA = {
     CHECK (length(CAST(recipient_user_id AS BLOB)) BETWEEN 1 AND 1024),
   change_seq INTEGER NOT NULL CHECK (change_seq BETWEEN 1 AND 9007199254740991),
   floor_seq INTEGER NOT NULL CHECK (floor_seq BETWEEN 0 AND change_seq),
-  removed_seq INTEGER NOT NULL CHECK (removed_seq BETWEEN 0 AND change_seq)
+  evicted_seq INTEGER NOT NULL CHECK (evicted_seq BETWEEN 0 AND change_seq),
+  reach_token TEXT CHECK (reach_token IS NULL OR (length(reach_token) = 64 AND reach_token NOT GLOB '*[^0-9a-f]*'))
 ) STRICT`,
   [NOTICES]: `CREATE TABLE sync_relay_notices (
   recipient_user_id TEXT NOT NULL REFERENCES sync_relay_notice_lists(recipient_user_id),

@@ -392,8 +392,8 @@ export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
 // The id a sender posts.
 export const NOTICE_POSTED_ID_MAX_CHARS = 256;
 // The id the relay stores and serves. A notice from another person is
-// stored as `from:<sender user id>:<posted id>`, so no sender can take an id
-// that another sender, or the recipient, will use.
+// stored as `from:<sender user id, percent-encoded>:<posted id>`, so no
+// sender can take an id that another sender, or the recipient, will use.
 export const NOTICE_ID_MAX_CHARS = 1_024;
 export const NOTICE_FROM_PREFIX = "from:";
 export const NOTICE_MARKS_PER_REQUEST = 100;
