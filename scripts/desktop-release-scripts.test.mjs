@@ -288,6 +288,27 @@ test("resolve-desktop-release prints release metadata when run as a command", as
   assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
 });
 
+// Node resolves links in the entry path before it sets import.meta.url, so a
+// guard that compares that URL with argv[1] fails in a checkout reached
+// through a junction or symlink, such as a runner's work directory or /var on
+// macOS.
+test("release commands run from a checkout reached through a link", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "dohc-linked-checkout-"));
+  const linkedRoot = join(parent, "checkout");
+  await symlink(repoRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
+  const root = await fixtureRoot();
+  const { stdout } = await runScript(
+    process.execPath,
+    [
+      "scripts/resolve-desktop-release.mjs",
+      "--root", root, "--channel", "nightly", "--date", "20260621",
+      "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
+    ],
+    { cwd: linkedRoot },
+  );
+  assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
+});
+
 test("update-desktop-package-version stamps the version when run as a command", async () => {
   const root = await fixtureRoot();
   const { stdout } = await runReleaseScript(

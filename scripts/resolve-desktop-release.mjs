@@ -2,7 +2,7 @@
 
 import { appendFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const DATE_PATTERN = /^\d{8}$/;
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
@@ -178,7 +178,7 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

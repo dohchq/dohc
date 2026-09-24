@@ -3,7 +3,6 @@
 import { createServer } from "node:http";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 
 const CONTENT_TYPES = new Map([
   [".yml", "text/yaml; charset=utf-8"],
@@ -135,7 +134,7 @@ async function main() {
   console.log(`Serving ${server.root} at ${server.url}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
