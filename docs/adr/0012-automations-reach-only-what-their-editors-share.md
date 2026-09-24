@@ -15,5 +15,5 @@ ADR 0008 still decides where an automation runs: on the computer where the trigg
 ## Consequences
 
 - The owner's computer holds more than any collaborator can reach. Its executor checks every step's target against the common reach of the automation's editors. A collaborator's computer holds only what was shared with them.
-- Sharing a Collection can narrow what its automations reach. Steps outside the new reach, and personal steps in a Collection that is now shared, stop with a notice. The share dialog warns before this happens.
+- Sharing a Collection can narrow what its automations reach. Steps outside the new reach stop with a notice, and so do personal steps once another person gains Edit on the Collection. The share dialog warns before this happens.
 - A missed schedule is skipped, and the owner gets a notice asking whether to run it.

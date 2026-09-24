@@ -52,10 +52,10 @@ automations:
 
 | Trigger | Example | Builds on | New work |
 |---|---|---|---|
-| Record added | a sign-up arrives | engine claims (`crates/dohc-engine-domain/src/automations.rs:308-416`) | a new record on a never-synced lineage claims nothing today (`automations.rs:326-331`) |
+| Record added | a sign-up arrives | engine claims (`crates/dohc-engine-domain/src/automations.rs:308-416`) | a bare record creation with no field history on a never-synced lineage claims nothing today (`automations.rs:326-332`) |
 | Record changed, field changed, field set to a value | Status becomes Done | claims; field history has previous and next values | subscriptions match only a path prefix (`automations.rs:248-271`), and a claim carries no field facts |
-| Record removed | a task is deleted | nothing | a claim on delete; clearing a field is not journaled (`collections.rs:2520-2525`) |
-| Record starts matching a condition | Due date passed and Status is not Done | field facts | compare the condition before and after each change |
+| Record removed | a task is deleted | nothing | a claim when a record is deleted or leaves the Collection |
+| Record starts matching a condition | Status is Blocked and Priority is High | field facts | compare the condition before and after each change; a condition on time, such as a due date passing, needs a schedule |
 | Schedule | every weekday at 9 | nothing: no scheduler exists | a scheduler on the owner's main computer or server |
 | Button | "Mark paid" on an invoice | dataset action buttons, which pass no record | the Button field type for both kinds of Collection |
 | Message in a Group | "/task Buy tickets" | the dispatch scan cursor (`crates/dohc-engine-domain/src/chats/dispatch.rs:121-144`) | a claim when the message is written, on the computer that wrote it |
@@ -83,20 +83,21 @@ Formulas are simple JavaScript expressions, such as `record.Status == "Done"` or
 ### Who can change an automation, and what it reaches (ADR 0012)
 
 - An automation belongs to its Collection. Anyone who can edit the Collection can create, edit, duplicate, switch off, or delete its automations. Editing one is like editing a record: nobody takes it over.
+- Today a person the work is shared with, even with Edit, changes live documents directly but sends every other file change as a change proposal (`CONTEXT.md` Change proposal; ADR 0002). `automations.yaml` is not a live document, so a collaborator's automation edits would arrive as proposals. Item 12 adds a direct lane for a Collection's own files under Edit.
 - An automation reaches only what all its editors can reach. In a Trip folder shared with Ana, an automation can change records in Trip and post in Groups that the owner and Ana share. It cannot touch the owner's private Budget or wake the owner's agent. Nobody gains access by writing one, so nothing needs approval.
 - A personal step uses one person's own reach, such as waking that person's agent. It shows that person, and only that person can change it. At launch, personal steps are allowed only in Collections that only their person can edit.
 - The owner's computer holds more than a collaborator can reach, so its executor checks each step's target against the editors' common reach.
 - Sharing a Collection can narrow its automations' reach. The share dialog warns first, and steps that fall outside the new reach stop with a notice.
-- Deleting an automation moves it to the trash like any file. When someone switches off an automation you last changed, you get a notice.
+- Deleting an automation removes it from the file, and the file's history can restore it. When someone switches off an automation you last changed, you get a notice.
 
 ### Where an automation runs (ADR 0008)
 
 - On the computer where the triggering change happened, as today. When Ana changes a record, her computer runs the automation at once. Each change has one origin, so each automation runs once per change.
-- A button runs on the computer of the person who clicks it, so it works at once and offline.
+- A button starts at once on the computer of the person who clicks it. Its steps write the way a hand edit writes: a Collection kept only on that computer works offline, and shared data needs what a hand edit needs, such as the configured host for a shared dataset (ADR 0010) or the session host for live editing (ADR 0003). When that is missing, the run waits and says so.
 - A message in a Group triggers on the computer that wrote the message.
 - A schedule has no triggering change. It runs on the workspace owner's main computer, which by default is the owner's first computer to save an automation. With a self-hosted server or Drive, it runs on the server, so it keeps running while the owner's laptop is off. Advanced settings let the owner choose another computer.
 - A schedule missed while its computer was off is skipped. When dohc next opens, a notice lists the skipped times and asks whether to run it now. No default suits every case.
-- The self-hosted server does not run automations today; only live documents run there. This plan adds it, and a self-hosted server gets exactly what Drive gets (ADR 0009).
+- The self-hosted server does not run automations today. It runs live documents and the dataset host (`services/sync-relay/src/main.ts:231-233`), but no automation executor. This plan adds it, and a self-hosted server gets exactly what Drive gets (ADR 0009).
 
 ### Runs, failures, and undo
 
@@ -123,13 +124,13 @@ dohc has Notices, a list of problems and finished tasks on one computer. It beco
 
 ## Part 3: Settings and apps in the sidebar
 
-- **Settings file.** One plain file per computer that applies when saved. It covers the theme and colors, including the person and agent colors from decision 6 of the app experience plan, the sidebar's order, hidden sections, and pinned apps, and the editor font and size. Keyboard shortcuts join once the app experience campaign's command list lands (its step 3b). A setting the file does not recognize turns off only itself (contracts-06). Today the settings file is cached, and a hand edit applies only after a restart (`apps/desktop/src/settings/userSettingsStore.ts:60-83`). Syncing settings between a person's computers comes after launch, through a server connection.
+- **Settings file.** One plain file per computer that applies when saved. It covers the theme and colors, including the person and agent colors that people choose for themselves, the sidebar's order, hidden sections, and pinned apps, and the editor font and size. Keyboard shortcuts join once dohc has one command list that records each command's shortcut, which the app experience work is building. A setting the file does not recognize, or a value it cannot accept, turns off only that setting, and the rest of the file applies. Today the settings file is cached, and a hand edit applies only after a restart (`apps/desktop/src/settings/userSettingsStore.ts:60-83`). Syncing settings between a person's computers comes after launch, through a server connection.
 - **Pin an app to the sidebar.** Any app can get its own icon in the left sidebar, beside Files and Search, and open in the side panel. The pin is personal. This replaces what plugin panels did (`apps/desktop/src/renderer/workbench/pluginActivityViews.ts:33-76`). The app still runs sealed off, with only the data its owner exposed.
 - **Show that dohc can be changed.** Each part's ••• menu gets "Customize…", which opens that part's settings. A place that can hold an app offers "Add an app here…". Settings gets "Open settings file". Each of these can hand the job to the person's agent, with the right file named.
 
 ## Part 4: Remove plugins
 
-After items 1 to 3 below land, remove the plugin host, the SDK's Node entry, the Plugins view and details page, plugin panels, plugin web apps, plugin automations, agent drivers with `AgentSessionManager`, and their docs and tests. Rewrite AGENTS.md commitment 8 and the "Tailor the workspace" example to describe apps, with no mention of plugins. Drop the plugin rows claimed in the app experience campaign's ledger.
+After items 1 to 3 below land, remove the plugin host, the SDK's Node entry, the Plugins view and details page, plugin panels, plugin web apps, plugin automations, agent drivers with `AgentSessionManager`, and their docs and tests. Rewrite AGENTS.md commitment 8 and the "Tailor the workspace" example to describe apps, with no mention of plugins.
 
 ## Order of work
 
@@ -146,8 +147,9 @@ Each item is one or more pull requests with one concern. Each gets a review from
 9. The code step.
 10. Schedules, including the server running automations and the skipped-schedule notice.
 11. Settings file and sidebar pins (Part 3). This can run beside any item above.
+12. A direct lane under Edit for a Collection's own files, `collection.yaml` and `automations.yaml`, and for creating a Collection inside a shared folder, with the provenance, grant checks, and restore that ADR 0002 required for live documents. It changes an authorization contract, so it needs a security review.
 
-Items 5 to 11 can run in parallel once item 3 lands. Before an item touches the engine or an area the app experience campaign owns, add a row to that campaign's ledger.
+Items 5 to 12 can run in parallel once item 3 lands. The app experience work runs at the same time and changes the engine and the shell; coordinate with it before an item touches code it is changing.
 
 ## After launch
 
