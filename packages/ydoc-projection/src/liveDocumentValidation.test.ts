@@ -965,12 +965,21 @@ it('journal refuses keyed body topology that the generic cut accepts', () => {
   expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
 })
 
-it('never projects a preserved source that holds table cells the document lacks', () => {
+it('never projects a preserved source that holds text the document lacks', () => {
   const table = '| a | b |\n|---|---|\n| c | d |\n'
-  const canonical = projection.yDocToMarkdown(markdownToYDoc(table))
+  const codeTable = '| `a|b` | c |\n|---|---|---|\n| x | `y|z` |\n'
   const digest = (text: string) => hash(new TextEncoder().encode(text))
-  for (const source of ['| a | b |\n|---|---|\n| c | d | hidden |\n', 'a | b\n--- | ---\nc | d | hidden\n']) {
-    const result = validate(input(encode(table, doc => {
+  for (const [document, source] of [
+    [table, '| a | b |\n|---|---|\n| c | d | hidden |\n'],
+    [table, 'a | b\n--- | ---\nc | d | hidden\n'],
+    // A header with a pipe inside a code span makes the importer read the
+    // table from the raw text, where the row's code span splits too.
+    [codeTable, '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n'],
+    // An unused link reference definition.
+    ['Hello\n', 'Hello\n\n[x]: https://h.example "hidden"\n'],
+  ]) {
+    const canonical = projection.yDocToMarkdown(markdownToYDoc(document))
+    const result = validate(input(encode(document, doc => {
       doc.getMap('meta').set('dohcMarkdownSource', source)
       doc.getMap('meta').set('dohcMarkdownSourceSha256', digest(source))
       doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', digest(canonical))

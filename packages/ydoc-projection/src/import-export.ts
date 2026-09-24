@@ -3,12 +3,11 @@ import type {
   JSONContent,
   MarkdownRendererHelpers,
 } from '@tiptap/core'
-import { getSchema } from '@tiptap/core'
+import { Extension, getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
-  escapeTableCellPipes,
   preprocessTablePipes,
   renderTableToMarkdown,
   Table,
@@ -231,26 +230,30 @@ function tableStart(src: string): number {
 }
 
 // Finds the table at the start of `rest` with marked's table rule and nothing
-// else. Lexing the rest of the document would re-enter this tokenizer for
-// every later table, and even a plain lexer would parse every block after
-// the table, so a run of tables would cost quadratic time. GFM rows are one
-// line each, which Tiptap's raw reconstruction gets wrong when a cell holds a
-// pipe inside inline code.
-function leadingTable(rest: string): Tokens.Table | undefined {
+// else, and returns its lines as that rule read them. Lexing the rest of the
+// document would re-enter this tokenizer for every later table, and even a
+// plain lexer would parse every block after the table, so a run of tables
+// would cost quadratic time. GFM rows are one line each, which Tiptap's raw
+// reconstruction gets wrong when a cell holds a pipe inside inline code.
+//
+// The importer reads a table the way Tiptap's tokenizer does: first with the
+// pipes inside code spans escaped, up to the first blank line, and only when
+// that is no table, from the raw text with marked's own rule. The two can
+// count a row's cells differently, so this reads the same text.
+function leadingTable(rest: string): { table: Tokens.Table; lines: string[] } | undefined {
   const tokenizer = new Tokenizer()
   // The lexer gives the tokenizer its GFM rules and the inline queue the
   // table rule fills.
   tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
-  const table = tokenizer.table(rest)
-  if (table) return table
-  // A header cell with a pipe inside inline code needs Tiptap's escaping
-  // before marked can count its cells. Only that first line can change.
-  const newline = rest.indexOf('\n')
-  const header = newline < 0 ? rest : rest.slice(0, newline)
-  if (!header.includes('`') || !header.includes('|')) return undefined
-  const escaped = escapeTableCellPipes(header)
-  if (escaped === header) return undefined
-  return tokenizer.table(escaped + rest.slice(header.length))
+  const blank = rest.indexOf('\n\n')
+  const candidate = blank < 0 ? rest : rest.slice(0, blank)
+  const escaped = preprocessTablePipes(candidate)
+  for (const text of escaped === candidate ? [rest] : [escaped, rest]) {
+    const table = tokenizer.table(text)
+    // The header, the delimiter, and each row take one line.
+    if (table) return { table, lines: text.split('\n', 2 + table.rows.length) }
+  }
+  return undefined
 }
 
 // A table row's cells as marked splits them: at each unescaped pipe, without
@@ -278,15 +281,15 @@ function tableRowCells(row: string): string[] {
 // Otherwise a file, or a preserved source, could hold text its document
 // lacks.
 function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
-  const table = leadingTable(rest)
-  if (!table) return undefined
-  // The header, the delimiter, and each row take one line.
-  const lines = rest.split('\n', 2 + table.rows.length)
+  const read = leadingTable(rest)
+  if (!read) return undefined
+  const { table, lines } = read
+  const raw = rest.split('\n', lines.length)
   for (let row = 2; row < lines.length; row += 1) {
-    const extra = tableRowCells(preprocessTablePipes(lines[row])).slice(table.header.length)
-    if (extra.some(cell => cell.trim())) return { text: lines.slice(0, row).join('\n'), cut: true }
+    const extra = tableRowCells(lines[row]).slice(table.header.length)
+    if (extra.some(cell => cell.trim())) return { text: raw.slice(0, row).join('\n'), cut: true }
   }
-  return { text: lines.join('\n'), cut: false }
+  return { text: raw.join('\n'), cut: false }
 }
 
 // Only a line after the first that could be a delimiter row can start a
@@ -355,7 +358,26 @@ export const DohcMarkdownTable = Table.extend({
   },
 })
 
+// marked reads a link reference definition as a `def` token, which Tiptap
+// drops. The engine's fold keeps the line as paragraph text, and so does
+// this, so the person's line stays in the document and in the file. A link
+// that uses the definition still resolves, because marked collects it while
+// lexing.
+const MarkdownDefinition = Extension.create({
+  name: 'markdownDefinition',
+  markdownTokenName: 'def',
+  parseMarkdown: (token) => {
+    const text = (token.raw ?? '')
+      .replace(/\s+$/u, '')
+      .split('\n')
+      .map(line => line.trimStart())
+      .join('\n')
+    return text ? { type: 'paragraph', content: [{ type: 'text', text }] } : []
+  },
+})
+
 const extensions: AnyExtension[] = [
+  MarkdownDefinition,
   ...dohcMarkdownExtensions,
   StarterKit.configure({ orderedList: false }),
   MarkdownOrderedList,

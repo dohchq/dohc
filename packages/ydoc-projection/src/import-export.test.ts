@@ -1762,9 +1762,26 @@ describe('Y.Doc markdown import/export', () => {
       '> | a | b |\n> |---|---|\n> | c | d | hidden |\n',
       '- [ ] task\n  | a | b |\n  |---|---|\n  | c | d | hidden |\n',
       '| a | b |\n|---|---|\n| `c|x` | d | hidden |\n',
+      // A code-span pipe in the header sends the importer to the raw text,
+      // where the code span in the row splits too.
+      '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n',
     ]) {
       expect(yDocToMarkdown(markdownToYDoc(input)), JSON.stringify(input)).toContain('hidden')
     }
+  })
+
+  it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
+    expect(yDocToMarkdown(markdownToYDoc('Hello\n\n[x]: https://h.example "kept"\n')))
+      .toBe('Hello\n\n\\[x]: https://h.example "kept"')
+    const body = yDocBodyJSON(markdownToYDoc('See [docs][x].\n\n[x]: https://example.com\n'))
+    expect(body.content?.[0]?.content?.[1]).toMatchObject({
+      text: 'docs',
+      marks: [{ type: 'link', attrs: { href: 'https://example.com' } }],
+    })
+    expect(body.content?.[1]).toEqual({
+      type: 'paragraph',
+      content: [{ type: 'text', text: '[x]: https://example.com' }],
+    })
   })
 
   it('still reads an empty extra cell and a pipe inside inline code as one table', () => {
