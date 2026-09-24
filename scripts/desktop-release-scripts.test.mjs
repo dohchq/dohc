@@ -332,7 +332,7 @@ test("workflow section helpers support CRLF line endings", () => {
   );
 });
 
-test("desktop releases use explicit release events and preserve unsigned package smoke", async () => {
+test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", async () => {
   const workflow = await readFile(
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
@@ -344,12 +344,31 @@ test("desktop releases use explicit release events and preserve unsigned package
     step.includes("electron-builder")
   );
 
-  assert.doesNotMatch(onSection, /pull_request/);
-  assert.doesNotMatch(onSection, /tags:/);
-  assert.match(onSection, /  push:/);
-  assert.match(onSection, /  workflow_dispatch:/);
+  assert.deepEqual(
+    [...onSection.matchAll(/^ {2}([\w-]+):\r?$/gm)].map((match) => match[1]),
+    ["workflow_dispatch"],
+    "a desktop release starts only when someone dispatches it",
+  );
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
+
+  // Cloud runners stay off (AGENTS.md). The package matrix names each
+  // platform's runner labels.
+  const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):\r?$/gm)].map((match) => match[1]);
+  const runsOn = [...jobs.matchAll(/^ {4}runs-on: (.+)$/gm)].map((match) => match[1].trim());
+  assert.equal(runsOn.length, jobNames.length, "every job names its runner");
+  const matrixRunners = [...jobs.matchAll(/^ {12}runner: (.+)$/gm)].map((match) => match[1].trim());
+  assert.ok(matrixRunners.length > 0, "the package matrix names its runners");
+  for (const runner of [
+    ...runsOn.filter((value) => value !== "${{ matrix.runner }}"),
+    ...matrixRunners,
+  ]) {
+    assert.match(
+      runner,
+      /^\[self-hosted, (linux|windows|macos), (x64|arm64)\]$/,
+      `release jobs run only on self-hosted runners: ${runner}`,
+    );
+  }
   assert.match(indentedSection(jobs, 2, "preflight"), /if: github\.ref == 'refs\/heads\/main'/);
   for (const job of ["build", "publish"]) {
     assert.match(indentedSection(jobs, 2, job), /^ {4}environment: desktop-release$/m);
