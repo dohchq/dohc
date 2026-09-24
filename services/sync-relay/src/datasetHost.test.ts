@@ -107,14 +107,15 @@ it("removes populated replay caches when their workspace is deleted", async () =
   }
   expect((await f.invoke(owner, id(6))).result).toHaveLength(128);
   const db = f.storage.db;
-  await vi.waitFor(() => expect(db.prepare("SELECT count(*) n FROM dohc_dataset_materializations WHERE workspace_id=?").get("w")!.n).toBe(1));
+  // Materialization runs in the background and yields to the event loop.
+  await vi.waitFor(() => expect(db.prepare("SELECT count(*) n FROM dohc_dataset_materializations WHERE workspace_id=?").get("w")!.n).toBe(1), {timeout: 10_000});
   await f.host.close();
   f.storage.tx(() => db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id=?").run("w"));
   for (const table of ["dohc_dataset_materializations", "dohc_dataset_checkpoints", "dohc_dataset_events", "dohc_dataset_journals", "sync_relay_dataset_usage"]) {
     expect(db.prepare(`SELECT count(*) n FROM ${table} WHERE workspace_id=?`).get("w")!.n).toBe(0);
   }
   expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoint_chunks").get()!.n).toBe(0);
-}, 20_000);
+});
 
 it("creates standalone data on the relay connection and recovers app writes after host restart", async () => {
   const f = await fixture(), before = workspaceUsageBytes(f.storage, "w");
@@ -146,7 +147,7 @@ it("charges only the current replay cache and retains retries across relay resta
       const cache = db.prepare("SELECT cursor_json FROM dohc_dataset_materializations").get();
       expect(cache && JSON.parse(String(cache.cursor_json)).revision).toBe((batch + 1) * 128);
       expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
-    });
+    }, {timeout: 10_000});
     const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
     expect(caches).toHaveLength(1);
     expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);
@@ -164,7 +165,7 @@ it("charges only the current replay cache and retains retries across relay resta
     .toMatchObject({revision: 1, replayed: true, result: {accepted: true}});
   expect(usage()).toBe(beforeRestart);
   expect(db.prepare("SELECT checkpoint_id FROM dohc_dataset_materializations").get()!.checkpoint_id).toBe(previousCheckpoint);
-}, 20_000);
+});
 
 it("keeps public submission separate from discovery and rejects forged cross-workspace bindings", async () => {
   const f = await fixture(); await f.activate();

@@ -250,6 +250,7 @@ export interface SyncJoinedSharedChannelsResult {
   // their local ops stay local; pull still ran.
   readOnlyShareIds: string[];
   // True when any pull applied new ops — the caller should refresh the UI.
+  // Pages applied before a later page or row failed count.
   changed: boolean;
   // Live rows the rotation did not reach this pass.
   uncovered: number;
@@ -288,6 +289,9 @@ export async function syncJoinedSharedChannels(input: {
     relay: SyncRelayConnection;
     shareId: string;
     channelWireId: string;
+    // The pull calls this after each page it applied, so a failure on a
+    // later page still reports the change.
+    onApplied: () => void;
   }) => Promise<PullSharedChannelResult>;
   push: (input: {
     rootDir: string;
@@ -371,7 +375,12 @@ export async function syncJoinedSharedChannels(input: {
           readOnlyShareIds.push(channel.shareId);
         }
       }
-      const pulled = await pull(target);
+      const pulled = await pull({
+        ...target,
+        onApplied: () => {
+          changed = true;
+        },
+      });
       if (pulled.applied > 0) changed = true;
     } catch (error) {
       if (error instanceof ShareUnavailableError) {

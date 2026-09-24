@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopTray } from "./desktopTray";
 import { createChatDispatchService } from "../agents/chatDispatchService";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
-import { readCachedUserSettingsFile, writeUserSettingsFile } from "../settings/userSettingsStore";
+import { readCachedUserSettingsFile, replaceUserSettingsFile } from "../settings/userSettingsStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -23,7 +23,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const resourcesPath = join(root, "resources");
   const iconRoot = packaged ? resourcesPath : join(root, "build");
   await mkdir(iconRoot, { recursive: true });
-  const configure = (enabled: boolean, command = "agent run") => writeUserSettingsFile(stateRoot, {
+  const configure = (enabled: boolean, command = "agent run") => replaceUserSettingsFile(stateRoot, {
     ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { enabled, command, timeoutMinutes: 30 },
   });
   await configure(true);

@@ -1,4 +1,7 @@
-import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import type {
+  AutomationChangeKind,
+  AutomationClaim,
+} from "@dohc/workspace-engine-client";
 import type { PluginAutomationRunParams } from "./pluginHostProtocol";
 import type { PluginAutomationDeclaration } from "./pluginManifestSchema";
 import type { PluginPipelineStatusEvent } from "./PluginPipeline";
@@ -8,8 +11,8 @@ import type { PluginAutomationRunAuthority } from "./pluginSdkHost";
 //
 // It keeps the engine's automation subscriptions in step with the installed,
 // enabled plugins' declared automations, and drains the engine's durable
-// claim table: take the oldest pending claim, start the owning plugin if
-// needed, run the registered handler, settle on the outcome. The engine's
+// claim table: take the oldest pending plugin claim, start the owning plugin
+// if needed, run the registered handler, settle on the outcome. The engine's
 // `automation.claimed` event is only the wake-up — the claim table is the
 // transport, so a claim inserted while the desktop was away drains on the
 // next reconcile.
@@ -46,17 +49,24 @@ const UNREGISTER_STATUSES = new Set([
   "uninstalling",
 ]);
 
+// A plugin automation runs for every change that adds a record or changes
+// its fields under the declared path.
+const PLUGIN_AUTOMATION_KINDS: AutomationChangeKind[] = ["added", "changed"];
+
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
 export interface AutomationEngineAdapter {
   subscribeAutomation(input: {
     automationId: string;
     path: string;
+    kinds: AutomationChangeKind[];
   }): Promise<unknown>;
   unsubscribeAutomation(input: {
     automationId: string;
     path: string;
   }): Promise<unknown>;
-  claimNextAutomation(): Promise<AutomationClaim | null>;
+  claimNextAutomation(input: {
+    automationIdPrefix: string;
+  }): Promise<AutomationClaim | null>;
   settleAutomationClaim(input: {
     claimId: string;
     state: "done" | "failed";
@@ -109,12 +119,19 @@ interface RegisteredAutomation {
   declaration: PluginAutomationDeclaration;
 }
 
+/**
+ * The namespace every plugin automation id lives in, and the claim prefix
+ * this executor drains. Other executors own other namespaces, such as the
+ * Collection executor's "collection:".
+ */
+const PLUGIN_AUTOMATION_NAMESPACE = "plugin:";
+
 /** The engine subscription id an automation registers and writes under. */
 function engineAutomationId(
   pluginId: string,
   automationId: string,
 ): string {
-  return `${pluginId}/${automationId}`;
+  return `${PLUGIN_AUTOMATION_NAMESPACE}${pluginId}/${automationId}`;
 }
 
 function errorText(error: unknown): string {
@@ -311,6 +328,7 @@ export class PluginAutomations {
         adapter.subscribeAutomation({
           automationId,
           path: declaration.collection,
+          kinds: PLUGIN_AUTOMATION_KINDS,
         }),
       );
       if (this.disposed) return;
@@ -335,7 +353,9 @@ export class PluginAutomations {
       }
       while (!this.disposed) {
         const claim = await this.withLiveAdapter((adapter) =>
-          adapter.claimNextAutomation(),
+          adapter.claimNextAutomation({
+            automationIdPrefix: PLUGIN_AUTOMATION_NAMESPACE,
+          }),
         );
         // Null is both "drained" and "engine unavailable": either way the
         // next wake-up (event or reconcile) resumes.
@@ -361,9 +381,12 @@ export class PluginAutomations {
    * undefined while discovery has not landed.
    */
   private installedPluginDeclares(automationId: string): boolean | undefined {
-    const slash = automationId.indexOf("/");
+    const name = automationId.slice(PLUGIN_AUTOMATION_NAMESPACE.length);
+    // A scoped plugin name ("@acme/tools") has its own "/", and an
+    // automation id never has one, so the last "/" separates the two.
+    const slash = name.lastIndexOf("/");
     if (slash <= 0) return false;
-    const pluginId = automationId.slice(0, slash);
+    const pluginId = name.slice(0, slash);
     const declared = this.options.declaredAutomations(pluginId);
     if (declared === undefined) return undefined;
     return (
@@ -396,11 +419,10 @@ export class PluginAutomations {
       // a claim that arrives that early waits, like one for a plugin that
       // has not registered yet.
       if (declares === undefined || declares) {
-        // Startup ordering: claimNext serves the oldest pending claim
-        // workspace-wide, but `registered` fills per plugin as each one's
-        // pipeline status lands. An installed declarer that has not
-        // registered yet is not a failure — that plugin's own reconcile
-        // re-drains this claim.
+        // Startup ordering: claimNext serves the oldest pending plugin claim,
+        // but `registered` fills per plugin as each one's pipeline status
+        // lands. An installed declarer that has not registered yet is not a
+        // failure — that plugin's own reconcile re-drains this claim.
         return "defer";
       }
       // No installed plugin declares it: uninstalled, or the manifest
@@ -415,6 +437,7 @@ export class PluginAutomations {
     this.activeRuns.set(claim.claimId, {
       claimId: claim.claimId,
       automationId: claim.automationId,
+      run: claim.run,
       // The origin desktop runs automations for its own workspace owner,
       // the same principal plugin writes already act for.
       onBehalfOf: "local",
