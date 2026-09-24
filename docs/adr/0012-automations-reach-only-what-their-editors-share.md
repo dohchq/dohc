@@ -4,7 +4,7 @@ Status: accepted September 24, 2026. It adds to ADR 0008, which still decides wh
 
 An automation belongs to its Collection, so anyone who can edit the Collection can edit its automations, as Notion lets anyone with full access edit a database's automations. An automation can therefore reach only what every one of those editors can reach. Nobody gains access by writing or changing one, so there is no approval step. A step that needs one person's own reach, such as waking that person's agent or changing a Collection only that person can edit, is a personal step. It shows its person, only that person can change it, and at launch it is allowed only in a Collection that only that person can edit.
 
-ADR 0008 still decides where an automation runs: on the computer where the triggering change happened, so a button runs on the computer of the person who clicks it. A schedule has no triggering change. It runs on the workspace owner's main computer, or on the owner's server when there is one, and the owner can choose another computer in Advanced settings.
+ADR 0008 still decides where an automation runs: on the computer where the triggering change happened, so a button runs on the computer of the person who clicks it. A schedule has no triggering change. It runs on the workspace owner's main computer, or on the owner's server when there is one, and the owner can choose another computer in Advanced settings. A message in a Group runs the same way: the owner's main computer claims each message in the Group exactly once when it applies the message, whoever wrote it, so a member who cannot edit the Collection can still trigger it. No other computer claims Group messages.
 
 ## Considered options
 
