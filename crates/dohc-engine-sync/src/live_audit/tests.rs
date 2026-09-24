@@ -101,6 +101,7 @@ fn contact(store: &mut EngineStore) {
         store,
         "ws",
         &RelayCursor {
+            bootstrap_complete: true,
             cursor: 0,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),

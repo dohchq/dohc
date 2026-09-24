@@ -1969,6 +1969,198 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 }
 
 #[test]
+fn join_pull_recovers_offline_edits_after_the_operation_limit() {
+    assert_join_pull_recovers_offline_edits(false);
+}
+
+#[test]
+fn join_pull_recovers_offline_edits_after_the_page_limit() {
+    assert_join_pull_recovers_offline_edits(true);
+}
+
+fn assert_join_pull_recovers_offline_edits(sparse: bool) {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "joining-doc", "joining.md", "offline edit");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "joining-doc").expect("key");
+    let offline = dohc_engine_collab::Ydoc::wire();
+    let update = offline.plaintext_insert(0, "offline edit");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &update,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("joining.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        1_100,
+        |_, _, _| Ok(()),
+    )
+    .expect("offline edit");
+
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.plaintext_insert(0, "remote edit");
+    let remote_bytes = remote.encode_full_state();
+    let remote_sha = dohc_engine_storage::hex_sha256(&remote_bytes);
+    let limit = if sparse {
+        crate::model::MAX_PULL_PAGES_PER_PASS
+    } else {
+        crate::model::MAX_PULL_OPS_PER_PASS
+    };
+    let boundary = i64::try_from(limit).expect("boundary");
+    let padding = |seq| envelope("padding-peer", seq, "probe.padding", json!({}));
+    let mut pages = if sparse {
+        (0..boundary)
+            .map(|seq| {
+                (
+                    seq,
+                    PullResponse {
+                        ops: vec![padding(seq)],
+                        next_cursor: seq + 1,
+                        has_more: true,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(
+            0,
+            PullResponse {
+                ops: (0..boundary).map(padding).collect(),
+                next_cursor: boundary,
+                has_more: true,
+            },
+        )]
+    };
+    pages.push((
+        boundary,
+        PullResponse {
+            ops: vec![envelope(
+                "document-peer",
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId": "main",
+                    "objectId": "joining-doc",
+                    "path": "joining.md",
+                    "contentKind": "plaintext",
+                    "updateBlobSha256": remote_sha,
+                    "lineageClaimId": remote_sha,
+                    "isBaseState": true,
+                }),
+            )],
+            next_cursor: boundary + 1,
+            has_more: false,
+        },
+    ));
+    let mut relay =
+        PagedRelay::new(pages).with_coordinate("local", 1, LogCoordinateResponse::Absent);
+    relay.blobs.insert(remote_sha.clone(), remote_bytes);
+    let client = RelaySyncClient::new(relay);
+    let first = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        )
+        .expect("first pass");
+    let SyncPassOutcome::Complete {
+        has_more: true,
+        pending_cursor: Some(cursor),
+        ..
+    } = first
+    else {
+        panic!("first pass must stop before the remote base: {first:?}");
+    };
+    assert!(!cursor.bootstrap_complete);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_201)
+        .expect("commit first batch");
+    assert_eq!(
+        engine
+            .write_with(&NoFaults, |tx| {
+                assert!(!workspace_replicates_with_relay_in_tx(tx, "ws")?);
+                originate_ydoc_base_in_tx(tx, &key, "joining.md", None, None, 1_202)
+            })
+            .expect("edit-time origination remains disabled"),
+        TxnOutcome::Committed(BaseOrigination::NothingToDo)
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_202).expect("resume bootstrap after restart");
+    let second = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_300,
+        )
+        .expect("later remote base must finish without a push or retry loop");
+    let SyncPassOutcome::Complete {
+        has_more: false,
+        pending_cursor: Some(cursor),
+        refused: 0,
+        ..
+    } = second
+    else {
+        panic!("join must finish: {second:?}");
+    };
+    assert!(cursor.bootstrap_complete);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_301)
+        .expect("finish bootstrap");
+    client
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &RelayCursor {
+                cursor: cursor.cursor + 1,
+                bootstrap_complete: false,
+                ..cursor
+            },
+            &NoFaults,
+            1_302,
+        )
+        .expect("later partial batches retain enrollment");
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("cursor")
+            .expect("present")
+            .bootstrap_complete
+    );
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load document")
+        .expect("document");
+    assert_eq!(persisted.doc.plaintext_string(), "remote edit");
+    assert_eq!(persisted.marker.lineage_claim_id, Some(remote_sha));
+    let texts: Vec<String> = engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE s.workspace_id='ws' AND s.version_id='main' ORDER BY b.text",
+            )?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("materialized content");
+    assert_eq!(texts, ["offline edit", "remote edit"]);
+}
+
+#[test]
 fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
@@ -2855,6 +3047,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
 fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     let (_scratch, _path, mut engine) = open_store();
     let relay = |cursor| RelayCursor {
+        bootstrap_complete: true,
         cursor,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -3618,6 +3811,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         "claiming every workspace row steals the direct RPC retry disposition"
     );
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 0,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -3640,6 +3834,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
 fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     let (_scratch, _path, mut engine) = open_store();
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 42,
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),

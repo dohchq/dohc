@@ -4197,6 +4197,13 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
             (true, true),
         ),
         (
+            "a pulled peer position before bootstrap finishes",
+            false,
+            true,
+            Some("foreign_relay_push_state"),
+            (false, false),
+        ),
+        (
             "a shared channel cursor",
             false,
             true,
@@ -4235,6 +4242,9 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
         if let Some(table) = lane {
             let sql = match table {
                 "sync_relay_push_state" => {
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','origin-chat',0)"
+                }
+                "foreign_relay_push_state" => {
                     "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','origin-lane',0)"
                 }
                 "share_view_cursors" => {

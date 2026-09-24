@@ -1203,6 +1203,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
+        let bootstrap_complete = current
+            .as_ref()
+            .is_some_and(|value| value.bootstrap_complete);
         let mut cursor = current.map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
@@ -1378,6 +1381,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let pending_cursor = RelayCursor {
             cursor,
+            bootstrap_complete: bootstrap_complete || !has_more,
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,

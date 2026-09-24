@@ -763,6 +763,7 @@ mod tests {
         assert_eq!(refusals.len(), 1);
         let refusal_report_id = refusal_report_id.expect("claimed report id");
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -2387,6 +2388,7 @@ mod tests {
             .expect("seed oversized local lineage");
 
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 0,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),

@@ -2168,6 +2168,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_AUTOMATION_CHANGE_FACTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 6,
+        id: "v2-relay-bootstrap-complete",
+        sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -2407,6 +2413,10 @@ mod tests {
             (
                 "v2-automation-change-facts",
                 "664e71f126144d9f2e90379cf12a84952dd768f765070bfbc62a0e0989a78f9c",
+            ),
+            (
+                "v2-relay-bootstrap-complete",
+                "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

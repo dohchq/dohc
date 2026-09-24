@@ -1478,6 +1478,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
 
     let mut store = EngineStore::open(&db, 9_350).expect("open store for enrollment");
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 0,
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
