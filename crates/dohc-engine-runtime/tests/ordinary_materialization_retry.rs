@@ -91,6 +91,11 @@ async fn earlier_page_delete_materializes_the_current_write_instead_of_erasing_i
         domain
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
+        // The disk holds an earlier head, so the store has its bytes and the
+        // write may replace them.
+        domain
+            .write_text(&write("old", "earlier", 1), &NoFaults)
+            .unwrap();
         domain
             .write_text(&write("new head", "recreated", 2), &NoFaults)
             .unwrap();

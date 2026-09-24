@@ -4,7 +4,9 @@
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
-use crate::materialize::{Displacement, DisplacementSpec, MaterializationJob};
+use crate::materialize::{
+    Displacement, DisplacementResolution, DisplacementSpec, JobStatus, MaterializationJob,
+};
 use crate::schema::{open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -276,38 +278,40 @@ impl EngineStore {
     }
 
     /// Record, before the move, that the materializer is about to move a
-    /// target aside. Returns the id [`Self::discard_displacement`] and
-    /// [`Self::keep_displacement`] resolve.
+    /// target aside. Returns the id later transitions name.
     pub fn open_displacement(&self, spec: &DisplacementSpec) -> Result<i64, StorageError> {
         materialize::open_displacement(&self.conn, spec)
     }
 
-    /// Delete an open displacement row.
-    pub fn discard_displacement(&self, displacement_id: i64) -> Result<(), StorageError> {
-        materialize::discard_displacement(&self.conn, displacement_id)
+    /// Record that the job's content is at the target.
+    pub fn mark_displacement_placed(&self, displacement_id: i64) -> Result<(), StorageError> {
+        materialize::mark_displacement_placed(&self.conn, displacement_id)
     }
 
-    /// Keep an open displacement as the evidence of an outside change.
-    pub fn keep_displacement(
+    /// End a displacement row and, in the same transaction, give `job` a
+    /// terminal status.
+    pub fn resolve_displacement(
         &self,
         displacement_id: i64,
-        displaced_sha256: Option<&str>,
+        resolution: DisplacementResolution<'_>,
+        job: Option<(&str, JobStatus)>,
         now_ms: i64,
     ) -> Result<(), StorageError> {
-        materialize::keep_displacement(&self.conn, displacement_id, displaced_sha256, now_ms)
+        materialize::resolve_displacement(&self.conn, displacement_id, resolution, job, now_ms)
     }
 
-    /// Every open displacement, oldest first.
-    pub fn list_open_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
-        materialize::list_open_displacements(&self.conn, None)
+    /// Open and placed displacements, and kept ones whose bytes could not be
+    /// read: the rows a replay resolves or inspects again.
+    pub fn list_unsettled_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_unsettled_displacements(&self.conn)
     }
 
-    /// The open displacements of one job, oldest first.
-    pub fn list_open_displacements_for_job(
+    /// Every displacement of one job, in any state.
+    pub fn list_displacements_for_job(
         &self,
         job_id: &str,
     ) -> Result<Vec<Displacement>, StorageError> {
-        materialize::list_open_displacements(&self.conn, Some(job_id))
+        materialize::list_displacements_for_job(&self.conn, job_id)
     }
 
     /// The kept displacements of one workspace, which are outside changes the
@@ -317,6 +321,18 @@ impl EngineStore {
         workspace_id: &str,
     ) -> Result<Vec<Displacement>, StorageError> {
         materialize::list_kept_displacements(&self.conn, workspace_id)
+    }
+
+    /// Whether an unfinished replace moved `path` aside, so that its absence
+    /// on disk is not a delete.
+    pub fn path_is_displaced(&self, workspace_id: &str, path: &str) -> Result<bool, StorageError> {
+        materialize::path_is_displaced(&self.conn, workspace_id, path)
+    }
+
+    /// Whether the store holds content with this hash, as a text or binary
+    /// blob.
+    pub fn holds_content(&self, sha256: &str) -> Result<bool, StorageError> {
+        materialize::holds_content(&self.conn, sha256)
     }
 
     /// The highest complete `target_generation` for `path` in `workspace_id`

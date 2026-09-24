@@ -6,9 +6,10 @@
 //! `cargo test --workspace`).
 
 use dohc_engine_storage::{
-    BackupOutcome, CorruptionKind, DiagnosticBundle, DisplacementSpec, DisplacementState,
-    EngineStore, FreeSpaceProbe, MaterializationJobSpec, NoFaults, Preimage, StorageError,
-    classify, create_verified_backup, enqueue_job, hex_sha256, load_valid_backup,
+    BackupOutcome, CorruptionKind, DiagnosticBundle, DisplacementResolution, DisplacementSpec,
+    DisplacementState, EngineStore, FreeSpaceProbe, JobStatus, MaterializationJobSpec, NoFaults,
+    Preimage, StorageError, classify, create_verified_backup, enqueue_job, hex_sha256,
+    load_valid_backup,
 };
 use dohc_test_scratch::ScratchDir;
 use rusqlite::{Connection, OptionalExtension};
@@ -750,54 +751,100 @@ fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
     }
 }
 
-/// An open row resolves exactly once: kept rows are evidence, discarded rows
-/// are gone, and neither transition touches a row already resolved.
+/// A row moves open, placed, then kept or deleted, and its job's status
+/// changes in the same transaction as the row's end.
 #[test]
-fn a_displacement_resolves_once_as_kept_or_discarded() {
+fn a_displacement_resolves_with_its_job_in_one_transaction() {
     let sc = Scratch::new("displacements");
-    let store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let mut store = EngineStore::open(&sc.db_path(), 1).expect("open");
+    let content = b"content";
+    let sha = store.put_binary_blob(content).expect("blob");
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "j1".to_owned(),
+                    workspace_id: "ws".to_owned(),
+                    target_path: "notes/a.md".to_owned(),
+                    content_sha256: sha.clone(),
+                    preimage: Preimage::Absent,
+                    target_generation: 1,
+                    now_ms: 1,
+                },
+            )?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue");
+    let placed = store
+        .open_displacement(&displacement_spec("j1", ".dohc-write-j1.displaced"))
+        .expect("open placed");
     let kept = store
-        .open_displacement(&displacement_spec("j1", ".dohc-write-j1.1.displaced"))
+        .open_displacement(&displacement_spec("j2", ".dohc-write-j2.displaced"))
         .expect("open kept");
-    let discarded = store
-        .open_displacement(&displacement_spec("j2", ".dohc-write-j2.1.displaced"))
-        .expect("open discarded");
-    assert_eq!(store.list_open_displacements().expect("open").len(), 2);
-    assert_eq!(
+    assert!(
         store
-            .list_open_displacements_for_job("j2")
-            .expect("for job")
-            .iter()
-            .map(|row| row.displacement_id)
-            .collect::<Vec<_>>(),
-        vec![discarded]
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced")
+    );
+    store.mark_displacement_placed(placed).expect("placed");
+    assert_eq!(
+        store.list_displacements_for_job("j1").expect("for job")[0].state,
+        DisplacementState::Placed
     );
 
+    store
+        .resolve_displacement(
+            placed,
+            DisplacementResolution::Discard,
+            Some(("j1", JobStatus::Complete)),
+            9,
+        )
+        .expect("discard");
+    assert_eq!(
+        store
+            .load_materialization_job("j1")
+            .expect("load")
+            .expect("job")
+            .status,
+        JobStatus::Complete
+    );
     let outside = hex_sha256(b"outside");
     store
-        .keep_displacement(kept, Some(&outside), 9)
+        .resolve_displacement(
+            kept,
+            DisplacementResolution::Keep {
+                displaced_sha256: Some(&outside),
+            },
+            None,
+            10,
+        )
         .expect("keep");
-    store.discard_displacement(discarded).expect("discard");
-    // Already resolved: neither call changes anything.
-    store.discard_displacement(kept).expect("discard kept");
-    store
-        .keep_displacement(discarded, None, 10)
-        .expect("keep gone");
 
-    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert!(
+        !store
+            .path_is_displaced("ws", "notes/a.md")
+            .expect("displaced")
+    );
+    assert!(
+        store
+            .list_unsettled_displacements()
+            .expect("unsettled")
+            .is_empty()
+    );
     let evidence = store.list_kept_displacements("ws").expect("kept");
     assert_eq!(evidence.len(), 1);
     assert_eq!(evidence[0].displacement_id, kept);
-    assert_eq!(evidence[0].state, DisplacementState::Kept);
     assert_eq!(
         evidence[0].displaced_sha256.as_deref(),
         Some(outside.as_str())
     );
-    assert_eq!(evidence[0].target_path, "notes/a.md");
     assert!(
         store
             .list_kept_displacements("other")
             .expect("other")
             .is_empty()
     );
+    assert!(store.holds_content(&sha).expect("holds"));
+    assert!(!store.holds_content(&outside).expect("holds"));
 }

@@ -569,9 +569,10 @@ export function createAtomicTextWriter(deps: {
       await deps.writeFile(temp, text);
       // Optimistic preimage check, not a filesystem compare-and-swap. An
       // uncooperative process can still change the target between this read
-      // and the rename. A conflict means we observed a mismatch before the
-      // atomic replacement; written means that replacement landed. The Rust
-      // materializer records the same portable-filesystem limit as R04.
+      // and the rename, and the rename destroys that change. A conflict means
+      // we observed a mismatch before the atomic replacement; written means
+      // that replacement landed. The Rust materializer instead moves the
+      // target aside and checks what it moved.
       const currentContentHash = await deps.readCurrentContentHash(target);
       if (currentContentHash !== expectedContentHash) {
         return { status: "conflict", currentContentHash };

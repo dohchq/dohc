@@ -438,29 +438,27 @@ pub(crate) fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, 
     .map_err(StorageError::persist)
 }
 
-/// Whether a displaced file is still being resolved or has been kept.
+/// Where a displaced file stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplacementState {
-    /// Written before the materializer moves the target aside. A crash leaves
-    /// it open; replay resolves it before the job runs again.
+    /// Written before the materializer moves the target aside. The job's own
+    /// content is not at the target yet, so a crash that leaves the target
+    /// name empty is undone by moving the displaced file back.
     Open,
-    /// The displaced file held bytes the engine never captured. The file stays
-    /// at its displaced name and this row is the evidence of that outside
-    /// change until the engine captures it.
+    /// The job's content is at the target. The displaced file held bytes the
+    /// store has and only waits to be deleted; recovery never moves it back.
+    Placed,
+    /// The displaced file held bytes the store does not have, and could not
+    /// go back to its path. It stays at its displaced name and this row is the
+    /// evidence of that outside change until the engine captures it.
     Kept,
 }
 
 impl DisplacementState {
-    fn as_str(self) -> &'static str {
-        match self {
-            DisplacementState::Open => "open",
-            DisplacementState::Kept => "kept",
-        }
-    }
-
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "open" => Some(DisplacementState::Open),
+            "placed" => Some(DisplacementState::Placed),
             "kept" => Some(DisplacementState::Kept),
             _ => None,
         }
@@ -485,11 +483,11 @@ pub struct DisplacementSpec {
 
 /// A file the materializer moved off a target path.
 ///
-/// The row is written `open` before the move. After the move the materializer
-/// compares the moved file with `expected_sha256` and `content_sha256`. When
-/// it holds one of them the engine already has those bytes, so the file and
-/// the row are deleted. Otherwise another program wrote it after the preimage
-/// check, and the row turns `kept`.
+/// The row is written `open` before the move. The materializer then reads the
+/// moved file. When the store holds its bytes, the job goes ahead and the file
+/// is deleted with its row. Otherwise another program wrote it after the
+/// preimage check: the file goes back to its path and the job conflicts. The
+/// row turns `kept` only when the file cannot go back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Displacement {
     pub displacement_id: i64,
@@ -502,9 +500,19 @@ pub struct Displacement {
     pub state: DisplacementState,
     /// For a kept file, the hash of the bytes it held when inspected. `None`
     /// when they could not be read whole: over the cap, not a regular file,
-    /// unreadable, or still open for writing by another program.
+    /// unreadable, or still open for writing by another program. Replay
+    /// inspects such a file again.
     pub displaced_sha256: Option<String>,
     pub created_at_ms: i64,
+}
+
+/// How [`resolve_displacement`] ends a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplacementResolution<'a> {
+    /// Delete the row: nothing is left at the displaced name.
+    Discard,
+    /// Keep the row as the evidence of an outside change.
+    Keep { displaced_sha256: Option<&'a str> },
 }
 
 const DISPLACEMENT_COLUMNS: &str = "displacement_id, job_id, workspace_id, target_path, \
@@ -536,8 +544,25 @@ fn row_to_displacement(row: &rusqlite::Row<'_>) -> rusqlite::Result<Displacement
     })
 }
 
-/// Record, durably and before the move, that the materializer is about to move
-/// a target aside. Returns the row id the resolution names.
+fn query_displacements(
+    conn: &Connection,
+    filter: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<Displacement>, StorageError> {
+    let sql = format!(
+        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
+         WHERE {filter} ORDER BY displacement_id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map(params, row_to_displacement)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
+/// Record, before the move, that the materializer is about to move a target
+/// aside. Returns the row id later transitions name.
 pub(crate) fn open_displacement(
     conn: &Connection,
     spec: &DisplacementSpec,
@@ -546,7 +571,7 @@ pub(crate) fn open_displacement(
         "INSERT INTO materialization_displacements \
          (job_id, workspace_id, target_path, displaced_name, expected_sha256, content_sha256, \
           state, displaced_sha256, created_at_ms, resolved_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', NULL, ?7, NULL)",
         rusqlite::params![
             spec.job_id,
             spec.workspace_id,
@@ -554,7 +579,6 @@ pub(crate) fn open_displacement(
             spec.displaced_name,
             spec.expected_sha256,
             spec.content_sha256,
-            DisplacementState::Open.as_str(),
             spec.now_ms,
         ],
     )
@@ -562,14 +586,14 @@ pub(crate) fn open_displacement(
     Ok(conn.last_insert_rowid())
 }
 
-/// Delete an open row. Either nothing was moved, or the moved file held only
-/// bytes the engine already has and has been deleted.
-pub(crate) fn discard_displacement(
+/// Record that the job's content is at the target, before the displaced
+/// file is deleted.
+pub(crate) fn mark_displacement_placed(
     conn: &Connection,
     displacement_id: i64,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "DELETE FROM materialization_displacements \
+        "UPDATE materialization_displacements SET state = 'placed' \
          WHERE displacement_id = ?1 AND state = 'open'",
         [displacement_id],
     )
@@ -577,38 +601,54 @@ pub(crate) fn discard_displacement(
     Ok(())
 }
 
-/// Turn an open row into the evidence of an outside change.
-pub(crate) fn keep_displacement(
+/// End a row and, in the same transaction, give its job a terminal status.
+pub(crate) fn resolve_displacement(
     conn: &Connection,
     displacement_id: i64,
-    displaced_sha256: Option<&str>,
+    resolution: DisplacementResolution<'_>,
+    job: Option<(&str, JobStatus)>,
     now_ms: i64,
 ) -> Result<(), StorageError> {
-    conn.execute(
-        "UPDATE materialization_displacements \
-         SET state = 'kept', displaced_sha256 = ?2, resolved_at_ms = ?3 \
-         WHERE displacement_id = ?1 AND state = 'open'",
-        rusqlite::params![displacement_id, displaced_sha256, now_ms],
-    )
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::persist)?;
+    match resolution {
+        DisplacementResolution::Discard => tx.execute(
+            "DELETE FROM materialization_displacements WHERE displacement_id = ?1",
+            [displacement_id],
+        ),
+        DisplacementResolution::Keep { displaced_sha256 } => tx.execute(
+            "UPDATE materialization_displacements \
+             SET state = 'kept', displaced_sha256 = ?2, resolved_at_ms = ?3 \
+             WHERE displacement_id = ?1",
+            rusqlite::params![displacement_id, displaced_sha256, now_ms],
+        ),
+    }
     .map_err(StorageError::persist)?;
-    Ok(())
+    if let Some((job_id, status)) = job {
+        set_status(&tx, job_id, status, now_ms)?;
+    }
+    tx.commit().map_err(StorageError::persist)
 }
 
-/// Open rows, oldest first. `job_id` narrows them to one job.
-pub(crate) fn list_open_displacements(
+/// Rows a replay must look at, oldest first: every open or placed row, and
+/// every kept row whose bytes could not be read.
+pub(crate) fn list_unsettled_displacements(
     conn: &Connection,
-    job_id: Option<&str>,
 ) -> Result<Vec<Displacement>, StorageError> {
-    let sql = format!(
-        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
-         WHERE state = 'open' AND (?1 IS NULL OR job_id = ?1) ORDER BY displacement_id"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
-    let rows = stmt
-        .query_map([job_id], row_to_displacement)
-        .map_err(StorageError::corrupt)?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::corrupt)
+    query_displacements(
+        conn,
+        "state IN ('open', 'placed') OR (state = 'kept' AND displaced_sha256 IS NULL)",
+        [],
+    )
+}
+
+/// Every row of one job, in any state, oldest first.
+pub(crate) fn list_displacements_for_job(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(conn, "job_id = ?1", [job_id])
 }
 
 /// Kept rows for one workspace, oldest first. They are the outside changes the
@@ -617,16 +657,36 @@ pub(crate) fn list_kept_displacements(
     conn: &Connection,
     workspace_id: &str,
 ) -> Result<Vec<Displacement>, StorageError> {
-    let sql = format!(
-        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
-         WHERE state = 'kept' AND workspace_id = ?1 ORDER BY displacement_id"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
-    let rows = stmt
-        .query_map([workspace_id], row_to_displacement)
-        .map_err(StorageError::corrupt)?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::corrupt)
+    query_displacements(conn, "state = 'kept' AND workspace_id = ?1", [workspace_id])
+}
+
+/// Whether an open row names `path`: a replace moved that path aside and
+/// has not put anything back yet, so its absence on disk is not a delete.
+/// An empty `workspace_id` on either side matches every workspace.
+pub(crate) fn path_is_displaced(
+    conn: &Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM materialization_displacements \
+         WHERE state = 'open' AND target_path = ?2 \
+           AND (?1 = '' OR workspace_id = ?1 OR workspace_id = ''))",
+        [workspace_id, path],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt)
+}
+
+/// Whether the store holds content with this hash, as a text or binary blob.
+pub(crate) fn holds_content(conn: &Connection, sha256: &str) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM blobs WHERE sha256 = ?1) \
+             OR EXISTS (SELECT 1 FROM binary_blobs WHERE sha256 = ?1)",
+        [sha256],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt)
 }
 
 /// The number of pending jobs (cheap gauge for tests / startup logging).
