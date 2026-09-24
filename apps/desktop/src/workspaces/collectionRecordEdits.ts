@@ -7,6 +7,7 @@ import type {
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
+import { editKeptFrontmatterKeys } from "@dohc/ydoc-projection/frontmatter";
 
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -205,6 +206,10 @@ export async function setCollectionRecordFields(
       try {
         scratch.transact(() => {
           const frontmatter = scratch.getMap(FRONTMATTER_FIELD);
+          // A new field gets no written text an offline delete left behind.
+          editKeptFrontmatterKeys(scratch.getMap("meta"), {
+            deleted: entries.map(([field]) => field).filter((field) => !frontmatter.has(field)),
+          });
           for (const [field, value] of entries) frontmatter.set(field, value);
         });
       } finally {

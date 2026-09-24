@@ -1079,7 +1079,13 @@ impl Ydoc {
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
     pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
         self.with_delta(|txn| {
+            // A key the map does not have gets no written text: an offline
+            // device's delete may have left an older entry for it.
+            if !map.contains_key(txn, key) {
+                forget_kept_frontmatter_key(&meta, txn, key);
+            }
             map.insert(txn, key, value);
         })
     }
@@ -1159,20 +1165,7 @@ impl Ydoc {
             let meta = self.doc.get_or_insert_map(ROOT_META);
             Some(self.with_delta(|txn| {
                 map.remove(txn, key);
-                // The kept frontmatter text forgets the key and its comments.
-                if let Some(Out::Any(Any::String(source))) =
-                    meta.get(txn, FRONTMATTER_SOURCE_META_KEY)
-                {
-                    match frontmatter_yaml::without_key(&source, key) {
-                        Some(next) if next == *source => {}
-                        Some(next) => {
-                            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, next);
-                        }
-                        None => {
-                            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
-                        }
-                    }
-                }
+                forget_kept_frontmatter_key(&meta, txn, key);
             }))
         } else {
             None
@@ -1378,6 +1371,24 @@ impl Ydoc {
             projection_sha256.as_str(),
         );
         Ok(())
+    }
+}
+
+/// Remove `key`'s lines and the comments above them from the frontmatter
+/// text the document keeps, in the caller's transaction. Text that cannot be
+/// rewritten is dropped.
+fn forget_kept_frontmatter_key(meta: &yrs::MapRef, txn: &mut yrs::TransactionMut, key: &str) {
+    let Some(Out::Any(Any::String(source))) = meta.get(txn, FRONTMATTER_SOURCE_META_KEY) else {
+        return;
+    };
+    match frontmatter_yaml::without_key(&source, key) {
+        Some(next) if next == *source => {}
+        Some(next) => {
+            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, next);
+        }
+        None => {
+            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
+        }
     }
 }
 
@@ -6384,6 +6395,34 @@ owner: rec_b
 ---
 
 Body"
+        );
+    }
+
+    /// Two devices drop different relations offline. The kept text is one
+    /// value, so after the merge it holds one device's rewrite and still
+    /// names the other device's key. Setting that key again strips its old
+    /// entry first, so its comment does not come back.
+    #[test]
+    fn a_key_dropped_on_another_device_returns_without_its_comment() {
+        let base = Ydoc::wire();
+        base.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            "---\n# owner note\nowner: rec_a\n# editor note\neditor: rec_b\nstatus:   open\n---\n\nBody",
+        )
+        .unwrap();
+        let (a, b) = (Ydoc::wire(), Ydoc::wire());
+        a.apply(&base.encode_full_state()).unwrap();
+        b.apply(&base.encode_full_state()).unwrap();
+        a.frontmatter_drop_relation_target("owner", "rec_a", false)
+            .expect("owner dropped");
+        b.frontmatter_drop_relation_target("editor", "rec_b", false)
+            .expect("editor dropped");
+        a.apply(&b.encode_full_state()).unwrap();
+        a.frontmatter_set("owner", "rec_c");
+        a.frontmatter_set("editor", "rec_d");
+        assert_eq!(
+            a.project_richdoc().unwrap(),
+            "---\nstatus:   open\neditor: rec_d\nowner: rec_c\n---\n\nBody"
         );
     }
 

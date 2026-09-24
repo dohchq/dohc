@@ -486,6 +486,33 @@ describe('Y.Doc markdown import/export', () => {
     expect(loadMarkdownFrontmatter(markdown)).toBeUndefined()
   })
 
+  // Two devices delete different keys offline. The kept text is one value, so
+  // after the merge it holds one device's rewrite and still names the other
+  // device's key. Adding that key again strips its old entry first.
+  it('never brings back a comment when a key deleted on another device returns', () => {
+    const base = markdownToYDoc('---\n# x note\nx: 1\n# y note\ny: 2\nz:   3\n---\n\nBody')
+    const [a, b] = [new Y.Doc(), new Y.Doc()]
+    try {
+      for (const device of [a, b]) Y.applyUpdate(device, Y.encodeStateAsUpdate(base))
+      const forget = (doc: Y.Doc, key: string) => doc.transact(() => {
+        doc.getMap('frontmatter').delete(key)
+        editKeptFrontmatterKeys(doc.getMap('meta'), { deleted: [key] })
+      })
+      forget(a, 'x')
+      forget(b, 'y')
+      Y.applyUpdate(a, Y.encodeStateAsUpdate(b))
+      expect(a.getMap('meta').get('dohcFrontmatterSource')).toMatch(/# [xy] note/)
+      a.transact(() => {
+        const frontmatter = a.getMap('frontmatter')
+        for (const key of ['x', 'y']) {
+          if (!frontmatter.has(key)) editKeptFrontmatterKeys(a.getMap('meta'), { deleted: [key] })
+          frontmatter.set(key, 'new')
+        }
+      })
+      expect(yDocToMarkdown(a)).toBe('---\nz:   3\nx: new\ny: new\n---\n\nBody')
+    } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+
   it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {
     const empty = markdownToYDoc('---\n---\n\nBody')
     const removed = markdownToYDoc('---\nz: 1\ntitle: Plan\n---\n\nBody')

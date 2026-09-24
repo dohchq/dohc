@@ -91,7 +91,11 @@ export function PageIdentity(props: PageIdentityProps) {
           // The kept frontmatter text forgets the key and its comments.
           editKeptFrontmatterKeys(ydoc.getMap("meta"), { deleted: [key] });
         }
-        else map.set(key, value);
+        else {
+          // A new key gets no written text an offline delete left behind.
+          if (!map.has(key)) editKeptFrontmatterKeys(ydoc.getMap("meta"), { deleted: [key] });
+          map.set(key, value);
+        }
       });
       return;
     }

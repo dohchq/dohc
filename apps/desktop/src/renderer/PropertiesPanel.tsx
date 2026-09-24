@@ -146,6 +146,9 @@ function applySharedFrontmatterPatch(
   const map = doc.getMap(FRONTMATTER_FIELD);
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
+  // A key the map does not have yet gets no written text: another device's
+  // offline delete may have left an older entry for it.
+  const added = [...next.keys()].filter((key) => !map.has(key));
 
   for (const key of previous.keys()) {
     if (!next.has(key)) map.delete(key);
@@ -157,7 +160,11 @@ function applySharedFrontmatterPatch(
   }
   // The frontmatter text the document keeps forgets a deleted key and moves
   // a renamed one, so a later settle cannot bring either back.
-  editKeptFrontmatterKeys(doc.getMap("meta"), keyEdit(previousEntries, nextEntries));
+  const edit = keyEdit(previousEntries, nextEntries);
+  editKeptFrontmatterKeys(doc.getMap("meta"), {
+    deleted: [...(edit.deleted ?? []), ...added],
+    renamed: edit.renamed,
+  });
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {

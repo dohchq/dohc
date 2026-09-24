@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { editKeptFrontmatterKeys } from "@dohc/ydoc-projection/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
@@ -207,9 +208,12 @@ export function CollectionRecordFieldWrite({
     applied.current = true;
     onApplied?.();
     doc.transact(() => {
-      doc
-        .getMap(FRONTMATTER_FIELD)
-        .set(change.field, frontmatterWriteValue(change.value));
+      const frontmatter = doc.getMap(FRONTMATTER_FIELD);
+      // A new field gets no written text an offline delete left behind.
+      if (!frontmatter.has(change.field)) {
+        editKeptFrontmatterKeys(doc.getMap("meta"), { deleted: [change.field] });
+      }
+      frontmatter.set(change.field, frontmatterWriteValue(change.value));
     });
   }, [
     docState.opening,
