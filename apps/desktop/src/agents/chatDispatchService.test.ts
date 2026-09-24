@@ -134,6 +134,8 @@ interface FixtureOptions {
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
   // Each post of a run notice takes the next error, if any, and fails.
   noticeFailures?: Error[];
+  // Each record of an owed notice takes the next error, if any, and fails.
+  owedAddFailures?: Error[];
 }
 
 interface Fixture {
@@ -634,7 +636,14 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         if (failure) throw failure;
         if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
       },
-      owed: owedRunNotices,
+      owed: {
+        ...owedRunNotices,
+        add: async (workspaceId, runId) => {
+          const failure = options.owedAddFailures?.shift();
+          if (failure) throw failure;
+          await owedRunNotices.add(workspaceId, runId);
+        },
+      },
     },
   });
 
@@ -2253,6 +2262,36 @@ describe("chatDispatchService", () => {
     expect(await owedRuns(fixture)).toEqual([]);
   });
 
+  it("saves a run's end only once its notice is owed", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({ owedAddFailures: [new Error("owed file unavailable")] });
+    const trigger = await createAgentThread(fixture, {
+      title: "Plan day 2",
+      body: "Finish while the owed file fails once.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => {
+      expect(fixture.errors).toContainEqual(expect.objectContaining({ message: "owed file unavailable" }));
+    }, { interval: 0 });
+    expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty("endedAtMs");
+    expect(fixture.notices).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await vi.waitFor(async () => {
+      expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({ exitCode: 0 });
+      expect(fixture.notices.map((notice) => notice.title)).toEqual([
+        "Your agent finished in \"Plan day 2\"",
+      ]);
+      expect(await owedRuns(fixture)).toEqual([]);
+    }, { interval: 0 });
+  });
+
   it("tries a notice again when its post fails", async () => {
     vi.useFakeTimers();
     // The run's end tries once, and the scan right after tries again.
@@ -2781,8 +2820,9 @@ describe("chatDispatchService", () => {
       message.body.includes("timed out after 1m"),
     );
     expect(timeoutMessage?.authorUserId).toBe("user_local");
+    // Worded like the thread's note.
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      "Your agent's run in \"This harness will hang.\" failed",
+      "Your agent's run in \"This harness will hang.\" timed out",
     ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);

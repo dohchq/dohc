@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
@@ -297,6 +297,26 @@ describe("notices on one person's computers", () => {
     await desktop.store.sync();
     await laptop.store.sync();
     expect((await titles(laptop)).sort()).toEqual(["account:Kept (read)", "account:Sweeps", "account:Waiting"]);
+  });
+
+  it("keeps a notice whose save failed out of the list, so a retry saves it", async () => {
+    const server = await relay();
+    server.online = false;
+    for (const signedIn of [null, account(server, "ana")]) {
+      const laptop = await computer(signedIn);
+      await laptop.store.postNotice(notice({ noticeId: "first", title: "First" }));
+      const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
+      const where = signedIn ? "account" : "local";
+      // A folder where the save writes its temporary file makes the save fail.
+      await mkdir(join(laptop.directory, `${name}.tmp`));
+      await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow();
+      expect(await titles(laptop)).toEqual([`${where}:First`]);
+
+      await rmdir(join(laptop.directory, `${name}.tmp`));
+      await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
+      const restarted = await computer(signedIn, { directory: laptop.directory });
+      expect(await titles(restarted)).toEqual([`${where}:First`, `${where}:Second`]);
+    }
   });
 
   it("keeps the list, cursor, and outbox across a restart", async () => {

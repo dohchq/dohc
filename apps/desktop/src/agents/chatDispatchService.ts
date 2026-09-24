@@ -27,9 +27,11 @@ import { buildRunnerThreadContext } from "./runnerThreadContext";
 
 // How a run ended, as its notice says it. Each matches the note the run
 // leaves in its thread.
-type RunOutcome = "finished" | "no-reply" | "failed" | "not-started" | "restarted" | "quit" | "stopped";
+type RunOutcome =
+  | "finished" | "no-reply" | "timed-out" | "failed" | "not-started" | "restarted" | "quit" | "stopped";
 
 const RUNNER_START_FAILURE = "runner failed to start";
+const RUN_TIMEOUT = "timed out after";
 
 // How a run ended, read from its saved record. A clean exit is "finished"
 // only once the run's reply is known, so it stays "exited" here.
@@ -44,12 +46,14 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
     case "user-stop":
       return "stopped";
     default:
-      return run.failureReason.startsWith(RUNNER_START_FAILURE) ? "not-started" : "failed";
+      if (run.failureReason.startsWith(RUNNER_START_FAILURE)) return "not-started";
+      return run.failureReason.startsWith(RUN_TIMEOUT) ? "timed-out" : "failed";
   }
 }
 
 const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
   "no-reply": "produced no reply",
+  "timed-out": "timed out",
   failed: "failed",
   "not-started": "failed to start",
   restarted: "stopped when dohc restarted",
@@ -639,8 +643,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         }
       }
-      await oweRunNotice(live.workspace, live.claim.run.runId);
       try {
+        await oweRunNotice(live.workspace, live.claim.run.runId);
         if (intent.kind === "complete") {
           await dispatch.completeRun({
             runId: live.claim.run.runId,
@@ -677,7 +681,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live.terminalIntent = {
       kind: "fail",
       exitCode: 124,
-      reason: `timed out after ${live.timeoutMinutes}m`,
+      reason: `${RUN_TIMEOUT} ${live.timeoutMinutes}m`,
     };
     live.killEscalation = terminateWithEscalation(
       live.child,
@@ -689,12 +693,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       live.claim.run,
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
-    await oweRunNotice(live.workspace, live.claim.run.runId);
     try {
+      await oweRunNotice(live.workspace, live.claim.run.runId);
       await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: 124,
-        reason: `timed out after ${live.timeoutMinutes}m`,
+        reason: `${RUN_TIMEOUT} ${live.timeoutMinutes}m`,
       });
       live.terminalDurable = true;
       notifyRunUpdated(live.workspace);
@@ -705,11 +709,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Records that a run's notice is owed, before its end is saved. A failed
-  // record does not hold up the run's end: the notice is still posted once
-  // the end is saved, and only a crash in between could lose it.
+  // Records that a run's notice is owed. Every run's end is saved only
+  // after this succeeds, so a failure here holds the end back like a failed
+  // save, and the recovery scan tries both again.
   async function oweRunNotice(workspace: ChatDispatchWorkspace, runId: string): Promise<void> {
-    await options.runNotices?.owed.add(workspace.workspaceId, runId).catch(reportError);
+    await options.runNotices?.owed.add(workspace.workspaceId, runId);
   }
 
   // Posts the notice for how an owed run ended, as its saved record says,

@@ -266,7 +266,12 @@ export function createNoticeStore(deps: {
     return localFile;
   }
 
-  const saveLocal = (file: LocalFile) => save("local.json", file);
+  // The cache takes a file only once it is saved. A caller that must not
+  // change the cache on a failed save changes a copy and saves that.
+  async function saveLocal(file: LocalFile): Promise<void> {
+    await save("local.json", file);
+    localFile = file;
+  }
 
   function pruneLocal(file: LocalFile): boolean {
     const kept = retained(file.rows, LOCAL_NOTICE_ROW_LIMIT, nowMs());
@@ -288,7 +293,10 @@ export function createNoticeStore(deps: {
     return file;
   }
 
-  const saveAccount = (account: NoticeAccount, file: AccountFile) => save(accountFileName(account), file);
+  async function saveAccount(account: NoticeAccount, file: AccountFile): Promise<void> {
+    await save(accountFileName(account), file);
+    accountFiles.set(accountFileName(account), file);
+  }
 
   // Only cached relay rows age out; the outbox has its own limit.
   function pruneAccount(file: AccountFile): boolean {
@@ -604,15 +612,19 @@ export function createNoticeStore(deps: {
         const known = file.rows.some((row) => row.noticeId === content.noticeId) ||
           file.posts.some((post) => post.request.noticeId === content.noticeId);
         if (known) return false;
-        dropOldestUnsent(file);
-        file.posts.push({
+        // Copies, so a failed save leaves no post behind that a retry would
+        // take for a saved one.
+        const next: AccountFile = { ...file, posts: [...file.posts], marks: [...file.marks] };
+        dropOldestUnsent(next);
+        next.posts.push({
           request: request(session.account.userId, reach), workspaceId: content.workspaceId, createdAtMs, sent: false,
         });
-        await saveAccount(session.account, file);
+        await saveAccount(session.account, next);
         return true;
       }
-      addLocal(local, content, createdAtMs);
-      await saveLocal(local);
+      const next: LocalFile = { ...local, rows: [...local.rows] };
+      addLocal(next, content, createdAtMs);
+      await saveLocal(next);
       return true;
     });
     if (!queued) return;
