@@ -7,16 +7,18 @@ const KiB = 1024, MiB = 1024 * KiB;
  * The scope is host data, like `queryBytes`.
  */
 export const AUTOMATION_LIMITS = Object.freeze({
-  /** Time for one formula once its context is ready. */
+  /** Time to read the scope into a formula or code step's fresh context, before its own time starts. */
+  prepareMs: 1000,
+  /** Time for one formula once its scope is ready. */
   formulaMs: 100,
-  /** Time for one code step once its context is ready. */
+  /** Time for one code step once its scope is ready. */
   codeMs: 1000,
   /** Wall time for one request, like the dataset guest's `deadlineMs`. Items it does not reach time out. */
   requestMs: 8000,
   /**
-   * The worker's whole WebAssembly memory. QuickJS itself uses about 7 MiB, so one formula or code step
-   * can use about 17 MiB, less its scope. QuickJS's own memory limit cannot measure allocations in this
-   * build, so this cap is the bound.
+   * One request's WebAssembly memory. Each request gets a fresh one, so no request reads memory another used.
+   * QuickJS itself uses about 7 MiB, so one formula or code step can use about 17 MiB, less its scope.
+   * QuickJS's own memory limit cannot measure allocations in this build, so this cap is the bound.
    */
   memoryBytes: 24 * MiB,
   stackBytes: 256 * KiB,
@@ -28,6 +30,8 @@ export const AUTOMATION_LIMITS = Object.freeze({
   /** How deeply a result's lists and objects can nest. */
   resultDepth: 64,
   formulasPerBatch: 64,
+  /** Requests waiting or running. When the queue is full, a new request returns `busy` for every item. */
+  queuedRequests: 16,
 });
 
 export type JsonObject = { [key: string]: JsonValue };
@@ -67,7 +71,7 @@ export type AutomationFormula =
   | { kind: "expression"; source: string }
   | { kind: "text"; parts: AutomationTextPart[] };
 
-export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result";
+export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result" | "busy";
 export interface AutomationError { code: AutomationErrorCode; message: string }
 export type AutomationOutcome<T> = { ok: true; value: T } | { ok: false; error: AutomationError };
 
@@ -97,4 +101,6 @@ export type AutomationWorkerReply =
 export const subjectOf = (item: { kind: AutomationWorkerItem["kind"] }) => item.kind === "code" ? "The code" : "The formula";
 export const itemLimitMs = (item: { kind: AutomationWorkerItem["kind"] }) =>
   item.kind === "code" ? AUTOMATION_LIMITS.codeMs : AUTOMATION_LIMITS.formulaMs;
+/** The worker refuses a request whose scope it cannot turn into JSON. */
+export const NOT_JSON = "The automation scope must hold only JSON values.";
 export const failure = (code: AutomationErrorCode, message: string) => ({ ok: false, error: { code, message } }) as const;

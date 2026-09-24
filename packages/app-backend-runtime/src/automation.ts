@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, subjectOf } from "./automation-protocol.js";
+import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, subjectOf } from "./automation-protocol.js";
 import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationWorkerItem, AutomationWorkerReply, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
@@ -8,12 +8,10 @@ export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol
 export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, CodeStepReturn, JsonObject } from "./automation-protocol.js";
 export type { JsonValue } from "./protocol.js";
 
-/** Time an item gets beyond its limit before its worker is replaced. */
+/** Time an item gets beyond its limits before its worker is replaced. */
 const WATCHDOG_GRACE_MS = 2000;
 /** An idle worker exits after this long, which returns its memory. */
 const IDLE_MS = 30_000;
-/** Requests waiting or running. When the queue is full, a new request fails at once instead of waiting. */
-const QUEUE_LIMIT = 16;
 const KiB = 1024;
 
 export interface AutomationEvaluatorOptions {
@@ -22,7 +20,10 @@ export interface AutomationEvaluatorOptions {
   idleMs?: number;
 }
 
-/** The scope and formulas must be plain JSON data: no functions, class instances, dates, maps, or cycles. */
+/**
+ * The scope and formulas must be plain JSON data: no functions, class instances, dates, maps, or cycles.
+ * When the queue is full, every item returns `busy`; the caller runs the automation again later.
+ */
 export interface AutomationEvaluator {
   /** Evaluates one run's formulas in one request. Each result is a JSON value or an error. */
   evaluate(scope: AutomationScope, formulas: readonly AutomationFormula[]): Promise<AutomationOutcome<JsonValue>[]>;
@@ -55,29 +56,42 @@ const isFormula = (formula: AutomationFormula) => formula.kind === "expression" 
   : formula.kind === "text" && Array.isArray(formula.parts) && formula.parts.every(isTextPart);
 
 /**
- * Counts a lower bound of the scope's JSON size and stops past the limit, so this thread never
- * walks or copies much more than the limit allows. The worker measures the exact size.
+ * Measures the scope's JSON size and stops past the limit, so this thread never walks or copies much more
+ * than the limit allows. Punctuation, numbers, and literals count exactly. A string counts its length, which
+ * is exact for plain ASCII and otherwise a lower bound of its UTF-8 size; the worker measures exactly.
+ * A value JSON cannot hold, such as a bigint or a date, is a problem for the caller to fix.
  */
-function scopeTooLarge(scope: AutomationScope): boolean {
+function measureScope(scope: AutomationScope): "fits" | "too_large" | { problem: string } {
   let size = 0;
   const pending: unknown[] = [scope];
   while (pending.length > 0) {
     const value = pending.pop();
     if (typeof value === "string") size += value.length + 2;
+    else if (typeof value === "number") size += Number.isFinite(value) ? String(value).length : 4;
+    else if (typeof value === "boolean") size += value ? 4 : 5;
+    // JSON.stringify writes null, and `undefined` in a list, as null. It leaves out an undefined property.
+    else if (value === null || value === undefined) size += 4;
     else if (Array.isArray(value)) {
-      size += 2;
-      for (let index = 0; index < value.length && size <= AUTOMATION_LIMITS.scopeBytes; index++) { size += 1; pending.push(value[index]); }
-    } else if (value !== null && typeof value === "object") {
-      size += 2;
+      size += Math.max(2, value.length + 1);
+      for (let index = 0; index < value.length && size <= AUTOMATION_LIMITS.scopeBytes; index++) pending.push(value[index]);
+    } else if (typeof value === "object" && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      let keys = 0;
       for (const key in value) {
+        const item = (value as Record<string, unknown>)[key];
+        if (item === undefined) continue;
+        keys++;
         size += key.length + 4;
         if (size > AUTOMATION_LIMITS.scopeBytes) break;
-        pending.push((value as Record<string, unknown>)[key]);
+        pending.push(item);
       }
-    } else size += 1;
-    if (size > AUTOMATION_LIMITS.scopeBytes) return true;
+      size += keys === 0 ? 2 : 1;
+    } else {
+      const kind = typeof value === "object" ? Object.prototype.toString.call(value).slice(8, -1) : typeof value;
+      return { problem: `${NOT_JSON} It holds a value of type ${kind}.` };
+    }
+    if (size > AUTOMATION_LIMITS.scopeBytes) return "too_large";
   }
-  return false;
+  return "fits";
 }
 
 /** Refuses an item that is too large before it is copied. String lengths are lower bounds of UTF-8 sizes. */
@@ -111,7 +125,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   };
 
   const start = () => new Promise<Worker>((resolve, reject) => {
-    const thread = new Worker(entryPath, { resourceLimits: { maxOldGenerationSizeMb: 32 } });
+    const thread = new Worker(entryPath, { resourceLimits: { maxOldGenerationSizeMb: 96 } });
     thread.unref();
     const settle = () => thread.off("message", onReady).off("error", onError).off("exit", onExit);
     const onReady = () => { settle(); resolve(thread); };
@@ -155,11 +169,11 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       // Guest limits stop runaway JavaScript. This catches native work that never checks them.
       const arm = () => {
         clearTimeout(watchdog);
-        const item = items[received]!, limitMs = itemLimitMs(item);
+        const item = items[received]!, limitMs = itemLimitMs(item), waitMs = AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS;
         watchdog = setTimeout(() => replace(performance.now() >= deadline
           ? failure("timeout", `${subjectOf(item)} stopped because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`)
           : failure("timeout", `${subjectOf(item)} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`)),
-        Math.max(0, Math.min(limitMs + WATCHDOG_GRACE_MS, deadline - performance.now())));
+        Math.max(0, Math.min(waitMs, deadline - performance.now())));
       };
       const onMessage = (reply: AutomationWorkerReply) => {
         if (reply.kind === "result") accept(reply.result);
@@ -183,11 +197,16 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     if (closed) throw new Error("The automation evaluator is closed.");
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
-    const results = scopeTooLarge(scope)
+    const measured = measureScope(scope);
+    if (typeof measured === "object") throw new Error(measured.problem);
+    const results = measured === "too_large"
       ? items.map(() => failure("too_large", `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / KiB} KiB.`))
       : items.map(tooLarge);
     if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
-    if (queued >= QUEUE_LIMIT) throw new Error(`The automation evaluator already has ${QUEUE_LIMIT} runs waiting. Try again.`);
+    if (queued >= AUTOMATION_LIMITS.queuedRequests) {
+      const busy = failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`);
+      return results.map(result => result ?? busy);
+    }
     queued++;
     const done = queue.then(async () => {
       const budget: { deadline?: number } = {};

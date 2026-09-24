@@ -1,10 +1,13 @@
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { parentPort } from "node:worker_threads";
 import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC } from "quickjs-emscripten";
 import type { QuickJSWASMModule } from "quickjs-emscripten";
 import { en } from "zod/locales";
 import * as z from "zod/mini";
 import { automationGuest } from "./automation-guest.js";
-import { AUTOMATION_LIMITS, failure, itemLimitMs, subjectOf } from "./automation-protocol.js";
+import { AUTOMATION_LIMITS, failure, itemLimitMs, NOT_JSON, subjectOf } from "./automation-protocol.js";
 import type { AutomationError, AutomationOutcome, AutomationWorkerItem, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
@@ -67,22 +70,40 @@ function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, item: Automatio
   try {
     runtime.setMaxStackSize(AUTOMATION_LIMITS.stackBytes);
     runtime.removeModuleLoader();
-    // The time limit starts once the context and the guest's own code are ready.
-    let deadline = Infinity;
+    // Reading the scope has its own limit. The item's limit starts once the scope is ready.
+    let deadline = performance.now() + AUTOMATION_LIMITS.prepareMs;
     runtime.setInterruptHandler(() => performance.now() >= deadline);
-    const timeout = () => failure("timeout", `${subject} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`);
-    // Only an interrupt or exhausted memory escapes the guest's own error handling.
-    const stopped = () => performance.now() >= deadline ? timeout() : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
     const vm = runtime.newContext();
     try {
       const guest = vm.evalCode(GUEST_SOURCE, "automation.js");
-      if (guest.error) { guest.error.dispose(); return stopped(); }
-      deadline = performance.now() + limitMs;
+      let prepared = guest;
+      if (!guest.error) {
+        const args = [vm.newString(scopeJson), vm.newString(item.kind)];
+        prepared = vm.callFunction(guest.value, vm.undefined, ...args);
+        for (const handle of [guest.value, ...args]) handle.dispose();
+      }
+      if (prepared.error) {
+        // No authored code has run yet, so only the scope's size can exhaust the limits.
+        prepared.error.dispose();
+        return performance.now() >= deadline
+          ? failure("timeout", `Reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareMs} ms.`)
+          : failure("too_large", "The record and step results are too large to read.");
+      }
+      if (vm.typeof(prepared.value) !== "function") {
+        try { return outcome(vm.typeof(prepared.value) === "string" ? vm.getString(prepared.value) : "") ?? failure("too_large", "The record and step results cannot be read."); }
+        finally { prepared.value.dispose(); }
+      }
+      const timeout = () => failure("timeout", `${subject} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`);
       const source = item.kind === "text" ? JSON.stringify(item.parts) : item.source;
-      const args = [vm.newString(scopeJson), vm.newString(item.kind), vm.newString(source), vm.newNumber(AUTOMATION_LIMITS.resultBytes)];
-      const result = vm.callFunction(guest.value, vm.undefined, ...args);
-      for (const handle of [guest.value, ...args]) handle.dispose();
-      if (result.error) { result.error.dispose(); return stopped(); }
+      const args = [vm.newString(source), vm.newNumber(AUTOMATION_LIMITS.resultBytes)];
+      deadline = performance.now() + limitMs;
+      const result = vm.callFunction(prepared.value, vm.undefined, ...args);
+      for (const handle of [prepared.value, ...args]) handle.dispose();
+      if (result.error) {
+        // Only an interrupt or exhausted memory escapes the guest's own error handling.
+        result.error.dispose();
+        return performance.now() >= deadline ? timeout() : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
+      }
       try {
         // Native work, such as converting a huge BigInt, can finish past the limit without an interrupt.
         if (performance.now() >= deadline) return timeout();
@@ -110,12 +131,20 @@ function codeStep(outcome: AutomationOutcome<JsonValue>): AutomationOutcome<Json
 
 const port = parentPort;
 if (!port) throw new Error("The automation worker must run in a worker thread.");
-// QuickJS's own memory limit cannot measure allocations in this build, so a capped memory bounds every run.
-const quickjs = await newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, {
+// The worker compiles QuickJS once. Each request instantiates it with a fresh memory, so no request reads memory
+// another request used. QuickJS's own memory limit cannot measure allocations in this build, so the memory's cap
+// bounds every request.
+const wasmPath = createRequire(fileURLToPath(import.meta.resolve("quickjs-emscripten"))).resolve("@jitl/quickjs-wasmfile-release-sync/wasm");
+const wasmModule = await WebAssembly.compile(await readFile(wasmPath));
+const newModule = () => newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, {
+  wasmModule,
   wasmMemory: new WebAssembly.Memory({ initial: INITIAL_MEMORY_BYTES / WASM_PAGE, maximum: AUTOMATION_LIMITS.memoryBytes / WASM_PAGE }),
 }));
 // A binding named after one of QuickJS's globals would hide a built-in, so the worker refuses it.
-const globals = (() => {
+const globals = await (async () => {
+  const quickjs = await newModule();
+  // A first evaluation compiles QuickJS's code paths, so a cold worker's first formula does not spend its time on that.
+  evaluate(quickjs, JSON.stringify({ trigger: { kind: "button" }, person: null, now: "2026-01-01T00:00:00Z" }), { kind: "expression", source: "today()" });
   const vm = quickjs.newContext();
   try {
     const names = vm.unwrapResult(vm.evalCode("Object.getOwnPropertyNames(globalThis)"));
@@ -123,17 +152,21 @@ const globals = (() => {
   } finally { vm.dispose(); }
 })();
 
-// A first evaluation compiles QuickJS's code paths, so a cold worker's first formula does not spend its time on that.
-evaluate(quickjs, JSON.stringify({ trigger: { kind: "button" }, person: null, now: "2026-01-01T00:00:00Z" }), { kind: "expression", source: "today()" });
-
 const reply = (message: AutomationWorkerReply) => port.postMessage(message);
-port.on("message", ({ scope, items }: AutomationWorkerRequest) => {
+// Requests run one at a time: the next message waits until this one has replied for every item.
+let requests = Promise.resolve();
+port.on("message", (request: AutomationWorkerRequest) => { requests = requests.then(() => answer(request)); });
+
+async function answer({ scope, items }: AutomationWorkerRequest): Promise<void> {
   const taken = Object.keys(scope.bindings ?? {}).find(name => globals.has(name));
   if (taken !== undefined) {
     return reply({ kind: "refused", message: `The step result name ${JSON.stringify(taken)} belongs to a JavaScript built-in. Bind it with another name.` });
   }
-  const scopeJson = JSON.stringify(scope);
+  let scopeJson: string;
+  try { scopeJson = JSON.stringify(scope); } catch { return reply({ kind: "refused", message: NOT_JSON }); }
   const scopeTooLarge = Buffer.byteLength(scopeJson) > AUTOMATION_LIMITS.scopeBytes;
+  let quickjs: QuickJSWASMModule;
+  try { quickjs = await newModule(); } catch { return reply({ kind: "restart" }); }
   for (const item of items) {
     let result: AutomationOutcome<JsonValue>;
     try {
@@ -150,5 +183,5 @@ port.on("message", ({ scope, items }: AutomationWorkerRequest) => {
     }
     reply({ kind: "result", result });
   }
-});
+}
 reply({ kind: "ready" });

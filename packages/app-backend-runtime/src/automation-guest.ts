@@ -13,13 +13,17 @@ type GuestTextPart = { kind: "text"; text: string } | { kind: "expression"; expr
 
 export type GuestKind = "expression" | "text" | "code";
 
+export type GuestEvaluate = (source: string, resultChars: number) => string;
+
 /**
- * Evaluates one formula or code step inside a fresh QuickJS context and returns the outcome as JSON.
- * For `text`, `source` is the parts as JSON. A reply longer than `resultChars` reports `too_large`.
+ * Prepares one formula or code step's scope inside a fresh QuickJS context, before authored code runs.
+ * It returns a function that evaluates the source and returns the outcome as JSON, or that outcome
+ * already when the scope cannot be read. For `text`, the source is the parts as JSON.
+ * A reply longer than `resultChars` reports `too_large`.
  * The worker sends this function's source text to the guest, so it must not use anything declared outside it.
  * The client validates `scope.now` and the worker refuses bindings named after globals before the call.
  */
-export function automationGuest(scopeJson: string, kind: GuestKind, source: string, resultChars: number): string {
+export function automationGuest(scopeJson: string, kind: GuestKind): GuestEvaluate | string {
   const freeze = Object.freeze, isArray = Array.isArray, stringify = JSON.stringify;
   const subject = kind === "code" ? "The code" : "The formula";
   const fail = (code: string, message: string) => stringify({ ok: false, error: { code, message } });
@@ -191,6 +195,26 @@ export function automationGuest(scopeJson: string, kind: GuestKind, source: stri
     record: scope.record ?? null, previous: scope.previous ?? {}, trigger: scope.trigger, person: scope.person,
     message: scope.message ?? null, ...scope.bindings, ...helpers,
   };
+  try {
+    // SharedArrayBuffer's grow returns heap memory without clearing it, so authored code never gets it.
+    if (!Reflect.deleteProperty(globalThis, "SharedArrayBuffer")) throw new TypeError("SharedArrayBuffer stayed.");
+    // Frozen built-ins keep authored code from changing what the evaluator uses after that code runs.
+    for (const name of Object.getOwnPropertyNames(globalThis)) {
+      const value: unknown = (globalThis as Record<string, unknown>)[name];
+      if (value === globalThis) continue;
+      if (typeof value === "function") freeze(value.prototype);
+      if (value !== null && (typeof value === "object" || typeof value === "function")) freeze(value);
+    }
+    // A formula reads the scope and helpers as globals; a code step reads them from `ctx`. Both are frozen already.
+    if (kind !== "code") {
+      for (const [name, value] of Object.entries(names)) {
+        Object.defineProperty(globalThis, name, { value, writable: false, enumerable: false, configurable: false });
+      }
+    }
+    freeze(globalThis);
+  } catch {
+    return fail("too_large", "The record and step results are too large to read.");
+  }
 
   const describe = (error: unknown) => {
     try {
@@ -209,8 +233,7 @@ export function automationGuest(scopeJson: string, kind: GuestKind, source: stri
     } catch { /* A thrown value's own getters can fail. */ }
     return fail(code, prefix + describe(error));
   };
-  const compile = (expression: string) => new Function(`"use strict"; return (${expression}
-);`) as () => unknown;
+  const compile = (expression: string) => new Function(`"use strict"; return (${expression}\n);`) as () => unknown;
   // Message text inserts each expression's value: a list as its items, an object as JSON, nothing for an empty value.
   const messageText = (json: string) => {
     const parts = (JSON.parse(json) as GuestTextPart[]).map(part => part.kind === "text" ? part.text : compile(part.expression));
@@ -223,54 +246,41 @@ export function automationGuest(scopeJson: string, kind: GuestKind, source: stri
     }).join("");
   };
 
-  let run: () => unknown;
-  try {
-    // A formula reads the scope and helpers as globals; a code step reads them from `ctx`.
-    if (kind !== "code") {
-      for (const [name, value] of Object.entries(names)) {
-        Object.defineProperty(globalThis, name, { value, writable: false, enumerable: false, configurable: false });
+  return (source, resultChars) => {
+    let run: () => unknown;
+    try {
+      if (kind === "code") {
+        const body = new Function("ctx", `"use strict";\n${source}\n`) as (ctx: unknown) => unknown;
+        const ctx = freeze(names);
+        run = () => body(ctx);
+      } else {
+        run = kind === "expression" ? compile(source) : messageText(source);
       }
+    } catch (error) {
+      return failure(error, "syntax");
     }
-    // Frozen built-ins keep authored code from changing what this function uses after that code runs.
-    for (const name of Object.getOwnPropertyNames(globalThis)) {
-      const value: unknown = (globalThis as Record<string, unknown>)[name];
-      if (typeof value === "function") freeze(value.prototype);
-      if (value !== null && (typeof value === "object" || typeof value === "function")) freeze(value);
-    }
-    freeze(globalThis);
-    if (kind === "code") {
-      const body = new Function("ctx", `"use strict";
-${source}
-`) as (ctx: unknown) => unknown;
-      const ctx = freeze(names);
-      run = () => body(ctx);
-    } else {
-      run = kind === "expression" ? compile(source) : messageText(source);
-    }
-  } catch (error) {
-    return failure(error, "syntax");
-  }
 
-  let value: unknown;
-  try {
-    value = run();
-    if (value !== null && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function") {
-      return fail("invalid_result", `${subject} must finish without waiting. Remove async and await.`);
+    let value: unknown;
+    try {
+      value = run();
+      if (value !== null && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function") {
+        return fail("invalid_result", `${subject} must finish without waiting. Remove async and await.`);
+      }
+    } catch (error) {
+      return failure(error, "runtime");
     }
-  } catch (error) {
-    return failure(error, "runtime");
-  }
-  // A code step that returns nothing asks for nothing. A formula without a value is empty.
-  if (kind === "code") value ??= {};
-  else if (value === undefined) value = null;
-  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
-    return fail("invalid_result", `${subject} must produce text, a number, true or false, a list, or an object.`);
-  }
-  let json: string;
-  try {
-    json = `{"ok":true,"value":${stringify(value)}}`;
-  } catch (error) {
-    return failure(error, "invalid_result", `${subject} produced a value that cannot be saved. `);
-  }
-  return json.length > resultChars ? fail("too_large", `${subject} produced more than ${resultChars / 1024} KiB.`) : json;
+    // A code step that returns nothing asks for nothing. A formula without a value is empty.
+    if (kind === "code") value ??= {};
+    else if (value === undefined) value = null;
+    if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+      return fail("invalid_result", `${subject} must produce text, a number, true or false, a list, or an object.`);
+    }
+    let json: string;
+    try {
+      json = `{"ok":true,"value":${stringify(value)}}`;
+    } catch (error) {
+      return failure(error, "invalid_result", `${subject} produced a value that cannot be saved. `);
+    }
+    return json.length > resultChars ? fail("too_large", `${subject} produced more than ${resultChars / 1024} KiB.`) : json;
+  };
 }

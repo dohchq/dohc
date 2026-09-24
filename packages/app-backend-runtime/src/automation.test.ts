@@ -1,6 +1,9 @@
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_LIMITS, createAutomationEvaluator } from "./automation.ts";
 import type { AutomationFormula, AutomationScope, AutomationTextPart, JsonObject } from "./automation.ts";
@@ -337,6 +340,105 @@ describe("limits", () => {
   }, 60_000);
 });
 
+describe("memory between runs", () => {
+  const marker = "dohc-marker-4111111111111111";
+  const planted: AutomationScope = { ...scope, record: { Notes: marker.repeat(40) }, bindings: { card: marker } };
+  // Fills freed memory with the marker: many copies of the record's text, then a large buffer of marker bytes.
+  const plant = `const copies = []; for (let i = 0; i < 4000; i++) copies.push(ctx.record.Notes + i);
+    const bytes = new Uint8Array(4 << 20); for (let i = 0; i < ${marker.length}; i++) bytes[i] = ctx.card.charCodeAt(i);
+    for (let filled = ${marker.length}; filled < bytes.length; filled *= 2) bytes.copyWithin(filled, 0, filled);
+    return { output: copies.length };`;
+  const find = `(bytes => { const m = ${JSON.stringify(marker)}, first = m.charCodeAt(0);
+    for (let i = bytes.indexOf(first); i >= 0; i = bytes.indexOf(first, i + 1)) {
+      let j = 1; while (j < m.length && bytes[i + j] === m.charCodeAt(j)) j++;
+      if (j === m.length) return true;
+    }
+    return false; })`;
+  const size = 8 << 20;
+  // Every way QuickJS hands out buffer memory: new, resized, grown, transferred, and copied.
+  const probes = [
+    `new Uint8Array(new ArrayBuffer(${size}))`,
+    `new Uint8Array(${size})`,
+    `new Uint8Array(new Float64Array(${size / 8}).buffer)`,
+    `new Uint8Array(new DataView(new ArrayBuffer(${size})).buffer)`,
+    `(() => { const b = new ArrayBuffer(16, { maxByteLength: ${size} }); b.resize(${size}); return new Uint8Array(b); })()`,
+    `(() => { const b = new ArrayBuffer(16, { maxByteLength: ${size} }); const view = new Uint8Array(b); b.resize(${size}); return view; })()`,
+    `new Uint8Array(new ArrayBuffer(16).transfer(${size}))`,
+    `new Uint8Array(new ArrayBuffer(16).transferToFixedLength(${size}))`,
+    `new Uint8Array(new ArrayBuffer(16, { maxByteLength: ${size} }).transfer(${size}))`,
+    `new Uint8Array(new ArrayBuffer(${size / 2}).slice(0))`,
+    `typeof SharedArrayBuffer === "undefined" ? new Uint8Array(0) : new Uint8Array(new SharedArrayBuffer(${size}))`,
+    `typeof SharedArrayBuffer === "undefined" ? new Uint8Array(0) : (() => { const b = new SharedArrayBuffer(16, { maxByteLength: ${size} }); b.grow(${size}); return new Uint8Array(b); })()`,
+  ];
+
+  it("gives no formula or code step a SharedArrayBuffer", async () => {
+    expect(await values(["typeof SharedArrayBuffer", "Object.getOwnPropertyNames(globalThis).includes('SharedArrayBuffer')"])).toEqual(["undefined", false]);
+    expect(await evaluator.runCode(scope, "return { output: typeof SharedArrayBuffer };")).toEqual({ ok: true, value: { output: "undefined" } });
+  });
+
+  it.each(probes)("keeps one run's data out of a later run's buffer: %s", async probe => {
+    expect(await evaluator.runCode(planted, plant)).toEqual({ ok: true, value: { output: 4000 } });
+    expect(await evaluator.runCode(scope, `return { output: ${find}(${probe}) };`)).toEqual({ ok: true, value: { output: false } });
+    // Formulas of one run share a memory; freed buffers still come back cleared.
+    const [planting, found] = await evaluator.evaluate(planted, [
+      expression("(() => { const copies = []; for (let i = 0; i < 4000; i++) copies.push(record.Notes + i); return copies.length; })()"),
+      expression(`${find}(${probe})`),
+    ]);
+    expect([planting, found]).toEqual([{ ok: true, value: 4000 }, { ok: true, value: false }]);
+  });
+});
+
+describe("scope preparation", () => {
+  it("reads a large scope before each formula's time starts", async () => {
+    const records = Array.from({ length: 900 }, (_, index) => ({ id: `record-${index}`, Name: `Task ${index} for the trip`, Status: index % 3 ? "Open" : "Done", Due: "2026-10-01", Price: index * 1.25, Tags: ["trip", "urgent"] }));
+    const large: AutomationScope = { ...scope, bindings: { tasks: records } };
+    expect(JSON.stringify(large).length).toBeGreaterThan(100 * 1024);
+    const results = await evaluator.evaluate(large, Array.from({ length: 20 }, () => expression('tasks.filter(task => task.Status == "Done").length')));
+    expect(results).toEqual(Array.from({ length: 20 }, () => ({ ok: true, value: 300 })));
+    const many: AutomationScope = { ...scope, bindings: Object.fromEntries(Array.from({ length: 15_000 }, (_, index) => [`b${index}`, index])) };
+    expect(await value("b14999 + 1", many)).toEqual({ ok: true, value: 15_000 });
+  });
+
+  it("counts the scope's size exactly before copying it", async () => {
+    const fresh = createAutomationEvaluator();
+    try {
+      const rows = Array.from({ length: 1000 }, (_, index) => ({ a: index, b: index % 2 === 0, c: null, d: [], e: {}, f: [1.5, -2e-7, undefined], g: undefined }));
+      const sized = (padding: number): AutomationScope => ({ ...scope, record: { Rows: rows as unknown as JsonObject[], Notes: "x".repeat(padding) } });
+      const padding = AUTOMATION_LIMITS.scopeBytes - JSON.stringify(sized(0)).length;
+      expect(JSON.stringify(sized(padding)).length).toBe(AUTOMATION_LIMITS.scopeBytes);
+      expect(await fresh.evaluate(sized(padding + 1), [expression("1")]))
+        .toEqual([{ ok: false, error: { code: "too_large", message: "The record and step results are larger than 256 KiB." } }]);
+      expect(threads.started).toBe(0);
+      expect(await fresh.evaluate(sized(padding), [expression("record.Rows.length")])).toEqual([{ ok: true, value: 1000 }]);
+      // 30,000 small objects are 240 KB of JSON, under the limit.
+      const small = { ...scope, record: { Rows: Array.from({ length: 30_000 }, () => ({ a: 1 })) } };
+      expect(await fresh.evaluate(small, [expression("record.Rows.length")])).toEqual([{ ok: true, value: 30_000 }]);
+    } finally { await fresh.close(); }
+  });
+  beforeEach(() => { threads.started = 0; });
+
+  it("refuses a scope with values JSON cannot hold", async () => {
+    const started = threads.started;
+    const cases: Array<[unknown, string]> = [[1n, "bigint"], [new Date(0), "Date"], [new Map(), "Map"], [() => 1, "function"], [[{ deep: [Symbol("s")] }], "symbol"]];
+    for (const [bad, kind] of cases) {
+      await expect(evaluator.evaluate({ ...scope, record: { Bad: bad as JsonObject } }, Array.from({ length: 64 }, () => expression("1"))))
+        .rejects.toThrow(`The automation scope must hold only JSON values. It holds a value of type ${kind}.`);
+    }
+    expect(threads.started).toBe(started);
+  });
+
+  it("has the worker refuse a scope it cannot turn into JSON, and keep serving", async () => {
+    const worker = new Worker(fileURLToPath(new URL("../dist/automation-worker.mjs", import.meta.url)));
+    try {
+      await once(worker, "message");
+      worker.postMessage({ scope: { ...scope, record: { Bad: 1n } }, items: [expression("1")] });
+      expect((await once(worker, "message"))[0]).toEqual({ kind: "refused", message: "The automation scope must hold only JSON values." });
+      worker.postMessage({ scope, items: [expression("1 + 1")] });
+      expect((await once(worker, "message"))[0]).toEqual({ kind: "result", result: { ok: true, value: 2 } });
+    } finally { await worker.terminate(); }
+  });
+});
+
 describe("evaluator lifetime", () => {
   beforeEach(() => { threads.started = 0; threads.terminated = 0; });
 
@@ -345,10 +447,11 @@ describe("evaluator lifetime", () => {
     expect(results).toEqual([{ ok: true, value: 2 }, { ok: true, value: 4 }, { ok: true, value: 6 }]);
   });
 
-  it("refuses a run when 16 are already waiting", async () => {
+  it("returns busy when 16 runs are already waiting", async () => {
     const waiting = Array.from({ length: 16 }, (_, index) => value(`${index}`));
-    await expect(value("16")).rejects.toThrow("already has 16 runs waiting");
+    expect(await value("16")).toEqual({ ok: false, error: { code: "busy", message: "The evaluator already has 16 runs waiting. Try this run again later." } });
     expect(await Promise.all(waiting)).toEqual(Array.from({ length: 16 }, (_, index) => ({ ok: true, value: index })));
+    expect(await value("16")).toEqual({ ok: true, value: 16 });
   });
 
   it("refuses oversized input without copying it to a worker", async () => {
