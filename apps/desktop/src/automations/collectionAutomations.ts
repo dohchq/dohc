@@ -586,23 +586,25 @@ export class CollectionAutomations {
     }
     const unsupported = unsupportedReason(automation);
     if (unsupported !== null) return { status: "refused", reason: unsupported };
+    // The guard is taken before the first read and held to the end, so an
+    // Undo of the same run cannot start between this check and the retry.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
-    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
-    if (listed === null) throw new Error("The workspace engine is not running.");
-    // Without its run history, dohc cannot tell what the run already did.
-    if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
-      return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
-    }
-    const runs = await runsForClaim(this.options.store, input, automation);
-    if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
-    // An undone run's keys and record ids are spent, so it cannot run again.
-    if (runs.current?.undone || runs.changedSince?.undone) return { status: "refused", reason: UNDONE_RUN_ERROR };
-    const progressGone = runs.done === null && runs.current?.compacted === true;
-    const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
-    if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
     this.changing.add(input.claimId);
-    this.waitingFor.delete(input.claimId);
     try {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      // Without its run history, dohc cannot tell what the run already did.
+      if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
+        return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+      }
+      const runs = await runsForClaim(this.options.store, input, automation);
+      if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
+      // An undone run's keys and record ids are spent, so it cannot run again.
+      if (runs.current?.undone || runs.changedSince?.undone) return { status: "refused", reason: UNDONE_RUN_ERROR };
+      const progressGone = runs.done === null && runs.current?.compacted === true;
+      const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
+      if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
+      this.waitingFor.delete(input.claimId);
       const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
       if (retried === null) throw new Error("The workspace engine is not running.");
       if (startsOver) {
@@ -629,16 +631,17 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
   ): Promise<CollectionAutomationUndo> {
     await this.ready();
+    // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
-    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
-    if (listed === null) throw new Error("The workspace engine is not running.");
-    const claim = listed.claims.find((candidate) => candidate.claimId === input.claimId);
-    if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
-    if (claim.state !== "done" && claim.state !== "failed") {
-      return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
-    }
     this.changing.add(input.claimId);
     try {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      const claim = listed.claims.find((candidate) => candidate.claimId === input.claimId);
+      if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
+      if (claim.state !== "done" && claim.state !== "failed") {
+        return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
+      }
       const { runs, unreadable } = await this.options.store.runsOf(input.automationId, input.claimId);
       if (unreadable) {
         return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };

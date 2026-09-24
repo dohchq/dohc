@@ -82,6 +82,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
       {...(props.onRetryAutomationFailure ? { onRetryAutomationFailure: props.onRetryAutomationFailure } : {})}
       {...(props.onOpenAutomation ? { onOpenAutomation: props.onOpenAutomation } : {})}
+      {...(props.automationFailureToast ? { automationFailureToast: props.automationFailureToast } : {})}
+      {...(props.onHideAutomationFailureToast ? { onHideAutomationFailureToast: props.onHideAutomationFailureToast } : {})}
     />
   );
 }
@@ -173,6 +175,34 @@ describe("automation failure notices", () => {
     await userEvent.click(within(again).getByRole("button", { name: "Open folder" }));
     expect(onResetAutomationHolds).toHaveBeenCalledOnce();
     expect(onRevealAutomationHolds).toHaveBeenCalledOnce();
+  });
+
+  it("toasts a failure that just arrived with Try again, Open automation, and copy, and keeps its row", async () => {
+    const failure = {
+      automationId: "collection:Tasks#stamp", claimId: "atc_1", chainStopped: false,
+      name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+    };
+    const user = userEvent.setup();
+    const onRetryAutomationFailure = vi.fn();
+    const onOpenAutomation = vi.fn();
+    const onHideAutomationFailureToast = vi.fn();
+    renderNotices({
+      automationFailures: [failure], automationFailureToast: failure,
+      onRetryAutomationFailure, onOpenAutomation, onHideAutomationFailureToast,
+    });
+    const toast = screen.getByTestId("automation-failure-toast");
+    expect(toast.textContent).toContain('Automation "Stamp" failed. The record is open elsewhere.');
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("Run: atc_1");
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(onRetryAutomationFailure).toHaveBeenCalledWith(failure);
+    expect(onHideAutomationFailureToast).toHaveBeenCalledTimes(1);
+    await user.click(within(toast).getByRole("button", { name: "Open automation" }));
+    expect(onOpenAutomation).toHaveBeenCalledWith("collection:Tasks#stamp");
+    await user.click(within(toast).getByRole("button", { name: "Dismiss automation notice" }));
+    expect(onHideAutomationFailureToast).toHaveBeenCalledTimes(3);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-automation-failure-collection:Tasks#stamp")).toBeTruthy();
   });
 
   it("asks once to allow a step that reaches more only because an editor left", async () => {

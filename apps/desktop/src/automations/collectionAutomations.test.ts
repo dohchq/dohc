@@ -180,8 +180,14 @@ async function world(options: {
       }
       const record = [...records.values()].find((candidate) => candidate.path === path);
       if (!record) throw new Error(`No record at ${path}.`);
-      return {
+      const session = {
         get initialUpdate() { return Y.encodeStateAsUpdate(record.doc); },
+        async applyDecidedLocalUpdate(decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void, applyOptions?: { idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }) {
+          const update = decide(record.doc);
+          if (update === null) return false;
+          session.applyLocalUpdate(update, armed, applyOptions);
+          return true;
+        },
         applyLocalUpdate(update: Uint8Array, armed?: () => void, applyOptions?: { idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }) {
           const key = applyOptions?.idempotencyKey;
           const bytes = Buffer.from(update).toString("base64");
@@ -198,7 +204,8 @@ async function world(options: {
         },
         async settleNow() { return { materialized: true }; },
         async close() {},
-      } as unknown as WorkspaceEngineYDocProviderSession;
+      };
+      return session as unknown as WorkspaceEngineYDocProviderSession;
     },
     async writeAuthoredTextFile(absolutePath, text, author, writeOptions) {
       if (failures.authoredWrite > 0) {
@@ -928,6 +935,23 @@ describe("Collection automations", () => {
     w.requeue(claim);
     w.executor.notifyClaimed();
     await w.until(() => claim.state === "failed" && claim.error === UNDONE_RUN_ERROR);
+    expect(w.fieldsOf(task).Count).toBe(2);
+  });
+
+  it("lets only one of an Undo and a Try again started together change a run", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    const undoing = w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
+    const retrying = w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false });
+    await expect(retrying).resolves.toEqual({ status: "refused", reason: "dohc is already changing this run. Try again in a moment." });
+    await expect(undoing).resolves.toMatchObject({ status: "undone", reverted: 2 });
+    expect(claim.state).toBe("failed");
     expect(w.fieldsOf(task).Count).toBe(2);
   });
 

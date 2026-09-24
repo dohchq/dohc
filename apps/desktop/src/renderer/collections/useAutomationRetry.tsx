@@ -1,6 +1,7 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { bridge } from "../bridge";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { useRequestSequence } from "../useRequestSequence";
 
 // Try again for a failed automation run, from the ⚡ panel or from its
 // notice. Main queues the claim, wakes the executor's drain, and tells the
@@ -19,25 +20,33 @@ export function useAutomationRetry(options: {
   onQueued: () => void;
 }): { retry: (target: Target) => void; dialog: ReactNode } {
   const { workspaceId, onError, onQueued } = options;
-  const [confirming, setConfirming] = useState<Target | null>(null);
+  // Rises when the workspace changes: an answer for another workspace, and
+  // a confirmation it opened, never reach this one.
+  const workspace = useRequestSequence([workspaceId]);
+  const [confirming, setConfirming] = useState<(Target & { epoch: number }) | null>(null);
+  useEffect(() => setConfirming(null), [workspaceId]);
 
   const run = useCallback(
     (target: Target, startOver: boolean) => {
+      const epoch = workspace.current();
       const again = () => run(target, startOver);
       void bridge()
         .retryCollectionAutomation({ workspaceId, automationId: target.automationId, claimId: target.claimId, startOver })
         .then((result) => {
-          if (result.status === "definition-changed") setConfirming(target);
+          if (!workspace.isCurrent(epoch)) return;
+          if (result.status === "definition-changed") setConfirming({ ...target, epoch });
           else if (result.status === "refused") onError(result.reason, new Error(result.reason));
           else onQueued();
         })
-        .catch((error: unknown) => onError("dohc could not run the automation again.", error, again));
+        .catch((error: unknown) => {
+          if (workspace.isCurrent(epoch)) onError("dohc could not run the automation again.", error, again);
+        });
     },
     [workspaceId, onError, onQueued],
   );
 
   const retry = useCallback((target: Target) => run(target, false), [run]);
-  const dialog = confirming ? (
+  const dialog = confirming && workspace.isCurrent(confirming.epoch) ? (
     <ConfirmDialog
       title="Run from the start?"
       confirmLabel="Run from the start"

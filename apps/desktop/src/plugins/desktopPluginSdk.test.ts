@@ -105,6 +105,12 @@ async function fixture() {
     return {
       doc, initialUpdate: Y.encodeStateAsUpdate(doc), path, contentKind: "richdoc",
       applyLocalUpdate(update, armed, options) { Y.applyUpdate(doc, update); journal.push(options); armed?.(); },
+      async applyDecidedLocalUpdate(decide, armed, options) {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); journal.push(options); armed?.();
+        return true;
+      },
       settleNow: async () => ({ momentId: "moment", path, content: null, sha256: "fixture", materialized: true,
         projection: { contentKind: "richdoc", sourceStateVectorSha256: "fixture", destructive: false } }),
       close: async () => undefined,

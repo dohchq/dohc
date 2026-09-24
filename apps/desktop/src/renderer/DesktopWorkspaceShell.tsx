@@ -3853,7 +3853,13 @@ export function DesktopWorkspaceShell(props: {
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
-  const { automationFailures, dismissAutomationFailure, reloadAutomationFailures } = useAutomationFailures(
+  const {
+    automationFailures,
+    dismissAutomationFailure,
+    reloadAutomationFailures,
+    automationFailureToast,
+    hideAutomationFailureToast,
+  } = useAutomationFailures(
     workspaceId,
     workspaceIsReady,
     reportShellError,
@@ -4784,6 +4790,8 @@ export function DesktopWorkspaceShell(props: {
               onDismissAutomationFailure={dismissAutomationFailure}
               onRetryAutomationFailure={automationFailureRetry.retry}
               onOpenAutomation={openAutomation}
+              automationFailureToast={automationFailureToast}
+              onHideAutomationFailureToast={hideAutomationFailureToast}
               automationHolds={automationHolds}
               onAllowAutomationHold={allowAutomationHold}
               automationHoldsUnreadable={automationHoldsUnreadable}

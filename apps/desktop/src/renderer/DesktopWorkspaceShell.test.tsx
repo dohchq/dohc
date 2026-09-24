@@ -9386,6 +9386,31 @@ describe("automation failure notices", () => {
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
   });
 
+  it("toasts a Collection automation failure that arrives while the window is open, but not the ones it opened with", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const old = {
+      automationId: "collection:tasks#old", claimId: "atc_old", chainStopped: false,
+      name: "Old", error: "An earlier failure.", updatedAtMs: 1_000, generation: 1,
+    };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old] });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.listAutomationFailures).toHaveBeenCalled());
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-automation-failure-collection:tasks#old");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("automation-failure-toast")).toBeNull();
+
+    const fresh = { ...old, automationId: "collection:tasks#stamp", claimId: "atc_new", name: "Stamp", error: "The record is open elsewhere.", updatedAtMs: 9_000 };
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [old, fresh] });
+    act(() => bridge.emitAutomationFailuresChanged({ workspaceId: WORKSPACE.workspaceId }));
+    const toast = await screen.findByTestId("automation-failure-toast");
+    expect(toast.textContent).toContain('Automation "Stamp" failed.');
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith(expect.objectContaining({ claimId: "atc_new" }));
+    await waitFor(() => expect(screen.queryByTestId("automation-failure-toast")).toBeNull());
+  });
+
   it("ignores a poke for another workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);

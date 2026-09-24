@@ -18,12 +18,38 @@ export function useAutomationFailures(
   const [automationFailures, setAutomationFailures] = useState<
     AutomationFailureNotice[]
   >([]);
+  // A failure that arrives while this window is open is also a toast, once.
+  // The first read of a workspace is the baseline: its failures are already
+  // rows in Notices, and a restart does not announce them again.
+  const [automationFailureToast, setAutomationFailureToast] =
+    useState<AutomationFailureNotice | null>(null);
+  const announced = useRef<Map<string, number> | null>(null);
   const automationFailuresToken = useRef(0);
+  useEffect(() => {
+    announced.current = null;
+    setAutomationFailureToast(null);
+  }, [workspaceId]);
   const reloadAutomationFailures = useCallback(async () => {
     const token = ++automationFailuresToken.current;
     const result = await bridge().listAutomationFailures({ workspaceId });
     if (token !== automationFailuresToken.current) return;
     setAutomationFailures(result.failures);
+    const seen = announced.current;
+    announced.current = new Map(result.failures.map((failure) => [
+      failure.automationId,
+      Math.max(failure.generation, seen?.get(failure.automationId) ?? 0),
+    ]));
+    const [fresh] = seen === null
+      ? []
+      : result.failures
+          .filter((failure) => failure.generation > (seen.get(failure.automationId) ?? 0))
+          .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+    // A toast whose failure was retried or dismissed goes with it.
+    setAutomationFailureToast((current) =>
+      fresh ?? (current && result.failures.some((failure) =>
+        failure.automationId === current.automationId && failure.generation === current.generation)
+        ? current
+        : null));
   }, [workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady) return;
@@ -44,6 +70,14 @@ export function useAutomationFailures(
     },
     [workspaceId, reloadAutomationFailures, reportShellError],
   );
+  // Closing the toast keeps the row.
+  const hideAutomationFailureToast = useCallback(() => setAutomationFailureToast(null), []);
 
-  return { automationFailures, dismissAutomationFailure, reloadAutomationFailures };
+  return {
+    automationFailures,
+    dismissAutomationFailure,
+    reloadAutomationFailures,
+    automationFailureToast,
+    hideAutomationFailureToast,
+  };
 }
