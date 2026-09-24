@@ -477,6 +477,24 @@ it("keeps one recovery draft when deletion lands during a lineage replacement ha
   expect(drafts.result.current.at(-1)?.text).toContain("seed!");
 });
 
+// A reopen in main found another file at this document's path. The text in
+// the editor has nowhere left to save, so it is set aside with the cause.
+it("sets the text aside when another file takes the document's path", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+
+  harness.emitNow("object-changed", 0);
+
+  await waitFor(() => expect(retained.snapshot.saveState).toBe("object-changed"));
+  expect(retained.snapshot.deletion).toMatchObject({ cause: "object-changed" });
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  // Nothing may repaint the terminal state.
+  harness.emitNow("saved", 1);
+  expect(retained.snapshot.saveState).toBe("object-changed");
+});
+
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
   // The boundary capture snapshots the doc synchronously at the
   // deletion event and defers only the markdown PROJECTION (the part that

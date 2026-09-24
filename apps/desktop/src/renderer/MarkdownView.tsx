@@ -1,5 +1,6 @@
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   ENGINE_CHIP,
   EngineMayHoldDocumentNotice,
   READ_ONLY_TRANSITION_CHIP,
@@ -36,6 +37,7 @@ import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
   applyFrontmatter,
@@ -177,16 +179,30 @@ export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): s
 // not-in-version refusal — can show the same recovery.
 const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. Copy your set-aside edit to keep it.";
+const REPLACED_WITH_SET_ASIDE_EDIT_NOTICE =
+  "Another file replaced this file while you had it open. Copy your set-aside edit to keep it.";
 
-function DeletedWhileEditingNotice(props: { hasSetAsideEdit: boolean }) {
+function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): string {
+  if (cause === "object-changed") {
+    return hasSetAsideEdit
+      ? REPLACED_WITH_SET_ASIDE_EDIT_NOTICE
+      : REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
+  }
+  return hasSetAsideEdit
+    ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+    : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
+}
+
+function DeletedWhileEditingNotice(props: {
+  cause: DocumentGoneCause | null;
+  hasSetAsideEdit: boolean;
+}) {
   return (
     <div
       data-testid="deleted-while-editing-notice"
       className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
     >
-      {props.hasSetAsideEdit
-        ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
-        : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE}
+      {goneNotice(props.cause, props.hasSetAsideEdit)}
     </div>
   );
 }
@@ -1302,7 +1318,9 @@ export function MarkdownView(props: {
         engine.saveState === "saving" ||
         engine.saveState === "deleted"
         ? engine.saveState
-        : "error",
+        : engine.saveState === "object-changed"
+          ? "deleted"
+          : "error",
     );
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
@@ -1842,7 +1860,10 @@ export function MarkdownView(props: {
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
-        <DeletedWhileEditingNotice hasSetAsideEdit={hasSetAsideEdit} />
+        <DeletedWhileEditingNotice
+          cause={engine.goneCause}
+          hasSetAsideEdit={hasSetAsideEdit}
+        />
       ) : null}
       <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
     </>
@@ -1884,8 +1905,10 @@ export function MarkdownView(props: {
                 data-testid="markdown-save-state"
                 data-state={engineChipState}
                 title={
-                  engineChipState === "deleted" && hasSetAsideEdit
-                    ? DELETED_WITH_SET_ASIDE_EDIT_NOTICE
+                  (engineChipState === "deleted" ||
+                    engineChipState === "object-changed") &&
+                  hasSetAsideEdit
+                    ? goneNotice(engine.goneCause, true)
                     : engineChipState === "error" && engine.saveError
                       ? engine.saveError
                       : engineChip.title

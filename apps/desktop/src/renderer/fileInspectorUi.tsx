@@ -50,6 +50,11 @@ export function ViewHeader(props: {
 export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
 
+// dohc cannot tell whether the original was moved or deleted, only that
+// another file now has its path.
+export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
+  "Another file replaced this file while you had it open.";
+
 export type FileSaveState = SaveState | "deleted";
 
 // Document + source-mode editor. Edits autosave on a short settle (and
@@ -101,6 +106,10 @@ export const ENGINE_CHIP: Record<
   deleted: {
     label: "Deleted",
     title: DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  },
+  "object-changed": {
+    label: "Replaced",
+    title: REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   },
   recovery: {
     label: "Edit set aside",

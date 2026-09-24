@@ -116,6 +116,9 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // was discarded outright; retrying cannot help, so it gets its own copy.
 // "changed-on-disk" = the file was edited outside dohc while this document was
 // open, and dohc kept that edit instead of overwriting it.
+// "deleted" and "object-changed" = this document is gone from its path: the
+// file was deleted, or another file now holds the path. Both set the text
+// aside and refuse further writes.
 // None is ever inferred — main pushes all of them from real outcomes.
 export type EngineDocSaveState =
   | "saved-to-host"
@@ -126,7 +129,11 @@ export type EngineDocSaveState =
   | "pending-share"
   | "read-only"
   | "changed-on-disk"
-  | "deleted";
+  | "deleted"
+  | "object-changed";
+
+// Why a document left its path while it was open.
+export type DocumentGoneCause = "deleted" | "object-changed";
 
 // What one open answers: a workspace, a path, the gate, and the active-version
 // token. Everything this hook returns belongs to exactly one of these. JSON
@@ -316,7 +323,11 @@ export type EngineDocLeaseSnapshot = {
   outcome: EngineDocOpenOutcome | null;
   saveState: EngineDocSaveState;
   saveError: string | null;
-  deletion: { token: number; draftId: number | null } | null;
+  deletion: {
+    token: number;
+    draftId: number | null;
+    cause: DocumentGoneCause;
+  } | null;
   readOnlyTransition: { token: number } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
@@ -420,6 +431,7 @@ function createEngineDocSession(
   let detachSaveObserver: (() => void) | null = null;
   let unsubscribeSaveState: (() => void) | null = null;
   let deletionPending = false;
+  let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
   let pendingSavedState: "saved" | "saved-to-host" = "saved";
@@ -661,7 +673,7 @@ function createEngineDocSession(
         if (transition === "deletion" && slot === recovery) {
           publish((current) => ({
             ...current,
-            deletion: { token, draftId: slot.draftId },
+            deletion: { token, draftId: slot.draftId, cause: deletionCause },
           }));
         }
         if (!sceneRecovery) return;
@@ -704,11 +716,15 @@ function createEngineDocSession(
       });
   };
 
-  const captureDeletion = (doc: Y.Doc): void => {
+  const captureDeletion = (
+    doc: Y.Doc,
+    cause: DocumentGoneCause = "deleted",
+  ): void => {
     writesRefused.current = true;
     // The PATH is gone whichever lineage wins: deletion outlives any later
     // replacement, and a fresh recovery slot re-captures on its first edit.
     deletionPending = true;
+    deletionCause = cause;
     recovery.transition = "deletion";
     // Snapshot now, synchronously: the doc can be destroyed (unmount) or
     // the caller's reference can go stale before a lazily-loaded
@@ -735,9 +751,9 @@ function createEngineDocSession(
     }
     publish((current) => ({
       ...current,
-      deletion: { token, draftId: recovery.draftId },
+      deletion: { token, draftId: recovery.draftId, cause },
     }));
-    reportSaveState("deleted");
+    reportSaveState(cause);
     enqueueRecoverySnapshot(
       bytes,
       forceCreate,
@@ -860,9 +876,9 @@ function createEngineDocSession(
     }
     if (
       error instanceof EngineYDocDeliveryRefusedError &&
-      error.reason === "deleted"
+      (error.reason === "deleted" || error.reason === "object-changed")
     ) {
-      captureDeletion(source);
+      captureDeletion(source, error.reason);
       return;
     }
     capturePermanentFailure(
@@ -895,26 +911,29 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
-    if (event.state === "deleted") {
+    if (event.state === "deleted" || event.state === "object-changed") {
       pendingSavedSeq = null;
+      const cause = event.state;
       const doc = binding?.doc;
       if (!doc) {
         deletionPending = true;
+        deletionCause = cause;
         writesRefused.current = true;
         return;
       }
       if (recovery.snapshotBytes !== null) {
         deletionPending = true;
+        deletionCause = cause;
         recovery.transition = "deletion";
         publish((current) => ({
           ...current,
-          deletion: { token, draftId: recovery.draftId },
+          deletion: { token, draftId: recovery.draftId, cause },
         }));
-        reportSaveState("deleted");
+        reportSaveState(cause);
         refreshRecoveryDraft(doc);
         return;
       }
-      captureDeletion(doc);
+      captureDeletion(doc, cause);
       return;
     }
     // Deletion is terminal for this session. A settle/update already in
@@ -968,7 +987,7 @@ function createEngineDocSession(
           // A replacement installed a fresh recovery slot while the path
           // stayed deleted. The first edit on the winner starts its own
           // draft instead of vanishing.
-          captureDeletion(doc);
+          captureDeletion(doc, deletionCause);
           return;
         }
         refreshRecoveryDraft(doc);
@@ -1240,7 +1259,7 @@ function createEngineDocSession(
           // spurious "saving".
           const doc = bound.doc;
           observeSaveState(doc);
-          if (deletionPending) captureDeletion(doc);
+          if (deletionPending) captureDeletion(doc, deletionCause);
           setOutcome(boundOutcome(doc, bound, bound.artifactAssets));
         } catch {
           if (!disposed) {

@@ -258,6 +258,7 @@ export function CollectionRecordFieldWrite({
       case "read-only":
       case "changed-on-disk":
       case "deleted":
+      case "object-changed":
         onFailed(
           docState.saveError
             ? `dohc could not save this change. ${docState.saveError}`

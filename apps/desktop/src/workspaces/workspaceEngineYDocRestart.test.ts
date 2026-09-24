@@ -860,7 +860,10 @@ async function typeIntoLostGeneration(input: {
         options.expectedObjectId !== undefined &&
         options.expectedObjectId !== claimedObjectId
       ) {
-        throw new Error("ydoc-object-changed");
+        throw new DaemonRefusalError(
+          { code: "INVALID_PARAMS", message: "ydoc-object-changed", retry: "no" },
+          new Error("daemon response"),
+        );
       }
     }
     const doc = new Y.Doc();
@@ -914,6 +917,7 @@ async function typeIntoLostGeneration(input: {
     openRustYDocProviderSession: openProvider,
   });
   const replacements: string[] = [];
+  let objectChanges = 0;
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
@@ -921,6 +925,9 @@ async function typeIntoLostGeneration(input: {
       const replacement = new Y.Doc();
       Y.applyUpdate(replacement, update);
       replacements.push(replacement.getText("plainText").toString());
+    },
+    onObjectChanged: () => {
+      objectChanges += 1;
     },
   });
   const openedDoc = session.doc;
@@ -936,6 +943,8 @@ async function typeIntoLostGeneration(input: {
   return {
     settled,
     reopenObjectIds,
+    objectChanges: () => objectChanges,
+    rendererDoc,
     session,
     openedDoc,
     claimId,
@@ -1043,6 +1052,16 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
   expect(typed.replacements).toEqual([]);
   expect(typed.claimedRecords).toEqual([]);
   expect(typed.session.doc.getText("plainText").toString()).toBe("old document typed");
+  // Reported once, and the session stops reopening: later typing and saves
+  // meet the same refusal, so they are not tried at all.
+  expect(typed.objectChanges()).toBe(1);
+  const before = Y.encodeStateVector(typed.rendererDoc);
+  typed.rendererDoc.getText("plainText").insert(0, "more ");
+  typed.session.applyLocalUpdate(Y.encodeStateAsUpdate(typed.rendererDoc, before));
+  await expect(typed.session.settleNow()).rejects.toThrow();
+  expect(typed.reopenObjectIds).toHaveLength(1);
+  expect(typed.objectChanges()).toBe(1);
+  await typed.close();
 });
 
 // The session recorded a word, and sync turned on before its settle ran. The

@@ -42,6 +42,7 @@ import {
   isFileLockedRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
+  isYdocObjectChangedRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
@@ -470,6 +471,10 @@ export interface WorkspaceEngineCapture {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
+    // A reopen found another object at this path: this document was moved,
+    // or deleted and replaced. The session stops reopening and saves nothing
+    // more, so the caller sets the editor's text aside.
+    onObjectChanged?: () => void;
     contentKind?: YdocContentKind;
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.
@@ -1781,6 +1786,7 @@ export function createWorkspaceEngineCapture(
     contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
+    onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onSettled: (
@@ -1821,6 +1827,10 @@ export function createWorkspaceEngineCapture(
     // under it.
     let sessionObjectId: string | undefined;
     let recordedStateVector: Uint8Array | null = null;
+    // Set when a reopen found another object at this path. Terminal: the
+    // session stops reopening, since every reopen would meet the same
+    // refusal.
+    let objectChanged = false;
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -2137,6 +2147,7 @@ export function createWorkspaceEngineCapture(
           retryTransportErrors: options?.retryTransportErrors,
         });
       } catch (error) {
+        if (retireForObjectChange(error)) return;
         markDead(failed);
         throw error;
       }
@@ -2166,12 +2177,28 @@ export function createWorkspaceEngineCapture(
       doc: Y.Doc,
       onReplayArmed?: () => void,
     ): Promise<void> => {
-      if (closed || current !== null) return;
-      await adoptGeneration(
-        doc,
-        await openGeneration(false, { retryTransportErrors: false }),
-        onReplayArmed,
-      );
+      if (closed || current !== null || objectChanged) return;
+      let replacement: EngineYdocProviderSession;
+      try {
+        replacement = await openGeneration(false, { retryTransportErrors: false });
+      } catch (error) {
+        if (retireForObjectChange(error)) return;
+        throw error;
+      }
+      await adoptGeneration(doc, replacement, onReplayArmed);
+    };
+
+    // A reopen names the object this session opened, and the engine refuses
+    // it when the path now holds another object. That is not a lost
+    // generation to retry: report it once and stay closed to reopening.
+    const retireForObjectChange = (error: unknown): boolean => {
+      if (!hasRefusalInCauseChain(error, isYdocObjectChangedRefusal)) return false;
+      current = null;
+      if (!objectChanged) {
+        objectChanged = true;
+        input.onObjectChanged();
+      }
+      return true;
     };
 
     const closedError = (cause?: unknown): Error =>
@@ -3509,6 +3536,13 @@ export function createWorkspaceEngineCapture(
               entry.status = "live";
             }
           },
+          onObjectChanged: () => {
+            try {
+              input.onObjectChanged?.();
+            } catch {
+              // Observer boundary, like the save-state hook.
+            }
+          },
           onRemoteUpdate: (update) => {
             noteUpdate();
             input.onRemoteUpdate(update);
@@ -3860,6 +3894,7 @@ export function createWorkspaceEngineCapture(
                   : {}),
                 onDead: () => undefined,
                 onAlive: () => undefined,
+                onObjectChanged: () => undefined,
                 onRemoteUpdate: () => {
                   // An update the settle did not carry is not covered by
                   // it. The close below cancels this update's debounce and

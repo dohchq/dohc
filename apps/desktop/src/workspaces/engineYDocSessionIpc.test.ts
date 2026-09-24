@@ -890,6 +890,28 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.session.applyLocalUpdate).not.toHaveBeenCalled();
   });
 
+  it("refuses every later update once another object takes the path", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+
+    h.capturedOpen()?.onObjectChanged?.();
+    expect(sender.sent.at(-1)?.payload).toEqual({
+      sessionId: openPayload.sessionId,
+      state: "object-changed",
+      seq: 0,
+    });
+    expect(
+      h.ipc.applyUpdate(sender, {
+        sessionId: openPayload.sessionId,
+        update: new Uint8Array([2]),
+        lineageGeneration: 1,
+        seq: 6,
+      }),
+    ).toEqual({ accepted: false, reason: "object-changed" });
+    expect(h.session.applyLocalUpdate).not.toHaveBeenCalled();
+  });
+
   it("moves pinned artifact authority only when the lineage is acknowledged", async () => {
     const losing = asset("shared", "assets/losing.png");
     const winner = asset("shared", "assets/winner.png");

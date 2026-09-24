@@ -121,6 +121,9 @@ interface EngineYDocIpcOwnedSession {
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
   deleted: boolean;
+  // Another object took this document's path. Implies `deleted`: the
+  // session is gone from this path either way, only the reason differs.
+  objectChanged: boolean;
   emit: (event: SessionEvent) => void;
   markDeleted(): void;
   close: WorkspaceEngineYDocProviderSession["close"];
@@ -473,6 +476,7 @@ class EngineYDocSessionIpc {
           else if (delivery === "pending") pending.push(send);
         };
         let provider: EngineYDocSessionProvider;
+        let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
@@ -496,6 +500,9 @@ class EngineYDocSessionIpc {
                 }),
               );
             },
+            onObjectChanged: () => {
+              publish(() => markObjectChanged());
+            },
           });
         } catch (error) {
           delivery = "discarded";
@@ -515,6 +522,7 @@ class EngineYDocSessionIpc {
           ),
           retiredArtifactAssets: [],
           deleted: false,
+          objectChanged: false,
           emit: signals.emit,
           markDeleted() {
             owned.deleted = true;
@@ -526,6 +534,12 @@ class EngineYDocSessionIpc {
             owned.ownerHandoff = undefined;
             return provider.close(options);
           },
+        };
+        markObjectChanged = () => {
+          if (owned.objectChanged) return;
+          owned.objectChanged = true;
+          owned.deleted = true;
+          owned.emit({ state: "object-changed", seq: owned.saveSeq.dirtySeq });
         };
         if (provider.contentKind === documentKind) {
           delivery = "active";
@@ -628,6 +642,10 @@ class EngineYDocSessionIpc {
         lineageGeneration: input.lineageGeneration,
       },
       (owned): ApplyUpdateResult => {
+        if (owned.objectChanged) {
+          owned.emit({ state: "object-changed", seq: input.seq });
+          return { accepted: false, reason: "object-changed" };
+        }
         if (owned.deleted) {
           owned.emit({ state: "deleted", seq: input.seq });
           return { accepted: false, reason: "deleted" };

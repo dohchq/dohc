@@ -13,6 +13,7 @@ export {
   isTransientEngineRefusal,
   isWorkspaceUpdatingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocObjectChangedRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
   type CompletedDaemonBlob,
