@@ -149,6 +149,9 @@ export function AutomationRuns(props: {
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
   const request = useRequestSequence([workspaceId, automationId]);
+  // Rises only when the workspace or automation changes, or the view
+  // closes, so an Undo that answers after that reports nothing here.
+  const scope = useRequestSequence([workspaceId, automationId]);
   const load = useCallback(async () => {
     const token = request.next();
     try {
@@ -169,15 +172,20 @@ export function AutomationRuns(props: {
   }, []);
 
   const undo = (claimId: string) => {
+    const epoch = scope.current();
     setUndoing(claimId);
     void bridge()
       .undoCollectionAutomationRun({ workspaceId, automationId, claimId })
       .then((result) => {
+        if (!scope.isCurrent(epoch)) return;
         if (result.status === "refused") onError(result.reason, new Error(result.reason));
         else onNotice(undoSentence(result));
       })
-      .catch((error: unknown) => onError("dohc could not undo this run.", error, () => undo(claimId)))
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId));
+      })
       .finally(() => {
+        if (!scope.isCurrent(epoch)) return;
         setUndoing(null);
         void load();
       });

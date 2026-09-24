@@ -74,16 +74,18 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = []) {
 }
 
 function Panel(props: {
+  workspaceId?: string;
   focus?: { automationId: string; seq: number } | null;
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
 }) {
   const onError = props.onError ?? (() => undefined);
-  const automations = useCollectionAutomations("ws-1", "Tasks", onError);
+  const workspaceId = props.workspaceId ?? "ws-1";
+  const automations = useCollectionAutomations(workspaceId, "Tasks", onError);
   return (
     <AutomationsPanel
-      workspaceId="ws-1"
+      workspaceId={workspaceId}
       collectionPath="Tasks"
       automations={automations}
       focus={props.focus ?? null}
@@ -137,7 +139,15 @@ describe("the ⚡ panel", () => {
     // The row menu works from the keyboard.
     within(row).getByRole("button", { name: "Stamp the finish date actions" }).focus();
     await userEvent.keyboard("{Enter}");
-    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(document.activeElement?.textContent).toBe("Runs");
+    await userEvent.keyboard("{End}");
+    expect(document.activeElement?.textContent).toBe("Delete");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement?.textContent).toBe("Runs");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement?.getAttribute("role")).toBe("menuitem");
+    expect(document.activeElement?.textContent).toBe("Duplicate");
+    await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations.map((automation) => [automation.id, automation.name, automation.enabled])).toEqual([
       ["stamp", "Stamp the finish date", true],
@@ -150,11 +160,37 @@ describe("the ⚡ panel", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith('Deleted "Stamp the finish date copy"', expect.any(Function)));
     expect(written[1]!.automations.map((automation) => automation.id)).toEqual(["stamp", "nudge"]);
+    // The deleted row held focus; the next automation's switch has it now.
+    expect(document.activeElement).toBe(within(screen.getByTestId("automation-nudge")).getByRole("switch"));
 
     // The notice's Undo reads the file again itself: it outlives the panel.
     (onNotice.mock.calls[0]![1] as () => void)();
     await waitFor(() => expect(written).toHaveLength(3));
     expect(written[2]!.automations.map((automation) => automation.id)).toEqual(["stamp", "stamp-copy", "nudge"]);
+  });
+
+  it("changes nothing when a save or an Undo answers after the workspace changed", async () => {
+    const { bridge } = makeBridge(read([summary(stamp, { lastRun: { state: "done", atMs: Date.now() } })]), [
+      run({ writes: [{ kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b" }] }),
+    ]);
+    let answerWrite: (result: WriteCollectionAutomationsResult) => void = () => undefined;
+    bridge.writeCollectionAutomations.mockImplementationOnce(() => new Promise((resolve) => { answerWrite = resolve; }));
+    let answerUndo: (result: UndoCollectionAutomationRunResult) => void = () => undefined;
+    bridge.undoCollectionAutomationRun.mockImplementationOnce(() => new Promise((resolve) => { answerUndo = resolve; }));
+    const onError = vi.fn();
+    const onNotice = vi.fn();
+    const { rerender } = render(<Panel onError={onError} onNotice={onNotice} />);
+    await userEvent.click(await screen.findByRole("switch", { name: "Stamp the finish date" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Runs\. The last run finished/ }));
+    await userEvent.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+
+    rerender(<Panel workspaceId="ws-2" onError={onError} onNotice={onNotice} />);
+    answerWrite({ status: "reformats" });
+    answerUndo({ status: "undone", reverted: 1, removed: 0, changedSince: 0, missing: 0 });
+    await waitFor(() => expect(bridge.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
+    expect(screen.queryByTestId("automations-reformat")).toBeNull();
+    expect(onNotice).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("turns editing off and offers the file when an automation cannot be read", async () => {

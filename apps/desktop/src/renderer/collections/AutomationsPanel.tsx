@@ -187,19 +187,19 @@ type MenuItem = { label: string; onSelect: () => void; disabled?: boolean };
 const MENU_WIDTH_PX = 144;
 
 /**
- * A row's ••• menu: arrow keys move, Enter picks, Escape closes and returns
- * focus. It sits at a fixed place under its trigger, so the panel's
+ * A row's ••• menu. Focus moves between its items: arrow keys, Home, and
+ * End move it, Enter or Space picks, and Escape or a pick returns it to the
+ * trigger. It sits at a fixed place under its trigger, so the panel's
  * scrolling list cannot clip it.
  */
 function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
   const [open, setOpen] = useState<{ top: number; left: number } | null>(null);
-  const [selected, setSelected] = useState(0);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const menu = useRef<HTMLDivElement | null>(null);
+  const items = useRef<Array<HTMLButtonElement | null>>([]);
   useEffect(() => {
     if (!open) return;
-    setSelected(0);
-    menu.current?.focus();
+    items.current[0]?.focus();
     const onPointerDown = (event: PointerEvent) => {
       if (!menu.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) setOpen(null);
     };
@@ -210,10 +210,15 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
     setOpen(null);
     trigger.current?.focus();
   };
-  const pick = (item: MenuItem | undefined) => {
-    if (!item || item.disabled) return;
+  const pick = (item: MenuItem) => {
+    if (item.disabled) return;
     close();
     item.onSelect();
+  };
+  const move = (to: (current: number, count: number) => number) => {
+    const count = props.items.length;
+    const current = items.current.findIndex((item) => item === document.activeElement);
+    items.current[(to(current, count) + count) % count]?.focus();
   };
   return (
     <div>
@@ -235,19 +240,23 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
           ref={menu}
           role="menu"
           aria-label={props.label}
-          tabIndex={-1}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            const moves: Record<string, (current: number, count: number) => number> = {
+              ArrowDown: (current) => current + 1,
+              ArrowUp: (current) => current - 1,
+              Home: () => 0,
+              End: (_current, count) => count - 1,
+            };
+            const to = moves[event.key];
+            if (to) {
               event.preventDefault();
-              const step = event.key === "ArrowDown" ? 1 : -1;
-              setSelected((current) => (current + step + props.items.length) % props.items.length);
-            } else if (event.key === "Enter") {
-              event.preventDefault();
-              pick(props.items[selected]);
+              move(to);
             } else if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
               close();
+            } else if (event.key === "Tab") {
+              setOpen(null);
             }
           }}
           style={{ top: open.top, left: open.left, width: MENU_WIDTH_PX }}
@@ -256,15 +265,17 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
           {props.items.map((item, index) => (
             <button
               key={item.label}
+              ref={(element) => {
+                items.current[index] = element;
+              }}
               type="button"
               role="menuitem"
               tabIndex={-1}
-              disabled={item.disabled}
-              onMouseEnter={() => setSelected(index)}
+              // Disabled items keep focus, so arrow keys pass over them.
+              aria-disabled={item.disabled ? true : undefined}
+              onMouseEnter={(event) => event.currentTarget.focus()}
               onClick={() => pick(item)}
-              className={`flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] transition-colors duration-75 disabled:opacity-50 ${
-                index === selected ? "bg-line text-ink" : "text-muted hover:bg-panel-2 hover:text-ink"
-              }`}
+              className="flex h-7 w-full items-center rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink focus:bg-line focus:text-ink aria-disabled:opacity-50"
             >
               {item.label}
             </button>
@@ -317,6 +328,10 @@ export function AutomationsPanel(props: {
   const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
+  // Rises when the workspace or Collection changes, or the panel closes: a
+  // save or Allow that answers after that changes nothing here.
+  const scope = useRequestSequence([workspaceId, collectionPath]);
+  useEffect(() => setReformat(null), [workspaceId, collectionPath]);
 
   // Runs settle, fail, and wait on this computer without touching the file.
   useEffect(() => {
@@ -354,6 +369,7 @@ export function AutomationsPanel(props: {
       const editable = current === null || current.status === "unavailable" ? null : editableOf(current);
       if (editable === null) return;
       const again = () => save(change, onSaved, agreed);
+      const epoch = scope.current();
       setSaving(true);
       void bridge()
         .writeCollectionAutomations({
@@ -364,24 +380,50 @@ export function AutomationsPanel(props: {
           reformat: agreed,
         })
         .then(async (result) => {
-          if (result.status === "written") onSaved();
+          if (!scope.isCurrent(epoch)) return;
           if (result.status === "reformats") setReformat(() => () => save(change, onSaved, true));
           await load();
-          if (result.status !== "written" && result.status !== "reformats") {
+          if (!scope.isCurrent(epoch)) return;
+          if (result.status === "written") onSaved();
+          else if (result.status !== "reformats") {
             onError(writeProblem(result), null, result.status === "conflict" ? again : null);
           }
         })
-        .catch((error: unknown) => onError(`dohc could not save ${AUTOMATIONS_FILE}.`, error, again))
-        .finally(() => setSaving(false));
+        .catch((error: unknown) => {
+          if (scope.isCurrent(epoch)) onError(`dohc could not save ${AUTOMATIONS_FILE}.`, error, again);
+        })
+        .finally(() => {
+          if (scope.isCurrent(epoch)) setSaving(false);
+        });
     },
     [workspaceId, collectionPath, load, onError],
   );
 
+  // Delete takes away the row that held focus, so focus moves to the next
+  // automation's switch, or the one before, or Close. It moves once the
+  // save has settled: switches are disabled while it runs, and a disabled
+  // control cannot take focus.
+  const rowElements = useRef(new Map<string, HTMLLIElement>());
+  const closeButton = useRef<HTMLButtonElement | null>(null);
+  const [focusAfterDelete, setFocusAfterDelete] = useState<{ neighbor: string | null } | null>(null);
+  useEffect(() => {
+    if (focusAfterDelete === null || saving) return;
+    const { neighbor } = focusAfterDelete;
+    const row = neighbor === null ? undefined : rowElements.current.get(neighbor);
+    (row?.querySelector<HTMLElement>('[role="switch"]') ?? closeButton.current)?.focus();
+    setFocusAfterDelete(null);
+  }, [focusAfterDelete, saving]);
+
   const allow = (automationId: string, definitionHash: string, step: number, seq: number) => {
+    const epoch = scope.current();
     void bridge()
       .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq })
-      .then(() => load())
-      .catch((error: unknown) => onError("dohc could not allow that automation step.", error));
+      .then(() => {
+        if (scope.isCurrent(epoch)) void load();
+      })
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("dohc could not allow that automation step.", error);
+      });
   };
 
   const editable = file === null || file.status === "unavailable" ? null : editableOf(file);
@@ -402,11 +444,16 @@ export function AutomationsPanel(props: {
     });
 
   const remove = (automation: Automation) => {
-    const index = editable?.automations.findIndex((entry) => entry.id === automation.id) ?? -1;
+    const list = editable?.automations ?? [];
+    const index = list.findIndex((entry) => entry.id === automation.id);
+    const neighbor = list[index + 1] ?? list[index - 1] ?? null;
     save(
       (automations) => automations.filter((entry) => entry.id !== automation.id),
-      () => onNotice(`Deleted "${automation.name}"`, () =>
-        void restoreAutomation({ workspaceId, collectionPath }, automation, index, onError)),
+      () => {
+        setFocusAfterDelete({ neighbor: neighbor?.id ?? null });
+        onNotice(`Deleted "${automation.name}"`, () =>
+          void restoreAutomation({ workspaceId, collectionPath }, automation, index, onError));
+      },
     );
   };
 
@@ -434,7 +481,7 @@ export function AutomationsPanel(props: {
             <FileCode2 size={14} aria-hidden />
           </IconButton>
         ) : null}
-        <IconButton aria-label="Close automations" title="Close automations" onClick={props.onClose}>
+        <IconButton ref={closeButton} aria-label="Close automations" title="Close automations" onClick={props.onClose}>
           <X size={14} aria-hidden />
         </IconButton>
       </div>
@@ -473,6 +520,10 @@ export function AutomationsPanel(props: {
                 entry.valid ? (
                   <li
                     key={entry.automationId}
+                    ref={(element) => {
+                      if (element) rowElements.current.set(entry.automation.id, element);
+                      else rowElements.current.delete(entry.automation.id);
+                    }}
                     data-testid={`automation-${entry.automation.id}`}
                     className="flex items-start gap-2 border-b border-line px-3 py-2.5"
                   >
