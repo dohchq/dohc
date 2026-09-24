@@ -1403,6 +1403,42 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("reports the open-time settle's own failure once", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "note.md", EDITOR_TEXT);
+    const states: string[] = [];
+    const engine = capture(root, {
+      openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
+        ({
+          doc: new Y.Doc(),
+          initialUpdate: Y.encodeStateAsUpdate(new Y.Doc()),
+          contentKind: "plaintext",
+          path: "note.md",
+          head: "present" as const,
+          lineage: "existing" as const,
+          unsettled: true,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => {
+            const failure = new Error("the settle started and failed");
+            options.onSettleStart?.(1);
+            options.onSettleError?.(failure, 1);
+            throw failure;
+          },
+          close: async () => undefined,
+        }) as never,
+    });
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(states).toContain("error"));
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(states).toEqual(["settling", "settling", "error"]);
+  });
+
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const outside = "written outside dohc\n";

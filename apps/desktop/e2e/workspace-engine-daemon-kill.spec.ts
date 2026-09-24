@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -333,7 +333,14 @@ test("a document reopened after an app crash reads Saved only once its file has 
     // from its first frame.
     await rm(join(temp.rootPath, ".dohc/ui-state.json"), { force: true });
 
-    desktop = await launchDesktopApp({ workspace: temp });
+    // The recovery settle waits on this file, so the test decides when the
+    // write may happen.
+    const gate = join(temp.baseDir, "open-settle-gate");
+    await writeFile(gate, "held");
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: { DOHC_TEST_YDOC_OPEN_SETTLE_GATE: gate },
+    });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, temp);
     // Every save mark the document shows, from its first frame. Nothing is
@@ -361,20 +368,27 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await openEngineDoc(page, docPath);
     await expect(page.getByTestId("markdown-editor")).toContainText(crashed);
 
-    // The first Saved the document shows must already be true of the file.
-    // The file only gains the text, so reading it after the mark is enough:
-    // the old default Saved, over a file that never got the text, fails here
-    // whenever it shows. How fast the write lands does not matter.
+    // Held: the document reads Saving… and never Saved, and the file lacks
+    // the text. The gate cannot open by itself, so this is not a race.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saving",
+    );
+    expect(await saveMarks()).toEqual(["saving"]);
+    expect(await diskText()).not.toContain(crashed);
+
+    // Released: the recovery settle writes the file, and only then Saved.
+    await rm(gate);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",
       "saved",
     );
-    expect(await diskText(), "the document read Saved before its file had the text").toContain(
-      crashed,
-    );
+    expect(await diskText()).toContain(crashed);
     const marks = await saveMarks();
-    expect(marks.at(-1)).toBe("saved");
-    expect(marks.filter((mark) => mark !== "saving" && mark !== "saved")).toEqual([]);
+    expect(marks, "the document read Saved before its file had the text").toEqual([
+      "saving",
+      "saved",
+    ]);
     expect((await diskText()).match(/Anchor paragraph\./g)).toHaveLength(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

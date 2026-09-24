@@ -1934,10 +1934,13 @@ pub struct YdocAppend {
     pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
-/// Whether the workspace file holds every update in this lineage, so an open
-/// can leave it alone. Every condition must hold, and any doubt answers no:
-/// - a settle, a seed, or a write that put the head on disk recorded the
-///   current update sequence;
+/// Whether every update in this lineage is in the version head, and no write
+/// of that head to its path is outstanding, so an open has nothing to settle.
+/// This reads the store only: it does not look at the file on disk, which the
+/// desktop checks against the head at open. Every condition must hold, and any
+/// doubt answers no:
+/// - a settle, a seed, or a write of the head recorded the current update
+///   sequence;
 /// - the version head is what that write produced, or, for a drawing, the
 ///   artifact its only update imported at open;
 /// - no write to the path is pending, and the newest one did not fail over

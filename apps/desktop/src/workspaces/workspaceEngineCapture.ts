@@ -622,9 +622,11 @@ export interface WorkspaceEngineCaptureOptions {
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
   createId?: () => string;
-  // How long an edit waits before its settle. Omitted uses the provider's
-  // default; only the desktop's test seam sets it.
+  // Test seams, set only by the desktop's DOHC_TEST_* switches. How long an
+  // edit waits before its settle (omitted uses the provider's default), and a
+  // gate the open-time settle of an unsettled document waits on.
   settleDebounceMs?: number;
+  openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
@@ -3241,6 +3243,9 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
+        // How many settles this session has started, so the open can tell a
+        // refusal before its settle started from that settle's own failure.
+        let settleStarts = 0;
         const settleClaims = new Map<string, number>();
         const settleId = (token: number, generation: number): string =>
           `${generation}:${token}`;
@@ -3407,6 +3412,7 @@ export function createWorkspaceEngineCapture(
         // session's commands in order, so an update already sent is in the
         // settle that follows it; one sent after this point is not.
         const onSettleStart = (token: number, generation: number) => {
+          settleStarts += 1;
           settleClaims.set(settleId(token, generation), updatesSeen);
           settleStartedAtMs.set(settleId(token, generation), now());
           reportSaveState("settling", token);
@@ -4405,11 +4411,17 @@ export function createWorkspaceEngineCapture(
         // first frame until the file has the text.
         const settleOnOpen = (): void => {
           reportSaveState("settling", 0);
-          // A settle that runs reports its own outcome. One refused before it
-          // starts (a removal under way, a closed session, a failed revive)
-          // reports nothing, so close the "settling" said above here.
-          void session.settleNow().catch((error: unknown) => {
-            reportSaveState(settleFailureSaveState(error), 0);
+          const startsBefore = settleStarts;
+          void (async () => {
+            await options.openSettleGate?.();
+            return await session.settleNow();
+          })().catch((error: unknown) => {
+            // A settle that started reports its own outcome. One refused
+            // before it started (a removal under way, a closed session, a
+            // failed revive) reports nothing, so close the "settling" above.
+            if (settleStarts === startsBefore) {
+              reportSaveState(settleFailureSaveState(error), 0);
+            }
           });
         };
         if (head === "present") {
