@@ -1,3 +1,4 @@
+import { datasetColumnFields } from "@dohc/security-contract/dataset";
 import { test, expect } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -33,7 +34,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     const revision = await host.approve({preparationId:prepared.preparationId,revisionSha256:prepared.revision.revisionSha256});
     const selection = {datasetId:revision.datasetId,revision:revision.revision,revisionSha256:revision.revisionSha256};
     const operation = (name:string)=>revision.definition.operations.find(operation=>operation.name===name)!.operationId;
-    const field = (table:string,column:string)=>revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId;
+    const field = (table:string,column:string)=>datasetColumnFields(revision.definition.tables.find(tableDefinition=>tableDefinition.sqlName===table)!).find(field=>field.sqlColumn===column)!.fieldId;
     const ownerRead = (name:string,input:Record<string,any>={})=>host.query({...selection,operationId:operation(name),input,idempotencyKey:randomUUID()});
     const publish = async (appRoot:string) => {
       const source = await prepareLocalAppPublication({workspaceId:"stock-workspace",appRoot},{adapter,compile:compileClosedApp,signal:lifetime.signal,assertCurrent(){},async resolveDatasetRevision(){return revision;}});
@@ -72,7 +73,7 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     const lines = (await ownerRead("tableOrderItems")).result as any;
     expect(lines.rows).toHaveLength(2);
     expect(lines.rows.every((line:any)=>line.values[field("order_items","order_id")]===orderId)).toBe(true);
-    expect(revision.definition.tables.find(table=>table.sqlName==="order_items")!.fields.find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
+    expect(datasetColumnFields(revision.definition.tables.find(table=>table.sqlName==="order_items")!).find(value=>value.sqlColumn==="order_id")!.relation?.tableId).toBe(revision.definition.tables.find(table=>table.sqlName==="orders")!.tableId);
     expect(Buffer.from((await host.file({...selection,fileId:receiptId})).bytesBase64,"base64")).toEqual(receipt);
     const request = {action:"invoke",workspaceId:"stock-workspace",...selection,operationId:operation("tableOrders"),input:{},idempotencyKey:"agent-stock-read"};
     const agentContext: ToolContext = {root:directory,home:directory,request:async envelope=>{

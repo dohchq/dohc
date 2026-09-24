@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { DATASET_MAX_FIELDS, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetFormSources, type DatasetFormInput } from "./datasetFormGenerator";
 import { compileClosedApp } from "./closedAppCompiler";
 
@@ -42,12 +42,12 @@ describe("dataset form generation", () => {
     const privateRevision = structuredClone(approvedRevision); privateRevision.definition.operations[0]!.access = "owner";
     expect(() => generate({ approvedRevision: privateRevision })).toThrow(/public create/);
     const related = structuredClone(approvedRevision);
-    related.definition.tables[0]!.fields[1] = { ...related.definition.tables[0]!.fields[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    related.definition.tables[0]!.fields[1] = { ...datasetColumnFields(related.definition.tables[0]!)[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
     expect(() => generate({ approvedRevision: related })).toThrow(/public read/);
   });
 
   it("permits omitted defaulted fields and safely embeds hostile labels", () => {
-    const value = structuredClone(approvedRevision); value.definition.tables[0]!.fields[1]!.default = "Anonymous";
+    const value = structuredClone(approvedRevision); datasetColumnFields(value.definition.tables[0]!)[1]!.default = "Anonymous";
     value.definition.tables[0]!.fields[2]!.name = '</script><img src=x onerror="alert(1)">';
     const { files } = generate({ approvedRevision: value, fieldIds: [id(5)] });
     expect(files["frontend.js"]).not.toContain("</script>");
@@ -79,7 +79,7 @@ describe("dataset form generation", () => {
 
   it("binds explicitly chosen public relation operations without embedding private data or source", () => {
     const value = structuredClone(approvedRevision);
-    value.definition.tables[0]!.fields[1] = { ...value.definition.tables[0]!.fields[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    value.definition.tables[0]!.fields[1] = { ...datasetColumnFields(value.definition.tables[0]!)[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
     value.definition.operations.push({ operationId: id(8), name: "choices", label: "Public choices", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3)] });
     const relationChoices = [{ fieldId: id(4), operationId: id(8), labelFieldId: id(3) }];
     const files = generate({ approvedRevision: value, relationChoices }).files;

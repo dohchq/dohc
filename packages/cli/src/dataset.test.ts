@@ -39,6 +39,15 @@ describe("dataset CLI", () => {
     expect(DatasetRequest.parse(prepare)).toEqual(prepare);
     expect(() => DatasetRequest.parse({ ...prepare, access: "owner" })).toThrow();
   });
+  it("prepares a button as a name on a table, with no column, type or operation", () => {
+    const request = { action: "prepareSchemaChange", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+      change: { kind: "addButton", tableId: id(2), name: "Send receipt" } };
+    expect(DatasetRequest.parse(request)).toEqual(request);
+    for (const extra of [{ sqlColumn: "send_receipt" }, { type: "button" }, { fieldIds: [id(3)] }, { operationId: id(4) }]) {
+      expect(() => DatasetRequest.parse({ ...request, change: { ...request.change, ...extra } })).toThrow();
+    }
+    expect(() => DatasetRequest.parse({ ...request, change: { ...request.change, name: " " } })).toThrow();
+  });
   it.each(["describe", "invoke", "helper", "export", "restore"])("rejects the retired private app %s command before transport", async action => {
     const send = vi.fn();
     const result = await executeCli({ argv: ["app", action, JSON.stringify({ workspaceId: "workspace", publicationId: "a".repeat(64) })], request: send });

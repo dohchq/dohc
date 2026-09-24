@@ -1,4 +1,4 @@
-import { DATASET_MAX_FIELDS, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, datasetColumnFields, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { generateDatasetFormFrontend, type DatasetFormField } from "./datasetFormFrontend";
@@ -28,24 +28,26 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
       input.fieldIds.some(id => !operation.fieldIds.includes(id))) {
     throw new Error(`Choose 1 to ${DATASET_MAX_FIELDS} distinct fields allowed by the create action.`);
   }
-  const required = table.fields.filter(field => operation.fieldIds.includes(field.fieldId) && field.required && !Object.hasOwn(field, "default") &&
+  // A form fills columns. Operations list no buttons.
+  const columns = datasetColumnFields(table);
+  const required = columns.filter(field => operation.fieldIds.includes(field.fieldId) && field.required && !Object.hasOwn(field, "default") &&
     !(field.sqlColumn === table.primaryKey && field.type === "text"));
   if (required.some(field => !input.fieldIds.includes(field.fieldId))) throw new Error("Include every required field allowed by the create action.");
   const choices = input.relationChoices ?? [];
   if (!Array.isArray(choices) || choices.length > input.fieldIds.length || new Set(choices.map(choice => choice.fieldId)).size !== choices.length ||
-      choices.some(choice => !input.fieldIds.includes(choice.fieldId) || table.fields.find(field => field.fieldId === choice.fieldId)?.type !== "relation")) {
+      choices.some(choice => !input.fieldIds.includes(choice.fieldId) || columns.find(field => field.fieldId === choice.fieldId)?.type !== "relation")) {
     throw new Error("Choose a public read action for each related-record field.");
   }
   const relationOperations: string[] = [];
   const fields: DatasetFormField[] = input.fieldIds.map(id => {
-    const field = table.fields.find(field => field.fieldId === id)!;
+    const field = columns.find(field => field.fieldId === id)!;
     let relation: DatasetFormField["relation"];
     if (field.type === "relation") {
       const choice = choices.find(choice => choice.fieldId === id);
       const read = revision.definition.operations.find(action => action.operationId === choice?.operationId);
       const target = revision.definition.tables.find(candidate => candidate.tableId === field.relation!.tableId)!;
-      const key = target.fields.find(candidate => candidate.fieldId === field.relation!.fieldId)!;
-      const label = target.fields.find(candidate => candidate.fieldId === choice?.labelFieldId);
+      const key = datasetColumnFields(target).find(candidate => candidate.fieldId === field.relation!.fieldId)!;
+      const label = datasetColumnFields(target).find(candidate => candidate.fieldId === choice?.labelFieldId);
       // A form grants the read operation itself, not merely the fields its picker displays.
       if (!read || read.kind !== "read" || !read.readOnly || read.access !== "link" || read.tableId !== target.tableId || !label ||
           !["text", "number", "select"].includes(label.type) || !read.fieldIds.includes(key.fieldId) || !read.fieldIds.includes(label.fieldId) ||

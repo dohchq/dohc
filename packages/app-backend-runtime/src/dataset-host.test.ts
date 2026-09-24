@@ -597,13 +597,36 @@ it("keeps original app and helper grants working through display renames, includ
   await expect(f.invoke("friend",id(6),{value:"saved"},"form")).rejects.toThrow("not permitted");
 });
 
+it("describes a visible table's buttons and keeps grants when only the owner adds one", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
+  const button = { fieldId: id(20), name: "Send receipt", type: "button" as const };
+  const next = structuredClone(definition); next.tables[0].fields.push(button);
+  next.schemaPath = "revisions/2/schema.sql"; next.operationsPath = "revisions/2/operations.js";
+  const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
+  const migration = {workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"};
+  const listed = structuredClone(revision); listed.definition.operations[1].fieldIds.push(id(20));
+  await expect(f.host.migrate("owner",{...migration,revision:listed})).rejects.toThrow("Invalid dataset metadata.");
+  await expect(f.host.migrate("helper",migration)).rejects.toThrow("not permitted");
+  await f.host.migrate("owner",migration);
+  expect(f.host.describe("helper",scope).tables[0].fields).toEqual([
+    { fieldId: id(3), name: "ID", type: "text", required: true, unique: true },
+    { fieldId: id(4), name: "Value", type: "text", required: true, unique: false },
+    button,
+  ]);
+  expect(JSON.stringify(f.host.describe("helper",scope))).not.toContain("Secret");
+  await expect(f.invoke("friend",id(6),{value:"after"},"form")).resolves.toMatchObject({ result: { accepted: true } });
+  expect((await f.invoke("helper",id(7))).result).toMatchObject([{ value: "after" }]);
+});
+
 it.each(["fields","access","constraint","source"])("requires reapproval after a %s change, even when later restored", async change => {
   const f = await fixture(); await f.activate();
   f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
   const next = structuredClone(definition);
   if(change === "fields") next.operations[0].fieldIds.push(id(5));
   if(change === "access") next.operations[1].access = "link";
-  if(change === "constraint") next.tables[0].fields[1].required = false;
+  if(change === "constraint") { const field = next.tables[0].fields[1]; if(field.type !== "button") field.required = false; }
   const source = change === "source" ? operationSource+"\n// edited rule" : operationSource;
   const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource:source});
   await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:source,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});

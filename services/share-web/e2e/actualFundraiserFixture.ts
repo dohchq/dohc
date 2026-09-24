@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCookies } from "better-auth/cookies";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { parseDatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { APP_PUBLICATION_LIMITS, prepareOwnerAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
@@ -109,7 +109,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     counts:()=>({participants:Number(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n),
       profiles:profiles.size,
       receipts:Number(storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n)}),
-    field:(table:string,column:string)=>definition.tables.find(value=>value.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId,
+    field:(table:string,column:string)=>datasetColumnFields(definition.tables.find(value=>value.sqlName===table)!).find(field=>field.sqlColumn===column)!.fieldId,
     ownerRead:(operation:string,input:unknown={})=>owner("invoke",{revision:1,revisionSha256:revision.revisionSha256,
       operationId:definition.operations.find(value=>value.name===operation)!.operationId,input,idempotencyKey:randomUUID()}),
     async close(){await datasetHost.close();storage.close();rmSync(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}};
