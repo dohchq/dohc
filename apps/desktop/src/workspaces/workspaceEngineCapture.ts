@@ -1895,14 +1895,15 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
-    // A failed settle leaves the file behind the document. A file-locked
-    // refusal is retried by the GENERATION's own backoff timer, and any other
-    // failure waits for the next edit, but both die with the generation. The
-    // debt must outlive it: set on a settle failure, cleared by the next
-    // settle that reaches disk, and read at adoption to settle the
-    // replacement. Enabling sync is one such loss: it drops the generation
-    // before its settle can run, and when the engine already recorded every
-    // edit the replacement needs no replay to arm a settle of its own.
+    // A settle that failed only because something was in the way leaves the
+    // file behind the document: a file lock or a busy store (the
+    // GENERATION's own backoff timer retries those), or the generation itself
+    // going away, as when enabling sync drops it before its settle runs. The
+    // retry dies with the generation, so the debt must outlive it: set on
+    // those failures, cleared by the next settle that reaches disk, and read
+    // at adoption to settle the replacement. A settle refused because the
+    // file changed outside dohc, or because a conflict is open, owes
+    // nothing: settling it again would write the lineage over that change.
     let settleOwed = false;
     const openGeneration = async (
       seedAbsentLineage: boolean,
@@ -1973,7 +1974,12 @@ export function createWorkspaceEngineCapture(
             onSessionError: requestReconnect,
             onSettleStart: (token) => input.onSettleStart(token, generation),
             onSettleError: (error, token) => {
-              settleOwed = true;
+              if (
+                isTransientEngineCause(error) ||
+                hasRefusalInCauseChain(error, isEngineSessionReconnectError)
+              ) {
+                settleOwed = true;
+              }
               input.onSettleError(error, token, generation);
             },
             onSettled: (result, token) => {

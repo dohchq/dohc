@@ -3668,6 +3668,43 @@ it("a rebind with no pending locked settle settles nothing on its own", async ()
   await capture.stop();
 });
 
+it("owes no settle for a file that changed outside dohc when the generation is lost", async () => {
+  // A settle refused because the file changed outside dohc must not be paid
+  // by the replacement. The reopened session has no settled sha, so it
+  // expects the current head, and an owed settle would write the lineage over
+  // the outside change with no new edit.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-stale-rebind-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "edit before the outside change");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  state.settleFailure = null;
+  expect(state.settleCalls).toEqual([1]);
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  // Give the adoption a beat: nothing may settle.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.settleCalls).toEqual([1]);
+  expect(state.settledContents).toEqual([]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
 it("pays a locked close debt by itself once the lock releases", async () => {
   // The locked retry died with the DOCUMENT close — the
   // renderer forgets the session on a failed close and main swallows the
