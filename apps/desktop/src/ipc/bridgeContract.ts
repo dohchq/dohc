@@ -5462,8 +5462,11 @@ export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
 export type DesktopUserSettings = DesktopUserSettingsType;
 export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
+// `base` is the settings the caller changed. Main writes only the difference,
+// so a caller that has not yet seen an edit made in the file cannot undo it.
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
+  base: DesktopUserSettingsSchema,
 }).strict();
 export type SetUserSettingsPayload = z.infer<typeof SetUserSettingsPayload>;
 
@@ -6544,6 +6547,14 @@ export interface DohcDesktopBridge
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
+  // Reads the settings file again, applies it, and answers what is in effect.
+  reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  getUserSettingsFilePath(): Promise<string>;
+  // Opens the settings file in the system's editor, creating it first when
+  // there is none.
+  openUserSettingsFile(): Promise<void>;
+  // Opens this workspace's .dohc/settings.local.json in the system's editor.
+  openWorkspaceSettingsFile(payload: WorkspaceSettingsPayload): Promise<void>;
   getWorkspaceSettings(
     payload: WorkspaceSettingsPayload,
   ): Promise<WorkspaceSettingsResult>;
