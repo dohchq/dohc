@@ -126,6 +126,8 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
   // Frames received from the daemon, counting up. The wedge detector reads it
   // to tell a queued probe from a silent daemon.
   inboundActivity?(): number;
+  // Requests of one method still waiting for an answer.
+  outstandingRequests?(method: string): number;
   waitForExit?(): Promise<void>;
 }
 
@@ -366,7 +368,8 @@ export class EngineDaemonLifecycle {
   // A read is the caller's budget, not a verdict on the engine. The CLI waits
   // 30s for its whole command and falls back when a read fails, so the wait in
   // this root's queue, the open, the read, and the release share one short
-  // budget from the call. A read still queued when it runs out never starts.
+  // budget from the call. A read whose budget ran out before it could start
+  // never reaches the engine.
   async requestWorkspace(
     rootDir: string,
     workspaceId: string,
@@ -376,21 +379,28 @@ export class EngineDaemonLifecycle {
     const budgetMs =
       this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
     const endsAt = this.monotonicNowMs() + budgetMs;
+    const unstarted = () =>
+      new EngineDaemonUnavailableError(
+        `Rust engine ${method} did not start within its ${budgetMs}ms budget.`,
+      );
     let started = false;
     let expired = false;
-    const earlier = this.workspaceRequestTails.get(rootDir);
-    const previous = earlier ?? Promise.resolve();
+    const previous = this.workspaceRequestTails.get(rootDir) ?? Promise.resolve();
     const request = previous
       .catch(() => undefined)
       .then(async (): Promise<JsonValue> => {
-        if (expired) return null;
+        // After a stall this can run before the overdue timer, so read the clock.
+        if (expired || this.monotonicNowMs() >= endsAt) {
+          expired = true;
+          throw unstarted();
+        }
         started = true;
         return await this.requestWorkspaceOnce(
           rootDir,
           workspaceId,
           method,
           params,
-          { endsAt, queued: earlier !== undefined },
+          endsAt,
         );
       });
     const tail = request.then(
@@ -398,16 +408,20 @@ export class EngineDaemonLifecycle {
       () => undefined,
     );
     this.workspaceRequestTails.set(rootDir, tail);
+    // The queue entry leaves with the work it stands for, not with a caller
+    // that stopped waiting: a read that expired in the queue still orders the
+    // next one behind the read ahead of it.
+    void tail.then(() => {
+      if (this.workspaceRequestTails.get(rootDir) === tail) {
+        this.workspaceRequestTails.delete(rootDir);
+      }
+    });
     let queueTimer: ReturnType<typeof setTimeout> | undefined;
     const queueExpiry = new Promise<never>((_resolve, reject) => {
       queueTimer = setTimeout(() => {
         if (started) return;
         expired = true;
-        reject(
-          new EngineDaemonUnavailableError(
-            `Rust engine ${method} waited ${budgetMs}ms behind earlier reads of this workspace.`,
-          ),
-        );
+        reject(unstarted());
       }, budgetMs);
       queueTimer.unref();
     });
@@ -415,9 +429,6 @@ export class EngineDaemonLifecycle {
       return await Promise.race([request, queueExpiry]);
     } finally {
       if (queueTimer) clearTimeout(queueTimer);
-      if (this.workspaceRequestTails.get(rootDir) === tail) {
-        this.workspaceRequestTails.delete(rootDir);
-      }
     }
   }
 
@@ -426,16 +437,19 @@ export class EngineDaemonLifecycle {
     workspaceId: string,
     method: string,
     params: Request["params"],
-    budget: { endsAt: number; queued: boolean },
+    endsAt: number,
   ): Promise<JsonValue> {
     const client = this.requireClient();
+    const budgetMs =
+      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
     const remaining = () =>
-      Math.max(1, Math.ceil(budget.endsAt - this.monotonicNowMs()));
-    // An attach open does not read the store; it takes the engine's open lock
-    // and mints a handle. One that did not queue behind another read had the
-    // whole budget. If it still cannot open, it is stuck behind an open that
-    // stopped while probes keep answering, so it replaces the engine. A read
-    // that queued, or a slow read after the open, is only the caller's wait.
+      Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
+    // An attach open takes the engine's one open lock and mints a handle. The
+    // desktop's own open holds that lock through a large adoption, so a slow
+    // attach is evidence against the engine only when it had nearly the whole
+    // budget and no other open is outstanding. In the stuck case the lock
+    // holder is an open this client already abandoned at its deadline.
+    const openCapMs = remaining();
     const opened = resultObject(
       await this.sendLifecycleRequest(
         client,
@@ -449,7 +463,12 @@ export class EngineDaemonLifecycle {
             skipStartupMaintenance: true,
           },
         },
-        { capMs: remaining(), onCap: budget.queued ? "cancel" : "condemn" },
+        {
+          capMs: openCapMs,
+          condemnOnCap: () =>
+            openCapMs >= budgetMs * 0.9 &&
+            (client.outstandingRequests?.("workspace.open") ?? Infinity) <= 1,
+        },
       ),
       "workspace.open",
     );
@@ -460,6 +479,11 @@ export class EngineDaemonLifecycle {
     }
     const workspace = opened.workspace as WorkspaceHandle;
     try {
+      if (this.monotonicNowMs() >= endsAt) {
+        throw new EngineDaemonUnavailableError(
+          `Rust engine ${method} ran out of its ${budgetMs}ms budget before the read.`,
+        );
+      }
       return (
         await this.sendLifecycleRequest(
           client,
@@ -469,7 +493,7 @@ export class EngineDaemonLifecycle {
             workspace,
             params,
           },
-          { capMs: remaining(), onCap: "cancel" },
+          { capMs: remaining(), condemnOnCap: () => false },
         )
       ).result;
     } finally {
@@ -487,7 +511,7 @@ export class EngineDaemonLifecycle {
             workspace,
             params: {},
           },
-          { capMs: Math.max(remaining(), 1_000), onCap: "cancel" },
+          { capMs: Math.max(remaining(), 1_000), condemnOnCap: () => false },
         );
       } catch (error) {
         console.debug(
@@ -545,8 +569,8 @@ export class EngineDaemonLifecycle {
   ): Promise<JsonValue> {
     const smokeCap = {
       capMs: this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      onCap: "condemn",
-    } as const;
+      condemnOnCap: () => true,
+    };
     const opened = resultObject(
       await this.sendLifecycleRequest(
         client,
@@ -613,13 +637,14 @@ export class EngineDaemonLifecycle {
     return this.client;
   }
 
-  // `condemn` treats a request that outlives its cap as a stuck engine and
-  // kills it for replacement. `cancel` is a caller's budget: it cancels the
-  // request and leaves the engine alone. Silence condemns either way.
+  // At the cap, `condemnOnCap` decides whether the request proves the engine
+  // stuck (kill it for replacement) or only ran out of a caller's budget
+  // (cancel it and leave the engine alone). Silence condemns either way. It
+  // runs as the cap fires, before this client drops its own expired request.
   private async sendLifecycleRequest(
     client: EngineDaemonClient,
     request: Request,
-    bound: { capMs: number; onCap: "condemn" | "cancel" },
+    bound: { capMs: number; condemnOnCap: () => boolean },
   ): Promise<Response> {
     const { method } = request;
     const timeoutMs = bound.capMs;
@@ -632,6 +657,7 @@ export class EngineDaemonLifecycle {
     let settled = false;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
+        const condemnOnCap = bound.condemnOnCap();
         const elapsedMs = Math.round(this.monotonicNowMs() - startedAt);
         const diagnostic = { at: new Date(this.wallNowMs()).toISOString(), method, requestId: request.id, timeoutMs,
           elapsedMs, timerLagMs: Math.max(0,elapsedMs-timeoutMs) };
@@ -643,12 +669,12 @@ export class EngineDaemonLifecycle {
             console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:"reply-drained"}));
             return;
           }
-          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:bound.onCap === "condemn" ? "kill-for-replacement" : "cancel-request"}));
+          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:condemnOnCap ? "kill-for-replacement" : "cancel-request"}));
           void client.cancelRequest?.(request.id).catch(() => undefined);
           const error = new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
           );
-          if (bound.onCap === "condemn") this.condemn(client, error);
+          if (condemnOnCap) this.condemn(client, error);
           reject(error);
         });
       }, timeoutMs);

@@ -1837,6 +1837,37 @@ describe("EngineClient", () => {
     }
   });
 
+  it("counts requests still waiting by method, and drops one abandoned at its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const peer = new FakePeerConnection();
+      const transport = client(peer);
+      peer.acknowledge();
+      await transport.ready();
+      const requests: Array<Extract<Envelope, { type: "request" }>> = [];
+      peer.onEnvelope = (envelope) => {
+        if (envelope.type === "request") requests.push(envelope);
+      };
+      const abandoned = transport.sendRequest({ ...request(60, "workspace.open"), deadlineMs: 25 });
+      void abandoned.catch(() => undefined);
+      const answered = transport.sendRequest(request(61, "workspace.open"));
+      const other = transport.sendRequest(request(62, "versions.active"));
+      expect(transport.outstandingRequests("workspace.open")).toBe(2);
+      await vi.advanceTimersByTimeAsync(25);
+      await vi.advanceTimersToNextTimerAsync();
+      expect(transport.outstandingRequests("workspace.open")).toBe(1);
+      peer.send({ type: "response", id: requests[1]!.id, result: null });
+      await answered;
+      expect(transport.outstandingRequests("workspace.open")).toBe(0);
+      expect(transport.outstandingRequests("versions.active")).toBe(1);
+      peer.send({ type: "response", id: requests[2]!.id, result: null });
+      await other;
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a matching wire error with the generated WireError payload", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

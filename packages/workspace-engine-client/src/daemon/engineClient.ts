@@ -689,6 +689,7 @@ export interface EngineClientConnection {
 
 interface PendingRequest {
   readonly callerId: number;
+  readonly method: string;
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
@@ -1133,6 +1134,7 @@ export class EngineClient implements EngineTransport {
           : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
+        method: request.method,
         resolve,
         reject,
         ...(restoreOutput ? { restoreOutput } : {}),
@@ -1643,6 +1645,16 @@ export class EngineClient implements EngineTransport {
   // overtake. Bytes arriving for anyone prove the daemon is turning.
   inboundActivity(): number {
     return this.inboundFrames;
+  }
+
+  // Requests of one method still waiting for their answer. One the client
+  // cancelled or abandoned at its deadline no longer counts.
+  outstandingRequests(method: string): number {
+    let count = 0;
+    for (const pending of this.pending.values()) {
+      if (pending.method === method) count += 1;
+    }
+    return count;
   }
 
   private receiveFrame(frame: Frame): void {

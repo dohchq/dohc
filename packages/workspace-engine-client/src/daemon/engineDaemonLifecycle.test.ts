@@ -81,9 +81,22 @@ class FakeClient implements EngineDaemonClient {
         : { id: request.id, result: null },
   ) {}
 
+  private readonly outstanding = new Map<string, number>();
+
+  outstandingRequests(method: string): number {
+    return this.outstanding.get(method) ?? 0;
+  }
+
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
-    return await this.respond(request);
+    const count = (delta: number) =>
+      this.outstanding.set(request.method, this.outstandingRequests(request.method) + delta);
+    count(1);
+    try {
+      return await this.respond(request);
+    } finally {
+      count(-1);
+    }
   }
 
   async cancelRequest(requestId: number): Promise<void> {
@@ -2111,7 +2124,7 @@ describe("Rust engine daemon lifecycle", () => {
     hangRead = true;
     await expect(
       lifecycle.requestWorkspace(
-        "C:\workspace",
+        "C:\\workspace",
         "workspace",
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 50_000 },
@@ -2128,7 +2141,7 @@ describe("Rust engine daemon lifecycle", () => {
     hangRead = false;
     await expect(
       lifecycle.requestWorkspace(
-        "C:\workspace",
+        "C:\\workspace",
         "workspace",
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 1 },
@@ -2170,14 +2183,14 @@ describe("Rust engine daemon lifecycle", () => {
       await startupSmokeDone(clients[0]!);
       stuck = true;
       await expect(
-        lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+        lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
       ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
       expect(clients[0]!.requests.some(({ method }) => method === "engine.ping")).toBe(true);
       expect(clients[0]!.closeCause).toBe("transport-error");
       expect(failures[0]?.message).toMatch(/^Rust engine workspace\.open timed out after \d+ms\.$/);
       await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
       await expect(
-        lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+        lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
       ).resolves.toBeNull();
     } finally {
       await lifecycle.stop();
@@ -2206,13 +2219,109 @@ describe("Rust engine daemon lifecycle", () => {
       await startupSmokeDone(client);
       client.requests.length = 0;
       holdClose = true;
-      const first = lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "first", limit: 1 });
+      const first = lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "first", limit: 1 });
       await vi.waitFor(() => expect(releaseClose).toBeDefined(), WAIT);
-      const second = lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "second", limit: 1 });
+      const second = lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "second", limit: 1 });
       await expect(second).rejects.toThrow(
-        "Rust engine search.queryChatMessagesGranular waited 50ms behind earlier reads of this workspace.",
+        "Rust engine search.queryChatMessagesGranular did not start within its 50ms budget.",
       );
       // It never reached the engine, and the first read still holds the queue.
+      expect(client.requests.filter(({ method }) => method === "workspace.open")).toHaveLength(1);
+      releaseClose!();
+      await expect(first).resolves.toBeNull();
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("leaves the engine alone when an attach waits behind the desktop's own slow open", async () => {
+    const failures: Error[] = [];
+    let adopting = false;
+    const client = new FakeClient((request) =>
+      // The desktop's open holds the engine's open lock through a long
+      // adoption, so the attach waits behind it.
+      adopting && request.method === "workspace.open"
+        ? new Promise<Response>(() => {})
+        : healthyPing(request),
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      workspaceReadTimeoutMs: 100,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async () => client,
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      adopting = true;
+      void client.sendRequest({ id: 900, method: "workspace.open", params: { rootDir: "C:\\big", workspaceId: "big" } });
+      await expect(
+        lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+      ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
+      expect(client.closed).toBe(false);
+      expect(failures).toEqual([]);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("never sends a read whose budget ran out before it could start", async () => {
+    let now = 0;
+    const client = new FakeClient(healthyPing);
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      workspaceReadTimeoutMs: 100,
+      monotonicNowMs: () => now,
+      launch: async () => client,
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      client.requests.length = 0;
+      const read = lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 });
+      // A host stall ends the budget before the read's first turn runs.
+      now += 1_000;
+      await expect(read).rejects.toThrow(
+        "Rust engine search.queryChatMessagesGranular did not start within its 100ms budget.",
+      );
+      expect(client.requests).toEqual([]);
+      expect(client.closed).toBe(false);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("keeps a read that expired in the queue ordering the next one behind the read ahead", async () => {
+    let holdClose = false;
+    let releaseClose: (() => void) | undefined;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.close" && holdClose && !releaseClose) {
+        return new Promise<Response>((resolve) => {
+          releaseClose = () => resolve(healthyPing(request));
+        });
+      }
+      return healthyPing(request);
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      workspaceReadTimeoutMs: 50,
+      launch: async () => client,
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      client.requests.length = 0;
+      holdClose = true;
+      const read = (query: string) =>
+        lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query, limit: 1 });
+      const first = read("first");
+      await vi.waitFor(() => expect(releaseClose).toBeDefined(), WAIT);
+      await expect(read("second")).rejects.toThrow("did not start within its 50ms budget");
+      const third = read("third");
+      await expect(third).rejects.toThrow("did not start within its 50ms budget");
+      // Neither later read reached the engine while the first still held the root.
       expect(client.requests.filter(({ method }) => method === "workspace.open")).toHaveLength(1);
       releaseClose!();
       await expect(first).resolves.toBeNull();
