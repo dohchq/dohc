@@ -334,10 +334,21 @@ export async function createFile(
 // Import outcome: what landed (workspace-relative paths, destination prefix
 // included) plus how many sources could not land — callers surface both, so
 // an import is never silently smaller than what the user handed us.
+//
+// `interrupted` means the import stopped after some files landed. Importing
+// the same sources again would copy those files a second time under
+// collision names, so callers name what landed. `stopReason` says what
+// stopped it, when known.
 export interface ImportCopyOutcome {
   imported: string[];
   skipped: number;
+  interrupted?: true;
+  stopReason?: string;
 }
+
+// The longest stop reason an import result carries; the IPC contract holds
+// the same bound.
+export const IMPORT_STOP_REASON_MAX_CHARS = 500;
 
 // Resolve + validate an import destination folder ("" / undefined = workspace
 // root). The folder must be a user-writable workspace-relative path (traversal
@@ -682,7 +693,21 @@ export async function copyIntoWorkspace(
       skipped += 1;
       continue;
     }
-    const landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+    let landed: string | null;
+    try {
+      landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+    } catch (error) {
+      // A failure before anything landed is the whole import's failure. After
+      // that, the files already copied stay, and the result names them.
+      if (imported.length === 0) throw error;
+      const reason = (error instanceof Error ? error.message : String(error)).trim();
+      return {
+        imported,
+        skipped,
+        interrupted: true,
+        ...(reason ? { stopReason: reason.slice(0, IMPORT_STOP_REASON_MAX_CHARS) } : {}),
+      };
+    }
     if (landed === null) {
       skipped += 1;
       continue;
@@ -709,10 +734,7 @@ export async function importDroppedPaths(
 ): Promise<ImportCopyOutcome> {
   const screened = await screenDroppedPaths(absolutePaths, registeredRoots);
   const outcome = await copyIntoWorkspace(rootPath, screened.usable, targetDir);
-  return {
-    imported: outcome.imported,
-    skipped: outcome.skipped + screened.refused,
-  };
+  return { ...outcome, skipped: outcome.skipped + screened.refused };
 }
 
 // The drag-in screen, exported because a share view's import needs the same

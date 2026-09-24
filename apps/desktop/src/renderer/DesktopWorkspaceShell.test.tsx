@@ -15336,6 +15336,30 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
   });
 
+  it("names what landed and why an ordinary import stopped, and Try again asks for files for the same folder", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+      stopReason: "EACCES: permission denied, copyfile 'two.md'",
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+
+    await importIntoNotes(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "Imported notes/one.md before the import stopped. EACCES: permission denied, copyfile 'two.md' Import only the files that are still missing.",
+    );
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
   it("asks for no files when the refresh before Try again fails", async () => {
     const bridge = sharedViewBridge([true, false]);
     renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });

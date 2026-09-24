@@ -878,6 +878,21 @@ describe("copyIntoWorkspace", () => {
     });
   });
 
+  // A copy that fails after others landed returns the landed files, so the
+  // shell can name them instead of letting a retry copy them again.
+  it("returns what landed when a later copy fails, and throws when nothing landed", async () => {
+    const outside = await createTestScratch("dohc-import-");
+    await writeFile(join(outside, "one.md"), "one");
+    const missing = join(outside, "gone.md");
+
+    const outcome = await copyIntoWorkspace(root, [join(outside, "one.md"), missing]);
+    expect(outcome).toMatchObject({ imported: ["one.md"], skipped: 0, interrupted: true });
+    expect(outcome.stopReason).toContain("gone.md");
+    expect(await readFile(join(root, "one.md"), "utf8")).toBe("one");
+
+    await expect(copyIntoWorkspace(root, [missing])).rejects.toThrow(/gone\.md/);
+  });
+
   it("fits collision variants within NAME_MAX for near-limit basenames", async () => {
     const outside = await createTestScratch("dohc-import-");
     // 251 chars + ".md" = 254 bytes — legal, but stem + " (2)" would exceed

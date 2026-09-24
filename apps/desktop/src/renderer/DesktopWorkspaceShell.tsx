@@ -2084,7 +2084,9 @@ export function DesktopWorkspaceShell(props: {
         reportShellError(
           count === 0
             ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-            : `Imported ${namedPaths(outcome.imported)} before the import stopped. Import only the files that are still missing.`,
+            : `Imported ${namedPaths(outcome.imported)} before the import stopped.${
+                outcome.stopReason ? ` ${outcome.stopReason}` : ""
+              } Import only the files that are still missing.`,
           null,
           retry,
           "import-files",
