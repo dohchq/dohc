@@ -45,6 +45,21 @@ describe("held device log reads", () => {
     expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
   });
 
+  it("parks again after a wake that left nothing past the cursor", async () => {
+    const { h, activity } = await ownedLog();
+    let answered = false;
+    const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000")).finally(() => {
+      answered = true;
+    });
+    await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
+    activity.wakeLog("workspace");
+    await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
+    expect(answered).toBe(false);
+
+    await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });
+    expect(await json(await held)).toMatchObject({ hasMore: true });
+  });
+
   it("answers at once when the log already has an op past the cursor", async () => {
     const { h, activity } = await ownedLog();
     const response = await h(request("owner", "/sync/workspace/log?since=0&hold=30000"));

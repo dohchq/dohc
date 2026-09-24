@@ -259,18 +259,25 @@ export function createWorkspaceReplicationRoutes(
     let since = input.since;
     const hasMore = () =>
       storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
-    if (input.holdMs > 0 && !hasMore()) {
+    const deadlineAtMs = Date.now() + input.holdMs;
+    // A wake can leave nothing past `since`, for example a retried link
+    // submission that appended nothing. The read then parks again until its
+    // deadline, so it answers early only with a change.
+    while (!hasMore() && !request.signal.aborted) {
+      const holdMs = deadlineAtMs - Date.now();
+      if (holdMs <= 0) break;
       try {
         await discussionActivity.wait(ownerLogWaitGroup(workspaceId), `owner:${userId}`, {
-          holdMs: input.holdMs,
+          holdMs,
           signal: request.signal,
           shouldPark: () => !hasMore(),
         });
       } catch (error) {
         if (!(error instanceof DiscussionActivityCapacityError)) throw error;
+        break;
       }
       // The read was authorized before it parked. Authorize it again, and
-      // re-read the epoch floor, before answering.
+      // re-read the epoch floor, before it answers or parks again.
       input.guard();
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
       since = Math.max(
