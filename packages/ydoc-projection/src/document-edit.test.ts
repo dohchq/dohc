@@ -148,9 +148,13 @@ describe('documentCreateUpdate', () => {
     expect(() => documentCreateUpdate(state(new Y.Doc()), markdown, open)).toThrow(FRONTMATTER_REFUSAL)
   })
 
-  test('takes rules the reader does not take as frontmatter as body text', () => {
-    expect(startsWithFrontmatter('Intro.\n\n---\n\nMore.')).toBe(false)
-    expect(startsWithFrontmatter('---\n---\n')).toBe(false)
+  test.each([
+    'Intro.\n\n---\n\nMore.',
+    '---\n---\n',
+    '---\nA line between two rules.\n---\n\nMore.',
+  ])('takes rules the reader does not read as frontmatter as body text: %j', (markdown) => {
+    expect(startsWithFrontmatter(markdown)).toBe(false)
+    expect(() => documentCreateUpdate(state(new Y.Doc()), markdown, open)).not.toThrow()
   })
 })
 

@@ -31,10 +31,9 @@ import {
 } from "../workspaces/collectionRecordEdits";
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
+import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import type { DocumentProjection } from "../workspaces/documentProjection";
-import type { LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 
@@ -45,7 +44,6 @@ function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentAuthor | null {
     ? null
     : { kind: "agent", agentId: origin.actorOriginId, onBehalfOf: "local" };
 }
-import { lstat } from "node:fs/promises";
 
 // With no editor open, the file holds the document's settled text.
 async function settledMarkdown(rootPath: string, path: string): Promise<string> {
@@ -290,7 +288,7 @@ export function createDesktopCliServer<State>(
             try {
               await current.writeAuthoredTextFile(absolute, "", momentAuthorFor(origin), { createOnly: true });
             } catch (error) {
-              if (await lstat(absolute).then(() => true, () => false)) {
+              if ((error as NodeJS.ErrnoException).code === "EEXIST") {
                 throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
               }
               throw error;

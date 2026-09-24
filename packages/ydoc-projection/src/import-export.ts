@@ -49,11 +49,6 @@ const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
 const TAGGED_FRONTMATTER_PREFIX_META_KEY = 'dohcTaggedFrontmatterPrefix'
 const TAGGED_FRONTMATTER_BASELINE_META_KEY = 'dohcTaggedFrontmatterBaseline'
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
-
-/** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
-export function startsWithFrontmatter(markdown: string): boolean {
-  return FM_RE.test(markdown)
-}
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
@@ -1324,6 +1319,11 @@ function parseFrontmatter(src: string): {
     return { meta: {}, body: src }
   }
   return { meta, body: rest ?? '' }
+}
+
+/** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
+export function startsWithFrontmatter(markdown: string): boolean {
+  return parseFrontmatter(markdown).body !== markdown
 }
 
 function loadFrontmatterWithUnsupportedTags(raw: string): {
