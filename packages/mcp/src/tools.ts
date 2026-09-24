@@ -2368,15 +2368,15 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
   return requestCli(ctx, "chat", args);
 }
 
-// --- channels (PR 12/15 slice, WS-E) ----------------------------------------
+// --- groups (PR 12/15 slice, WS-E) ----------------------------------------
 
-// Channel discovery for agents: names, slugs, kinds, and each channel's
+// Group discovery for agents: names, slugs, kinds, and each group's
 // threads (id + display title) so a follow-up reply/read has real ids to
 // target. Writable MCP profiles ensure the workspace's default "general"
-// channel on first use — the same rule the desktop applies. Read-only shared
-// views list only existing channels so discovery never creates durable state.
-export async function listChannels(ctx: ToolContext) {
-  return requestCli(ctx, "channelsFull", {});
+// group on first use — the same rule the desktop applies. Read-only shared
+// views list only existing groups so discovery never creates durable state.
+export async function listGroups(ctx: ToolContext) {
+  return requestCli(ctx, "groupsFull", {});
 }
 
 // Canonical chat verbs return CLI handles. MCP reads use engine ids, so
@@ -2387,7 +2387,7 @@ function engineId(id: string, handlePrefix: string, enginePrefix: string): strin
     : id;
 }
 
-const engineChannelId = (id: string) => engineId(id, "ch_", "channel-");
+const engineGroupId = (id: string) => engineId(id, "ch_", "channel-");
 const engineThreadId = (id: string) => engineId(id, "th_", "thread-");
 const engineMessageId = (id: string) => engineId(id, "msg_", "message-");
 
@@ -2412,25 +2412,25 @@ function chatWriteArgs(input: ChatWriteInput) {
   };
 }
 
-// Start a chat in a channel AS THE AGENT. `channel` accepts a channel id or
+// Start a chat in a group AS THE AGENT. `group` accepts a group id or
 // a name/slug ("general", "#general", "Client ACME"). No title is required:
 // untitled chats display their first-message snippet.
-export async function startChannelChat(
+export async function startGroupChat(
   ctx: ToolContext,
-  args: ChatWriteInput & { channel: string; title?: string },
+  args: ChatWriteInput & { group: string; title?: string },
 ) {
   const result = await requestCli(ctx, "post", {
-    channel: args.channel,
+    group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...chatWriteArgs(args),
   });
   if ("ok" in result) return result;
   return {
     ok: true as const,
-    channel: {
-      id: engineChannelId(result.channel.id),
-      slug: result.channel.slug,
-      kind: result.channel.kind,
+    group: {
+      id: engineGroupId(result.group.id),
+      slug: result.group.slug,
+      kind: result.group.kind,
     },
     threadId: engineThreadId(result.threadId),
     messageId: engineMessageId(result.messageId),

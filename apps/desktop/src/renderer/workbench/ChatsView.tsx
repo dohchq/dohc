@@ -1453,7 +1453,7 @@ export function ChatsView(props: {
         applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this channel."));
+        props.onError(ipcErrorMessage(error, "Could not load this group."));
       } finally {
         if (
           token === liveToken.current &&
@@ -2957,7 +2957,7 @@ export function ChatsView(props: {
       await refreshShares();
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not share that channel."));
+      props.onError(ipcErrorMessage(error, "Could not share that group."));
     } finally {
       setShareBusy(false);
     }
@@ -3027,7 +3027,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not join that channel."));
+        props.onError(ipcErrorMessage(error, "Could not join that group."));
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
         // refreshOverview bumps liveToken itself, so a token-equality check
@@ -3053,7 +3053,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that channel."));
+        props.onError(ipcErrorMessage(error, "Could not leave that group."));
       }
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
@@ -3093,7 +3093,7 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not create that channel."));
+        props.onError(ipcErrorMessage(error, "Could not create that group."));
       }
     },
     [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
@@ -3973,8 +3973,8 @@ export function ChatsView(props: {
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
-                ? "This channel is no longer shared with you. You can still read it."
-                : "This channel is read-only for you."}
+                ? "This group is no longer shared with you. You can still read it."
+                : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
             <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
@@ -4453,8 +4453,8 @@ export function ChatsView(props: {
         {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
-              ? "This channel is no longer shared with you. You can still read it."
-              : "This channel is read-only for you."}
+              ? "This group is no longer shared with you. You can still read it."
+              : "This group is read-only for you."}
           </ComposerNotice>
         ) : null}
       </div>

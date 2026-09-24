@@ -11,13 +11,13 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   DOHC_TRANSPORT_UNAVAILABLE_REASON,
-  listChannels,
+  listGroups,
   listChanges,
   listFileChats,
   readChange,
   readChat,
   replyToChat,
-  startChannelChat,
+  startGroupChat,
   type ToolContext,
 } from "./tools";
 
@@ -92,14 +92,14 @@ const results = {
       text: "# Agenda review\n",
     },
   },
-  channelsFull: {
+  groupsFull: {
     ok: true,
-    channels: [
+    groups: [
       {
         id: "channel-1",
         name: "General",
         slug: "general",
-        kind: "channel" as const,
+        kind: "group" as const,
         threadCount: 1,
         threads: [{
           id: thread.id,
@@ -112,7 +112,7 @@ const results = {
   },
   // The desktop answers post/reply with the CLI's short display handles.
   post: {
-    channel: { id: "ch_1", name: "General", slug: "general", kind: "channel" as const },
+    group: { id: "ch_1", name: "General", slug: "general", kind: "group" as const },
     threadId: "th_2",
     messageId: "msg_2",
     title: "Agenda review",
@@ -127,7 +127,7 @@ const results = {
 } satisfies {
   [Verb in Extract<
     CliVerb,
-    "moments" | "moment" | "fileChats" | "chat" | "channelsFull" | "post" | "reply"
+    "moments" | "moment" | "fileChats" | "chat" | "groupsFull" | "post" | "reply"
   >]: CliResultByVerb[Verb];
 };
 
@@ -169,14 +169,14 @@ describe("desktop CLI proxy", () => {
       await expect(readChange(ctx, { id: moment.id })).resolves.toEqual(results.moment);
       await expect(listFileChats(ctx, { path: moment.path })).resolves.toEqual(results.fileChats);
       await expect(readChat(ctx, { threadId: thread.id })).resolves.toEqual(results.chat);
-      await expect(listChannels(ctx)).resolves.toEqual(results.channelsFull);
+      await expect(listGroups(ctx)).resolves.toEqual(results.groupsFull);
 
       expect(requests.map((request) => request.verb)).toEqual([
         "moments",
         "moment",
         "fileChats",
         "chat",
-        "channelsFull",
+        "groupsFull",
       ]);
       expect(requests[0]).toMatchObject({
         verb: "moments",
@@ -199,9 +199,9 @@ describe("desktop CLI proxy", () => {
     await withWorkspace(async (base) => {
       const { ctx, requests } = recordingContext(base);
 
-      await startChannelChat(ctx, { channel: "general", title: "Agenda review", body: "On it." });
-      await startChannelChat(ctx, {
-        channel: "#general",
+      await startGroupChat(ctx, { group: "general", title: "Agenda review", body: "On it." });
+      await startGroupChat(ctx, {
+        group: "#general",
         body: "Ship it?",
         attachments: ["notes/agenda.md"],
         needsDecision: true,
@@ -227,7 +227,7 @@ describe("desktop CLI proxy", () => {
         ["post", {
           cwd: base.root,
           actor: "agent",
-          channel: "general",
+          group: "general",
           title: "Agenda review",
           attachments: [],
           needsDecision: false,
@@ -237,7 +237,7 @@ describe("desktop CLI proxy", () => {
           cwd: base.root,
           actor: "agent",
           runId: "run_1",
-          channel: "#general",
+          group: "#general",
           attachments: ["notes/agenda.md"],
           needsDecision: true,
           options: ["Ship", "Hold"],
@@ -271,34 +271,34 @@ describe("desktop CLI proxy", () => {
     });
   });
 
-  it("omits CLI display aliases from the posted channel descriptor", async () => {
+  it("omits CLI display aliases from the posted group descriptor", async () => {
     await withWorkspace(async (base) => {
       const ctx: ToolContext = {
         ...base,
         request: async () => ({
           ...results.post,
-          channel: { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
+          group: { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
         }),
       };
-      const result = await startChannelChat(ctx, { channel: "my-agent", body: "On it." });
+      const result = await startGroupChat(ctx, { group: "my-agent", body: "On it." });
       expect(result).toMatchObject({
         ok: true,
-        channel: { id: "channel-agent", slug: "my-agent", kind: "agent" },
+        group: { id: "channel-agent", slug: "my-agent", kind: "agent" },
       });
       if (!result.ok) throw new Error(result.reason);
-      expect(result.channel).not.toHaveProperty("name");
+      expect(result.group).not.toHaveProperty("name");
     });
   });
 
-  it("returns engine ids from chat writes so dohc_read_chat and dohc_list_channels accept them", async () => {
+  it("returns engine ids from chat writes so dohc_read_chat and dohc_list_groups accept them", async () => {
     await withWorkspace(async (base) => {
       const { ctx } = recordingContext(base);
 
       await expect(
-        startChannelChat(ctx, { channel: "general", body: "On it." }),
+        startGroupChat(ctx, { group: "general", body: "On it." }),
       ).resolves.toEqual({
         ok: true,
-        channel: { id: "channel-1", slug: "general", kind: "channel" },
+        group: { id: "channel-1", slug: "general", kind: "group" },
         threadId: "thread-2",
         messageId: "message-2",
         title: "Agenda review",
@@ -324,15 +324,15 @@ describe("desktop CLI proxy", () => {
         request: async (request) => {
           throw new DohcCliError(
             request.verb === "post"
-              ? "dohc: no such channel: nope"
+              ? "dohc: no such group: nope"
               : "dohc: message is not an open decision: msg_1",
           );
         },
       };
 
       await expect(
-        startChannelChat(ctx, { channel: "nope", body: "Must not post" }),
-      ).resolves.toEqual({ ok: false, reason: "dohc: no such channel: nope" });
+        startGroupChat(ctx, { group: "nope", body: "Must not post" }),
+      ).resolves.toEqual({ ok: false, reason: "dohc: no such group: nope" });
       await expect(
         replyToChat(ctx, { threadId: thread.id, resolve: message.id, body: "Must not post" }),
       ).resolves.toEqual({
@@ -355,7 +355,7 @@ describe("desktop CLI proxy", () => {
       });
       // A malformed write response is never widened into a success.
       await expect(
-        startChannelChat(ctx, { channel: "general", body: "On it." }),
+        startGroupChat(ctx, { group: "general", body: "On it." }),
       ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });
     });
   });
@@ -386,7 +386,7 @@ describe("desktop unavailable failures", () => {
       };
 
       await expect(
-        startChannelChat(ctx, { channel: "general", body: "Must not be stored" }),
+        startGroupChat(ctx, { group: "general", body: "Must not be stored" }),
       ).resolves.toEqual({
         ok: false,
         reason: DOHC_TRANSPORT_UNAVAILABLE_REASON,

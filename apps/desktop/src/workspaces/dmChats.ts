@@ -54,14 +54,14 @@ export async function requireShareableChatChannel(input: {
   const channel = (await input.store.listChannels({ workspaceId: input.workspaceId })).find(
     (candidate) => candidate.id === input.channelId,
   );
-  if (!channel) throw new Error("This channel no longer exists.");
+  if (!channel) throw new Error("This group no longer exists.");
   if (channel.kind === "dm") {
     throw new Error(
-      "Direct messages can't be shared as channels. Start a direct message to choose its participants.",
+      "A direct message can't be shared as a group. Start a direct message to choose its participants.",
     );
   }
   if (channel.kind !== "channel") {
-    throw new Error("Only ordinary channels can be shared.");
+    throw new Error("Only groups can be shared.");
   }
   return channel;
 }
