@@ -178,6 +178,9 @@ type ProgressSend = Option<Box<dyn Fn(ProgressMessage) + Send>>;
 
 struct ProgressState {
     id: RequestId,
+    /// Cleared by `finish`, so a clone that gates costly counting on
+    /// `is_active` stops paying once the request has answered.
+    active: AtomicBool,
     waiting: AtomicBool,
     send: Mutex<ProgressSend>,
 }
@@ -210,23 +213,28 @@ impl ProgressSink {
     pub fn new(id: RequestId, send: impl Fn(ProgressMessage) + Send + 'static) -> Self {
         ProgressSink(Some(Arc::new(ProgressState {
             id,
+            active: AtomicBool::new(true),
             waiting: AtomicBool::new(false),
             send: Mutex::new(Some(Box::new(send))),
         })))
     }
 
-    /// Whether a report can reach anyone. Work that costs something only to
+    /// Whether a report can reach anyone: false for the inactive default and
+    /// after [`ProgressSink::finish`]. Work that costs something only to
     /// report progress checks this first.
     pub fn is_active(&self) -> bool {
-        self.0.is_some()
+        self.0
+            .as_ref()
+            .is_some_and(|state| state.active.load(Ordering::Acquire))
     }
 
     pub fn report(&self) {
         let Some(state) = &self.0 else { return };
-        if state.waiting.swap(true, Ordering::AcqRel) {
+        if !state.active.load(Ordering::Acquire) || state.waiting.swap(true, Ordering::AcqRel) {
             return;
         }
-        // Once finished, `waiting` stays set and later reports stop at the swap.
+        // A report that races `finish` finds no sender under the lock, so no
+        // message can follow the response.
         if let Some(send) = state
             .send
             .lock()
@@ -241,6 +249,7 @@ impl ProgressSink {
     /// stay ahead of anything the caller queues after this returns.
     pub fn finish(&self) {
         if let Some(state) = &self.0 {
+            state.active.store(false, Ordering::Release);
             state.send.lock().unwrap_or_else(|e| e.into_inner()).take();
         }
     }
@@ -456,8 +465,11 @@ mod progress_tests {
     #[test]
     fn nothing_is_sent_after_finish() {
         let (sink, queue) = queued(3);
+        let clone = sink.clone();
         sink.report();
+        assert!(clone.is_active());
         sink.finish();
+        assert!(!clone.is_active(), "every clone sees the request finished");
         // A waiting message stays ahead of the response; it is not recalled.
         assert_eq!(queue.lock().unwrap().len(), 1);
         drop(queue.lock().unwrap().pop());

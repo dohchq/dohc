@@ -1887,24 +1887,14 @@ export class EngineClient implements EngineTransport {
     this.readyResolve(this);
   }
 
+  // Progress only informs a waiting caller. Progress no caller is waiting for,
+  // such as for a request that stopped waiting or never asked, is dropped: it
+  // cannot corrupt any state, so it must not end the transport.
   private receiveProgress(id: number): void {
-    const pending = this.pending.get(id);
-    if (!pending) {
-      // The caller stopped waiting; the engine may still be working on it.
-      if (this.abandonedRequestIds.has(id)) return;
-      throw new EngineClientError(
-        "protocol-error",
-        `Received progress for unknown request ${id}.`,
-      );
-    }
-    if (!pending.onProgress) {
-      throw new EngineClientError(
-        "protocol-error",
-        `Received progress for request ${id}, which did not ask for it.`,
-      );
-    }
+    const onProgress = this.pending.get(id)?.onProgress;
+    if (!onProgress) return;
     try {
-      pending.onProgress();
+      onProgress();
     } catch {
       // A progress observer cannot interrupt transport dispatch.
     }

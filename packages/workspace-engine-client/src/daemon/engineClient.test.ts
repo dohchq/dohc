@@ -1299,7 +1299,7 @@ describe("request progress", () => {
   });
 
   it.each(["a request that did not ask", "an unknown request"])(
-    "treats progress for %s as a protocol error",
+    "ignores progress for %s and keeps the transport",
     async (target) => {
       const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
       try {
@@ -1307,7 +1307,12 @@ describe("request progress", () => {
         await nextImmediate();
         const wireId = requests[0]!.id;
         peer.send({ type: "progress", id: target === "an unknown request" ? wireId + 100 : wireId });
-        await expect(sent).rejects.toMatchObject({ code: "protocol-error" });
+        peer.send({ type: "response", id: wireId, result: { workspace: "ws-1" } });
+        await expect(sent).resolves.toEqual({ id: 8, result: { workspace: "ws-1" } });
+        peer.onEnvelope = (envelope) => {
+          if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+        };
+        await expect(transport.sendRequest(request(9, "engine.ping"))).resolves.toMatchObject({ result: { ok: true } });
       } finally { transport.close(); }
     },
   );
