@@ -1283,20 +1283,6 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** The values of a frontmatter block's YAML, or undefined when it is not a map. */
-export function parseFrontmatterYaml(raw: string): Record<string, unknown> | undefined {
-  try {
-    const { value } = loadFrontmatterWithUnsupportedTags(raw)
-    return isFrontmatterMap(value) ? value : undefined
-  } catch {
-    return undefined
-  }
-}
-
-export function setDohcYDocFrontmatter(doc: Y.Doc, values: Record<string, unknown>): void {
-  writeMap(doc.getMap(FRONTMATTER_FIELD), values)
-}
-
 function parseFrontmatter(src: string): {
   meta: Record<string, unknown>
   body: string

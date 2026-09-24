@@ -1007,6 +1007,8 @@ describe("sync relay startup guards", () => {
     DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
     DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
     BETTER_AUTH_SECRET: "x".repeat(32),
+    // Validated at startup; the engine child starts on first use.
+    DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath,
     SYNC_RELAY_PORT: "0",
     FORCE_COLOR: "0",
   } as const;
@@ -1064,6 +1066,20 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("DOHC_RELAY_SHARE_WEB_ORIGIN must be set");
+  });
+
+  it.each([
+    ["unset", undefined, "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE must name the engine executable outside development/test."],
+    ["relative", "dohc-workspace-engine", "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid."],
+    ["a directory", tmpdir(), "FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid."],
+  ])("refuses to start in production when the engine executable is %s", async (label, executable, reason) => {
+    const dbPath = join(await tempRoot(`engine-executable-${label.replaceAll(" ", "-")}`), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: executable, SYNC_RELAY_DB_PATH: dbPath,
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(reason);
+    await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each([

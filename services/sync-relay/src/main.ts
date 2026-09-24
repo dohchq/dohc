@@ -30,6 +30,7 @@ import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-contr
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
+import { createEngineProjection, DOCUMENT_PROJECTION_LIMITS } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
@@ -178,6 +179,17 @@ if (!testAuthSeam && secret.length < 32) {
     "BETTER_AUTH_SECRET must be set (>=32 chars) and must match workspace-api's secret.",
   );
 }
+
+// Shared documents open in an editor reach recipients as Y.Doc updates, which
+// only the engine can turn into the file an owner device settles.
+const engineExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
+if (!isDevOrTest && !engineExecutable) {
+  fatal("FATAL: DOHC_RELAY_ENGINE_EXECUTABLE must name the engine executable outside development/test.");
+}
+const documentProjection = engineExecutable === undefined ? undefined : (() => {
+  try { return createEngineProjection({ engineExecutable, ...DOCUMENT_PROJECTION_LIMITS }); }
+  catch (error) { fatal(`FATAL: DOHC_RELAY_ENGINE_EXECUTABLE is invalid. ${error instanceof Error ? error.message : String(error)}`); }
+})();
 
 const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? (selfHostedLive ? {version: 1} : undefined) : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
 const appPublicationLimits = (() => {
@@ -567,6 +579,7 @@ installShutdown(server, {
   onClosed: async () => {
     await selfHost?.close();
     await configuredServiceHost?.close();
+    await documentProjection?.close();
     await liveValidation.close();
     await datasetHost?.close();
     if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});

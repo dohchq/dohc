@@ -19,7 +19,6 @@ import {
   markdownToYDoc,
   yDocToMarkdown,
 } from './import-export.js'
-import { engineReprojection } from './engineMarkdownFold.js'
 import {
   validateRegistrationCutForProjection,
   validateJournalCutForProjection,
@@ -45,8 +44,6 @@ const POLICY_FIELDS = [
 ] as const
 const MAX_DEPTH = 128
 const MAX_NODES = 262_144
-// The engine's versioned text store bounds retained source at 10 MiB (`MAX_TEXT_BYTES`).
-const MAX_TEXT_BYTES = 10 * 1024 * 1024
 const MIN_INT64 = -(1n << 63n)
 const MAX_INT64 = (1n << 63n) - 1n
 const SHARED_BIGINT_KEY = '$dohcBigInt'
@@ -202,7 +199,7 @@ function validateRegistrationInput(
   if (result.kind === 'refused') return refusal(result.reason, 'registration-input')
   const { cut, topology } = result
   let checkpointCopy: Uint8Array | undefined
-  const projected = projectAndFinalize(cut, topology, validatePublicState, () => {
+  const projected = projectAndFinalize(cut, topology, () => {
     if (!includeEvidence) return
     checkpointCopy = copyBytes(checkpoint)
     if (sha256Hex(checkpointCopy) !== cut.checkpoint.updateDigest) refuse('invalid-update')
@@ -302,7 +299,7 @@ export function createLiveMarkdownJournalValidator(
     if (result.kind === 'refused') failure = result
     else {
       const { cut, topology } = result
-      const projected = projectAndFinalize(cut, topology, validatePublicState)
+      const projected = projectAndFinalize(cut, topology)
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
         if (!includeEvidence) return { kind: 'accepted' }
@@ -372,57 +369,6 @@ export function createLiveMarkdownJournalValidator(
   }
 }
 
-export interface SettledMarkdownInput {
-  readonly checkpoint: Uint8Array
-  readonly updates: readonly Uint8Array[]
-}
-export type SettledMarkdownResult =
-  | {
-      readonly kind: 'projected'
-      readonly markdown: string
-      readonly markdownSha256: string
-      readonly markdownByteLength: number
-      /** The merged state, a checkpoint that replaces `checkpoint` and `updates`. */
-      readonly state: Uint8Array
-    }
-  | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
-
-/**
- * Project a rich document's Y.Doc to the Markdown the engine's settle writes
- * (`project_ydoc_with_store`). It checks the same public state as live
- * validation, but where the engine falls back to canonical output this does
- * too: preserved source only gates preservation, and metadata the engine
- * ignores does not refuse.
- */
-export function createSettledMarkdownProjector(
-  policy: OrderedLiveUpdateCutPolicy,
-): (input: SettledMarkdownInput) => SettledMarkdownResult {
-  const ownedPolicy = capturePolicy(policy)
-  return input => {
-    let checkpoint: Uint8Array, updates: Uint8Array[]
-    try {
-      const snapshot = exactDataFields(input, ['checkpoint', 'updates'])
-      checkpoint = captureBytes(snapshot.checkpoint)
-      updates = captureSuffix(snapshot.updates)
-    } catch (error) { return { kind: 'refused', reason: error instanceof Refusal ? error.reason : 'invalid-input' } }
-    const candidate = updates.pop()
-    const result = candidate === undefined
-      ? validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, ownedPolicy)
-      : validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint, suffix: updates, candidate }, ownedPolicy)
-    if (result.kind === 'refused') return { kind: 'refused', reason: result.reason }
-    const projected = projectAndFinalize(result.cut, result.topology, settledPublicState)
-    if (projected.kind === 'refused') return projected
-    const markdownBytes = utf8.encode(projected.projectedMarkdown)
-    return Object.freeze({
-      kind: 'projected',
-      markdown: projected.projectedMarkdown,
-      markdownSha256: sha256Hex(markdownBytes),
-      markdownByteLength: markdownBytes.byteLength,
-      state: copyBytes(projected.finalized.stateUpdate),
-    })
-  }
-}
-
 type ProjectedCut =
   | { readonly kind: 'accepted'; readonly projectedMarkdown: string; readonly finalized: Extract<OrderedLiveUpdateCutFinalizeResult, { kind: 'accepted' }> }
   | { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal }
@@ -430,7 +376,6 @@ type ProjectedCut =
 function projectAndFinalize(
   cut: ValidatedLiveUpdateCut,
   topology: ProjectionTopology,
-  project: (scratch: Y.Doc, topology: CompatibleTopology) => string,
   beforeProjection?: () => void,
 ): ProjectedCut {
   let pending: LiveMarkdownValidationRefusal | undefined
@@ -439,7 +384,7 @@ function projectAndFinalize(
   try {
     beforeProjection?.()
     if (topology.kind !== 'compatible') refuse('invalid-schema')
-    projectedMarkdown = project(cut.document, topology)
+    projectedMarkdown = validatePublicState(cut.document, topology)
   } catch (error) { pending = error instanceof Refusal ? error.reason : 'invalid-schema' }
   finally {
     try { finalized = cut.finishAfterProjection() }
@@ -736,21 +681,17 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
     if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
       || typeof snapshot.dohcMarkdownSourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceSha256)
       || typeof snapshot.dohcMarkdownSourceProjectionSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceProjectionSha256)
-      || exceedsUtf8Bytes(snapshot.dohcMarkdownSource, MAX_TEXT_BYTES)
+      // The existing native text store bounds retained source at 10 MiB.
+      || exceedsUtf8Bytes(snapshot.dohcMarkdownSource, 10 * 1024 * 1024)
       || sha256Hex(utf8.encode(snapshot.dohcMarkdownSource)) !== snapshot.dohcMarkdownSourceSha256) refuse('invalid-schema')
   }
   return snapshot
 }
 
-type CompatibleTopology = Extract<ProjectionTopology, { kind: 'compatible' }>
-interface PublicRoots {
-  readonly body: Y.XmlFragment
-  readonly frontmatter: Y.Map<unknown>
-  readonly meta: Y.Map<unknown>
-  readonly zeroStructSeed: boolean
-}
-
-function publicRoots(scratch: Y.Doc, topology: CompatibleTopology): PublicRoots {
+function validatePublicState(
+  scratch: Y.Doc,
+  topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
+): string {
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
     || !(scratch.share.get('body') instanceof Y.XmlFragment)
@@ -762,32 +703,11 @@ function publicRoots(scratch: Y.Doc, topology: CompatibleTopology): PublicRoots 
   const meta = scratch.getMap('meta')
   const zeroStructSeed = topology.canonicalZeroStructSeed
     && !topology.bodyHasActiveItem && body.length === 0 && frontmatter.size === 0 && meta.size === 0
-  return { body, frontmatter, meta, zeroStructSeed }
-}
-
-// The engine writes an element without an attribute that ProseMirror fills
-// with its default, as `orderedList` without `start`. Both serializers read it
-// as the default.
-function withDefaultAttributes(fingerprints: XmlFingerprint[]): XmlFingerprint[] {
-  const schema = getDohcProseMirrorSchema()
-  return fingerprints.map(fingerprint => {
-    if (fingerprint.kind === 'text') return fingerprint
-    const attributes = Object.fromEntries(fingerprint.attributes)
-    for (const [name, attribute] of Object.entries(schema.nodes[fingerprint.nodeName]?.spec.attrs ?? {})) {
-      if (!Object.hasOwn(attributes, name) && attribute.default != null) attributes[name] = attribute.default
-    }
-    return { ...fingerprint, attributes: sortedValueEntries(attributes), children: withDefaultAttributes(fingerprint.children) }
-  })
-}
-
-/** Refuses a body or frontmatter that the TypeScript serializer would not render node for node. */
-function projectCanonicalMarkdown(
-  scratch: Y.Doc, topology: CompatibleTopology, { body, frontmatter }: PublicRoots, defaultAttributes = false,
-): string {
+  const metadata = validateMetadata(meta, zeroStructSeed)
   const budget = new ProjectionBudget()
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set())
-  const fingerprint = bodyFingerprint(body, budget)
-  const originalFingerprint = defaultAttributes ? withDefaultAttributes(fingerprint) : fingerprint
+  const originalFingerprint = bodyFingerprint(body, budget)
+  const frontmatterSnapshot = getDohcYDocFrontmatter(scratch)
   let rootNode: ReturnType<typeof yXmlFragmentToProseMirrorRootNode>
   try {
     rootNode = yXmlFragmentToProseMirrorRootNode(body, getDohcProseMirrorSchema())
@@ -813,16 +733,8 @@ function projectCanonicalMarkdown(
   }
 
   const projectedMarkdown = yDocToMarkdown(scratch)
-  if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
-  return projectedMarkdown
-}
-
-function validatePublicState(scratch: Y.Doc, topology: CompatibleTopology): string {
-  const roots = publicRoots(scratch, topology)
-  const metadata = validateMetadata(roots.meta, roots.zeroStructSeed)
-  const projectedMarkdown = projectCanonicalMarkdown(scratch, topology, roots)
-  const frontmatterSnapshot = getDohcYDocFrontmatter(scratch)
   let preservedSource: string | undefined
+  if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
   if (typeof metadata.dohcMarkdownSourceProjectionSha256 === 'string'
     && metadata.dohcMarkdownSourceProjectionSha256 === sha256Hex(utf8.encode(projectedMarkdown))) {
@@ -834,7 +746,7 @@ function validatePublicState(scratch: Y.Doc, topology: CompatibleTopology): stri
     }
     finally { source.destroy() }
   }
-  if (!roots.zeroStructSeed) {
+  if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
@@ -847,29 +759,4 @@ function validatePublicState(scratch: Y.Doc, topology: CompatibleTopology): stri
     } finally { reimported.destroy() }
   }
   return preservedSource ?? projectedMarkdown
-}
-
-/**
- * Mirrors the engine's `Ydoc::preserved_markdown_source`: exact source replaces
- * the canonical projection only when its witness names that projection, its
- * digest matches, and the engine's own parser rebuilds it into the same bytes.
- * Anything else settles canonical output, so digests alone never authorize
- * stored source.
- */
-function settledPublicState(scratch: Y.Doc, topology: CompatibleTopology): string {
-  const roots = publicRoots(scratch, topology)
-  // The TypeScript serializer drops CRLF under a plain-text marker; the engine's rich projection does not.
-  if (roots.meta.has('contentKind')) refuse('invalid-schema')
-  const canonical = projectCanonicalMarkdown(scratch, topology, roots, true)
-  const source = roots.meta.get('dohcMarkdownSource')
-  const sourceSha256 = roots.meta.get('dohcMarkdownSourceSha256')
-  const witness = roots.meta.get('dohcMarkdownSourceProjectionSha256')
-  if (typeof sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sourceSha256)
-    || typeof witness !== 'string' || !/^[0-9a-f]{64}$/.test(witness)
-    || witness !== sha256Hex(utf8.encode(canonical))
-    || typeof source !== 'string' || exceedsUtf8Bytes(source, MAX_TEXT_BYTES)
-    || sha256Hex(utf8.encode(source)) !== sourceSha256) return canonical
-  if (source === canonical) return source
-  if (exceedsLiveMarkdownLimit(source)) refuse('capacity-refused')
-  return engineReprojection(source, roots.meta) === canonical ? source : canonical
 }
