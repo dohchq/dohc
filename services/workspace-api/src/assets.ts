@@ -16,7 +16,7 @@ export const ACCOUNT_CSS = `:root {
   --accent: #2d342e;
   --danger: #a6402c;
   --success: #38684e;
-  --sans: "InterVariable", system-ui, "Segoe UI", sans-serif;
+  --sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
 }

@@ -514,6 +514,10 @@ export interface EngineRelayWorkspaceClient {
   pullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
+    // Called after each page whose ops the engine applied. The engine commits
+    // a page before the next one is requested, so a caller learns of applied
+    // ops even when a later page fails.
+    onApplied?: () => void;
   }): Promise<PullSharedChannelResult>;
   pushSharedChannel(input: {
     shareId: string;
@@ -905,7 +909,7 @@ export class EngineRelayClient {
             workspaceId: workspace.workspaceId,
           }),
         ),
-      pullSharedChannel: async ({ shareId, channelWireId }) => {
+      pullSharedChannel: async ({ shareId, channelWireId, onApplied }) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
@@ -938,9 +942,11 @@ export class EngineRelayClient {
           );
           previousCursor = pageCursor;
           nextCursor = pageCursor;
+          const pageApplied = numberField(result, "applied", "share.channel.pull");
           fetched += numberField(result, "fetched", "share.channel.pull");
-          applied += numberField(result, "applied", "share.channel.pull");
+          applied += pageApplied;
           skipped += numberField(result, "skipped", "share.channel.pull");
+          if (pageApplied > 0) onApplied?.();
           if (!hasMore) break;
         }
         return {

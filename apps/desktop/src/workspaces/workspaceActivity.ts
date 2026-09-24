@@ -466,6 +466,13 @@ export function createWorkspaceActivity(
     );
   }
 
+  // Pulls the workspace's own relay log for the Chats polls, where members'
+  // replies to the DMs and Groups this workspace owns land. Records no local
+  // change. No-op when the workspace has no engine.
+  function queueCloudPull(state: WorkspaceActivityState): void {
+    state.entry?.engine?.queuePull();
+  }
+
   // Sets (or clears) the active agent run for an open workspace. The engine
   // capture reads this slot when a batch settles, so writes made during the
   // run are attributed to the agent. Throws if the workspace isn't open — a
@@ -602,6 +609,7 @@ export function createWorkspaceActivity(
     isOpen,
     queueCloudSync,
     retryCloudSync,
+    queueCloudPull,
     setAgentRun,
     claimAgentRun,
     clearAgentRun,

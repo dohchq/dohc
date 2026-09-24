@@ -1265,7 +1265,7 @@ function assertEngineWritablePath(
   // The disk-materialize boundary runs Check A + Check B (win32): a name that
   // cannot be written on this disk is refused here (and surfaced) while
   // classification/capture/store writes stayed permissive (Check A only).
-  const check = validateUserMaterializePath(path);
+  const check = validateUserMaterializePath(path, { platform: process.platform });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }

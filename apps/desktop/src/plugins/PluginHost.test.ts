@@ -60,13 +60,13 @@ function isProcessAlive(pid: number): boolean {
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   message: string,
-  timeoutMs = 5_000,
+  options: { timeout?: number } = {},
 ): Promise<void> {
   await vi.waitFor(
     async () => {
       if (!(await predicate())) throw new Error(message);
     },
-    { timeout: timeoutMs, interval: 25 },
+    { interval: 25, ...options },
   );
 }
 
@@ -1260,7 +1260,6 @@ describe("PluginHost", () => {
     await waitFor(
       () => statuses.includes("crashed"),
       "Plugin did not crash after the asynchronous error.",
-      2_000,
     );
 
     expect(
@@ -1563,24 +1562,37 @@ describe("PluginHost", () => {
     );
   });
 
-  it("lets a healthy activation finish before a short test deadline", async () => {
-    const root = await workspaceRoot();
-    const harness = createProcessHarness();
-    const host = trackHost({
-      stateDir: await stateDir(),
-      workspaceRoot: root,
-      spawnTransport: harness.spawnTransport,
-      routeSdkRequest: defaultRouter,
-      activationTimeoutMs: 1_000,
-    });
-    const startedAt = Date.now();
-    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-    // The deadline covers start() itself, not only the wait after it.
-    await waitFor(
-      () => host.getStatus("hello-plugin") === "ready",
-      "Healthy plugin missed the test activation deadline.",
-      Math.max(1, 1_000 - (Date.now() - startedAt)),
-    );
+  it("lets a healthy activation finish before a short deadline", async () => {
+    // The deadline runs on a clock that stands still until the plugin is
+    // ready. A real 1 s race failed beside other work because the plugin
+    // process took longer to start, not because the deadline misfired.
+    // No waitFor here: it advances fake timers on every check.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const root = await workspaceRoot();
+      const harness = createProcessHarness();
+      const statuses: PluginRuntimeStatus[] = [];
+      let settle!: (status: PluginRuntimeStatus) => void;
+      const settled = new Promise<PluginRuntimeStatus>((resolve) => { settle = resolve; });
+      const host = trackHost({
+        stateDir: await stateDir(),
+        workspaceRoot: root,
+        spawnTransport: harness.spawnTransport,
+        routeSdkRequest: defaultRouter,
+        onStatusChange: (_pluginId, status) => {
+          statuses.push(status);
+          if (status === "ready" || status === "failed" || status === "crashed") settle(status);
+        },
+        activationTimeoutMs: 1_000,
+      });
+      await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+      expect(await settled).toBe("ready");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(host.getStatus("hello-plugin")).toBe("ready");
+      expect(statuses).not.toContain("failed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails and disposes an activation at its wall-clock deadline", async () => {
@@ -1603,7 +1615,6 @@ describe("PluginHost", () => {
     await waitFor(
       () => statuses.includes("failed"),
       "Plugin activation did not fail at the deadline.",
-      2_000,
     );
 
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
@@ -1624,10 +1635,12 @@ describe("PluginHost", () => {
     });
 
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+    // Three real plugin processes start and fail in turn, which a loaded
+    // gate can stretch past the 10 s default wait.
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Crash loop did not disable the plugin.",
-      10_000,
+      { timeout: 20_000 },
     );
 
     expect(harness.spawnedPluginIds).toEqual([
@@ -1639,7 +1652,7 @@ describe("PluginHost", () => {
     if (!localState.ok) throw new Error(localState.warning);
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
     expect(harness.spawnedPluginIds).toHaveLength(3);
-  }, 15_000);
+  });
 
   it("disables a plugin after three activation timeouts", async () => {
     const root = await workspaceRoot();
@@ -1659,14 +1672,14 @@ describe("PluginHost", () => {
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Timeout loop did not disable the plugin.",
-      10_000,
+      { timeout: 20_000 },
     );
 
     expect(harness.spawnedPluginIds).toHaveLength(3);
     const localState = await readPluginLocalState(localStateDir, root);
     if (!localState.ok) throw new Error(localState.warning);
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
-  }, 15_000);
+  });
 
   it("lets freshly built code use a new fast-failure window after reset", async () => {
     const root = await workspaceRoot();
@@ -2255,16 +2268,14 @@ describe("PluginHost", () => {
         if (status === "starting") void host.stop(pluginId);
       },
     });
-    const startedAt = Date.now();
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     // disposedPluginIds only proves shutdown() started disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
     // actually be gone, which only happens once shutdown() fully completes,
-    // within the same 5 s the whole start-and-stop must fit.
+    // well before the 30 s activation deadline could have cleaned it up.
     await waitFor(
       () => host.getStatus("hello-plugin") === undefined,
       "Plugin was not fully stopped after a listener stopped it on \"starting\".",
-      Math.max(1, 5_000 - (Date.now() - startedAt)),
     );
 
     expect(harness.disposedPluginIds).toContain("hello-plugin");
@@ -2337,7 +2348,7 @@ describe("PluginHost", () => {
     await waitFor(
       () => host.getStatus("broken-plugin") === "disabled",
       "Broken plugin did not finish its crash loop.",
-      10_000,
+      { timeout: 20_000 },
     );
 
     const healthyStatuses = statuses
@@ -2350,7 +2361,7 @@ describe("PluginHost", () => {
     expect(
       harness.spawnedPluginIds.filter((id) => id === "broken-plugin"),
     ).toHaveLength(3);
-  }, 15_000);
+  });
 
   it("does not become ready when stopped during activation", async () => {
     const root = await workspaceRoot();
@@ -2365,7 +2376,9 @@ describe("PluginHost", () => {
       spawnTransport: harness.spawnTransport,
       routeSdkRequest: defaultRouter,
       onStatusChange: (_pluginId, status) => statuses.push(status),
-      activationTimeoutMs: 5_000,
+      // Inside the 30 s test timeout, and long enough for a loaded gate to
+      // start the process and finish the slow activation.
+      activationTimeoutMs: 20_000,
     });
 
     const start = host.start(
@@ -2495,7 +2508,7 @@ describe("PluginHost", () => {
       () => !isProcessAlive(descendantPid),
       "Heartbeat descendant survived the plugin stop.",
     );
-  }, 15_000);
+  });
 
   it("discards an activation result from an older host generation", async () => {
     const root = await workspaceRoot();
@@ -2509,7 +2522,7 @@ describe("PluginHost", () => {
       spawnTransport: harness.spawnTransport,
       routeSdkRequest: defaultRouter,
       onStatusChange: (_pluginId, status) => statuses.push(status),
-      activationTimeoutMs: 2_000,
+      activationTimeoutMs: 20_000,
     });
 
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());

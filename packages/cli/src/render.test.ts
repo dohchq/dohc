@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  renderChannels,
+  renderGroups,
   renderGrep,
   renderInbox,
   renderShowMarkdown,
@@ -16,14 +16,14 @@ const engineering = {
   id: "ch_123",
   name: "Engineering",
   slug: "engineering",
-  kind: "channel" as const,
+  kind: "group" as const,
 };
 
 const showResult: ShowResult = {
   thread: {
     id: "th_8f2k1c",
     title: "Conflict handling should feel like a doc editor",
-    channel: engineering,
+    group: engineering,
     commentCount: 1,
     openDecisionCount: 1,
   },
@@ -103,16 +103,16 @@ describe("markdown renderers", () => {
     ).toContain("open decisions: none");
   });
 
-  it("uses my-agent for the agent channel and keeps every channel id", () => {
+  it("uses my-agent for the agent group and keeps every group id", () => {
     expect(
-      renderChannels({
-        channels: [
+      renderGroups({
+        groups: [
           engineering,
           { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
         ],
       }),
     ).toMatchInlineSnapshot(`
-      "Engineering · #engineering · channel · ch_123
+      "Engineering · #engineering · group · ch_123
       my-agent · #my-agent · agent · ch_agent"
     `);
   });
@@ -120,7 +120,7 @@ describe("markdown renderers", () => {
   it("marks unread threads", () => {
     expect(
       renderThreads({
-        channel: engineering,
+        group: engineering,
         threads: [
           {
             id: "th_unread",
@@ -137,7 +137,7 @@ describe("markdown renderers", () => {
 
   it("labels agent authors in inbox mentions without relabeling humans", () => {
     const common = {
-      channel: engineering,
+      group: engineering,
       threadId: "th_8f2k1c",
       createdAtMs: Date.parse("2026-07-03T05:06:07.000Z"),
     };
@@ -169,7 +169,7 @@ describe("markdown renderers", () => {
     const result = {
       matches: [
         {
-          channel: engineering,
+          group: engineering,
           threadId: "th_8f2k1c",
           messageId: "msg_reply",
           author: { kind: "agent" as const, displayName: "Sam" },

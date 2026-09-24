@@ -42,10 +42,11 @@ beforeAll(() => {
 
 // Load the real Mermaid and KaTeX packages before the bounded assertion starts.
 // The assertion still exercises Mermaid's real lazy flowchart render and
-// KaTeX output; this keeps cold module evaluation outside its 15-second budget.
+// KaTeX output; this keeps cold module evaluation outside the test's bound.
+// Beside other work the cold import passed 60 s and the render passed 30 s.
 beforeAll(async () => {
   await Promise.all([import("mermaid"), import("katex")]);
-}, 30_000);
+}, 120_000);
 
 afterAll(() => {
   vi.restoreAllMocks();
@@ -67,24 +68,20 @@ afterAll(() => {
 });
 
 describe("renderMermaidDiagram with math", () => {
-  it(
-    "renders a math-bearing diagram through Mermaid and KaTeX",
-    async () => {
-      const { svg } = await renderMermaidDiagram(
-        "dohc-mermaid-math",
-        String.raw`flowchart LR
+  it("renders a math-bearing diagram through Mermaid and KaTeX", async () => {
+    const { svg } = await renderMermaidDiagram(
+      "dohc-mermaid-math",
+      String.raw`flowchart LR
   A["$$\frac{x^2}{y}$$"] --> B[done]`,
-      );
+    );
 
-      const rendered = document.createElement("div");
-      rendered.innerHTML = svg;
+    const rendered = document.createElement("div");
+    rendered.innerHTML = svg;
 
-      expect(rendered.querySelector("svg")).not.toBeNull();
-      expect(rendered.querySelector(".node .katex math")).not.toBeNull();
-      expect(rendered.textContent).not.toContain(
-        "MathML is unsupported in this environment.",
-      );
-    },
-    15_000,
-  );
+    expect(rendered.querySelector("svg")).not.toBeNull();
+    expect(rendered.querySelector(".node .katex math")).not.toBeNull();
+    expect(rendered.textContent).not.toContain(
+      "MathML is unsupported in this environment.",
+    );
+  }, 60_000);
 });

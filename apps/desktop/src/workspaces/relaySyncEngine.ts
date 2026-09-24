@@ -48,8 +48,9 @@ export interface CloudSyncEngineOptions {
   // every sync pass (push member ops, pull peers'). Best-effort — the
   // callback owns its own error handling (revocation marking, logging); a
   // throw here is logged and never fails the workspace's own pass, so a
-  // revoked share can't wedge file sync into permanent backoff.
-  syncSharedChannels?: () => Promise<void>;
+  // revoked share can't wedge file sync into permanent backoff. Resolves true
+  // when it applied ops, so a quiet pass announces its end.
+  syncSharedChannels?: () => Promise<boolean>;
   // Runs after the workspace pull has fully succeeded through the capture
   // gate (including materialization and cursor commit). Follow-up projection
   // work such as live chat bookmarks must be prompt, but is ancillary: a
@@ -89,6 +90,7 @@ export interface CloudSyncSnapshot {
 export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
+  queuePull(): void;
   // Runs a pass now instead of waiting out the backoff, and settles when it
   // ends. The outcome is in the next snapshot, not in the promise. A pass that
   // does not count as an attempt (a retry on reconnecting or waking) updates
@@ -120,16 +122,28 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  // A pull the Chats polls asked for while local writes held the debounce.
+  let pullTimer: ReturnType<typeof setTimeout> | undefined;
   // When the pending backoff pass is due, so a failed retry someone asked for
   // can keep that deadline instead of moving it.
   let backoffDueAtMs: number | null = null;
   let retryQueued = false;
+  // Passes queued on the chain or running. Each of them pulls.
+  let passesPending = 0;
+  // Counts change events, so a quiet pass knows whether anything announced
+  // `syncing` while it ran.
+  let changeEvents = 0;
   let chain: Promise<void> = Promise.resolve();
+
+  function emitChange(): void {
+    changeEvents += 1;
+    options.onChange();
+  }
 
   function setSyncFailure(value: CloudSyncFailure | null): void {
     if (syncFailure === value) return;
     syncFailure = value;
-    options.onChange();
+    emitChange();
   }
 
   function clearTimers(): void {
@@ -140,6 +154,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (backoffTimer !== undefined) {
       clearTimeout(backoffTimer);
       backoffTimer = undefined;
+    }
+    if (pullTimer !== undefined) {
+      clearTimeout(pullTimer);
+      pullTimer = undefined;
     }
   }
 
@@ -173,7 +191,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       // The expired sign-in is the state now; an older failure is not.
       syncFailure = null;
       clearTimers();
-      options.onChange();
+      emitChange();
       return;
     }
     setSyncFailure({
@@ -192,7 +210,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     );
   }
 
-  async function doPass(): Promise<void> {
+  // Resolves true when the workspace pull or the shared-channel pass applied
+  // ops. The shared-channel pass tells the renderer itself, and the renderer
+  // then reads `syncing`, so a quiet pass must announce that it ended.
+  async function doPass(): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
     let passOwnerPending = ownerAdmissionPending;
@@ -248,9 +269,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // Shared channels ride the same cadence but never gate the pass: chat
     // replay touches no workspace files, so it runs outside runRelaySync's
     // capture gate, and its failures are contained here.
+    let sharedChannelsApplied = false;
     if (options.syncSharedChannels) {
       try {
-        await options.syncSharedChannels();
+        sharedChannelsApplied = await options.syncSharedChannels();
       } catch (error) {
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
@@ -281,40 +303,67 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         void runPass(false);
       }, 0);
     }
+    return pullResult.applied > 0 || sharedChannelsApplied;
   }
 
+  // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
+  // every pass, so they do not count.
+  function visibleState(): string {
+    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
+  }
+
+  // A quiet pass serves queuePull. Each change event refreshes Chats, so a
+  // quiet pass announces nothing at its start, and at its end only when it
+  // applied ops, changed what the snapshot shows, or something announced
+  // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
+  // `retry` marks a pass someone asked for with retryNow.
   function runPass(
     rethrow: boolean,
-    manual = false,
-    countsAsAttempt = true,
+    quiet = false,
+    retry?: { countsAsAttempt: boolean },
   ): Promise<void> {
+    passesPending += 1;
+    // This pass pulls, so it serves a pull waiting on its own deadline.
+    if (pullTimer !== undefined) {
+      clearTimeout(pullTimer);
+      pullTimer = undefined;
+    }
     const result = chain.then(async () => {
-      if (stopped) return;
-      // A retry someone asked for keeps the automatic pass it displaces, in
-      // case it fails. `undefined` marks an automatic pass.
-      const displacedDueAtMs = manual
-        ? backoffTimer !== undefined
-          ? backoffDueAtMs
-          : null
-        : undefined;
-      // This pass carries everything queued so far, so any timer waiting to
-      // start another is now stale. Its own outcome sets the next one. Done
-      // here, in the serialized lifecycle, so a pass that ends before this
-      // one starts cannot leave its backoff behind.
-      clearTimers();
-      retryQueued = false;
-      syncing = true;
-      retrying = manual;
-      options.onChange();
       try {
-        await doPass();
-      } catch (error) {
-        handleFailure(error, displacedDueAtMs, countsAsAttempt);
-        if (rethrow) throw error;
+        if (stopped) return;
+        // A retry someone asked for keeps the automatic pass it displaces, in
+        // case it fails. `undefined` marks an automatic pass.
+        const displacedDueAtMs = retry
+          ? backoffTimer !== undefined
+            ? backoffDueAtMs
+            : null
+          : undefined;
+        // This pass carries everything queued so far, so any timer waiting to
+        // start another is now stale. Its own outcome sets the next one. Done
+        // here, in the serialized lifecycle, so a pass that ends before this
+        // one starts cannot leave its backoff behind.
+        clearTimers();
+        retryQueued = false;
+        const eventsBefore = changeEvents;
+        const stateBefore = visibleState();
+        let applied = false;
+        syncing = true;
+        retrying = retry !== undefined;
+        if (!quiet) emitChange();
+        try {
+          applied = await doPass();
+        } catch (error) {
+          handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
+          if (rethrow) throw error;
+        } finally {
+          syncing = false;
+          retrying = false;
+          if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+            emitChange();
+          }
+        }
       } finally {
-        syncing = false;
-        retrying = false;
-        options.onChange();
+        passesPending -= 1;
       }
     });
     chain = result.catch(() => undefined);
@@ -329,7 +378,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     queueSync() {
       if (authExpired || stopped) return;
       pendingChangeCount += 1;
-      options.onChange();
+      emitChange();
       if (backoffTimer !== undefined) {
         retryQueued = true;
         return;
@@ -341,9 +390,29 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }, debounceMs);
     },
 
+    // A pull the Chats polls ask for. Members' replies to conversations this
+    // workspace owns land in its own relay log, and nothing else fetches them
+    // while the desktop is idle. Unlike queueSync this records no local change,
+    // so a poll cannot show "Local changes". It yields to a queued or running
+    // pass and to failure backoff, because those pull too. Each local write
+    // restarts the debounce, so the pull keeps its own deadline: steady writes
+    // cannot postpone it past one debounce interval.
+    queuePull() {
+      if (authExpired || stopped) return;
+      if (passesPending > 0 || backoffTimer !== undefined || pullTimer !== undefined) return;
+      if (debounceTimer === undefined) {
+        void runPass(false, true);
+        return;
+      }
+      pullTimer = setTimeout(() => {
+        pullTimer = undefined;
+        void runPass(false, true);
+      }, debounceMs);
+    },
+
     retryNow(options) {
       if (authExpired || stopped) return Promise.resolve();
-      return runPass(false, true, options.countsAsAttempt);
+      return runPass(false, false, options);
     },
 
     snapshot() {

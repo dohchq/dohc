@@ -1478,6 +1478,31 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("reports each applied page of a shared-channel pull before a later page fails", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.channel.pull") return undefined;
+      pulls += 1;
+      if (pulls >= 2) {
+        throw new EngineRequestError(request.id, {
+          code: "OVERLOADED",
+          message: "relay unreachable",
+          retry: "no",
+        });
+      }
+      return { fetched: 1, applied: 1, refused: 0, skipped: 0, hasMore: true, nextCursor: pulls };
+    });
+    const { client, sessions } = await harness(daemon);
+    const onApplied = vi.fn();
+
+    await expect(
+      client.pullSharedChannel({ shareId: "share-channel", channelWireId: "wire-channel", onApplied }),
+    ).rejects.toThrow();
+    expect(pulls).toBe(2);
+    expect(onApplied).toHaveBeenCalledTimes(1);
+    await sessions.closeAll();
+  });
+
   it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
     const { daemon, routes, sessions } = await harness();
 

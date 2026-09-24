@@ -1933,6 +1933,14 @@ pub fn archive_active_lineage_in_tx(
             reason: "archived Y.Doc lineage marker vanished during its transaction".to_owned(),
         });
     }
+    // A base still waiting to learn its relay position belongs to the lineage
+    // just archived, and no later lineage of this object may inherit it.
+    tx.execute(
+        "DELETE FROM ydoc_base_relay_candidates \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
     Ok(())
 }
 

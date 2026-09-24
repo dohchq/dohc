@@ -12,7 +12,9 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1") {
     throw new Error("Account browser acceptance requires an explicit disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
   }
-  const pool = new Pool({ connectionString, connectionTimeoutMillis: 2000 });
+  // Under the full JS gate a 2 s connect bound timed out against a healthy
+  // database; a refused connection still fails at once.
+  const pool = new Pool({ connectionString, connectionTimeoutMillis: 30_000 });
   await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"));
   const port = options.port ?? await availablePort();
   const listenOrigin = `http://127.0.0.1:${port}`;

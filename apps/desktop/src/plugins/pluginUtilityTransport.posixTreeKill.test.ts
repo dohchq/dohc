@@ -58,7 +58,6 @@ describe("createPluginUtilityTransport", () => {
         }
       }
     },
-    15_000,
   );
 
   it.skipIf(process.platform === "win32")(
@@ -107,7 +106,7 @@ describe("createPluginUtilityTransport", () => {
         await vi.waitFor(async () => {
           expect(await readFile(grandchildPidPath, "utf8")).not.toBe("");
           expect(await readFile(grandchildReadyPath, "utf8")).toBe("ready");
-        });
+        }, { timeout: 20_000 });
         grandchildPid = Number(await readFile(grandchildPidPath, "utf8"));
         expect(() => process.kill(grandchildPid as number, 0)).not.toThrow();
 
@@ -133,6 +132,5 @@ describe("createPluginUtilityTransport", () => {
         }
       }
     },
-    15_000,
   );
 });

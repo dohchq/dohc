@@ -269,6 +269,72 @@ const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
+// How long a failed DM sync holds the DM syncs nobody asked for. The relay is
+// down or slow, and a sync that queued behind a slow failure would otherwise
+// run again the moment it ends.
+const DM_SYNC_HOLD_MS = 15_000;
+
+// Why a DM sync runs, and what the cause allows.
+// - `pull`: main also pulls this workspace's relay log, where members' replies
+//   to owned DMs and Groups land. Only the view's own schedule pulls. A sync
+//   that reacts to an activity event must not, because the pull's own events
+//   would cause another one.
+// - `asked`: a person is waiting on it, so it runs during a hold.
+const DM_SYNC_CAUSES = {
+  // Chats or a conversation opened.
+  open: { pull: true, asked: true },
+  // A poll timer.
+  tick: { pull: true, asked: false },
+  // A workspace activity event.
+  activity: { pull: false, asked: false },
+  // A person's action changed the list.
+  person: { pull: false, asked: true },
+} as const;
+type DmSyncCause = keyof typeof DM_SYNC_CAUSES;
+
+interface DmSyncRequest {
+  pull: boolean;
+  asked: boolean;
+}
+
+interface OpenDmSyncRequest extends DmSyncRequest {
+  dm: DmRecord;
+}
+
+// A call that lands mid-sync joins the pass queued behind it.
+function queueDmSync(queued: DmSyncRequest | null, cause: DmSyncCause): DmSyncRequest {
+  const next = DM_SYNC_CAUSES[cause];
+  return {
+    pull: next.pull || queued?.pull === true,
+    asked: next.asked || queued?.asked === true,
+  };
+}
+
+// The list and the open conversation share one hold. The newest sync to
+// settle decides it: a failure holds, a success clears. A sync that settles
+// after a newer one changes nothing, and a workspace or session change
+// settles every sync still in flight.
+interface DmSyncHold {
+  issued: number;
+  settled: number;
+  until: number;
+}
+
+function settleDmSync(hold: DmSyncHold, sync: number, failed: boolean): void {
+  if (sync <= hold.settled) return;
+  hold.settled = sync;
+  hold.until = failed ? Date.now() + DM_SYNC_HOLD_MS : 0;
+}
+
+function resetDmSyncHold(hold: DmSyncHold): void {
+  hold.settled = hold.issued;
+  hold.until = 0;
+}
+
+function dmSyncHeld(hold: DmSyncHold, request: DmSyncRequest): boolean {
+  return !request.asked && Date.now() < hold.until;
+}
+
 interface ChatsComposerReplyTarget {
   messageId: string;
   authorLabel: string;
@@ -1153,24 +1219,43 @@ export function ChatsView(props: {
   // A call landing mid-sync is not dropped: it runs exactly one more pass when
   // the sync settles. A drain whose token era ended can commit nothing, so the
   // next caller takes the slot instead of queueing onto it.
-  const dmSync = useRef<{ token: number; pending: boolean } | null>(null);
+  //
+  // The cause decides whether main may pull and whether a failed sync holds
+  // the pass (DM_SYNC_CAUSES). The queued pass checks the hold again, so a
+  // sync that queued behind a slow failure waits it out unless a person
+  // asked for it.
+  const dmSync = useRef<{ token: number; queued: DmSyncRequest | null } | null>(null);
+  const dmSyncHold = useRef<DmSyncHold>({ issued: 0, settled: 0, until: 0 });
   const keepAcceptedNoticeRef = useRef(false);
-  const refreshDms = useCallback(async () => {
+  const refreshDms = useCallback(async (cause: DmSyncCause) => {
     const active = dmSync.current;
     if (active !== null && active.token === liveToken.current) {
-      active.pending = true;
+      active.queued = queueDmSync(active.queued, cause);
       return;
     }
-    const mine = { token: liveToken.current, pending: false };
+    const mine: { token: number; queued: DmSyncRequest | null } = {
+      token: liveToken.current,
+      queued: queueDmSync(null, cause),
+    };
     dmSync.current = mine;
     try {
-      do {
-        mine.pending = false;
-        mine.token = liveToken.current;
+      while (
+        mine.queued !== null &&
+        mine.token === liveToken.current &&
+        dmSync.current === mine
+      ) {
+        const request = mine.queued;
+        mine.queued = null;
+        if (dmSyncHeld(dmSyncHold.current, request)) return;
         const token = mine.token;
         const session = sessionGeneration.current;
+        const sync = ++dmSyncHold.current.issued;
         try {
-          const result = await bridge().syncDms({ workspaceId });
+          const result = await bridge().syncDms({
+            workspaceId,
+            ...(request.pull ? { poll: true } : {}),
+          });
+          settleDmSync(dmSyncHold.current, sync, result.failed);
           if (token !== liveToken.current) return;
           if (session !== sessionGeneration.current) continue;
           setDmAvailable(result.available);
@@ -1186,11 +1271,7 @@ export function ChatsView(props: {
         } catch {
           // DMs are optional: Chats stays fully usable without them.
         }
-      } while (
-        mine.pending &&
-        mine.token === liveToken.current &&
-        dmSync.current === mine
-      );
+      }
     } finally {
       if (dmSync.current === mine) dmSync.current = null;
     }
@@ -1200,6 +1281,7 @@ export function ChatsView(props: {
   useEffect(() => {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
+    resetDmSyncHold(dmSyncHold.current);
     paintedDmRevision.current = null;
     resetForWorkspace();
     setDmRestoreReady(false);
@@ -1256,7 +1338,7 @@ export function ChatsView(props: {
     setBookmarkBusy(new Set());
     setOverview({ status: "loading" });
     void refreshOverview();
-    void refreshDms();
+    void refreshDms("open");
     void refreshBookmarks();
     return () => {
       liveToken.current += 1;
@@ -1355,7 +1437,7 @@ export function ChatsView(props: {
   // relay/sync cadence for no benefit.
   useEffect(() => {
     if (props.suspendPolling || nav.level === "dm") return;
-    const interval = setInterval(() => void refreshDms(), 5_000);
+    const interval = setInterval(() => void refreshDms("tick"), 5_000);
     return () => clearInterval(interval);
   }, [refreshDms, nav.level, props.suspendPolling]);
 
@@ -1391,7 +1473,7 @@ export function ChatsView(props: {
     const revision = props.dmReadRevision;
     if (revision === seenDmReadRevision.current) return;
     seenDmReadRevision.current = revision;
-    void refreshDms();
+    void refreshDms("person");
   }, [props.dmReadRevision, refreshDms]);
 
   const loadChannelSnapshot = useCallback(
@@ -1453,7 +1535,7 @@ export function ChatsView(props: {
         applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this channel."));
+        props.onError(ipcErrorMessage(error, "Could not load this group."));
       } finally {
         if (
           token === liveToken.current &&
@@ -1561,17 +1643,20 @@ export function ChatsView(props: {
     [onDmRead, workspaceId],
   );
 
-  const refreshOpenDm = useCallback(
-    async (dm: DmRecord, token: number) => {
+  const syncOpenDm = useCallback(
+    async (dm: DmRecord, token: number, pull: boolean) => {
       const session = sessionGeneration.current;
       const request = ++dmRefreshSeq.current;
+      const sync = ++dmSyncHold.current.issued;
       try {
         // Name the open DM: the main-side shared-channel pass is bounded, so an
         // unnamed poll can refresh 16 other channels and leave this one stale.
         const result = await bridge().syncDms({
           workspaceId,
           openChannelId: dm.channelId,
+          ...(pull ? { poll: true } : {}),
         });
+        settleDmSync(dmSyncHold.current, sync, result.failed);
         if (
           token !== liveToken.current ||
           request !== dmRefreshSeq.current ||
@@ -1625,6 +1710,41 @@ export function ChatsView(props: {
       }
     },
     [loadDmConversation, workspaceId],
+  );
+
+  // One conversation sync in flight, like refreshDms. A slow relay would
+  // otherwise stack a sync per tick in main, and they would all run the
+  // moment the first one failed. A call that lands mid-sync queues one more
+  // pass for the DM it names, and that pass checks the hold again first.
+  const openDmSync = useRef<{ token: number; queued: OpenDmSyncRequest | null } | null>(null);
+  const refreshOpenDm = useCallback(
+    async (dm: DmRecord, token: number, cause: DmSyncCause) => {
+      const active = openDmSync.current;
+      if (active !== null && active.token === token) {
+        active.queued = { dm, ...queueDmSync(active.queued, cause) };
+        return;
+      }
+      const mine: { token: number; queued: OpenDmSyncRequest | null } = {
+        token,
+        queued: { dm, ...queueDmSync(null, cause) },
+      };
+      openDmSync.current = mine;
+      try {
+        while (
+          mine.queued !== null &&
+          token === liveToken.current &&
+          openDmSync.current === mine
+        ) {
+          const request = mine.queued;
+          mine.queued = null;
+          if (dmSyncHeld(dmSyncHold.current, request)) return;
+          await syncOpenDm(request.dm, token, request.pull);
+        }
+      } finally {
+        if (openDmSync.current === mine) openDmSync.current = null;
+      }
+    },
+    [syncOpenDm],
   );
 
   // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
@@ -1756,8 +1876,9 @@ export function ChatsView(props: {
         void refreshChannelBadges();
         // The DM roll-up lives on the same list and used to wait for the 5s
         // poll beside a live channel badge. Same signal, same moment —
-        // refreshDms coalesces the burst itself.
-        void refreshDms();
+        // refreshDms coalesces the burst itself. The activity cause never
+        // pulls: a sync event caused this, and a pull would fire another.
+        void refreshDms("activity");
         return;
       }
       if (nav.level === "feed") {
@@ -1786,7 +1907,8 @@ export function ChatsView(props: {
               }
             });
         } else {
-          void refreshOpenDm(nav.dm, token);
+          // Not a poll, for the same reason as the list above.
+          void refreshOpenDm(nav.dm, token, "activity");
         }
         return;
       }
@@ -2218,12 +2340,16 @@ export function ChatsView(props: {
         }
         props.onError(ipcErrorMessage(error, "Could not load this conversation."));
       } finally {
-        if (token === liveToken.current && request === dmRefreshSeq.current) {
-          setMessagesLoading(false);
+        if (token === liveToken.current) {
+          if (request === dmRefreshSeq.current) setMessagesLoading(false);
+          // A person opened this conversation, so its first sync runs during
+          // a hold. It starts after the local paint, because it would
+          // otherwise supersede that paint and wait on the relay.
+          void refreshOpenDm(dm, token, "open");
         }
       }
     },
-    [loadDmConversation, props.onError],
+    [loadDmConversation, props.onError, refreshOpenDm],
   );
 
   const openFeed = useCallback(() => {
@@ -2372,17 +2498,16 @@ export function ChatsView(props: {
   ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers'),
-  // then reload only when its content revision changed. Pending DMs also sync
-  // immediately so they can acquire their relay-created thread while the outer
-  // list poll is paused. Token and request guards prevent an older pass from
-  // repainting a newer snapshot or a local send.
+  // then reload only when its content revision changed. openDm runs the first
+  // sync, once per opening; a refresh that updates this DM's fields changes
+  // nav but is not an opening. Token and request guards prevent an older pass
+  // from repainting a newer snapshot or a local send.
   useEffect(() => {
     if (props.suspendPolling || nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
-    if (!dm.threadId) void refreshOpenDm(dm, token);
     const interval = setInterval(
-      () => void refreshOpenDm(dm, token),
+      () => void refreshOpenDm(dm, token, "tick"),
       4_000,
     );
     return () => clearInterval(interval);
@@ -2521,7 +2646,7 @@ export function ChatsView(props: {
         setAcceptingDmRequest(null);
         if (chosenWorkspaceId === workspaceId) {
           openConversation({ level: "dm", dm: result.dm });
-          void refreshDms();
+          void refreshDms("person");
         } else {
           const label =
             props.workspaces.find(
@@ -2532,7 +2657,7 @@ export function ChatsView(props: {
             workspaceLabel: label,
           });
           keepAcceptedNoticeRef.current = true;
-          void refreshDms();
+          void refreshDms("person");
         }
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -2558,7 +2683,7 @@ export function ChatsView(props: {
           : bridge().requestDmAgain;
         await updateRequest({ shareId: request.shareId });
         if (token !== liveToken.current) return;
-        await refreshDms();
+        await refreshDms("person");
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(
@@ -2885,8 +3010,10 @@ export function ChatsView(props: {
       if (changed) {
         // Everything issued under the previous session is now stale: a read
         // still in flight must not land the old account's rows after the
-        // clear below.
+        // clear below. A failure under the previous account says nothing
+        // about this one, so its hold goes too.
         sessionGeneration.current += 1;
+        resetDmSyncHold(dmSyncHold.current);
         // And the previous session's rows leave the screen now, not when
         // the next listing resolves — a stalled relay would otherwise keep
         // showing another account's invitations and emails indefinitely.
@@ -2918,7 +3045,7 @@ export function ChatsView(props: {
         setReactions([]);
         setViewerAuthorId("");
         setComposer("");
-        void refreshDms();
+        void refreshDms("person");
         void refreshShares();
         return;
       }
@@ -2957,7 +3084,7 @@ export function ChatsView(props: {
       await refreshShares();
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not share that channel."));
+      props.onError(ipcErrorMessage(error, "Could not share that group."));
     } finally {
       setShareBusy(false);
     }
@@ -3027,7 +3154,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not join that channel."));
+        props.onError(ipcErrorMessage(error, "Could not join that group."));
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
         // refreshOverview bumps liveToken itself, so a token-equality check
@@ -3053,7 +3180,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that channel."));
+        props.onError(ipcErrorMessage(error, "Could not leave that group."));
       }
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
@@ -3093,7 +3220,7 @@ export function ChatsView(props: {
         openConversation({ level: "channel", channel: result.channel });
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not create that channel."));
+        props.onError(ipcErrorMessage(error, "Could not create that group."));
       }
     },
     [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
@@ -3130,7 +3257,7 @@ export function ChatsView(props: {
       // shows a stale, unrelated "To:" that could misdirect the next send.
       setDmRecipients("");
       setDmDraft("");
-      void refreshDms();
+      void refreshDms("person");
     }
   }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
@@ -3973,8 +4100,8 @@ export function ChatsView(props: {
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
-                ? "This channel is no longer shared with you. You can still read it."
-                : "This channel is read-only for you."}
+                ? "This group is no longer shared with you. You can still read it."
+                : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
             <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
@@ -4453,8 +4580,8 @@ export function ChatsView(props: {
         {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
-              ? "This channel is no longer shared with you. You can still read it."
-              : "This channel is read-only for you."}
+              ? "This group is no longer shared with you. You can still read it."
+              : "This group is read-only for you."}
           </ComposerNotice>
         ) : null}
       </div>

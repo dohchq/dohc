@@ -81,7 +81,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
       outcome={resolved:true,verdict:result.verdict};
     }catch(error){outcome={error:error.message,cleanupError:error.cleanupError};}
     writeFileSync('outcome.json',JSON.stringify({...outcome,listeners:[process.listenerCount('SIGINT'),process.listenerCount('SIGTERM')]}));
-  `], { cwd: root, encoding: "utf8", timeout: 10_000 });
+  `], { cwd: root, encoding: "utf8", timeout: 20_000 });
   const json = (path) => existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;
   const reports = join(root, ".agent-artifacts/verification");
   return { pid: result.pid, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr,

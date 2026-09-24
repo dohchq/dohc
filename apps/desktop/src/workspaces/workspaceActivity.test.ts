@@ -100,15 +100,12 @@ describe("workspaceActivity capture hooks", () => {
 
     await writeFile(join(root, "changed.md"), "changed");
 
-    await vi.waitFor(
-      () => {
-        expect(notify).toHaveBeenCalledWith({
-          workspaceId: "activity-test",
-          paths: ["changed.md"],
-        });
-      },
-      { timeout: 3_000 },
-    );
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith({
+        workspaceId: "activity-test",
+        paths: ["changed.md"],
+      });
+    });
     await activity.stopAll();
   });
 
@@ -256,6 +253,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -301,6 +299,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
@@ -331,6 +330,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -383,6 +383,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           start: async () => undefined,
           queueSync: () => undefined,
+          queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -441,6 +442,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineFor: () => ({
           start: async () => undefined,
           queueSync: () => undefined,
+          queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -610,6 +612,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       engineFor: () => ({
         start: async () => undefined,
         queueSync: () => undefined,
+        queuePull: () => undefined,
         retryNow: async () => undefined,
         snapshot: () => ({
           syncFailure: null,

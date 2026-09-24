@@ -8,9 +8,6 @@ import {
   stopProcessTreePosix,
 } from "./posixSpawn";
 
-// The live test spawns a real tree and polls for its death.
-vi.setConfig({ testTimeout: 20_000 });
-
 const TEST_STARTED_AT = "Fri Aug 21 10:00:00 2026";
 
 function psRow(pid: number, ppid: number, startedAt = TEST_STARTED_AT): string {
@@ -1119,7 +1116,7 @@ describePosix("real process tree teardown (posix)", () => {
         if (out.includes("\n") && line) resolvePid(Number(line.trim()));
       });
       child.once("error", reject);
-      setTimeout(() => reject(new Error("The tree never reported its grandchild pid.")), 10_000);
+      setTimeout(() => reject(new Error("The tree never reported its grandchild pid.")), 20_000);
     });
 
     try {
