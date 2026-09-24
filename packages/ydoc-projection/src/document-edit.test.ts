@@ -2,7 +2,7 @@ import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
 import { describe, expect, test } from 'vitest'
 import * as Y from 'yjs'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { documentEditUpdate, documentMarkdown, type DocumentEdit } from './document-edit.js'
+import { documentCreateUpdate, documentEditUpdate, documentMarkdown, type DocumentEdit } from './document-edit.js'
 import { getDohcProseMirrorSchema, markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from './import-export.js'
 
 function edited(doc: Y.Doc, edit: DocumentEdit): Y.Doc {
@@ -111,6 +111,21 @@ describe('documentEditUpdate', () => {
     const state = Y.encodeStateVector(doc)
     expect(documentEditUpdate(doc, { find: 'Before', replacement: 'After' })).not.toBeNull()
     expect(Y.encodeStateVector(doc)).toEqual(state)
+  })
+})
+
+describe('documentCreateUpdate', () => {
+  test('writes the first text into a document with no blocks', () => {
+    const doc = new Y.Doc()
+    const update = documentCreateUpdate(doc, '# Kyoto\n\n- Day one\n- Day two')
+    Y.applyUpdate(doc, update!)
+    expect(documentMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+    expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+  })
+
+  test('refuses frontmatter, which would land as body blocks', () => {
+    expect(() => documentCreateUpdate(new Y.Doc(), '---\ntitle: Trip\n---\n\nBody.'))
+      .toThrow('without frontmatter')
   })
 })
 

@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
   CHATS_METHOD,
@@ -32,8 +32,15 @@ import {
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
-import { readWorkspaceText } from "../workspaces/workspaceAssets";
-import { documentEditUpdate, documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { readWorkspaceText, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
+import { createFile } from "../workspaces/workspaceFiles";
+import {
+  documentCreateUpdate,
+  documentEditUpdate,
+  documentMarkdown,
+  markdownToYDoc,
+} from "@dohc/ydoc-projection";
+import { lstat } from "node:fs/promises";
 
 // With no editor open, the file holds the document's settled text.
 async function settledMarkdown(rootPath: string, path: string): Promise<string> {
@@ -256,6 +263,38 @@ export function createDesktopCliServer<State>(
             origin,
             change: (current) => documentEditUpdate(current, edit),
           }),
+        create: async ({ path, markdown, origin }) => {
+          // An empty file, as the explorer's New file writes, and then the
+          // text through the new file's live session, like typing into it.
+          await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+            operation.assertCurrent();
+            if (sharedViewOf(workspace.workspaceId)) {
+              throw new Error("A shared view cannot create documents.");
+            }
+            const root = operation.workspace.rootPath;
+            await withStaleSensitiveWorkspaceOperation(root, async () => {
+              if (await lstat(join(root, path)).then(() => true, () => false)) {
+                throw new Error(`${path} already exists. Edit it instead.`);
+              }
+              await createFile(root, path, "");
+            });
+          });
+          try {
+            await liveDocuments.editDocument({
+              workspaceId: workspace.workspaceId,
+              path,
+              origin,
+              change: (current) => documentCreateUpdate(current, markdown),
+            });
+          } catch (error) {
+            const cause = error instanceof Error ? error.message : String(error);
+            throw new Error(
+              `dohc created ${path}, but could not write its text (${cause}). Edit the document to add it.`,
+              { cause: error },
+            );
+          }
+          return { path };
+        },
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit }) => {

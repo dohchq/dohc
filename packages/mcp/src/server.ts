@@ -18,6 +18,7 @@ import {
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
 import {
+  createDocument,
   createRecord,
   dataset,
   createWorkspaceDirectory,
@@ -29,6 +30,7 @@ import {
   readChat,
   replyToChat,
   startChannelChat,
+  startFileChat,
   createSite,
   deleteWorkspacePath,
   detectSites,
@@ -104,10 +106,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // that exist — `dohc_start_channel_chat` and `dohc_reply_to_chat` — are
   // CHANNEL tools, and a shared view refuses every channel write before the
   // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
-  // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
-  // a tool its own workspace always refuses is a promise the surface cannot
-  // keep, so the level is carried here for the tiers PR3 adds and grants
-  // nothing today.
+  // grants per-FILE chat, and `dohc_start_file_chat` writes it, but a shared
+  // view refuses every chat write in the desktop's chat write module. Offering
+  // an agent a tool its own workspace always refuses is a promise the surface
+  // cannot keep, so the level is carried here for the tiers PR3 adds and
+  // grants nothing today.
   const register = server.registerTool.bind(server);
   const skip = (() => undefined) as unknown as McpServer["registerTool"];
   // Every write tool, document and chat alike.
@@ -239,10 +242,23 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   registerWrite(
+    "dohc_create_document",
+    {
+      description:
+        "Create a Markdown document at a path that does not exist yet. `markdown` is its body text, without frontmatter. dohc writes it the way a person types into a new file, so later changes go through dohc_edit_document.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        markdown: z.string().max(256 * 1024).optional(),
+      },
+    },
+    async (args) => text(await createDocument(ctx, args, agentName())),
+  );
+
+  registerWrite(
     "dohc_write_file",
     {
       description:
-        "Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
+        "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -413,6 +429,21 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await startChannelChat(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_start_file_chat",
+    {
+      description:
+        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `runId` behaves as in dohc_start_channel_chat.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        title: z.string().min(1).max(200),
+        body: chatWriteInput.body,
+        runId: chatWriteInput.runId,
+      },
+    },
+    async (args) => text(await startFileChat(ctx, args)),
   );
 
   registerWrite(

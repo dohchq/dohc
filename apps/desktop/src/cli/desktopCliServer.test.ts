@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -287,6 +287,46 @@ describe("desktop CLI workspace context", () => {
     const current = markdownToYDoc("Draft plan.");
     Y.applyUpdate(current, input.change(current)!);
     expect(documentMarkdown(current)).toBe("Final plan.");
+  });
+
+  it("creates a document as an empty file, then writes its text through the live session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-create-"));
+    try {
+      await writeFile(join(root, "taken.md"), "Already here.\n");
+      const f = fixture(root);
+      const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
+      const created = new Map<string, Y.Doc>();
+      edit.mockImplementation(async (input) => {
+        // The file is on disk, empty, before the text goes to its session.
+        expect(await readFile(join(root, input.path), "utf8")).toBe("");
+        const doc = new Y.Doc();
+        const update = input.change(doc);
+        if (update) Y.applyUpdate(doc, update);
+        created.set(input.path, doc);
+        return { path: input.path, changed: update !== null };
+      });
+      const context = await f.create().openCliWorkspace(f.workspace);
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+
+      await expect(context.documents!.create({ path: "notes/new.md", markdown: "# New\n\nFirst line.", origin }))
+        .resolves.toEqual({ path: "notes/new.md" });
+      expect(documentMarkdown(created.get("notes/new.md")!)).toBe("# New\n\nFirst line.");
+      expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
+
+      await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
+        .rejects.toThrow("taken.md already exists. Edit it instead.");
+      expect(await readFile(join(root, "taken.md"), "utf8")).toBe("Already here.\n");
+
+      // The file stays, and the refusal names it, so the caller edits it
+      // instead of creating a second one.
+      edit.mockRejectedValueOnce(new Error("engine busy"));
+      await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
+        .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
+      expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
+      expect(edit).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("refuses a collection edit whose admitted physical workspace retires while its context opens", async () => {

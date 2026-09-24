@@ -1339,6 +1339,9 @@ describe("CLI socket server", () => {
         edits.push(input);
         return { path: input.path, changed: true };
       },
+      async create() {
+        throw new Error("creates are not under test");
+      },
     };
 
     await expect(invoke("documentRead", {
@@ -1390,6 +1393,87 @@ describe("CLI socket server", () => {
     ]);
   });
 
+  it("creates a Markdown document with provenance the door derives", async () => {
+    const creates: Array<Parameters<CliDocumentsPort["create"]>[0]> = [];
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit() {
+        throw new Error("edits are not under test");
+      },
+      async create(input) {
+        creates.push(input);
+        return { path: input.path };
+      },
+    };
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/new.md",
+      markdown: "# New",
+    })).resolves.toEqual({ ok: true, path: "notes/new.md" });
+    await expect(invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/board.excalidraw",
+      markdown: "",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a document path ends in .md or .markdown: notes/board.excalidraw",
+    });
+    expect(creates).toEqual([{
+      path: "notes/new.md",
+      markdown: "# New",
+      origin: {
+        actorOriginId: "claude-code",
+        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+      },
+    }]);
+  });
+
+  it("comments on a file through the chat write path a person's comment takes", async () => {
+    if (!store) throw new Error("Store is not available");
+    const started = await invoke("fileChatStart", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "tracked.md",
+      title: "Budget",
+      body: "Is 400 enough for food?",
+    });
+    if (!started.ok) throw new Error(started.reason);
+    expect(started.path).toBe("tracked.md");
+
+    // The comment is the file's chat, authored as the agent on behalf of
+    // the person, exactly as the agent's chat replies are.
+    await expect(invoke("fileChats", {
+      cwd: workspaceRoot, actor: "agent", path: "tracked.md",
+    })).resolves.toMatchObject({
+      ok: true,
+      threads: [{ id: started.threadId, title: "Budget", linkedPathHint: "tracked.md" }],
+    });
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: started.threadId });
+    expect(messages).toMatchObject([{
+      id: started.messageId,
+      body: "Is 400 enough for food?",
+      author: { kind: "agent", displayName: "Nova" },
+      authorOwnerDisplayName: "Sam",
+    }]);
+
+    // A file dohc does not track has no chats to start.
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "agent", path: "untracked.md", title: "T", body: "B",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track untracked.md") });
+
+    // A shared view refuses before the chat module is reached.
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "T", body: "B",
+    })).rejects.toThrow("chats are not available in a read-only shared view");
+  });
+
   it("refuses document edits it cannot attribute or place", async () => {
     let touched = 0;
     context.documents = {
@@ -1398,6 +1482,10 @@ describe("CLI socket server", () => {
         throw new Error("must not be reached");
       },
       async edit() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async create() {
         touched += 1;
         throw new Error("must not be reached");
       },
@@ -1429,7 +1517,7 @@ describe("CLI socket server", () => {
       actor: "agent",
       path: "notes/plan.md",
       replacement: "x",
-    })).rejects.toThrow("document edits are not available in a read-only shared view");
+    })).rejects.toThrow("document changes are not available in a read-only shared view");
     expect(touched).toBe(0);
   });
 

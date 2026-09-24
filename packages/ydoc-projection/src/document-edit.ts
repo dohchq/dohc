@@ -8,6 +8,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocPlainText,
+  markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
 } from './import-export.js'
@@ -73,6 +74,23 @@ export function documentEditUpdate(doc: Y.Doc, edit: DocumentEdit): Uint8Array |
     }
     return update
   })
+}
+
+/**
+ * The update that writes the first text into a new document. The text is
+ * the body only: frontmatter would reach the Y.Doc as body blocks, so it is
+ * refused.
+ */
+export function documentCreateUpdate(doc: Y.Doc, markdown: string): Uint8Array | null {
+  const parsed = markdownToYDoc(markdown)
+  try {
+    if (Object.keys(getDohcYDocFrontmatter(parsed)).length > 0) {
+      throw new Error('A new document starts without frontmatter. Write its body text only.')
+    }
+  } finally {
+    parsed.destroy()
+  }
+  return documentEditUpdate(doc, { replacement: markdown })
 }
 
 // Reading a Y.Doc as ProseMirror can delete elements the schema refuses. That
