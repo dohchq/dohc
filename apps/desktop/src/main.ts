@@ -4633,8 +4633,15 @@ function registerIpcHandlers(): void {
         window.webContents.send(CHANNELS.userSettingsChanged, result);
       }
     },
+    openPath: (path) => shell.openPath(path),
   });
   settingsIpc.registerSettingsIpcHandlers();
+  // The settings file applies when saved.
+  try {
+    settingsIpc.watchUserSettingsFile();
+  } catch (error) {
+    console.error("[desktop] settings file watch:", error);
+  }
 
   windowIpc.registerWindowControls();
 

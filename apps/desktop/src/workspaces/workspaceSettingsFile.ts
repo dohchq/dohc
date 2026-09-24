@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { WorkspaceSettings as WorkspaceSettingsContract } from "@dohc/workspace-contracts/workspace-settings";
 import * as Schema from "effect/Schema";
 import {
+  isSettingsObject,
+  overlaySettings,
+  readSettingsLeniently,
+  settingKinds,
+} from "../settings/settingsFile";
+import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
   WorkspaceSettings,
@@ -17,6 +23,35 @@ export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
 export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
 const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettingsContract);
+// The contract decides what is valid; the IPC mirror, bound to the contract
+// by type, lists the keys.
+const workspaceSettingKinds = settingKinds(WorkspaceSettings, DEFAULT_WORKSPACE_SETTINGS);
+
+function decodedOrNull(candidate: unknown): WorkspaceSettings | null {
+  try {
+    return decodeWorkspaceSettings(candidate);
+  } catch {
+    return null;
+  }
+}
+
+// The file as dohc found it, and what it means. A save writes onto `raw`, so
+// keys dohc does not use stay in the file.
+interface WorkspaceSettingsOnDisk {
+  raw: Record<string, unknown> | null;
+  result: WorkspaceSettingsResult;
+}
+
+// An unknown key, or a value dohc cannot use, turns off only that key.
+function settingsFromObject(raw: Record<string, unknown>): WorkspaceSettingsResult {
+  const { settings, ignored } = readSettingsLeniently({
+    raw,
+    defaults: DEFAULT_WORKSPACE_SETTINGS,
+    kind: workspaceSettingKinds,
+    parse: decodedOrNull,
+  });
+  return { settings, source: "stored", ...(ignored.length > 0 ? { ignored } : {}) };
+}
 
 // A settings file that EXISTS but cannot be read runs on defaults and carries
 // a warning Settings shows, so the user knows their choices are not in
@@ -39,6 +74,12 @@ async function workspaceSettingsPath(rootPath: string): Promise<string> {
 export async function readWorkspaceSettingsFile(
   rootPath: string,
 ): Promise<WorkspaceSettingsResult> {
+  return (await loadWorkspaceSettings(rootPath)).result;
+}
+
+async function loadWorkspaceSettings(
+  rootPath: string,
+): Promise<WorkspaceSettingsOnDisk> {
   // The metadata resolver refuses a symlinked or non-directory .dohc by
   // throwing, and its contract says readers stay tolerant by catching. A
   // throw here is the settings-unreadable class one level up — the FOLDER is
@@ -48,30 +89,45 @@ export async function readWorkspaceSettingsFile(
   try {
     path = await workspaceSettingsPath(rootPath);
   } catch {
-    return unreadableSettings(
-      "dohc cannot use the workspace's .dohc folder.",
-      join(rootPath, ".dohc"),
-    );
+    return {
+      raw: null,
+      result: unreadableSettings(
+        "dohc cannot use the workspace's .dohc folder.",
+        join(rootPath, ".dohc"),
+      ),
+    };
   }
   try {
     const fileStats = await lstat(path);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
-      return unreadableSettings(
-        "Workspace settings are not a file dohc can read.",
-        path,
-      );
+      return {
+        raw: null,
+        result: unreadableSettings("Workspace settings are not a file dohc can read.", path),
+      };
     }
     if (fileStats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
-      return unreadableSettings("Workspace settings are too large to read.", path);
+      return {
+        raw: null,
+        result: unreadableSettings("Workspace settings are too large to read.", path),
+      };
     }
-    const raw = JSON.parse(await readFile(path, "utf8"));
-    return { settings: decodeWorkspaceSettings(raw), source: "stored" };
+    const raw: unknown = JSON.parse(await readFile(path, "utf8"));
+    // Another version is a format this build cannot read, not one bad key.
+    if (
+      isSettingsObject(raw) &&
+      (raw.version === undefined || raw.version === DEFAULT_WORKSPACE_SETTINGS.version)
+    ) {
+      return { raw, result: settingsFromObject(raw) };
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" };
+      return { raw: null, result: { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" } };
     }
-    return unreadableSettings("Workspace settings could not be read.", path);
   }
+  return {
+    raw: null,
+    result: unreadableSettings("Workspace settings could not be read.", path),
+  };
 }
 
 // Every write for one workspace runs on this queue, one at a time. Two
@@ -147,22 +203,26 @@ export function resetWorkspaceSettingsFile(
 // deliberate way to replace the file. After the user repairs the file, the
 // caller may still hold the resolved copy from before the repair: writing
 // that copy back would undo the repair. Merging the patch onto a fresh read
-// closes that, and every other stale-snapshot save with it.
+// closes that, and every other stale-snapshot save with it. Only the changed
+// keys are written, so keys dohc does not use stay as the person left them.
 async function applyWorkspaceSettingsPatch(
   rootPath: string,
   patch: WorkspaceSettingsPatch,
 ): Promise<WorkspaceSettingsResult> {
-  const current = await readWorkspaceSettingsFile(rootPath);
-  if (current.source === "recovered") {
+  const current = await loadWorkspaceSettings(rootPath);
+  if (current.result.source === "recovered") {
     const path = await workspaceSettingsPath(rootPath);
     return {
-      ...current,
+      ...current.result,
       refusal: `dohc did not save workspace settings. dohc cannot read ${path}. Fix that file. Or select Reset workspace in Advanced to replace it.`,
     };
   }
-  const settings = mergeWorkspaceSettings(current.settings, patch);
-  await writeWorkspaceSettingsFile(rootPath, settings);
-  return { settings, source: "stored" };
+  const settings = mergeWorkspaceSettings(current.result.settings, patch);
+  const content = current.raw
+    ? overlaySettings(current.raw, current.result.settings, settings)
+    : settings;
+  await writeSettingsContent(rootPath, content);
+  return settingsFromObject(content);
 }
 
 // Answers what it had to move aside to land, so a reset can tell the user
@@ -173,11 +233,17 @@ export async function writeWorkspaceSettingsFile(
   rootPath: string,
   settings: WorkspaceSettings,
 ): Promise<"folder" | "link" | null> {
+  return writeSettingsContent(rootPath, decodeWorkspaceSettings(settings));
+}
+
+async function writeSettingsContent(
+  rootPath: string,
+  content: Record<string, unknown>,
+): Promise<"folder" | "link" | null> {
   const path = await workspaceSettingsPath(rootPath);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    const decoded = decodeWorkspaceSettings(settings);
-    await writeFile(tmp, `${JSON.stringify(decoded, null, 2)}\n`);
+    await writeFile(tmp, `${JSON.stringify(content, null, 2)}\n`);
     // A directory or a link at the settings path reads as unreadable, and
     // Reset is what the refusal tells the user to reach for — but the atomic
     // rename cannot land on either, so the advertised way out would fail.

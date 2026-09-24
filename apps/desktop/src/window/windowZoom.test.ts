@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../settings/userSettings";
 import {
   createGuestZoomApplier,
   createUserSettingsWriteQueue,
@@ -23,6 +23,7 @@ function storeAt(zoomLevel: number) {
     // Hold every write until the test releases it, so concurrency is real.
     await new Promise<void>((release) => gates.push(release));
     stored = settings;
+    return { settings, source: "stored" as const };
   });
   const step = createZoomMutation({
     enqueue: createUserSettingsWriteQueue(),
@@ -166,7 +167,10 @@ describe("the zoom mutation", () => {
   });
 
   it("refuses to replace recovered settings", async () => {
-    const write = vi.fn(async () => undefined);
+    const write = vi.fn(async (settings: DesktopUserSettings) => ({
+      settings,
+      source: "stored" as const,
+    }));
     const apply = vi.fn();
     const step = createZoomMutation({
       enqueue: createUserSettingsWriteQueue(),
@@ -201,6 +205,7 @@ describe("the zoom mutation", () => {
       write: async (settings) => {
         order.push(`write:${settings.appearance.zoomLevel}`);
         stored = settings;
+        return { settings, source: "stored" as const };
       },
       apply: (zoomLevel) => order.push(`apply:${zoomLevel}`),
     });

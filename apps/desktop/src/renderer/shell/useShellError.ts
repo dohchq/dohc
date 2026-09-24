@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
-type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
+export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
+type ShellErrorKind =
+  | "singleton-tab-split"
+  | "tab-limit"
+  | "workspace-search"
+  | SettingsFileKind;
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -145,6 +150,15 @@ export function useShellError(workspaceId: string) {
     (message: string) => push({ message, retry: null }),
     [push],
   );
+  // One row per settings file: a newer read replaces it, and a read with
+  // nothing to report clears it.
+  const showSettingsFileNotice = useCallback(
+    (kind: SettingsFileKind, message: string | null) => {
+      if (message === null) clearKind(kind);
+      else push({ message, retry: null, kind });
+    },
+    [clearKind, push],
+  );
   const showSuccessNotice = useCallback(
     (message: string) => push({ message, retry: null, tone: "success" }),
     [push],
@@ -178,6 +192,7 @@ export function useShellError(workspaceId: string) {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSettingsFileNotice,
     showSuccessNotice,
     hideShellError,
     dismissShellError,

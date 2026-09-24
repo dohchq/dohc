@@ -340,6 +340,8 @@ export const CHANNELS = {
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
+  getUserSettingsFilePath: "desktop:get-user-settings-file-path",
+  openUserSettingsFile: "desktop:open-user-settings-file",
   getWorkspaceSettings: "desktop:get-workspace-settings",
   setWorkspaceSettings: "desktop:set-workspace-settings",
   resetWorkspaceSettings: "desktop:reset-workspace-settings",

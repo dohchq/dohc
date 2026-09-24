@@ -8,6 +8,7 @@ import {
   type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { applyAppearanceSettings } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
@@ -152,6 +153,12 @@ export function DesktopRoot() {
       unsubscribe();
     };
   }, [refreshUserSettings]);
+
+  // The theme follows the settings file, including an edit made outside dohc.
+  const appearance = userSettings?.settings.appearance;
+  useEffect(() => {
+    if (appearance) applyAppearanceSettings(appearance);
+  }, [appearance?.themeMode]);
 
   useEffect(
     () =>

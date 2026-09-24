@@ -78,7 +78,7 @@ export function createUserSettingsWriteQueue(): UserSettingsWriteQueue {
 export function createZoomMutation(deps: {
   enqueue: UserSettingsWriteQueue;
   read: () => Promise<DesktopUserSettingsResult>;
-  write: (settings: DesktopUserSettings) => Promise<void>;
+  write: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult>;
   apply: (zoomLevel: number) => void;
 }): (step: ZoomStep) => Promise<DesktopUserSettingsResult> {
   return (step) =>
@@ -102,8 +102,8 @@ export function createZoomMutation(deps: {
         ...current.settings,
         appearance: { ...current.settings.appearance, zoomLevel },
       };
-      await deps.write(settings);
+      const saved = await deps.write(settings);
       deps.apply(zoomLevel);
-      return { settings, source: "stored" as const };
+      return saved;
     });
 }

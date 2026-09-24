@@ -55,6 +55,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
   let write: Dependencies["writeUserSettingsFile"] = async (_directory, value) => {
     stored = { settings: structuredClone(value), source: "stored" };
+    return structuredClone(stored);
   };
   let ready = true;
   let canInstall = false;

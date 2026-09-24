@@ -71,6 +71,7 @@ import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
+import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -783,10 +784,17 @@ export function DesktopWorkspaceShell(props: {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSettingsFileNotice,
     showSuccessNotice,
     dismissShellError,
     retryShellError,
   } = useShellError(workspaceId);
+  const onWorkspaceSettingsRead = useSettingsFileNotices({
+    workspaceId,
+    workspaceIsReady,
+    userSettings: props.userSettings,
+    show: showSettingsFileNotice,
+  });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
   // outlives the panel, so its Try again reopens the connection dialog with
@@ -5937,6 +5945,7 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
             onError={showShellError}
+            onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

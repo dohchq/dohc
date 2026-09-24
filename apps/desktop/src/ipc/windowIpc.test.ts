@@ -45,7 +45,7 @@ async function harness(isPackaged = false) {
   const enqueue = createUserSettingsWriteQueue();
   let stored: DesktopUserSettings = structuredClone(DEFAULT_USER_SETTINGS);
   const apply = vi.fn();
-  const write = vi.fn(async (next: DesktopUserSettings) => { stored = next; });
+  const write = vi.fn(async (next: DesktopUserSettings) => { stored = next; return { settings: next, source: "stored" as const }; });
   const stepWindowZoom = createZoomMutation({ enqueue, read: async () => ({ settings: stored, source: "stored" }), write, apply });
   const clipboard = { writeText: vi.fn() };
   const shell = { openExternal: vi.fn(async (_url: string) => undefined) };
