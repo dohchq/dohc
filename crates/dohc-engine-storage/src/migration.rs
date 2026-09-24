@@ -2099,7 +2099,10 @@ CREATE INDEX owner_pending_settlement_binary_blobs
     ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 ";
 
-/// The frozen, ordered list of migrations this build knows.
+/// The frozen, ordered list of migrations this build knows. No build may
+/// delete or rename the `v2-baseline` ledger row, because an older build
+/// recognizes a newer store only by that row and would otherwise offer
+/// Rebuild for it.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 0,
