@@ -259,7 +259,8 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
-            change: (state) => documentProjection.run({ kind: "edit", state, edit }),
+            change: (state, { keepBlocks }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
         create: async ({ path, markdown, origin }) => {
           // An empty file, as the explorer's New file writes, and then the
@@ -282,7 +283,8 @@ export function createDesktopCliServer<State>(
               workspaceId: workspace.workspaceId,
               path,
               origin,
-              change: (state) => documentProjection.run({ kind: "create", state, markdown }),
+              change: (state, { keepBlocks }) =>
+                documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
             });
           } catch (error) {
             const cause = error instanceof Error ? error.message : String(error);

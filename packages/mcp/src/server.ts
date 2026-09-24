@@ -231,7 +231,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_edit_document",
     {
       description:
-        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. If the call fails without a reason, read the document before you retry.",
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone has it open, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         find: documentEditTextSchema.min(1).optional(),

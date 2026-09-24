@@ -23,6 +23,7 @@ export {
   documentCreateUpdate,
   documentEditUpdate,
   settledDocumentMarkdown,
+  type DocumentEditOptions,
   documentMarkdown,
   type DocumentEdit,
 } from "./document-edit.js";
