@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
-import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
+import { openPersistentAppBackend, PersistentRuntimeError, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import { acquireSupervisorOwnership } from "./worker-ownership.js";
 import { readMigrationPreviewReportPage, type MigrationPreviewReportPage, type MigrationPreviewTableSummary } from "./migration-preview-report.js";
 export type { MigrationPreviewValue, MigrationPreviewChange, MigrationPreviewTableSummary, MigrationPreviewReportPage } from "./migration-preview-report.js";
@@ -91,6 +91,11 @@ export interface DatasetSupervisorOptions {
   materializationEvents?: number;
   /** A journal replay that takes at least this long is cached at once, so a later reopen does not repeat it. */
   replayCacheMs?: number;
+  /**
+   * Longest wait before reopening a dataset whose last reopen or replay ran out of time or CPU. The wait keeps one
+   * app from holding shared workers with the same failing work. 0 turns it off, for a host that serves only its owner.
+   */
+  reopenWaitCapMs?: number;
   onMaintenanceError?: (scope: DatasetScope, error: unknown) => void;
   /** Host-lifetime maintenance authority and quota, independent of any request credential. */
   maintenanceStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
@@ -99,7 +104,7 @@ type Worker = { runtime: PersistentAppBackend; directory: string; cursor: Datase
 type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
 type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const REOPEN_WAIT_MS = 5_000, REOPEN_WAIT_CAP_MS = 30 * 60_000;
+const REOPEN_WAIT_MS = 5_000;
 /** A dataset whose reopen ran out of time or CPU refuses to reopen until its wait ends. */
 export class DatasetReopenWaitError extends Error {
   readonly code = "dataset_reopen_wait";
@@ -126,10 +131,12 @@ const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.worksp
 export async function createDatasetSupervisor(options: DatasetSupervisorOptions) {
   const maxWorkers = options.maxWorkers ?? 4, idleMs = options.idleMs ?? 30_000, queueMs = options.queueMs ?? 30_000;
   const materializationEvents = options.materializationEvents ?? 128, replayCacheMs = options.replayCacheMs ?? 1000;
+  const reopenWaitCapMs = options.reopenWaitCapMs ?? 30 * 60_000;
   for (const [value, max] of [[maxWorkers, 16], [idleMs, 300_000], [queueMs, 60_000], [materializationEvents, 4096]]) {
     if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error("Invalid dataset worker limit.");
   }
   if (!Number.isSafeInteger(replayCacheMs) || replayCacheMs < 0 || replayCacheMs > 60_000) throw new Error("Invalid dataset worker limit.");
+  if (!Number.isSafeInteger(reopenWaitCapMs) || reopenWaitCapMs < 0 || reopenWaitCapMs > 24 * 60 * 60_000) throw new Error("Invalid dataset worker limit.");
   await mkdir(options.directory, { recursive: true });
   const root = await realpath(options.directory);
   const ownership=await acquireSupervisorOwnership(root);
@@ -141,14 +148,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const candidateCleanup = new Set<Promise<void>>();
   // A reopen that ran out of time or CPU would repeat the same work, so each
   // such failure in a row doubles the wait before the next reopen. The count
-  // starts over once the last failure is older than the longest wait.
-  const reopenWaits = new Map<string, { failures: number; failedAtMs: number; untilMs: number }>();
+  // starts over once the longest wait has passed since the last wait ended.
+  const reopenWaits = new Map<string, { failures: number; untilMs: number }>();
   function noteReopenFailure(scope: DatasetScope, error: unknown): void {
     const code = (error as {code?: unknown}).code;
-    if (code !== "worker_budget" && code !== "worker_stalled" && code !== "worker_deadline") return;
+    if (!reopenWaitCapMs || (code !== "worker_budget" && code !== "worker_stalled" && code !== "worker_deadline" && code !== "replay_not_saved")) return;
     const key = JSON.stringify(scope), previous = reopenWaits.get(key), at = now();
-    const failures = previous && at - previous.failedAtMs < REOPEN_WAIT_CAP_MS ? previous.failures + 1 : 1;
-    reopenWaits.set(key, { failures, failedAtMs: at, untilMs: at + Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), REOPEN_WAIT_CAP_MS) });
+    const failures = previous && at - previous.untilMs < reopenWaitCapMs ? previous.failures + 1 : 1;
+    reopenWaits.set(key, { failures, untilMs: at + Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs) });
   }
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
@@ -438,7 +445,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     // later reopen repeats it.
     if (replayed && performance.now() - replayStart >= replayCacheMs) {
       await maintainMaterialization(lane, true);
-      if (lane.worker !== worker) throw new Error("The dataset worker stopped while saving its replay. Try again.");
+      if (lane.worker !== worker) throw new PersistentRuntimeError("replay_not_saved", "The dataset worker stopped while saving its replay. Try again.");
     }
     return worker;
   }
