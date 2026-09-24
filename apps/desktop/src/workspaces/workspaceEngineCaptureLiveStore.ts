@@ -40,12 +40,58 @@ import {
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// A manifest rebuild after a version switch costs one unsettled pass, so this
-// budget is generous by two orders of magnitude. It is bounded rather than
-// unbounded because a workspace under genuinely continuous mutation can keep
-// missing quiescence, and that must still surface as an error rather than hang.
-const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+// How long the capture may go without answering from a running, healthy layer
+// before the wait gives up. A manifest rebuild after a version switch costs
+// one unsettled pass with the layer down, well inside this.
+const FLUSH_NO_PROGRESS_MS = 1_000;
+// A running layer that keeps reconciling is making progress, and on a busy
+// disk that can take seconds. The cap is for a workspace under continuous
+// mutation, and stays under the CLI socket's 15 s request deadline so an
+// agent hears the refusal.
+const FLUSH_SETTLE_CAP_MS = 10_000;
+
+function workspaceUpdatingRefusal(): DaemonRefusalError {
+  return new DaemonRefusalError(
+    {
+      code: "OVERLOADED",
+      message: "Workspace is still updating. Try again.",
+      retry: "afterBackoff",
+    },
+    undefined,
+  );
+}
+
+/**
+ * Flushes the capture until it settles. An unsettled answer from a running,
+ * healthy layer is progress: the engine drove its reconcile cycles and
+ * changes are still landing. The wait gives up when that stops for
+ * FLUSH_NO_PROGRESS_MS, or at FLUSH_SETTLE_CAP_MS, with the retryable
+ * "still updating" refusal every caller already handles.
+ */
+export async function flushCaptureUntilSettled(input: {
+  flush(): Promise<{ settled: boolean; running: boolean; degraded: boolean }>;
+  watcherPhase(): Promise<string>;
+  clock?: { now(): number; sleep(ms: number): Promise<unknown> };
+}): Promise<void> {
+  const clock = input.clock ?? { now: Date.now, sleep: delay };
+  let outcome = await input.flush();
+  if (outcome.settled) return;
+  // The initial import can take minutes. Say so now instead of waiting.
+  const phase = await input.watcherPhase();
+  if (phase === "starting" || phase === "importing") throw workspaceUpdatingRefusal();
+  const startedAt = clock.now();
+  let progressAt = startedAt;
+  while (!outcome.settled) {
+    const now = clock.now();
+    if (outcome.running && !outcome.degraded) progressAt = now;
+    if (now - progressAt >= FLUSH_NO_PROGRESS_MS || now - startedAt >= FLUSH_SETTLE_CAP_MS) {
+      throw workspaceUpdatingRefusal();
+    }
+    await clock.sleep(FLUSH_SETTLE_POLL_MS);
+    outcome = await input.flush();
+  }
+}
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
 // verbatim into the wire MESSAGE (`map_runtime`,
@@ -1274,33 +1320,11 @@ export function createCaptureLiveStores(
       // deliberate unsettled pass, `running: false` with `degraded: false`.
       // A second switch straight after the first therefore threw
       // "did not settle" at whoever asked for it.
-      let outcome = await runRead(async (adapter) => await adapter.flushCapture());
-      if (!outcome.settled) {
-        const status = await runRead(async (adapter) => await adapter.watcherStatus());
-        if (status.phase === "starting" || status.phase === "importing") {
-          throw new DaemonRefusalError(
-            {
-              code: "OVERLOADED",
-              message: "Workspace is still updating. Try again.",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
-        }
-      }
-      for (
-        let attempt = 0;
-        !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
-        attempt += 1
-      ) {
-        await delay(FLUSH_SETTLE_POLL_MS);
-        outcome = await runRead(async (adapter) => await adapter.flushCapture());
-      }
-      if (!outcome.settled) {
-        throw new Error(
-          `Engine capture for ${workspace.workspaceId} did not settle.`,
-        );
-      }
+      await flushCaptureUntilSettled({
+        flush: () => runRead(async (adapter) => await adapter.flushCapture()),
+        watcherPhase: async () =>
+          (await runRead(async (adapter) => await adapter.watcherStatus())).phase,
+      });
     },
 
     async listPendingCollectionAdoptions(input = {}) {

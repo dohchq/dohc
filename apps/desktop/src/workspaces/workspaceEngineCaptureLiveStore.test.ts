@@ -19,7 +19,61 @@ import {
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import {
+  createCaptureLiveStores as createAttachedCaptureLiveStores,
+  flushCaptureUntilSettled,
+} from "./workspaceEngineCaptureLiveStore";
+
+describe("flushCaptureUntilSettled", () => {
+  // A clock that moves only when the wait sleeps, so each case states how
+  // much time passed.
+  function fakeClock() {
+    let now = 0;
+    return { now: () => now, sleep: async (ms: number) => { now += ms; } };
+  }
+  const healthy = { settled: false, running: true, degraded: false };
+  const ready = async () => "ready";
+
+  it("keeps waiting past a second while a running layer keeps reconciling", async () => {
+    const clock = fakeClock();
+    let flushes = 0;
+    await flushCaptureUntilSettled({
+      clock,
+      watcherPhase: ready,
+      flush: async () => {
+        flushes += 1;
+        return flushes < 200 ? healthy : { ...healthy, settled: true };
+      },
+    });
+    expect(flushes).toBe(200);
+    expect(clock.now()).toBeGreaterThan(1_000);
+  });
+
+  it("waits out one pass with the layer down, as a manifest rebuild makes", async () => {
+    const answers = [{ ...healthy, running: false }, healthy, { ...healthy, settled: true }];
+    await flushCaptureUntilSettled({ clock: fakeClock(), watcherPhase: ready, flush: async () => answers.shift()! });
+    expect(answers).toEqual([]);
+  });
+
+  it.each([
+    ["degraded", { ...healthy, degraded: true }],
+    ["down", { ...healthy, running: false }],
+  ])("gives up a second after the layer stops making progress while %s", async (_state, stuck) => {
+    const clock = fakeClock();
+    const error = await flushCaptureUntilSettled({ clock, watcherPhase: ready, flush: async () => stuck })
+      .catch((reason: unknown) => reason);
+    expect(isWorkspaceUpdatingRefusal(error)).toBe(true);
+    expect(clock.now()).toBe(1_000);
+  });
+
+  it("gives up at the cap when changes never stop landing", async () => {
+    const clock = fakeClock();
+    const error = await flushCaptureUntilSettled({ clock, watcherPhase: ready, flush: async () => healthy })
+      .catch((reason: unknown) => reason);
+    expect(isWorkspaceUpdatingRefusal(error)).toBe(true);
+    expect(clock.now()).toBe(10_000);
+  });
+});
 
 const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
@@ -374,7 +428,7 @@ describe("createCaptureLiveStores", () => {
       sessionsFor(client),
     );
 
-    await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+    await expect(store.flushCapture?.()).rejects.toThrow("Workspace is still updating. Try again.");
   });
 
   it("classifies an unsettled initial capture before bounded settle polling", async () => {

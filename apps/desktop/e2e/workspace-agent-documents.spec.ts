@@ -234,26 +234,19 @@ test("an agent creates a document and comments on it where the person reads comm
     await expect(editor.getByRole("heading", { name: "Friday 14" })).toBeVisible();
     await expect(editor).toContainText("Fushimi Inari at dawn");
 
-    // The agent comments on it: a chat linked to the file, the same kind a
-    // person starts from the file's Chats panel.
-    // Finding a file's chats first waits for dohc to capture the workspace,
-    // which reports a refusal while its capture is still moving. Nothing is
-    // created before that refusal, so the agent retries.
-    let comment: CliResultByVerb["fileChatStart"] | undefined;
-    await expect.poll(async () => {
-      comment = await agentCli(temp, "fileChatStart", {
-        path: "notes/itinerary.md",
-        title: "Friday plan",
-        body: "Dawn is 5:40. Should we leave the hotel at 5?",
-      });
-      return comment.ok ? "started" : comment.reason;
-    }, { timeout: 60_000 }).toBe("started");
-    if (!comment?.ok) throw new Error("fileChatStart did not start a chat");
+    // The agent comments on it right after the person opened it: a chat
+    // linked to the file, the same kind a person starts from the file's Chats
+    // panel. Finding the file first waits for dohc to finish capturing the
+    // workspace, which the editor's open keeps busy for a moment.
+    const comment = await agentCli(temp, "fileChatStart", {
+      path: "notes/itinerary.md",
+      title: "Friday plan",
+      body: "Dawn is 5:40. Should we leave the hotel at 5?",
+    });
+    if (!comment.ok) throw new Error(`fileChatStart failed: ${comment.reason}`);
     const threadId = comment.threadId;
-    await expect.poll(async () => {
-      const listed = await agentCli(temp, "fileChats", { path: "notes/itinerary.md" });
-      return listed.ok ? listed.threads.map((thread) => [thread.id, thread.title]) : listed.reason;
-    }, { timeout: 60_000 }).toEqual([[threadId, "Friday plan"]]);
+    await expect(agentCli(temp, "fileChats", { path: "notes/itinerary.md" }))
+      .resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
 
     await openFileChatsPanel(page);
     await page.getByTestId("linked-chat-open").click();
