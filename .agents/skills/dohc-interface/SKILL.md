@@ -35,7 +35,7 @@ Words are for two things: the user's own content (file names, titles, messages),
 | `Unknown source` on every row | An actor glyph, or nothing |
 | An empty state sentence | The actions it offers, with their shortcuts |
 | Prose about what changed | A number, a bar, or the changed words highlighted |
-| A label saying who is an agent | The agent's shape: a rounded square where a person is round |
+| A label saying who is an agent | The agent's shape (see Agent attribution) |
 
 **Keep what a picture cannot carry.**
 
@@ -171,11 +171,11 @@ But most apparent violations are not one bad string. dohc's UI vocabulary is **u
 
 **Settle a vocabulary, do not rename a string.** Choosing what a thing is called is a deliberate decision taken across every surface that shows it, and it has to be made before any renaming starts.
 
-**Names follow what a surface is.** A copy fix changes the visible words and keeps the `data-testid`, `aria-*`, `role`, and accessible name as they are. They change only when the surface itself changes what it is (see Hard invariants).
+**A copy fix changes visible words only.** The `data-testid`, `aria-*`, `role`, and accessible name stay as they are (see Hard invariants for when they change).
 
 Known so far:
 
-- The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything. The two `aria-label`s change only as part of that decision, together with the e2e assertions that read them.
+- The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything. Settling a word changes visible copy and keeps these two `aria-label`s, because the surface stays the same surface (see Hard invariants).
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx` is **mixed**: `document` at `:487`, `:662` and `:669`, but `files` at `:630` a few rows above them.
 
 Do not read existing copy as an example of the rules. And note that `${confirmDelete.length} items` in the Explorer delete dialog is *correct*, the selection can mix files and folders, so `files` would be false.
@@ -210,7 +210,7 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | `text-muted` | Secondary text (labels, inactive items) |
 | `text-subtle` | Decorative text ONLY (hints, timestamps, kbd), 3:1 floor |
 | `bg-accent` / `text-accent` | Green-graphite. Primary buttons, checked/active semantics, focus rings. THE brand accent |
-| `text-agent` / `bg-agent` | The default agent color, olive in both themes. Shape, not color, marks an agent |
+| `text-agent` / `bg-agent` | The default agent color, olive (see Agent attribution) |
 | `bg-match` / `text-match` | Find-match highlight ONLY. Never decoration |
 | `text-success` / `warning` / `danger` | State semantics only |
 
@@ -238,7 +238,7 @@ Never invent fractional sizes (`text-[10.5px]`); snap to 10/11/12/13px.
 | Buttons, inputs, list rows, menu items | `rounded-md` (6px) |
 | Cards, menus, dropdowns, larger buttons | `rounded-lg` (8px) |
 | Popovers, dialogs, modals | `rounded-xl` (12px) |
-| Pills, dots, avatars | `rounded-full` |
+| Pills, dots, a person's avatar | `rounded-full` (an agent's avatar is a rounded square; see Agent attribution) |
 
 ### Elevation (classes in styles.css, do not write ad-hoc shadows)
 
