@@ -272,7 +272,7 @@ export async function resolveShareProjectionPath<Mount>(
   relativePath: string,
   mounts: readonly Mount[],
 ): Promise<ResolvedShareProjectionPath<Mount>> {
-  const validated = validateUserReadPath(relativePath);
+  const validated = validateUserReadPath(relativePath, { platform: process.platform });
   if (!validated.ok) return { kind: "local" };
   const resolved = await assertResolvedWorkspacePath({
     rootPath: hostRoot,

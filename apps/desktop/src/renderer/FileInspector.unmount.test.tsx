@@ -112,6 +112,7 @@ async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
 // cleanup must fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
+    platform: "linux" as const,
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text: "# Hello\n",
       truncated: false as const,

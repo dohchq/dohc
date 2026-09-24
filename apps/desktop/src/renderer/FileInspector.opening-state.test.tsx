@@ -53,6 +53,7 @@ describe("markdown document opening state", () => {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
     const bridgeMock = {
+      platform: "linux" as const,
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
         async () => ({
           text: DOC_MARKDOWN,

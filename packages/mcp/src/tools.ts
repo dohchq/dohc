@@ -104,8 +104,8 @@ async function safeResolve(
   // the entry itself rather than following it — see realRelativeInRoot.
   const validated =
     access === "read"
-      ? validateUserReadPath(relativePath)
-      : validateUserMaterializePath(relativePath);
+      ? validateUserReadPath(relativePath, { platform: process.platform })
+      : validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
@@ -612,7 +612,7 @@ function isSecretWorkspacePath(normalizedPath: string): boolean {
   // Read-aware: a mounted `shared-with-me/alex/.env` classifies as the mount
   // sees it (secret), where the write-side classifier would say "ignored"
   // and wave it through the floor.
-  return classifyEngineFilePathForRead(normalizedPath).kind === "secret";
+  return classifyEngineFilePathForRead(normalizedPath, process.platform).kind === "secret";
 }
 
 // The secret floor decided on both spellings of a resolved path. The name the

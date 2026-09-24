@@ -189,7 +189,7 @@ async function writeWorkspaceBytes(
   relativePath: string,
   bytes: Buffer,
 ): Promise<string> {
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }
