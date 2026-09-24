@@ -813,7 +813,9 @@ pub fn apply_committed(
                 tx,
                 &key,
                 &event.metadata.accepted.receipt.update_digest,
-                Some(&event.metadata.accepted.receipt.delivery_id),
+                crate::owner_outbox::AcceptedAs::Delivery(
+                    &event.metadata.accepted.receipt.delivery_id,
+                ),
             )? {
                 dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
             }

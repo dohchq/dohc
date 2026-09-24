@@ -1111,6 +1111,10 @@ mod tests {
                 .len(),
             0
         );
+        // The draft's bytes served again under a later cursor are not the
+        // draft the relay acknowledged at cursor 4.
+        feed(&mut reopened, &observed, 12, retry.update_bytes.clone());
+        assert_eq!(remote_changes(&reopened), 3);
     }
     #[test]
     fn accepted_write_failure_rolls_back_native_state_cursor_and_pending_work() {

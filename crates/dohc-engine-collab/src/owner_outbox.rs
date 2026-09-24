@@ -31,27 +31,46 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
-/// Whether this engine drafted an update with these bytes for this document:
-/// an owner outbox entry for it carries the digest, and the delivery id when
-/// the caller knows which delivery the relay accepted. A live frame that is
-/// this computer's own draft is not a change from another computer.
+/// Where a live frame was accepted, as far as its receiver can tell.
+#[derive(Debug, Clone, Copy)]
+pub enum AcceptedAs<'a> {
+    /// The session host knows the delivery the relay accepted.
+    Delivery(&'a str),
+    /// The owner's ordered feed carries only the journal cursor.
+    JournalCursor(i64),
+}
+
+/// Whether a live frame with these bytes for this document is this engine's
+/// own draft. The host matches the draft's delivery. The owner matches a
+/// draft still waiting for its receipt, or one acknowledged at this cursor,
+/// so an old draft's bytes served again under a new cursor are not its own.
+/// A frame that is this computer's own draft is not a change from another
+/// computer.
 pub fn is_own_draft_in(
     conn: &Connection,
     key: &crate::DocKey,
     update_digest: &str,
-    delivery_id: Option<&str>,
+    accepted: AcceptedAs<'_>,
 ) -> Result<bool, crate::CollabError> {
+    let (delivery_id, journal_cursor) = match accepted {
+        AcceptedAs::Delivery(delivery_id) => (Some(delivery_id), None),
+        AcceptedAs::JournalCursor(cursor) => (None, Some(cursor)),
+    };
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
          JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
-         WHERE e.update_digest=?1 AND (?2 IS NULL OR e.delivery_id=?2) \
-           AND o.workspace_id=?3 AND o.main_version_id=?4 AND o.object_id=?5)",
+         WHERE e.update_digest=?1 \
+           AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
+           AND CASE WHEN ?5 IS NOT NULL THEN e.delivery_id=?5 \
+                    ELSE e.pending=1 \
+                      OR json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)",
         params![
             update_digest,
-            delivery_id,
             key.workspace_id,
             key.version_id,
-            key.object_id
+            key.object_id,
+            delivery_id,
+            journal_cursor
         ],
         |r| r.get(0),
     )

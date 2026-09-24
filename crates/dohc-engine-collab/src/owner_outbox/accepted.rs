@@ -247,7 +247,15 @@ fn apply_ordered_in_tx(
     // A frame another computer wrote is a change from elsewhere; this
     // owner's own accepted draft is not. A sync can carry either, so it
     // counts.
-    if host_vector.is_some() || !super::is_own_draft_in(tx, &key, &digest, None).map_err(collab)? {
+    if host_vector.is_some()
+        || !super::is_own_draft_in(
+            tx,
+            &key,
+            &digest,
+            super::AcceptedAs::JournalCursor(input.journal_cursor),
+        )
+        .map_err(collab)?
+    {
         dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
     }
     prune_in(tx, b)?;
