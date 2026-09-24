@@ -3,7 +3,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  OfferedPluginRecord,
   PluginStatusChangedEvent,
   PluginStatusRecord,
 } from "../../ipc/bridgeContract";
@@ -14,8 +13,6 @@ let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
 const bridgeMock = {
   listPlugins: vi.fn(),
-  listOfferedPlugins: vi.fn(),
-  addOfferedPlugin: vi.fn(),
   openPluginWebApp: vi.fn(),
   installPlugin: vi.fn(),
   disablePlugin: vi.fn(),
@@ -105,7 +102,6 @@ beforeEach(() => {
     };
   });
   bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
-  bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers: [] });
 });
 
 afterEach(() => {
@@ -113,436 +109,6 @@ afterEach(() => {
 });
 
 describe("PluginsView", () => {
-  const offers: OfferedPluginRecord[] = [
-    {
-      directoryName: "agent-chat",
-      displayName: "Agent chat",
-      description: "Runs the Claude Code and Codex CLIs on this workspace as dohc agents.",
-      publisher: "dohc",
-    },
-  ];
-
-  it("does not flash the empty state while offers are still loading", async () => {
-    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
-    const offersResult = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
-    bridgeMock.listOfferedPlugins.mockReturnValue(offersResult.promise);
-
-    renderList();
-
-    // listPlugins' fast resolve settles catalog.load to ready/empty while
-    // listOfferedPlugins is still deliberately unresolved: without the
-    // fix, "No plugins yet" would paint here and then get replaced the
-    // instant offers arrive.
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.queryByTestId("plugins-empty")).toBeNull();
-
-    await act(async () => {
-      offersResult.resolve({ ok: true, offers: [offers[0]] });
-      await offersResult.promise;
-    });
-
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-    expect(screen.queryByTestId("plugins-empty")).toBeNull();
-  });
-
-  it("shows the offered driver plugin when the workspace has no plugins", async () => {
-    bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
-
-    renderList();
-
-    const section = await screen.findByTestId("plugins-section-offered");
-    expect(within(section).getAllByTestId("plugin-offer-row")).toHaveLength(1);
-    expect(within(section).getByText("Agent chat")).toBeTruthy();
-  });
-
-  it("drops a stale offer list after switching workspaces", async () => {
-    const oldList = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
-    const newList = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
-    bridgeMock.listOfferedPlugins.mockImplementation(
-      ({ workspaceId }: { workspaceId: string }) =>
-        workspaceId === "ws-old" ? oldList.promise : newList.promise,
-    );
-
-    const view = renderList({ workspaceId: "ws-old" });
-    view.rerender(
-      <PluginsView workspaceId="ws-new" activePluginId={null} activePluginDirectoryName={null} onOpenDetails={noop} />,
-    );
-    // Synchronously after the switch, before either bridge call resolves:
-    // neither workspace's offers show. usePluginCatalog tags every non-
-    // loading offers state with the workspaceId it was fetched for and
-    // checks that tag on every render, so a workspace switch can never
-    // paint a still-pending or still-resolving fetch's stale data.
-    expect(screen.queryByText("Agent chat")).toBeNull();
-
-    await act(async () => {
-      newList.resolve({ ok: true, offers: [] });
-      await newList.promise;
-    });
-    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
-
-    await act(async () => {
-      oldList.resolve({ ok: true, offers: [offers[0]] });
-      await oldList.promise;
-    });
-    expect(screen.queryByText("Agent chat")).toBeNull();
-    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
-  });
-
-  it("does not offer a driver plugin already present in the workspace", async () => {
-    bridgeMock.listPlugins.mockResolvedValue({
-      ok: true,
-      plugins: [plugin("agent-chat")],
-    });
-    bridgeMock.listOfferedPlugins.mockResolvedValue({
-      ok: true,
-      offers: [],
-    });
-
-    renderList();
-
-    const rows = await screen.findAllByTestId("plugin-row");
-    expect(rows.map((row) => row.getAttribute("data-plugin-id"))).toEqual(["agent-chat"]);
-    expect(screen.queryByTestId("plugins-section-offered")).toBeNull();
-    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
-  });
-
-  it("adds an offered plugin and removes its row without reloading offers", async () => {
-    bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
-    bridgeMock.addOfferedPlugin.mockResolvedValue({
-      ok: true,
-      plugin: plugin("agent-chat", {
-        status: "discovered",
-        runtimeStatus: null,
-        sourceHash: null,
-        approvedHash: null,
-        installedBaselineHash: null,
-      }),
-    });
-
-    renderList();
-    const chatRow = (await screen.findAllByTestId("plugin-offer-row")).find(
-      (row) => row.getAttribute("data-plugin-directory") === "agent-chat",
-    );
-    expect(chatRow).toBeTruthy();
-
-    await userEvent.click(within(chatRow!).getByTestId("plugin-offer-add"));
-
-    expect(bridgeMock.addOfferedPlugin).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      directoryName: "agent-chat",
-    });
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(1);
-  });
-
-  it("offers a plugin again once it is uninstalled (removed status event)", async () => {
-    bridgeMock.listOfferedPlugins
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
-    bridgeMock.addOfferedPlugin.mockResolvedValue({
-      ok: true,
-      plugin: plugin("agent-chat", {
-        status: "discovered",
-        runtimeStatus: null,
-        sourceHash: null,
-        approvedHash: null,
-        installedBaselineHash: null,
-      }),
-    });
-
-    renderList();
-    await userEvent.click(await screen.findByTestId("plugin-offer-add"));
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-
-    act(() => {
-      statusListener?.({
-        kind: "removed",
-        workspaceId: "ws-1",
-        pluginId: "agent-chat",
-        directoryName: "agent-chat",
-      });
-    });
-
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-    expect(screen.getByText("Agent chat")).toBeTruthy();
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
-  });
-
-  it("drops an offer once a changed status event introduces its id under another directory", async () => {
-    bridgeMock.listOfferedPlugins
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
-      .mockResolvedValueOnce({ ok: true, offers: [] });
-
-    renderList();
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-
-    act(() => {
-      // Something other than this hook's own Add discovered "agent-chat" under a
-      // renamed directory — an agent's own copy, a second client. The
-      // catalog does not know why, only that the identity now exists.
-      statusListener?.({
-        kind: "changed",
-        workspaceId: "ws-1",
-        plugin: plugin("agent-chat", { directoryName: "my-chat" }),
-      });
-    });
-
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
-  });
-
-  // Round 23 finding 3: an invalid, never-installed candidate (a broken
-  // manifest, or none at all) gets no status entry of its own, so its own
-  // arrival or departure names no pluginId a "changed"/"removed" event
-  // could carry — creating or deleting plugins/agent-chat with a broken
-  // manifest never fires either kind. discovery-changed is the honest
-  // signal instead: discovery itself moved, so offers re-check.
-  it("hides an offer once an invalid directory occupies it, and returns it once that directory is gone", async () => {
-    bridgeMock.listOfferedPlugins
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
-      .mockResolvedValueOnce({ ok: true, offers: [] })
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
-
-    renderList();
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-
-    act(() => {
-      // A broken manifest just landed at plugins/agent-chat — invalid, so
-      // discovery never seeds a status for it, and no "changed"/"removed"
-      // event names it either.
-      statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" });
-    });
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
-
-    act(() => {
-      // The invalid directory is deleted — the offer's own directory is
-      // free again.
-      statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" });
-    });
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(3);
-  });
-
-  it("keeps the Built in section on screen while a background refresh is in flight", async () => {
-    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
-
-    renderList();
-    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
-
-    const refresh = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
-    bridgeMock.listOfferedPlugins.mockReturnValueOnce(refresh.promise);
-
-    act(() => {
-      // setStatus emits several "changed" events per action — each one
-      // triggers a refresh, and none of them may hide the section while
-      // its own fetch is still in flight.
-      statusListener?.({
-        kind: "changed",
-        workspaceId: "ws-1",
-        plugin: plugin("some-other-plugin"),
-      });
-    });
-
-    // The refresh is pending, but the previously-ready offer — row and Add
-    // control both — stays rendered, not replaced by a loading state.
-    const row = screen.getByTestId("plugin-offer-row");
-    expect(row).toBeTruthy();
-    expect(within(row).getByTestId("plugin-offer-add")).toBeTruthy();
-
-    await act(async () => {
-      refresh.resolve({ ok: true, offers: [] });
-      await refresh.promise;
-    });
-
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-  });
-
-  it("clears a refused Add's error once the offer leaves the list, instead of leaking onto an installed row", async () => {
-    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
-    bridgeMock.listOfferedPlugins
-      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
-      .mockResolvedValueOnce({ ok: true, offers: [] });
-    bridgeMock.addOfferedPlugin.mockResolvedValue({
-      ok: false,
-      error: {
-        stage: "state",
-        code: "pipeline-unavailable",
-        message: 'Another plugin already claims the id "agent-chat" in this workspace.',
-      },
-    });
-
-    renderList();
-    await userEvent.click(await screen.findByTestId("plugin-offer-add"));
-    expect(await screen.findByTestId("plugin-action-error")).toBeTruthy();
-
-    // A refresh — a changed/removed status event — settles with the offer
-    // no longer listed.
-    act(() => {
-      statusListener?.({
-        kind: "changed",
-        workspaceId: "ws-1",
-        plugin: plugin("some-other-plugin"),
-      });
-    });
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
-
-    // "agent-chat" now shows as an installed row — a separate identity entirely
-    // from the offer that used to occupy this directoryName — and must not
-    // inherit the stale Add error. "some-other-plugin" (from the refresh
-    // trigger above) is already a row too, so this looks up "agent-chat" by id
-    // rather than assuming it is the only row on screen.
-    act(() => {
-      statusListener?.({
-        kind: "changed",
-        workspaceId: "ws-1",
-        plugin: plugin("agent-chat"),
-      });
-    });
-
-    const chatRow = await waitFor(() => {
-      const found = screen
-        .getAllByTestId("plugin-row")
-        .find((row) => row.getAttribute("data-plugin-id") === "agent-chat");
-      if (!found) throw new Error("agent-chat row not rendered yet");
-      return found;
-    });
-    expect(chatRow).toBeTruthy();
-    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
-  });
-
-  it("shows an Adding state and a named error when Add fails", async () => {
-    const addResult = deferred<{
-      ok: false;
-      error: { stage: "state"; code: string; message: string };
-    }>();
-    bridgeMock.listOfferedPlugins.mockResolvedValue({
-      ok: true,
-      offers: [offers[0]],
-    });
-    bridgeMock.addOfferedPlugin.mockReturnValue(addResult.promise);
-
-    renderList();
-    const addButton = await screen.findByTestId("plugin-offer-add");
-    await userEvent.click(addButton);
-
-    expect(addButton.textContent).toBe("Adding");
-    expect((addButton as HTMLButtonElement).disabled).toBe(true);
-
-    await act(async () => {
-      addResult.resolve({
-        ok: false,
-        error: {
-          stage: "state",
-          code: "pipeline-unavailable",
-          message: "plugins/agent-chat already exists in this workspace.",
-        },
-      });
-      await addResult.promise;
-    });
-
-    expect((await screen.findByTestId("plugin-action-error")).textContent).toBe(
-      "dohc could not add Agent chat. plugins/agent-chat already exists in this workspace.",
-    );
-    expect(addButton.textContent).toBe("Add");
-  });
-
-  // The interleaving the round-8 pruneToKeys work only covered from the
-  // other direction (an error already recorded, then the offer leaves):
-  // here the offer leaves while the refused response is still in flight.
-  // A stale response settling after that must not recreate a key
-  // loadOffers already pruned — there is no row left on screen to show it
-  // against.
-  it("does not resurrect a pruned offer error when a refused Add settles after the offer already left the list", async () => {
-    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
-    const addResult = deferred<{
-      ok: false;
-      error: { stage: "state"; code: string; message: string };
-    }>();
-    bridgeMock.addOfferedPlugin.mockReturnValue(addResult.promise);
-
-    renderList();
-    const addButton = await screen.findByTestId("plugin-offer-add");
-    await userEvent.click(addButton);
-    expect(addButton.textContent).toBe("Adding");
-
-    // The offer leaves the authoritative list while Add is still in
-    // flight — added from another window, discovered under a renamed
-    // directory, whatever the reason.
-    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [] });
-    act(() => {
-      statusListener?.({
-        kind: "changed",
-        workspaceId: "ws-1",
-        plugin: plugin("agent-chat", { directoryName: "my-chat" }),
-      });
-    });
-    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
-
-    // The refused response arrives after the row is already gone.
-    await act(async () => {
-      addResult.resolve({
-        ok: false,
-        error: {
-          stage: "state",
-          code: "pipeline-unavailable",
-          message: "plugins/agent-chat already exists in this workspace.",
-        },
-      });
-      await addResult.promise;
-    });
-
-    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
-    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
-  });
-
-  it("shows a visible offers error with a working retry, without hiding installed plugins", async () => {
-    bridgeMock.listPlugins.mockResolvedValue({
-      ok: true,
-      plugins: [plugin("installed-plugin")],
-    });
-    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({
-      ok: false,
-      error: {
-        stage: "state",
-        code: "pipeline-unavailable",
-        message: "The plugin pipeline could not start.",
-      },
-    });
-
-    renderList();
-
-    // A rejected or {ok:false} offers load must not silently read as an
-    // empty list: the installed plugin still renders, and the offers
-    // section names its own failure instead of just vanishing.
-    expect(await screen.findByText("installed-plugin")).toBeTruthy();
-    const offersError = await screen.findByTestId("plugins-offers-error");
-    expect(offersError.textContent).toContain("The plugin pipeline could not start.");
-    expect(screen.queryByTestId("plugins-section-offered")).toBeNull();
-
-    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
-    await userEvent.click(within(offersError).getByText("Retry"));
-
-    expect(await screen.findByTestId("plugins-section-offered")).toBeTruthy();
-    expect(screen.queryByTestId("plugins-offers-error")).toBeNull();
-    expect(screen.getByText("installed-plugin")).toBeTruthy();
-    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
-  });
-
-  it("shows the offers error even when the workspace has no plugins of its own", async () => {
-    bridgeMock.listOfferedPlugins.mockRejectedValueOnce(new Error("IPC unavailable"));
-
-    renderList();
-
-    const offersError = await screen.findByTestId("plugins-offers-error");
-    expect(offersError.textContent).toContain("IPC unavailable");
-    expect(screen.queryByTestId("plugins-empty")).toBeNull();
-  });
-
   it("drops a stale plugin list after switching workspaces", async () => {
     const oldList = deferred<{
       ok: true;
@@ -1004,7 +570,7 @@ describe("PluginsView", () => {
         statusListener?.({
           kind: "changed",
           workspaceId: "ws-1",
-          plugin: plugin("agent-chat", { directoryName, displayName: directoryName }),
+          plugin: plugin("chat-plugin", { directoryName, displayName: directoryName }),
         });
       }
     });
@@ -1018,7 +584,7 @@ describe("PluginsView", () => {
   });
 
   it("does not restore the old directory from an action that settles after a rename", async () => {
-    const original = plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat", status: "discovered", approvedHash: null, runtimeStatus: null });
+    const original = plugin("chat-plugin", { directoryName: "chat-a", displayName: "Chat", status: "discovered", approvedHash: null, runtimeStatus: null });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [original] });
     const install = deferred<{ ok: true; plugin: PluginStatusRecord }>();
     bridgeMock.installPlugin.mockReturnValue(install.promise);
@@ -1029,7 +595,7 @@ describe("PluginsView", () => {
       plugins: [{ ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" }],
     });
     act(() => {
-      statusListener?.({ kind: "renamed", workspaceId: "ws-1", pluginId: "agent-chat", from: "chat-a", to: "chat-b" });
+      statusListener?.({ kind: "renamed", workspaceId: "ws-1", pluginId: "chat-plugin", from: "chat-a", to: "chat-b" });
       statusListener?.({ kind: "changed", workspaceId: "ws-1", plugin: { ...original, directoryName: "chat-b", status: "disabled", disabledReason: "user" } });
     });
     await act(async () => {
@@ -1225,13 +791,13 @@ describe("PluginsView", () => {
       .mockResolvedValueOnce({
         ok: true,
         plugins: [
-          plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A" }),
-          plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" }),
+          plugin("chat-plugin", { directoryName: "chat-a", displayName: "Chat A" }),
+          plugin("chat-plugin", { directoryName: "chat-b", displayName: "Chat B" }),
         ],
       })
       .mockResolvedValueOnce({
         ok: true,
-        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
+        plugins: [plugin("chat-plugin", { directoryName: "chat-b", displayName: "Chat B" })],
       });
 
     renderList();
@@ -1242,7 +808,7 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "removed",
         workspaceId: "ws-1",
-        pluginId: "agent-chat",
+        pluginId: "chat-plugin",
         directoryName: "chat-a",
       });
     });
@@ -1257,8 +823,8 @@ describe("PluginsView", () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
       plugins: [
-        plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A" }),
-        plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" }),
+        plugin("chat-plugin", { directoryName: "chat-a", displayName: "Chat A" }),
+        plugin("chat-plugin", { directoryName: "chat-b", displayName: "Chat B" }),
       ],
     });
 
@@ -1270,7 +836,7 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "changed",
         workspaceId: "ws-1",
-        plugin: plugin("agent-chat", { directoryName: "chat-a", displayName: "Chat A, updated" }),
+        plugin: plugin("chat-plugin", { directoryName: "chat-a", displayName: "Chat A, updated" }),
       });
     });
 
@@ -1291,7 +857,7 @@ describe("PluginsView", () => {
       .mockReturnValueOnce(initialLoad.promise)
       .mockResolvedValueOnce({
         ok: true,
-        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
+        plugins: [plugin("chat-plugin", { directoryName: "chat-b", displayName: "Chat B" })],
       });
 
     renderList();
@@ -1302,7 +868,7 @@ describe("PluginsView", () => {
       statusListener?.({
         kind: "removed",
         workspaceId: "ws-1",
-        pluginId: "agent-chat",
+        pluginId: "chat-plugin",
         directoryName: "chat-a",
       });
     });
@@ -1313,7 +879,7 @@ describe("PluginsView", () => {
     await act(async () => {
       initialLoad.resolve({
         ok: true,
-        plugins: [plugin("agent-chat", { directoryName: "chat-b", displayName: "Chat B" })],
+        plugins: [plugin("chat-plugin", { directoryName: "chat-b", displayName: "Chat B" })],
       });
       await initialLoad.promise;
     });

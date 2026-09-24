@@ -195,7 +195,12 @@ describe('an edit merged with a person typing', () => {
       .toBe('Intro.\n\nLast paragraph. Still typing.\n\n## Added\n\nBy the agent.')
   })
 
-  test('keeps the person text when the agent splits the block they type in', () => {
+  // A split keeps the typed block and gives the text after the split point to
+  // a new block. The person typed at the end of the old block, after text the
+  // split moved out, so their typing stays in the block they were typing in,
+  // now at the end of the text before the split. Nothing is lost; where it
+  // lands follows the block, not the moved words.
+  test('keeps the person text in the block they typed in when the agent splits it', () => {
     const merged = merge('Budget: 400 dollars', 0, ' PERSON', {
       find: 'Budget: 400 dollars',
       replacement: 'Budget:\n\n400 dollars',

@@ -56,6 +56,41 @@ async function openDocument(page: Page, path: string): Promise<void> {
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 
+// Holds main's handler for the editor's Y.Doc updates behind a gate the test
+// opens. Electron looks the handler up on each invoke, so swapping the entry
+// holds every update the editor sends until release.
+type InvokeHandlers = Map<string, (...args: unknown[]) => unknown>;
+type HeldUpdates = { __dohcReleaseEditorUpdates?: () => void };
+
+async function holdEditorUpdates(desktop: Desktop): Promise<void> {
+  await desktop.app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: InvokeHandlers })._invokeHandlers;
+    const channel = "desktop:engine-ydoc-apply-update";
+    const original = handlers.get(channel);
+    if (!original) throw new Error("main has no editor update handler");
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    handlers.set(channel, async (...args: unknown[]) => {
+      await gate;
+      return await original(...args);
+    });
+    (globalThis as HeldUpdates).__dohcReleaseEditorUpdates = () => {
+      handlers.set(channel, original);
+      open();
+    };
+  });
+}
+
+async function releaseEditorUpdates(desktop: Desktop): Promise<void> {
+  await desktop.app.evaluate(() => {
+    const release = (globalThis as HeldUpdates).__dohcReleaseEditorUpdates;
+    if (!release) throw new Error("editor updates are not held");
+    release();
+  });
+}
+
 async function fileText(temp: TempWorkspace, path: string): Promise<string> {
   return await readFile(join(temp.rootPath, path), "utf8").catch(() => "");
 }
@@ -92,34 +127,12 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       }, { timeout: 30_000 })
       .toBe(true);
 
-    // The person types once more, and the renderer then stops handling
-    // anything for a while: the typing waits in the editor's send batch, and
-    // no update from the person reaches main while the agent edits.
-    const holdMs = 10_000;
-    const heldUntil = await page.evaluate((hold) => {
-      const host = document.querySelector('[data-testid="markdown-editor"]') as
-        | (Element & {
-          editor?: {
-            state: { doc: { descendants(visit: (node: { isTextblock: boolean; textContent: string; nodeSize: number }, pos: number) => void): void } };
-            commands: { insertContentAt(position: number, text: string): boolean };
-          };
-        })
-        | null;
-      const tiptap = host?.editor;
-      if (!tiptap) throw new Error("The editor is not ready.");
-      let end = -1;
-      tiptap.state.doc.descendants((node, pos) => {
-        if (node.isTextblock && node.textContent.startsWith("The person writes here.")) end = pos + node.nodeSize - 1;
-      });
-      tiptap.commands.insertContentAt(end, " Queued.");
-      const until = Date.now() + hold;
-      // Scheduled after the send batch's own timer was armed and before it
-      // fires, so the batch stays queued.
-      setTimeout(() => {
-        while (Date.now() < until) { /* hold the renderer */ }
-      }, 0);
-      return until;
-    }, holdMs);
+    // Main now holds the editor's updates until the test lets them through,
+    // so the person's next typing is in their editor but not in main while
+    // the agent edits. A barrier the test opens, not a timer.
+    await holdEditorUpdates(desktop);
+    await page.keyboard.type(" Queued.");
+    await expect(editor).toContainText("Typed before. Queued.");
 
     // The agent edits the paragraph the person is typing in and the line
     // below it. Main has not seen the queued typing.
@@ -139,8 +152,6 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       find: "The agent edits this line.",
       replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-    // Both edits landed while the renderer still held its batch.
-    expect(Date.now()).toBeLessThan(heldUntil);
     // Turning the paragraph the person is typing in into a heading would
     // lose their typing, so the edit is refused with what to do instead.
     await expect(agentCli(temp, "documentEdit", {
@@ -150,8 +161,9 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       replacement: "# The person wrote here.",
     })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("ask the person") });
 
-    // The renderer resumes, sends its typing, and takes the agent's edits.
-    // The person keeps typing where the cursor was.
+    // Main takes the held typing, and the person keeps typing where the
+    // cursor was.
+    await releaseEditorUpdates(desktop);
     await page.keyboard.type(" Typed after.");
 
     await expect(editor).toContainText(
