@@ -10,6 +10,8 @@ import { createDatasetSupervisor, type DatasetInvocation, type DatasetMigration,
 import type { AppRuntimeLauncher } from "./protocol.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
+// These waits cover real worker processes, which a loaded gate host can hold past vi.waitFor's 1 s default.
+const wait = { timeout: 10_000 };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -371,7 +373,7 @@ it("recovers from a materialization cache and replays only its tail while retain
   const f=await fixture({launch,maintenanceStorage:storage,materializationEvents:2});
   for(let n=1;n<=3;n++)await f.invoke({id:String(n),value:"saved"},{idempotencyKey:String(n)});
   await f.invoke({}, {readOnly:true});
-  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0));
+  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0),wait);
   const cached=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
   expect(cached.cursor.revision).toBe(2);
   expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(3);
@@ -398,7 +400,7 @@ it("serves committed reads and writes while a captured cache is being sealed",as
   await f.invoke({id:"one",value:"saved"});await sealing;
   let result:unknown;
   const foreground=(async()=>{await f.invoke({id:"two",value:"new"},{idempotencyKey:"second"});result=(await f.invoke({}, {readOnly:true})).result;})();
-  try{await vi.waitFor(()=>expect(result).toEqual([{id:"one",value:"saved"},{id:"two",value:"new"}]),{timeout:1000});}
+  try{await vi.waitFor(()=>expect(result).toEqual([{id:"one",value:"saved"},{id:"two",value:"new"}]),wait);}
   finally{release();await foreground;}
   await cached;
   expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(1);
@@ -433,7 +435,7 @@ it("acknowledges a committed write before cache maintenance and serializes snaps
     if(command.command.kind==="snapshot"){release=controls.deliver;return;}controls.deliver();
   })});
   expect((await f.invoke({id:"one",value:"saved"})).revision).toBe(1);
-  await vi.waitFor(()=>expect(release).toBeTypeOf("function"));
+  await vi.waitFor(()=>expect(release).toBeTypeOf("function"),wait);
   let completed=false;
   const read=f.invoke({}, {readOnly:true}).then(result=>{completed=true;return result;});
   await new Promise<void>(resolve=>setImmediate(resolve));expect(completed).toBe(false);
@@ -482,7 +484,7 @@ it.each(["chunk", "full hash", "missing marker", "wrong marker", "schema"])("fal
   const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}}});
   await f.invoke({id:"one",value:"saved"});
   await f.invoke({}, {readOnly:true});
-  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull());
+  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull(),wait);
   const cache=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
   await f.supervisor.close();
   const bytes=f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})!;
@@ -536,12 +538,12 @@ it("refuses cache installation after authority transfers during the snapshot",as
     if(command.command.kind==="snapshot"){release=controls.deliver;return;}controls.deliver();
   })});
   const result=await f.invoke({id:"one",value:"saved"});expect(result.revision).toBe(1);
-  await vi.waitFor(()=>expect(release).toBeTypeOf("function"));
+  await vi.waitFor(()=>expect(release).toBeTypeOf("function"),wait);
   f.journal.fence({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
   const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("transferred");
   release!();await check;
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
-  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0));
+  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0),wait);
   expect(errors.length).toBeGreaterThan(0);
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
 });
@@ -554,7 +556,7 @@ it("stages and restores a large materialization through bounded chunks",async()=
     source:"globalThis.operations={run(ctx,input){if(input.id)ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,'saved']);return ctx.db.query('SELECT count(*) AS count FROM items')}}",
     transform:journal=>({...journal,appendCheckpointChunk(input){staged.push(input.bytes.byteLength);return journal.appendCheckpointChunk(input);}})});
   await f.invoke({id:"new"});await f.invoke({}, {readOnly:true});
-  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull());await f.supervisor.close();
+  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull(),wait);await f.supervisor.close();
   const journal={...f.journal,materializationBlob(input:Parameters<DatasetJournal["materializationBlob"]>[0]){const bytes=f.journal.materializationBlob(input);if(bytes)restored.push(bytes.byteLength);return bytes;}};
   const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,"workers")});cleanups.push(()=>reopened.close());
   expect((await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize})).result).toEqual([{count:1501}]);

@@ -7,8 +7,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type CommitOperationInput, type DatasetCursor, type DatasetScope, type JournalOptions, type TransitionCheckpointInput } from "./journal.ts";
 
 const digest=(value:string|Uint8Array)=>createHash("sha256").update(value).digest("hex");
-// These probes use FULL durability on real files, including close/reopen recovery.
-vi.setConfig({testTimeout:20000});
 const cleanups:Array<()=>void>=[];
 afterEach(()=>{for(const cleanup of cleanups.splice(0).reverse())cleanup();});
 const schemaSql="CREATE TABLE stock(id TEXT PRIMARY KEY NOT NULL,remaining INTEGER NOT NULL CHECK(remaining>=0)); INSERT INTO stock VALUES('item',3); CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,quantity INTEGER NOT NULL);";
@@ -386,7 +384,7 @@ it("accounts initialization once and refuses conflicting initialization",()=>{
 });
 it("does not accept attachment references without host validation",()=>{
   const f=fixture();expect(()=>f.journal.commitOperation({...f.prepare(),attachedFileIds:["receipt_file_0001"]})).toThrow("host validation");
-}, 20000);
+});
 
 function migration(f: ReturnType<typeof fixture>, expected:DatasetCursor):TransitionCheckpointInput {
   const db=f.materialize();

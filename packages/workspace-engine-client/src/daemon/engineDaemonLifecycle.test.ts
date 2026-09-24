@@ -17,8 +17,8 @@ import {
 // wait's duration is honest fs work plus whatever else the machine is doing.
 // Measured 2026-08-03 on a 24-process load (4 copies of this suite plus 4
 // each of five desktop suites, 3 waves, 12 runs): every wait whose subject
-// arrived completed within 2.5s; 15s is 6x that, and the 20s test deadline
-// still fails a genuine hang as itself. The rolling-window failures that
+// arrived completed within 2.5s; 15s is 6x that, and the package's 30s test
+// deadline still fails a genuine hang as itself. The rolling-window failures that
 // same load produced (6/12 and 3/12 runs) were not slow waits — the crash
 // landed while the replacement's startup smoke was still in flight, so it
 // was spent on the burst budget and the window signal never existed to wait
@@ -28,8 +28,6 @@ const WAIT = { timeout: 15_000 } as const;
 function probesSent(client: FakeClient | undefined): number {
   return client?.requests.filter((request) => request.method === "engine.ping").length ?? 0;
 }
-vi.setConfig({ testTimeout: 20_000 });
-
 function deferred() {
   let resolve!: () => void;
   let reject!: (error: Error) => void;

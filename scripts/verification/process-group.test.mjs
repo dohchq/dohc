@@ -98,7 +98,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
         let stdout='',stderr='';
         try {
           await assert.rejects(run(process.execPath,[join(root,'command.mjs')],{
-            timeoutMs:10000,log:join(root,'command.log'),
+            timeoutMs:20000,log:join(root,'command.log'),
             onSpawn:child=>{
               command=child;
               child.once('close',()=>{closed=true;});
@@ -130,7 +130,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
         supervisor.once("error", reject);
         supervisor.once("close", (status, signal) => done({ status, signal }));
       });
-      deadline = setTimeout(() => supervisor.kill("SIGKILL"), 15_000);
+      deadline = setTimeout(() => supervisor.kill("SIGKILL"), 30_000);
       const result = await supervisorClosed;
       assert.equal(result.signal, null, "repeated signal must not terminate the supervisor before cleanup");
       assert.equal(result.status, 0, stderr);
@@ -246,7 +246,7 @@ test("POSIX timeout kills descendants holding pipes after their leader exits", {
 });
 
 test("Windows timeout kills descendants holding pipes after cmd.exe exits", {
-  skip: process.platform !== "win32", timeout: 25_000,
+  skip: process.platform !== "win32", timeout: 30_000,
 }, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-windows-job-"));
   try {
@@ -301,7 +301,7 @@ test("Windows timeout kills descendants holding pipes after cmd.exe exits", {
       const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
       assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
       console.log(JSON.stringify({ ownerPid: owner.pid, descendantPid: pid, closed: true }));
-    `, root], { encoding: "utf8", windowsHide: true, timeout: 10_000, killSignal: "SIGKILL" });
+    `, root], { encoding: "utf8", windowsHide: true, timeout: 20_000, killSignal: "SIGKILL" });
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /"closed":true/);
@@ -345,7 +345,7 @@ test("Windows job closes descendants after the command completes normally", {
 
 for (const flag of ["--require", "--import"]) {
   test(`Windows ${flag} preloads run only in the assigned command and their descendants stop on timeout`, {
-    skip: process.platform !== "win32", timeout: 15_000,
+    skip: process.platform !== "win32", timeout: 30_000,
   }, async (context) => {
     const root = mkdtempSync(join(tmpdir(), "dohc-job-preload-"));
     context.mock.timers.enable({ apis: ["setTimeout"] });

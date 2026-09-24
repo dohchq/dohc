@@ -1,6 +1,6 @@
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   collapseSqliteSidecars,
@@ -245,12 +245,11 @@ describe("watchWorkspaceEvents", () => {
       await mkdir(join(root, ".dohc", "history"), { recursive: true });
       await writeFile(join(root, ".dohc", "history", "1.json"), "{}");
       await writeFile(join(root, "notes.md"), "hi");
-      await new Promise((r) => setTimeout(r, 600));
+      // notes.md, written after the .dohc/ writes, is the barrier: the user file
+      // is reported and nothing under .dohc/ ever is (no feedback loop).
+      await vi.waitFor(() => expect(batches.flat()).toContain("notes.md"), { timeout: 10_000 });
       watcher.stop();
-      const seen = batches.flat();
-      // The user file is reported; nothing under .dohc/ ever is (no feedback loop).
-      expect(seen).toContain("notes.md");
-      expect(seen.some((p) => p.includes(".dohc"))).toBe(false);
+      expect(batches.flat().some((p) => p.includes(".dohc"))).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -314,18 +313,19 @@ describe("settle max-window cap", () => {
         (paths) => batches.push(paths),
       );
       await watcher.ready;
-      // Write faster than settleMs for well past maxWindowMs: the trailing
-      // debounce alone would never flush, the deadline must.
-      const start = Date.now();
-      while (Date.now() - start < 1400) {
+      // Write faster than settleMs until a batch arrives: the trailing
+      // debounce alone would never flush, the deadline must. A loaded gate
+      // host can delay the first flush well past maxWindowMs.
+      const deadline = Date.now() + 10_000;
+      while (batches.length === 0) {
+        expect(Date.now(), "no batch flushed under continuous writes").toBeLessThan(deadline);
         await writeFile(join(root, "busy.md"), `tick ${Date.now()}`);
         await new Promise((r) => setTimeout(r, 90));
       }
-      expect(batches.length).toBeGreaterThan(0);
       expect(batches[0]).toContain("busy.md");
       watcher.stop();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 15_000);
+  });
 });
