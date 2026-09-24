@@ -34,6 +34,7 @@ import {
 } from "../ipc/bridgeContract";
 
 import type {
+  SitePackageInfo,
   AgentRunStatusResult,
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
@@ -16912,5 +16913,90 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("apps pinned to the sidebar", () => {
+  it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
+    const user = userEvent.setup();
+    const site: SitePackageInfo = {
+      root: "apps/trip",
+      title: "Trip planner",
+      kind: "static",
+      confidence: "high",
+      entryPath: "apps/trip/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredPreviewMode: null,
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: ["apps/trip/index.html"],
+      shareManifest: { ok: true, manifest: { entryPath: "apps/trip/index.html", assets: [] } },
+      diagnostics: [],
+      authority: { kind: "workspace" },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      getSitePackage: vi.fn(async () => site),
+      startSitePreview: vi.fn(async () => ({
+        siteRoot: "apps/trip",
+        mode: "static" as const,
+        url: "http://127.0.0.1:49152/",
+        logs: [],
+        exited: false,
+      })),
+      stopSitePreview: vi.fn(async () => undefined),
+      getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
+    });
+    bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: {
+        ...DEFAULT_USER_SETTINGS.sidebar,
+        hidden: ["graph" as const],
+        pinnedApps: { [WORKSPACE.workspaceId]: ["apps/trip"] },
+      },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    expect(screen.queryByTestId("activity-graph")).toBeNull();
+    const pinned = screen.getByRole("button", { name: "trip" });
+    await user.click(pinned);
+
+    const panel = screen.getByTestId("side-panel");
+    const frame = await within(panel).findByTestId("site-preview-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
+    expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(bridge.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      siteRoot: "apps/trip",
+      mode: "static",
+    });
+
+    fireEvent.contextMenu(pinned);
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        settings: { ...settings, sidebar: { ...settings.sidebar, pinnedApps: {} } },
+        base: settings,
+      }),
+    );
+    expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      context: "pinned-app",
+      path: "apps/trip",
+    });
   });
 });

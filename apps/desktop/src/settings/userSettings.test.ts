@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RUNNER_SETTINGS,
+  DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
   RunnerSettings,
@@ -58,6 +59,7 @@ describe("desktop user settings model", () => {
       ...legacySettings,
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
+      sidebar: DEFAULT_SIDEBAR_SETTINGS,
     });
   });
 
@@ -446,6 +448,29 @@ describe("desktop user settings store", () => {
     await writeFile(path, "{}");
     await ensureUserSettingsFile(root);
     expect(await readFile(path, "utf8")).toBe("{}");
+  });
+
+  it("keeps sidebar order, hidden views, and pins, and turns off only a list it cannot use", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    const pinned: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { order: ["sites", "explorer"], hidden: ["graph"], pinnedApps: { "ws-a": ["apps/trip"] } },
+    };
+    await writeUserSettingsFile(root, pinned, DEFAULT_USER_SETTINGS);
+    expect((await readUserSettingsFile(root)).settings.sidebar).toEqual(pinned.sidebar);
+    const unpinned = { ...pinned, sidebar: { ...pinned.sidebar, pinnedApps: {} } };
+    await writeUserSettingsFile(root, unpinned, pinned);
+    expect((await readUserSettingsFile(root)).settings.sidebar.pinnedApps).toEqual({});
+
+    // A view this build does not have turns off the order, not the pins.
+    await writeFile(path, JSON.stringify({
+      sidebar: { order: ["files", "search"], hidden: [], pinnedApps: { "ws-a": ["report"] } },
+    }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { sidebar: { order: [], hidden: [], pinnedApps: { "ws-a": ["report"] } } },
+      ignored: [{ key: "sidebar.order", reason: "invalid" }],
+    });
   });
 
   it("refuses to read a symlinked user settings file", async () => {

@@ -79,6 +79,22 @@ describe("SitePreviewPage", () => {
     vi.clearAllMocks();
   });
 
+  it("runs a pinned app in the side panel inside the same sandbox as its tab", async () => {
+    const tab = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    const tabFrame = await screen.findByTestId("site-preview-frame");
+    const tabAttributes = ["sandbox", "referrerpolicy", "src"].map((name) => tabFrame.getAttribute(name));
+    tab.unmount();
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" variant="panel" />);
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-forms allow-same-origin allow-scripts");
+    expect(["sandbox", "referrerpolicy", "src"].map((name) => frame.getAttribute(name)))
+      .toEqual(tabAttributes);
+    // The side panel's header already names the folder.
+    expect(screen.getByText("Report")).toBeTruthy();
+    expect(screen.queryByText("report")).toBeNull();
+  });
+
   it("starts the best available preview automatically and embeds the local URL", async () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 

@@ -202,6 +202,8 @@ function shareRefusalMessage(
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
+  // A pinned app in the side panel, whose header already names its folder.
+  variant?: "panel";
   sharedView?: boolean;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
@@ -542,7 +544,9 @@ export function SitePreviewPage(props: {
             Shared
           </span>
         ) : null}
-        <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
+        {props.variant === "panel" ? null : (
+          <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           {preview ? (
             <>

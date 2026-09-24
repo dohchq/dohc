@@ -5,6 +5,7 @@
 // editor's save state) and never lives here or on disk.
 
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import type { SidebarSettings } from "../../settings/userSettings";
 import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 
 export const VIEW_IDS = [
@@ -26,7 +27,34 @@ export type ViewId = (typeof VIEW_IDS)[number];
 // path here, so an id containing a slash cannot split into a different view.
 export const PLUGIN_VIEW_ID_PREFIX = "plugin-view:";
 export type PluginViewId = `${typeof PLUGIN_VIEW_ID_PREFIX}${string}`;
-export type ActivityViewId = ViewId | PluginViewId;
+// An app pinned to the sidebar, named by its folder, percent-encoded like
+// every path in a view or tab id.
+export const APP_VIEW_ID_PREFIX = "app-view:";
+export type AppViewId = `${typeof APP_VIEW_ID_PREFIX}${string}`;
+export type ActivityViewId = ViewId | PluginViewId | AppViewId;
+
+export function appViewId(appRoot: string): AppViewId {
+  return `${APP_VIEW_ID_PREFIX}${encodeURIComponent(appRoot)}`;
+}
+
+export function parseAppViewId(value: string): string | null {
+  if (!value.startsWith(APP_VIEW_ID_PREFIX)) return null;
+  try {
+    const appRoot = decodeURIComponent(value.slice(APP_VIEW_ID_PREFIX.length));
+    return appRoot.length > 0 ? appRoot : null;
+  } catch {
+    return null;
+  }
+}
+
+/** dohc's own views the sidebar shows, in the person's order. */
+export function sidebarViews(
+  sidebar: Pick<SidebarSettings, "order" | "hidden">,
+): ViewId[] {
+  return [...new Set([...sidebar.order, ...VIEW_IDS])].filter(
+    (view) => !sidebar.hidden.includes(view),
+  );
+}
 
 export function pluginViewId(pluginId: string, panelId: string): PluginViewId {
   return `${PLUGIN_VIEW_ID_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
@@ -55,7 +83,11 @@ export function isViewId(value: unknown): value is ViewId {
 
 function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
-  return isViewId(value) || parsePluginViewId(value) !== null;
+  return (
+    isViewId(value) ||
+    parsePluginViewId(value) !== null ||
+    parseAppViewId(value) !== null
+  );
 }
 
 /**
@@ -65,6 +97,19 @@ function isActivityViewId(value: unknown): value is ActivityViewId {
  */
 export function clearPluginView(state: WorkbenchState): WorkbenchState {
   return parsePluginViewId(state.activeView) === null
+    ? state
+    : { ...state, activeView: defaultWorkbenchState().activeView };
+}
+/**
+ * Drops the selection of an app that is no longer pinned, the way an
+ * uninstalled plugin's view is dropped.
+ */
+export function clearUnpinnedAppView(
+  state: WorkbenchState,
+  pinnedApps: readonly string[],
+): WorkbenchState {
+  const appRoot = parseAppViewId(state.activeView);
+  return appRoot === null || pinnedApps.includes(appRoot)
     ? state
     : { ...state, activeView: defaultWorkbenchState().activeView };
 }

@@ -64,6 +64,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  APP_VIEW_ID_PREFIX,
+  parseAppViewId,
   parsePluginViewId,
   PLUGIN_VIEW_ID_PREFIX,
   VIEW_IDS,
@@ -781,7 +783,8 @@ export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
 
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  context: z.enum(["tab", "editor", "status"]),
+  // A pinned app's menu names the app's folder as its path.
+  context: z.enum(["tab", "editor", "status", "pinned-app"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
   canCloseEditorGroup: z.boolean().optional(),
@@ -5639,11 +5642,17 @@ const PLUGIN_VIEW_ID = z
     );
   });
 
+// A pinned app's view: its folder, where each character can encode to nine.
+const APP_VIEW_ID = z
+  .string()
+  .max(APP_VIEW_ID_PREFIX.length + 4096 * 9)
+  .refine((value) => parseAppViewId(value) !== null);
+
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  // dohc's own views, or a view a plugin contributes. The catch keeps a
-  // stored id that names neither from failing the whole file.
-  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID]).catch("explorer"),
+  // dohc's own views, a view a plugin contributes, or a pinned app. The
+  // catch keeps a stored id that names none of them from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID, APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,

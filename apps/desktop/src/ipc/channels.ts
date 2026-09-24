@@ -54,6 +54,7 @@ export const WORKBENCH_MENU_COMMANDS = [
   "install-update",
   "settings",
   "toggle-theme",
+  "unpin-app",
 ] as const;
 
 export const PLUGIN_PIPELINE_STATUSES = [
