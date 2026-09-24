@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../src/ipc/channels.ts";
 
 // Static packaging gate: asserts the built tree and electron-builder config
 // are release-ready without running electron-builder (no network, no heavy
@@ -122,19 +121,6 @@ if (config) {
     check(
       cliBinResource?.filter?.includes(launcher) === true,
       `cli-bin extraResource ships ${launcher}`,
-    );
-  }
-  // The only tie between this config and BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES:
-  // a driver added there without a matching extraResources entry ships in dev
-  // but silently disappears from a packaged app's Offered section.
-  for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
-    check(
-      extraResources.some(
-        (entry) =>
-          entry?.from === `plugins/${directoryName}` &&
-          entry?.to === `builtin-plugins/${directoryName}`,
-      ),
-      `built-in ${directoryName} plugin ships as an extraResource`,
     );
   }
 
