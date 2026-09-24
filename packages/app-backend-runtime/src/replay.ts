@@ -40,11 +40,15 @@ function copyRows(source:DatabaseSync, target:DatabaseSync, table:string, column
 }
 
 /** Called only after the fast replay transaction rolls back a secondary-constraint conflict. */
-export function replayThroughShadow(database:DatabaseSync, input:{directory:string;tables:string[];changeset:Uint8Array;databaseBytes:number}, commit:()=>void):void {
+// `steps` reports each phase to the host and charges the app's indexes and
+// generated columns to its CPU budget as rows are rebuilt.
+export function replayThroughShadow(database:DatabaseSync, input:{directory:string;tables:string[];changeset:Uint8Array;databaseBytes:number}, commit:()=>void,
+  steps:{progress(step:string):void;appCode<T>(run:()=>T):T}={progress(){},appCode:run=>run()}):void {
   const path=join(input.directory,`replay-${randomUUID()}.sqlite`);
   closeSync(openSync(path,"wx",0o600));
   let shadow:DatabaseSync | undefined;
   try {
+    steps.progress("copying the dataset for the replay");
     shadow=new DatabaseSync(path,{allowExtension:false,enableForeignKeyConstraints:false,enableDoubleQuotedStringLiterals:false});
     shadow.exec(`PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE; PRAGMA temp_store=MEMORY; PRAGMA max_page_count=${Math.floor(input.databaseBytes/4096)}; BEGIN IMMEDIATE;`);
     const tables=input.tables.map(name=>({name,columns:stageTable(database,shadow!,name)}));
@@ -54,17 +58,23 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
       onConflict:()=>constants.SQLITE_CHANGESET_ABORT,
     });
     if(!applied || forbidden) reject("invalid_changeset","The committed changeset cannot be replayed.");
+    steps.progress("saving the replay copy");
     shadow.exec("COMMIT");
 
     // Replay restores accepted predicates; structural constraints and generated columns still apply.
     const triggers=database.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
     database.exec("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; BEGIN IMMEDIATE");
     try {
+      steps.progress("rebuilding the dataset from the replay copy");
       for(const trigger of triggers) database.exec(`DROP TRIGGER ${quote(String(trigger.name))}`);
-      for(const table of tables) database.exec(`DELETE FROM ${quote(table.name)}`);
-      for(const table of tables) copyRows(shadow,database,table.name,table.columns);
+      // Deleting and reinserting every row runs the app's indexes and generated columns.
+      steps.appCode(()=>{
+        for(const table of tables) database.exec(`DELETE FROM ${quote(table.name)}`);
+        for(const table of tables) copyRows(shadow!,database,table.name,table.columns);
+      });
       if(!database.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The committed changeset violates a foreign-key constraint.");
       for(const trigger of triggers) database.exec(String(trigger.sql));
+      steps.progress("saving the rebuilt dataset");
       commit();database.exec("COMMIT");
     } catch(error) {if(database.isTransaction) database.exec("ROLLBACK");throw error;}
     finally {database.exec("PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF");}

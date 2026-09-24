@@ -422,6 +422,55 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("charges a journal replay's app work to the CPU budget",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open();
+      // One statement that inserts many rows, so replaying it rebuilds the table's rows and index.
+      const prepared=await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
+        ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200000) SELECT x FROM n)");return 1}}`});
+      const committed=event(prepared);
+      await expect((await open({limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Reopen it from the journal."});
+      await expect((await open()).apply(committed)).resolves.toMatchObject({revision:1});
+    });
+  },60_000);
+
+  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
+    await fixture(async({open})=>{
+      let pid=0,stall:Promise<void>|undefined,suspendedAt=0,resumedAt=0,repliedAt=0;
+      const signal=async(verb:"Suspend"|"Resume")=>{
+        if(process.platform!=="win32"){process.kill(pid,verb==="Suspend"?"SIGSTOP":"SIGCONT");return;}
+        const script=`Add-Type -Namespace W -Name ${verb} -MemberDefinition '[DllImport("ntdll.dll")] public static extern int Nt${verb}Process(IntPtr h);'; [void][W.${verb}]::Nt${verb}Process((Get-Process -Id ${pid}).Handle)`;
+        await new Promise<void>((resolve,rejectRun)=>spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",script],{windowsHide:true}).on("exit",code=>code===0?resolve():rejectRun(new Error(`powershell ${code}`))));
+      };
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        pid=child.pid!;
+        child.on("message",message=>{
+          const reply=message as {progress?:string;ok?:boolean};
+          // The app code section starts right after this report: stop the worker inside it.
+          if(reply.progress==="running the app operation" && !stall) stall=(async()=>{
+            await signal("Suspend");suspendedAt=performance.now();
+            await new Promise(resolve=>setTimeout(resolve,6_000));
+            resumedAt=performance.now();await signal("Resume");
+          })();
+          if(typeof reply.ok==="boolean") repliedAt=performance.now();
+          options.onMessage(message);
+        });
+        child.on("error",options.onError);child.on("close",options.onExit);
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({limits:{cpuBudgetMs:5_000}},launch);
+      // About two seconds of CPU, so the stop lands inside the app's section.
+      const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000000) SELECT sum(x) AS total FROM n')}}"});
+      await stall;
+      expect(prepared.result).toEqual([{total:450000015000000}]);
+      // Stopped for 6 s inside a 5 s budget, and not charged for it.
+      expect(suspendedAt).toBeGreaterThan(0);
+      expect(repliedAt).toBeGreaterThan(resumedAt);
+    });
+  },60_000);
+
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{
       let finalizeId:number|undefined;

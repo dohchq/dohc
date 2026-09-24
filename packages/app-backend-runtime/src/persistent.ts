@@ -51,6 +51,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     const seen=entry.progress;
     entry.timer=setTimeout(()=>{
       // A stalled host fires this before it reads messages that arrived meanwhile.
+      // In Node the check phase follows the poll that delivers them; Electron's
+      // main process runs its own loop, where this recheck is best effort.
       setImmediate(()=>{
         if(active!==entry || entry.progress!==seen) return;
         fail(new PersistentRuntimeError("worker_stalled",`The dataset worker made no progress for ${duration(silenceMs)}${during(entry)}. Reopen it from the journal.`));
@@ -60,8 +62,11 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
   const budgetMarker=()=>join(config.directory,APP_CPU_BUDGET_MARKER);
   // The worker's CPU budget watch leaves this marker as it ends the worker.
   function exceededBudget():number|undefined {
-    try {const budgetMs=Number(readFileSync(budgetMarker(),"utf8"));rmSync(budgetMarker(),{force:true});return budgetMs;}
-    catch {return undefined;}
+    let budgetMs:number;
+    try {budgetMs=Number(readFileSync(budgetMarker(),"utf8"));} catch {return undefined;}
+    // An antivirus scan can hold the file; the reason is already known.
+    try {rmSync(budgetMarker(),{force:true});} catch {/* removed before the next launch */}
+    return budgetMs;
   }
   function fail(error:Error):void {
     stopped??=error;

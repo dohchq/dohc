@@ -59,31 +59,65 @@ function writeMarker(next:DatasetCursor):void {
 // on this thread runs. A second thread watches the process's CPU time while app
 // code runs. Past the budget it leaves a marker for the host and ends the
 // worker, because node:sqlite cannot interrupt a statement. Waiting on the disk
-// uses no CPU, so a slow disk never counts against the budget.
+// uses no CPU, so a slow disk never counts against the budget. Only app code is
+// charged: the app's schema text and SQL, its operation, its migration, and a
+// journal replay that runs the app's indexes and generated columns. The
+// budget covers one command, so the events of a replay batch share it.
+//
+// Shared with the watch thread: armed (0 or 1), generation, CPU charged to
+// this command before the current section, the section's start, and the budget,
+// all in microseconds. The watch re-reads the generation before it ends the
+// worker, so a section that ended while it measured is never charged.
+const budgetState=new BigInt64Array(new SharedArrayBuffer(5*8));
+const [ARMED,GENERATION,CHARGED,SECTION_START,BUDGET]=[0,1,2,3,4];
 const budgetWatchSource=`
-const {parentPort}=require("node:worker_threads");
+const {workerData}=require("node:worker_threads");
 const {writeFileSync}=require("node:fs");
-const {join}=require("node:path");
-let armed;
-parentPort.on("message",message=>{armed=message.budgetMs ? message : undefined;});
+const state=new BigInt64Array(workerData.state);
 setInterval(()=>{
-  if(!armed) return;
+  if(Atomics.load(state,${ARMED})!==1n) return;
+  const generation=Atomics.load(state,${GENERATION});
   const used=process.cpuUsage();
-  if(used.user+used.system-armed.startCpuMicros<=armed.budgetMs*1000) return;
-  try {writeFileSync(join(armed.directory,${JSON.stringify(APP_CPU_BUDGET_MARKER)}),String(armed.budgetMs));} finally {process.kill(process.pid,"SIGKILL");}
+  const charged=Atomics.load(state,${CHARGED})+BigInt(used.user+used.system)-Atomics.load(state,${SECTION_START});
+  if(charged<=Atomics.load(state,${BUDGET})) return;
+  if(Atomics.load(state,${ARMED})!==1n || Atomics.load(state,${GENERATION})!==generation) return;
+  try {writeFileSync(workerData.marker,String(Number(Atomics.load(state,${BUDGET})/1000n)));} finally {process.kill(process.pid,"SIGKILL");}
 },50);`;
 let budgetWatch:Worker|undefined;
-function armAppCode():()=>void {
-  if(!budgetWatch) {budgetWatch=new Worker(budgetWatchSource,{eval:true});budgetWatch.unref();}
-  const used=process.cpuUsage();
-  budgetWatch.postMessage({directory:config.directory,budgetMs:config.limits.cpuBudgetMs,startCpuMicros:used.user+used.system});
-  return ()=>budgetWatch?.postMessage({});
+let exiting=false;
+process.on("exit",()=>{exiting=true;});
+const cpuMicros=()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);};
+function startBudgetWatch():void {
+  if(budgetWatch) return;
+  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,marker:join(config.directory,APP_CPU_BUDGET_MARKER)}});
+  budgetWatch.unref();
+  // Without the watch, app code would run unbounded. End the worker instead.
+  const lost=()=>{if(!exiting) process.exit(70);};
+  budgetWatch.on("error",lost);
+  budgetWatch.on("exit",lost);
+}
+function appCode<T>(run:()=>T):T {
+  startBudgetWatch();
+  Atomics.add(budgetState,GENERATION,1n);
+  Atomics.store(budgetState,SECTION_START,cpuMicros());
+  Atomics.store(budgetState,BUDGET,BigInt(config.limits.cpuBudgetMs)*1000n);
+  Atomics.store(budgetState,ARMED,1n);
+  const disarm=()=>{
+    Atomics.store(budgetState,ARMED,0n);
+    Atomics.add(budgetState,GENERATION,1n);
+    Atomics.add(budgetState,CHARGED,cpuMicros()-Atomics.load(budgetState,SECTION_START));
+  };
+  let result:T;
+  try {result=run();} catch(error) {disarm();throw error;}
+  if(result instanceof Promise) return result.finally(disarm) as T;
+  disarm();
+  return result;
 }
 
 function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
   config=openRequest({...input,databaseBytes:input.limits.databaseBytes,limits:Object.fromEntries(Object.entries(input.limits).filter(([key])=>key!=="databaseBytes"))});
-  assertReplayableSchema(config.schemaSql);
+  appCode(()=>assertReplayableSchema(config.schemaSql));
   progress("taking the dataset lease");
   if(config.ownership) lease=acquireWorkerLease(config.directory,config.ownership);
   noLinks(config.directory);
@@ -101,16 +135,13 @@ function initialize(input:OpenRequest):DatasetCursor {
   db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
   const pageSize=Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
-  const disarm=armAppCode();
-  try {
-    if (!config.checkpointPath) {
-      progress("creating the schema");
-      authorize(db,{tables:config.tables},{initializing:true});
-      db.exec(config.schemaSql);db.setAuthorizer(null);
-    }
-    progress("checking the schema");
-    verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits);
-  } finally { disarm(); }
+  if (!config.checkpointPath) {
+    progress("creating the schema");
+    authorize(db,{tables:config.tables},{initializing:true});
+    appCode(()=>db!.exec(config.schemaSql));db.setAuthorizer(null);
+  }
+  progress("checking the schema");
+  verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits,false,appCode);
   progress("recording the dataset cursor");
   const existing=db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(marker);
   if (existing) {
@@ -158,7 +189,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     const session=db.createSession();
     let resultJson:string, attachedFileIds:string[], changeset:Uint8Array;
     try {
-      ({resultJson,attachedFileIds}=await evaluate(db,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true}));
+      ({resultJson,attachedFileIds}=await appCode(()=>evaluate(db!,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true})));
       db.setAuthorizer(null);changeset=session.changeset();
     } finally { session.close(); }
     if (!db.isTransaction) reject("invalid_changeset","The prepared operation transaction ended.");
@@ -184,10 +215,11 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     try {
       db.exec("BEGIN IMMEDIATE");transaction=true;
       for (const trigger of triggers) db.exec(`DROP TRIGGER "${String(trigger.name).replaceAll('"','""')}"`);
-      const applied=changeset.byteLength===0 || db.applyChangeset(changeset,{
+      // Applying runs the app's indexes and generated columns.
+      const applied=changeset.byteLength===0 || appCode(()=>db!.applyChangeset(changeset,{
         filter:table=>{ const allowed=config.tables.includes(table); if (!allowed) forbidden=true;return allowed; },
         onConflict:kind=>{constraintConflict=kind===changesetConstraint;return constants.SQLITE_CHANGESET_ABORT;},
-      });
+      }));
       if (!applied || forbidden || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The committed changeset cannot be applied to this dataset.");
       for (const trigger of triggers) db.exec(String(trigger.sql));
       writeMarker(command.input);db.exec("COMMIT");transaction=false;
@@ -195,13 +227,13 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     } catch (error) {
       rollback();
       if(!constraintConflict || forbidden) throw error;
-      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input));
+      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input),{progress,appCode});
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     }
     finally { db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }
   }
   if (command.kind==="migrateCheckpoint") {
-    progress("migrating a copy of the dataset");
+    progress("copying the dataset for the migration");
     noLinks(command.input.path,true);
     if(command.input.reportPath) noLinks(command.input.reportPath,true);
     const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
@@ -216,15 +248,21 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       copy.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;");
       const pageSize=Number(copy.prepare("PRAGMA page_size").get()!.page_size);
       copy.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
+      progress("running the migration");
       copy.exec(`DROP TABLE ${marker}; BEGIN IMMEDIATE`);
       authorizeMigration(copy,[...new Set([...config.tables,...command.input.tables])]);
-      copy.exec(command.input.migrationSql);copy.setAuthorizer(null);
+      const migrationCopy=copy;
+      appCode(()=>migrationCopy.exec(command.input.migrationSql));copy.setAuthorizer(null);
       if (copy.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(marker)) reject("invalid_checkpoint","Migration introduced internal metadata.");
-      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql);
+      progress("checking the migrated schema");
+      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql,appCode);
+      progress("saving the migrated copy");
       copy.exec("COMMIT");
+      if(command.input.reportPath) progress("writing the migration preview");
       const report=command.input.reportPath ? createMigrationPreviewReport({before:db,after:copy,beforeTables:config.tables,
         afterTables:command.input.tables,path:command.input.reportPath,maxBytes:config.limits.databaseBytes}) : undefined;
       reportCreated=Boolean(report);
+      progress("writing the migrated checkpoint");
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
       copy.prepare("VACUUM INTO ?").run(command.input.path);
       succeeded=true;
@@ -255,7 +293,9 @@ function progress(step:string):void { if(activeId!==undefined) send({id:activeId
 async function receive(message:{id:number;command:PersistentCommand}):Promise<void> {
   if (busy) { send({id:message.id,ok:false,code:"busy",error:"The worker is busy."});return; }
   busy=true;activeId=message.id;batching=message.command.kind==="applyBatch";
-  const disarm=db && (message.command.kind==="prepare" || message.command.kind==="migrateCheckpoint") ? armAppCode() : undefined;
+  // Each command gets the whole budget. Every section disarmed itself before
+  // this command replies, so the watch cannot end the worker after the reply.
+  Atomics.store(budgetState,CHARGED,0n);
   try {
     const result=await handle(message.command);
     send({id:message.id,ok:true,result});
@@ -266,7 +306,7 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
     send({id:message.id,ok:false,error:error instanceof Error ? error.message.slice(0,1024) : "Dataset operation failed.",
       code:error instanceof PersistentRuntimeError ? error.code : "operation_failed",
       ...(error instanceof AppBackendRuntimeError ? {refusal:error.refusal} : {})});
-  } finally { disarm?.();busy=false;activeId=undefined;batching=false; }
+  } finally { busy=false;activeId=undefined;batching=false; }
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
 else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }

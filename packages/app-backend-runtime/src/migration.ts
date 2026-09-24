@@ -31,13 +31,16 @@ export function assertReplayableSchema(schemaSql:string):void {
   if (/\bAUTOINCREMENT\b/i.test(code)) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
 }
 
-export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false):void {
-  assertReplayableSchema(schemaSql);
+// `appCode` runs the app's own schema text and SQL under the worker's CPU
+// budget; the integrity and foreign-key checks are the host's and stay outside.
+export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false,
+  appCode:<T>(run:()=>T)=>T=run=>run()):void {
+  appCode(()=>assertReplayableSchema(schemaSql));
   const expected=new DatabaseSync(":memory:",options);
   try {
     expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA ignore_check_constraints=ON; PRAGMA max_page_count=${Math.floor(limits.databaseBytes/4096)}`);
     authorize(expected,{tables},{initializing:true});
-    expected.exec(schemaSql);expected.setAuthorizer(null);
+    appCode(()=>expected.exec(schemaSql));expected.setAuthorizer(null);
     if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
     const schema=expected.prepare(datasetSchema).all();
     const declaredTables=schema.filter(row=>row.type==="table");
