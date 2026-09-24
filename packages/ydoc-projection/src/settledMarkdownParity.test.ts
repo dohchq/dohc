@@ -199,6 +199,9 @@ function yjsVectors(): Vector[] {
     const baseUpdate = Y.encodeStateAsUpdate(base)
     const peer = new Y.Doc()
     Y.applyUpdate(peer, baseUpdate)
+    // Fixed client ids keep the merge order of the two edits stable across regenerations.
+    base.clientID = 1
+    peer.clientID = 2
     const updates = [baseUpdate]
     base.on('update', (update: Uint8Array) => updates.push(update))
     peer.on('update', (update: Uint8Array) => updates.push(update))
