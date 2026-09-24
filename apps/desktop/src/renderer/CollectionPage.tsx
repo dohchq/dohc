@@ -460,27 +460,75 @@ export function CollectionPage({
     />
   ) : null;
 
-  // Settled 2026-08-31: a collection with no records shows one line and the
-  // New record action, nothing else. A notice can still open the ⚡ panel
-  // beside it.
+  const automationCount =
+    automations.file?.status === "read" ? automations.file.automations.length : 0;
+  // Automations and Fields set up a Collection, so they stay in the header
+  // even before it has records.
+  const collectionName = (
+    <span className="min-w-0 truncate text-sm font-semibold text-ink">
+      {schema.name ?? collectionPath.split("/").at(-1)}
+    </span>
+  );
+  const setupButtons = (
+    <>
+      <SecondaryButton
+        data-testid="collection-automations-button"
+        aria-pressed={automationsOpen}
+        onClick={() => setAutomationsOpen((open) => !open)}
+        className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
+      >
+        <Zap size={12} aria-hidden />
+        Automations
+        {automationCount > 0 ? (
+          <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
+            {automationCount}
+          </span>
+        ) : null}
+      </SecondaryButton>
+      <SecondaryButton
+        data-testid="collection-fields-button"
+        onClick={() => setFieldsOpen(true)}
+      >
+        Fields
+      </SecondaryButton>
+    </>
+  );
+  const fieldsDialog = fieldsOpen ? (
+    <FieldsDialog
+      schema={schema}
+      relationTargets={relationTargets}
+      apply={applySchemaChange}
+      onClose={() => setFieldsOpen(false)}
+    />
+  ) : null;
+
+  // Settled 2026-08-31, amended for automations on 2026-09-25: a collection
+  // with no records shows one line and the New record action, under a
+  // header that keeps only what sets the Collection up.
   if (empty) {
     return (
-      <div className="flex min-h-0 flex-1">
-        <div
-          data-testid="collection-empty"
-          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
-        >
-          <span className="text-sm text-muted">
-            No records in this collection yet.
-          </span>
-          <NewRecordButton onClick={newRecord} />
+      <div className="flex min-h-0 flex-1 flex-col bg-bg">
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+          {collectionName}
+          <span className="flex-1" />
+          {setupButtons}
         </div>
-        {automationsPanel}
+        <div className="flex min-h-0 flex-1">
+          <div
+            data-testid="collection-empty"
+            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
+          >
+            <span className="text-sm text-muted">
+              No records in this collection yet.
+            </span>
+            <NewRecordButton onClick={newRecord} />
+          </div>
+          {automationsPanel}
+        </div>
+        {fieldsDialog}
       </div>
     );
   }
-  const automationCount =
-    automations.file?.status === "read" ? automations.file.automations.length : 0;
 
   const kind = activeView?.kind ?? "table";
   const boardReady =
@@ -493,9 +541,7 @@ export function CollectionPage({
       className="flex min-h-0 flex-1 flex-col bg-bg"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-        <span className="min-w-0 truncate text-sm font-semibold text-ink">
-          {schema.name ?? collectionPath.split("/").at(-1)}
-        </span>
+        {collectionName}
         {views.length > 1 ? (
           <div
             data-testid="collection-view-switcher"
@@ -539,26 +585,7 @@ export function CollectionPage({
             {writeError}
           </span>
         ) : null}
-        <SecondaryButton
-          data-testid="collection-automations-button"
-          aria-pressed={automationsOpen}
-          onClick={() => setAutomationsOpen((open) => !open)}
-          className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
-        >
-          <Zap size={12} aria-hidden />
-          Automations
-          {automationCount > 0 ? (
-            <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
-              {automationCount}
-            </span>
-          ) : null}
-        </SecondaryButton>
-        <SecondaryButton
-          data-testid="collection-fields-button"
-          onClick={() => setFieldsOpen(true)}
-        >
-          Fields
-        </SecondaryButton>
+        {setupButtons}
         <SecondaryButton
           data-testid="collection-views-button"
           onClick={() => setViewsOpen(true)}
@@ -615,14 +642,7 @@ export function CollectionPage({
       </div>
       {automationsPanel}
       </div>
-      {fieldsOpen ? (
-        <FieldsDialog
-          schema={schema}
-          relationTargets={relationTargets}
-          apply={applySchemaChange}
-          onClose={() => setFieldsOpen(false)}
-        />
-      ) : null}
+      {fieldsDialog}
       {viewsOpen ? (
         <ViewsDialog
           schema={schema}

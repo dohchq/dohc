@@ -296,9 +296,14 @@ describe("CollectionPage", () => {
     expect(
       await screen.findByText("No records in this collection yet."),
     ).toBeDefined();
-    // Settled 2026-08-31: the line and the action, nothing else.
+    // Settled 2026-08-31: the line and the action, nothing else. Amended
+    // 2026-09-25: the header keeps what sets the Collection up.
     const empty = screen.getByTestId("collection-empty");
     expect(empty.querySelectorAll("button")).toHaveLength(1);
+    expect(screen.getByTestId("collection-automations-button")).toBeDefined();
+    expect(screen.getByTestId("collection-fields-button")).toBeDefined();
+    expect(screen.queryByTestId("collection-views-button")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "New record" })).toHaveLength(1);
 
     fireEvent.click(screen.getByTestId("collection-new-record"));
     expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("tasks");
