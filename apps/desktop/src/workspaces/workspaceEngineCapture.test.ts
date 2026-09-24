@@ -36,7 +36,6 @@ import {
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
-  isWorkspaceUpdatingRefusal,
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -345,33 +344,6 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(objectId).toBeTruthy();
     expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
-    await engine.stop();
-  });
-
-  it("finds a file the engine has while the capture stays degraded, and refuses one it has not seen", async () => {
-    const root = await createTestScratch("dohc-engine-capture-");
-    const loopback = new VersionedLoopbackEngine();
-    loopback.seedTextFile({
-      workspace: "engine-capture-test",
-      versionId: "main",
-      path: "open-in-editor.md",
-      text: "held by an editor",
-    });
-    let settled = true;
-    const engine = capture(root, {
-      rustEngineSessions: mockLiveSessions(loopback, [], () => ({
-        settled,
-        running: true,
-        degraded: !settled,
-      })),
-    });
-
-    settled = false;
-    await expect(engine.fileObjectIdForPath("open-in-editor.md")).resolves.toBeTruthy();
-    const refusal = await engine.fileObjectIdForPath("not-captured-yet.md").catch((error: unknown) => error);
-    expect(isWorkspaceUpdatingRefusal(refusal)).toBe(true);
-
-    settled = true;
     await engine.stop();
   });
 
@@ -1189,7 +1161,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const outcome = await engine.stop().catch((error: unknown) => error);
 
     expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toContain("Workspace is still updating. Try again.");
+    expect((outcome as Error).message).toContain("did not settle");
     expect(closeWorkspace, "await the final flush outside try/finally. Its rejection skips both adapter closes, so this count is zero.").toHaveBeenCalledTimes(2);
   });
 
@@ -1979,7 +1951,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
           commitWhileUnsettled,
         ),
       ),
-    ).rejects.toThrow("Workspace is still updating. Try again.");
+    ).rejects.toThrow("did not settle");
     expect(commitWhileUnsettled).not.toHaveBeenCalled();
 
     settled = true;
@@ -2748,7 +2720,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     });
 
     await engine.setActiveAgentRun(run);
-    await expect(engine.setActiveAgentRun(null)).rejects.toThrow("Workspace is still updating. Try again.");
+    await expect(engine.setActiveAgentRun(null)).rejects.toThrow("did not settle");
     const methods = requests
       .filter(
         (request) =>

@@ -41,7 +41,6 @@ import {
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isTransientEngineRefusal,
-  isWorkspaceUpdatingRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
@@ -5325,24 +5324,13 @@ export function createWorkspaceEngineCapture(
       // Drain the chain so a just-captured file is immediately chat-able.
       await chain;
       const engine = await engineStore();
-      // The capture can stay unsettled for as long as an editor holds a new
-      // file: the layer reports itself degraded until the editor closes. A
-      // file the engine already has needs nothing from the capture to be
-      // linked, so only a file it has not seen yet waits on the refusal.
-      let unsettled: unknown = null;
-      try {
-        await engine.flushCapture?.();
-      } catch (error) {
-        if (!isWorkspaceUpdatingRefusal(error)) throw error;
-        unsettled = error;
-      }
+      await engine.flushCapture?.();
       const activeVersionId = await activeVersionIdOf(engine);
       const snapshot = await engine.readTextFile({
         workspaceId,
         versionId: activeVersionId,
         path,
       });
-      if (!snapshot && unsettled !== null) throw unsettled;
       return snapshot?.objectId ?? null;
     },
 
