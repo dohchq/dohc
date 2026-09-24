@@ -11,7 +11,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EXCHANGE_BUCKET_CAPACITY, shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
@@ -31,6 +31,11 @@ const FORCED_SHUTDOWN_TIMEOUT_MS = CHILD_RESPONSE_WAIT_MS;
 // did not wait out its grace period.
 const QUIET_SHUTDOWN_GRACE_PERIOD_MS = 60_000;
 const STOP_SHARE_WEB_DEADLINE_MS = 13_000;
+// tsx compiles share-web on startup. A loaded run missed a 20 s bound, so this
+// matches sync-relay's 45 s tsx startup bound. A test starts share-web and
+// then waits up to 10 s per step, so each test gets 90 s.
+const SHARE_WEB_START_TIMEOUT_MS = 45_000;
+vi.setConfig({ testTimeout: 90_000 });
 const SIGKILL_EXIT_TIMEOUT_MS = 1_000;
 const CLEANUP_HOOK_TIMEOUT_MS =
   STOP_SHARE_WEB_DEADLINE_MS + SIGKILL_EXIT_TIMEOUT_MS + 2_000;
@@ -752,9 +757,7 @@ async function startShareWeb(
   const port = await new Promise<number>((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error(`share-web did not start\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-      // A full gate beside other work can take well over 5 s to start a child
-      // process; each start stays bounded inside the 30 s test timeout.
-    }, 20_000);
+    }, SHARE_WEB_START_TIMEOUT_MS);
     const inspectStdout = (): void => {
       const match = /SHARE_WEB_LISTENING host=[^ ]+ port=(\d+)/u.exec(stdout);
       if (!match) return;

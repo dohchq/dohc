@@ -32,7 +32,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
+  // Windows can hold a killed descendant's working directory for a moment
+  // after it exits; rm retries EBUSY for up to about 5 s.
+  await rm(root, { recursive: true, force: true, maxRetries: 10 });
 });
 
 // stopChild sends SIGKILL and returns without waiting for the kernel to
@@ -1214,6 +1216,11 @@ describe("startSiteDevServer", () => {
   });
 });
 
+// On Windows buildSite snapshots descendants with PowerShell, and a trivial
+// build still passed 30 s beside other work. These tests allow 60 s, well
+// past their 20 s build timeout.
+const BUILD_TEST_TIMEOUT_MS = 60_000;
+
 describe("buildSite", () => {
   it("runs a build command and detects the output directory", async () => {
     await mkdir(join(root, "site"), { recursive: true });
@@ -1231,7 +1238,7 @@ describe("buildSite", () => {
     expect(result.outputPath).toBe(join(root, "site", "dist"));
     expect(result.logs.some((entry) => entry.text.includes("built ok"))).toBe(true);
     expect(await readFile(join(root, "site", "dist", "index.html"), "utf8")).toBe("built");
-  });
+  }, BUILD_TEST_TIMEOUT_MS);
 
   it.runIf(process.platform !== "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind",
@@ -1341,7 +1348,7 @@ describe("buildSite", () => {
     expect(result.outputPath).toBeNull();
     expect(result.exitCode).toBe(3);
     expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
-  });
+  }, BUILD_TEST_TIMEOUT_MS);
 
   it("cancels an in-flight build instead of waiting for its timeout", async () => {
     await mkdir(join(root, "site"), { recursive: true });

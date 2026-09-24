@@ -1562,24 +1562,34 @@ describe("PluginHost", () => {
     );
   });
 
-  it("lets a healthy activation finish before a short test deadline", async () => {
-    const root = await workspaceRoot();
-    const harness = createProcessHarness();
-    const host = trackHost({
-      stateDir: await stateDir(),
-      workspaceRoot: root,
-      spawnTransport: harness.spawnTransport,
-      routeSdkRequest: defaultRouter,
-      activationTimeoutMs: 1_000,
-    });
-    const startedAt = Date.now();
-    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-    // The deadline covers start() itself, not only the wait after it.
-    await waitFor(
-      () => host.getStatus("hello-plugin") === "ready",
-      "Healthy plugin missed the test activation deadline.",
-      { timeout: Math.max(1, 1_000 - (Date.now() - startedAt)) },
-    );
+  it("lets a healthy activation finish before a short deadline", async () => {
+    // The deadline runs on a clock that stands still until the plugin is
+    // ready. A real 1 s race failed beside other work because the plugin
+    // process took longer to start, not because the deadline misfired.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const root = await workspaceRoot();
+      const harness = createProcessHarness();
+      const statuses: PluginRuntimeStatus[] = [];
+      const host = trackHost({
+        stateDir: await stateDir(),
+        workspaceRoot: root,
+        spawnTransport: harness.spawnTransport,
+        routeSdkRequest: defaultRouter,
+        onStatusChange: (_pluginId, status) => statuses.push(status),
+        activationTimeoutMs: 1_000,
+      });
+      await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+      await waitFor(
+        () => host.getStatus("hello-plugin") === "ready",
+        "Healthy plugin did not become ready.",
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(host.getStatus("hello-plugin")).toBe("ready");
+      expect(statuses).not.toContain("failed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails and disposes an activation at its wall-clock deadline", async () => {

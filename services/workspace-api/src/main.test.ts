@@ -17,13 +17,14 @@ for (const nodeEnv of [undefined, "production", "staging"]) {
         },
         encoding: "utf8",
         windowsHide: true,
-        // Inside the 30 s test bound; beside 32 CPU burners a run took up to 10 s.
-        timeout: 20_000,
+        // tsx compiles main.ts on startup. A loaded run passed 20 s, so this
+        // matches sync-relay's 45 s tsx startup bound, inside the 60 s test.
+        timeout: 45_000,
       });
       assert.equal(result.error, undefined);
       assert.equal(result.status, 1);
       assert.match(result.stderr, /POSTGRES_URL must be set outside development\/test/);
       assert.doesNotMatch(result.stdout, /listening/);
-    });
+    }, 60_000);
   }
 }
