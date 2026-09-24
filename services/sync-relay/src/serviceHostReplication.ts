@@ -6,7 +6,8 @@ import {errorResponse, notFound} from "./errors";
 
 /** This credential enters only ordinary replication, never an account resolver or share route. */
 export function createServiceHostReplication(options: {storage: SyncRelayStorage; key: Uint8Array; namespace: string}) {
-  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wake() {}});
+  // This path parks no reads: a held log read answers at once.
+  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wake() {}, wait: async () => {}});
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   return async (request: Request): Promise<Response> => {
     try {

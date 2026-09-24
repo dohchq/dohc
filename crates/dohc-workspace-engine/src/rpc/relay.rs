@@ -615,7 +615,15 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
-        self.notify_editors_behind(ctx, &open).await;
+        // Only an applied envelope can park an edit for an open editor.
+        if let RelayOperationOutcome::Sync(
+            SyncPassOutcome::Complete { applied, .. }
+            | SyncPassOutcome::CrashedAfterApply { applied, .. },
+        ) = &outcome
+            && *applied > 0
+        {
+            self.notify_editors_behind(ctx, &open).await;
+        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -654,7 +662,8 @@ impl EngineService {
     /// editor of this workspace with parked updates it can take to resync, so
     /// an idle editor shows another device's edits. The request is advisory
     /// like every event: the parked updates stay durable, and the next pull
-    /// asks again. A failed check therefore does not fail the committed pull.
+    /// that applies anything asks again. A failed check therefore does not
+    /// fail the committed pull.
     async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()

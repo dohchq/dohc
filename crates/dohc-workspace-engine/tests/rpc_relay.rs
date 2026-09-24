@@ -929,7 +929,9 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         .to_owned();
     let mut events = a_service.events().subscribe();
 
-    // A pull with nothing parked for the editor asks nothing of it.
+    // A pull that parks nothing for the editor asks nothing of it.
+    push_unrelated_change(&b_transport, &b, &mut b_id, workspace_id, "before-edit").await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
     pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
     assert_eq!(resync_requests(&mut events), Vec::<Value>::new());
 
@@ -979,9 +981,39 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         .expect("apply resync state");
     assert_eq!(shown.plaintext_string(), "Starting together. Typed on B.");
 
-    // The resync drained what was parked, so the next pull asks nothing.
+    // The resync drained what was parked, so a pull that applies B's next,
+    // unrelated change asks nothing.
+    push_unrelated_change(&b_transport, &b, &mut b_id, workspace_id, "after-resync").await;
+    publish_pushed_ops(&relay, workspace_id, &b_scratch);
     pull_and_commit(&a_transport, &a, &mut a_id, workspace_id).await;
     assert_eq!(resync_requests(&mut events), Vec::<Value>::new());
+}
+
+/// Creates a channel on the device and pushes it: an applied pull on the
+/// other device with no Y.Doc update in it.
+async fn push_unrelated_change(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    workspace_id: &str,
+    channel_id: &str,
+) {
+    call(
+        transport,
+        handle,
+        id,
+        "chats.channels.create",
+        json!({ "channelId": channel_id, "name": channel_id, "kind": "channel", "nowMs": 20 }),
+    )
+    .await;
+    call(
+        transport,
+        handle,
+        id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

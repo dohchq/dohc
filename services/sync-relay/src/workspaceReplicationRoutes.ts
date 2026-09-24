@@ -1,10 +1,10 @@
 import { jsonResponse } from "@dohc/service-http";
-import type { DiscussionActivityHub } from "./discussionActivity";
+import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
-import { MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
@@ -26,9 +26,10 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceIdentity"
     | "verifyWorkspaceIdentity"
     | "getEpochLogFloor"
+    | "workspaceIsOwnedBy"
   >,
   nowMs: () => number,
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wake" | "wait">,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -156,6 +157,16 @@ export function createWorkspaceReplicationRoutes(
       );
       const requestedSince = parseCursor(url.searchParams.get("since"));
       const since = Math.max(requestedSince, epochLogFloor);
+      const hold = url.searchParams.get("hold");
+      if (hold !== null) {
+        return await waitForLogChange(request, route.workspaceId, actor.userId, {
+          identity,
+          requestedSince,
+          since,
+          holdMs: parseLogHold(hold),
+          guard,
+        });
+      }
       const limit = parseLimit(url.searchParams.get("limit"));
       const page = storage.fetchLogPage({
         workspaceId: route.workspaceId,
@@ -222,7 +233,69 @@ export function createWorkspaceReplicationRoutes(
     throw relayError("method_not_allowed");
   }
 
+  // A held read tells a device when its log has an op past `since`, so an
+  // idle device can pull only when there is something to pull. It answers
+  // only `hasMore` and never serves an op: a session revoked while its read
+  // was parked learns that the log changed, never what changed. `hold` is an
+  // upper bound. The relay answers at once when the log already has an op,
+  // and also when its parked reads are at capacity, so a device must not
+  // read an early empty answer as a promise to hold the next one.
+  async function waitForLogChange(
+    request: Request,
+    workspaceId: string,
+    userId: string,
+    input: {
+      identity: OptionalWorkspaceIdentity | null;
+      requestedSince: number;
+      since: number;
+      holdMs: number;
+      guard: () => void;
+    },
+  ): Promise<Response> {
+    let since = input.since;
+    const hasMore = () =>
+      storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
+    if (input.holdMs > 0 && !hasMore()) {
+      try {
+        await discussionActivity.wait(`log:${workspaceId}`, `owner:${userId}`, {
+          holdMs: input.holdMs,
+          signal: request.signal,
+          shouldPark: () => !hasMore(),
+        });
+      } catch (error) {
+        if (!(error instanceof DiscussionActivityCapacityError)) throw error;
+      }
+      // The read was authorized before it parked. Authorize it again, and
+      // re-read the epoch floor, before answering.
+      input.guard();
+      if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
+      since = Math.max(
+        input.requestedSince,
+        enforceWorkspaceIdentity(storage, workspaceId, input.identity),
+      );
+    }
+    return jsonResponse({
+      ok: true,
+      ops: [],
+      nextCursor: input.requestedSince,
+      hasMore: hasMore(),
+    });
+  }
+
   return { respondToWorkspaceRegistration, respondToWorkspaceReplication };
+}
+
+function parseLogHold(value: string): number {
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw badRequest("hold must be a non-negative integer");
+  }
+  const hold = Number(value);
+  if (!Number.isSafeInteger(hold) || hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+    throw badRequest(
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
+    );
+  }
+  return hold;
 }
 
 function parseWorkspaceIdentityValue(value: unknown, name: string): string {

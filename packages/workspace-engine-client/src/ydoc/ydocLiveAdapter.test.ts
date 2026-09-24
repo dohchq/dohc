@@ -217,6 +217,81 @@ it("shares one pending native resync between concurrent callers", async () => {
   await session.close(); adapter.dispose();
 });
 
+// The daemon asks an open editor to resync after every pull that parked an
+// edit for it, so a person can be typing at that moment.
+function resyncRequestTransport(
+  engine: YdocLoopbackEngine,
+  onResync: () => Promise<void>,
+): EngineTransport {
+  return {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}}
+      : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) await onResync();
+      return engine.sendRequest(request);
+    },
+  };
+}
+
+it("journals what a person types while a resync is pending, without failing the session", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void, resyncs = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const localEditErrors: unknown[] = [], sessionErrors: unknown[] = [];
+  const provider = await openEngineYdocProviderSession({
+    transport: resyncRequestTransport(engine, async () => {resyncs++; await held;}), workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, scheduleSettle: settleScheduler().schedule,
+    onLocalEditError: error => localEditErrors.push(error), onSessionError: error => sessionErrors.push(error),
+  });
+  const sessionId = provider.nativeOwner!.sessionId;
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(resyncs).toBe(1);
+
+  // Two keystrokes while the resync waits: the second queues behind the first.
+  const first = provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(4, " one")));
+  const second = provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(8, " two")));
+  await Promise.all([first, second]);
+  expect(engine.sessionText(sessionId)).toBe("remote seed one two");
+
+  release(); await drain();
+  expect(provider.doc.getText("plainText").toString()).toBe("remote seed one two");
+  await expect(provider.settleNow()).resolves.toMatchObject({materialized: true});
+  expect(localEditErrors).toEqual([]);
+  expect(sessionErrors).toEqual([]);
+  peer.destroy(); await provider.close();
+});
+
+it("retries a failed resync when the next resync request arrives", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let resyncs = 0;
+  const adapter = new YdocLiveAdapter(resyncRequestTransport(engine, async () => {
+    if (++resyncs === 1) throw new Error("resync failed");
+  }));
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const errors: unknown[] = []; session.onSessionError(error => errors.push(error));
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const remoteEdit = (text: string) => {
+    const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, text);
+    engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  };
+  remoteEdit("first ");
+  await drain();
+  expect(resyncs).toBe(1);
+  expect(errors).toHaveLength(1);
+  expect(session.doc.getText("plainText").toString()).toBe("seed");
+
+  remoteEdit("second ");
+  await drain();
+  expect(resyncs).toBe(2);
+  expect(session.doc.getText("plainText").toString()).toBe("second first seed");
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
   engine.seedFile({
@@ -3137,9 +3212,6 @@ describe("YdocLiveAdapter", () => {
     expect(resyncErrors).toHaveLength(1);
     expect(resyncErrors[0]?.reason).toBe("event-sequence-gap");
     expect(session.doc.getText("plainText").toString()).toBe("A");
-    expect(() =>
-      session.applyLocalTextEdit({ root: "plainText", index: 1, insert: "C" }),
-    ).toThrow(YdocResyncNeededError);
 
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(engine.requests.map((request) => request.method)).toContain(

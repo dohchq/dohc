@@ -22,6 +22,7 @@ import {
 import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaceJoinEnrollment";
 import { createRelaySyncEngine, type CloudSyncEngine } from "./relaySyncEngine";
+import { createRelayLogWait } from "./relayLogWait";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -673,10 +674,8 @@ it.skipIf(engine.missing)(
     const relayRoot = await createTestScratch("dohc-idle-editor-relay-");
     const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite") });
     const relayConnection = { baseUrl: relay.baseUrl, token };
-    // The product pulls every few seconds. Any cadence proves the same path,
-    // and a short one keeps the waits short.
-    const idlePullMs = 100;
-    // Generous against that cadence plus one settle.
+    // Generous against one push, one held read's answer, one pull, and one
+    // resync on a loaded machine.
     const arrival = { timeout: 60_000, interval: 100 };
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
@@ -713,7 +712,8 @@ it.skipIf(engine.missing)(
       editors.push(editorB);
       expect(shown(editorB)).toBe("Starting together.\n");
 
-      // From here nothing asks either device to sync. Each pulls on its own.
+      // From here the typing device pushes as the desktop does after a local
+      // write, and nothing asks the idle device to pull: it waits on the relay.
       for (const [daemon, rootPath] of [
         [daemonA, rootA],
         [daemonB, rootB],
@@ -725,17 +725,20 @@ it.skipIf(engine.missing)(
           capture: daemon.capture,
           onChange: () => undefined,
           debounceMs: 0,
-          idlePullMs,
+          waitForChange: createRelayLogWait({ workspaceId, relay: relayConnection }),
         });
         engines.push(sync);
         await sync.start();
       }
+      const [syncA, syncB] = engines;
 
       // Each device types while the other's editor sits idle, and the idle
       // editor shows the edit without being touched.
       await typeAtEnd(editorA, "Typed on A.\n");
+      syncA!.queueSync();
       await vi.waitFor(() => expect(shown(editorB)).toContain("Typed on A."), arrival);
       await typeAtEnd(editorB, "Typed on B.\n");
+      syncB!.queueSync();
       await vi.waitFor(() => expect(shown(editorA)).toContain("Typed on B."), arrival);
 
       // Both editors and both files hold every line exactly once.
