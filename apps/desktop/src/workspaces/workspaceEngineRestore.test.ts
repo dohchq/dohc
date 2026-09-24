@@ -175,6 +175,56 @@ describe("engine restore", () => {
     await engine.stop();
   });
 
+  it("does not record a delete when a replace empties the name as the restore reads it", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "doc.md", "original\n");
+    const loopback = new VersionedLoopbackEngine();
+    const hidden = join(root, ".dohc-write-doc.displaced");
+    let armed = false;
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "engine-restore-test",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+      rustEngineSessions: mockDaemonSessions({
+        rootPath: root,
+        workspaceId: "engine-restore-test",
+        loopback,
+        // The restore's own flush sees the file; right after it, the engine
+        // moves it aside to replace it, so the restore reads an empty name.
+        afterRequest: async (request) => {
+          if (armed && request.method === "capture.flush") {
+            armed = false;
+            await rename(join(root, "doc.md"), hidden);
+          }
+        },
+        // By the time the delete reaches the engine, the replace is done.
+        beforeRequest: async (request) => {
+          const params = request.params as { onlyIfAbsentOnDisk?: boolean } | undefined;
+          if (request.method === VERSIONED_METHOD.textDelete && params?.onlyIfAbsentOnDisk) {
+            await writeFile(join(root, "doc.md"), "replaced\n");
+          }
+        },
+      }),
+    });
+    engine.start();
+    await engine.flush();
+    await write(root, "doc.md", "edited\n");
+    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    await engine.flush();
+    const editMomentId = (await engine.listMoments()).moments[0].id;
+
+    armed = true;
+    await engine.restoreFileToBeforeMoment(editMomentId);
+
+    expect(await readText(root, "doc.md")).toBe("original\n");
+    const moments = (await engine.listMoments()).moments;
+    expect(moments.map((moment) => moment.operation)).not.toContain("delete");
+    const saved = await engine.readMoment(moments[1].id);
+    const savedPayload = saved?.protected === false ? saved.moment.payload : undefined;
+    expect(savedPayload?.after.text).toBe("replaced\n");
+    await engine.stop();
+  });
+
   it("restoring to before a create removes the file; undo brings it back", async () => {
     const root = await createTestScratch("dohc-engine-restore-");
     const loopback = new VersionedLoopbackEngine();

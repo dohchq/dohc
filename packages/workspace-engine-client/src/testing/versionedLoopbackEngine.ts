@@ -147,6 +147,7 @@ interface SerdeParamShape {
   optionalUsize?: readonly string[];
   optionalBytes?: readonly string[];
   optionalJson?: readonly string[];
+  optionalBools?: readonly string[];
 }
 
 const MUTATION_OPTIONAL_STRINGS = [
@@ -195,6 +196,8 @@ const VERSIONED_PARAM_SHAPES = {
     optionalStrings: [...MUTATION_OPTIONAL_STRINGS,"expectedObjectId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
+    // The engine checks the disk; a loopback has none, so it only validates.
+    optionalBools: ["onlyIfAbsentOnDisk"],
   },
   [VERSIONED_METHOD.textRollback]: {
     requiredStrings: ["versionId", "path", "mutationMomentId"],
@@ -553,6 +556,7 @@ function versionedParamFields(shape: SerdeParamShape): ReadonlySet<string> {
     ...(shape.optionalUsize ?? []),
     ...(shape.optionalBytes ?? []),
     ...(shape.optionalJson ?? []),
+    ...(shape.optionalBools ?? []),
   ]);
 }
 
@@ -571,6 +575,12 @@ function validateVersionedParams(
   for (const key of shape.optionalI64 ?? []) serdeOptionalParamNumber(params, key);
   for (const key of shape.optionalUsize ?? []) serdeOptionalParamUsize(params, key);
   for (const key of shape.optionalBytes ?? []) serdeOptionalParamBytes(params, key);
+  for (const key of shape.optionalBools ?? []) {
+    // serde's `#[serde(default)] bool` accepts only a boolean or no field.
+    if (params[key] !== undefined && typeof params[key] !== "boolean") {
+      throw new Error("invalid parameters");
+    }
+  }
 }
 
 function validatePreWorkspaceSemantics(method: string, params: JsonObject): void {

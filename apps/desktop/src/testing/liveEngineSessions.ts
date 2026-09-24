@@ -98,11 +98,20 @@ export function mockDaemonSessions(input: {
   workspaceId: string;
   loopback: VersionedLoopbackEngine;
   requests?: Request[];
+  // Runs before the daemon sees a request.
+  beforeRequest?: (request: Request) => void | Promise<void>;
+  // Runs after the daemon answered a request, before the caller sees it.
+  afterRequest?: (request: Request) => void | Promise<void>;
 }): EngineWorkspaceSessions {
   const disk = createFakeDaemonCapture(input);
   return loopbackSessions(input.loopback, {
     requests: input.requests,
-    answer: (request) => disk.sendRequest(request),
+    ...(input.beforeRequest ? { beforeRequest: input.beforeRequest } : {}),
+    answer: async (request) => {
+      const answered = await disk.sendRequest(request);
+      await input.afterRequest?.(request);
+      return answered;
+    },
   });
 }
 

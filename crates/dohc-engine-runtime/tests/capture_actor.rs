@@ -1284,3 +1284,108 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
 
     supervisor.close(&db).expect("close actor");
 }
+
+/// A capture that saw a path missing asks the actor to confirm it. The
+/// materializer runs on the actor's thread, so a replace caught between its
+/// two renames is finished by then and the retire is refused.
+#[test]
+fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
+    const WORKSPACE_ID: &str = "ws-absence-retire";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let retire = || CaptureRetire {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: "notes/a.md".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        now_ms: 20,
+        request_id: None,
+        only_if_text_head: false,
+        only_if_capture_origin: false,
+        allow_ydoc_origin: true,
+    };
+    let retire_absent = |handle: &dohc_engine_runtime::ActorHandle| {
+        handle.capture_retire_materialized_blocking_guarded(
+            retire(),
+            scratch.path().to_path_buf(),
+            true,
+            Arc::new(()),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            Arc::new(ExistingRootGuard),
+        )
+    };
+    let refused = |result: Result<_, RuntimeError>| {
+        matches!(
+            result,
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState { .. }
+            ))
+        )
+    };
+
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    handle
+        .capture_ingest_blocking(
+            CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/a.md".to_owned(),
+                text: "captured".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("capture");
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join("notes/a.md"), "captured").expect("file on disk");
+    assert!(
+        refused(retire_absent(&handle)),
+        "a file on disk is not a delete"
+    );
+    supervisor.close(&db).expect("close actor");
+
+    // A crash left a replace with the target moved aside.
+    std::fs::remove_file(scratch.path().join("notes/a.md")).expect("empty the name");
+    EngineStore::open(&db, 15)
+        .expect("store")
+        .open_displacement(&dohc_engine_storage::DisplacementSpec {
+            job_id: "job".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            target_path: "notes/a.md".to_owned(),
+            displaced_name: ".dohc-write-job.displaced".to_owned(),
+            expected_sha256: "sha".to_owned(),
+            content_sha256: Some("sha".to_owned()),
+            now_ms: 15,
+        })
+        .expect("open displacement");
+    let handle = supervisor.open(&db, 16).expect("reopen actor").actor;
+    assert!(
+        refused(retire_absent(&handle)),
+        "a path an unfinished replace moved aside is not a delete"
+    );
+    supervisor.close(&db).expect("close actor");
+
+    let mut store = EngineStore::open(&db, 17).expect("store");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM materialization_displacements", [])
+                .map_err(|_| StorageError::PersistFailed { source: None })?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("resolve the displacement");
+    drop(store);
+    let handle = supervisor.open(&db, 18).expect("reopen actor").actor;
+    let retired = retire_absent(&handle).expect("a confirmed absence retires");
+    assert!(retired.retired.is_some(), "the head was intact until now");
+    supervisor.close(&db).expect("close actor");
+}

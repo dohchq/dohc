@@ -209,6 +209,7 @@ impl ActorHandle {
                     &input,
                     None,
                     None,
+                    false,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -220,10 +221,22 @@ impl ActorHandle {
 
     /// Retire a captured path and immediately apply any durable disk cleanup
     /// that the mutation creates.
+    ///
+    /// `confirm_absent` marks a retire whose reason is that the file is gone
+    /// from disk. The observation was made off the actor, where a replace
+    /// that has moved the target aside and not yet put the new file in place
+    /// looks exactly like a delete. The actor checks again on its own thread,
+    /// where materialization also runs, and refuses with a retryable error
+    /// while anything is at the path or an unfinished replace names it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each seam is injected for testability"
+    )]
     pub fn capture_retire_materialized_blocking_guarded(
         &self,
         input: CaptureRetire,
         root_dir: PathBuf,
+        confirm_absent: bool,
         self_writes: Arc<dyn SelfWriteRecorder>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
@@ -240,6 +253,7 @@ impl ActorHandle {
                     &input,
                     root_dir,
                     root_guard,
+                    confirm_absent,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -365,6 +379,7 @@ impl ActorHandle {
                     &input,
                     None,
                     None,
+                    false,
                     self_writes.as_deref(),
                     &leases,
                     faults.as_ref(),
@@ -1029,12 +1044,46 @@ fn capture_secret_retire_on_store(
         .map_err(RuntimeError::from)
 }
 
+/// Refuse, with a retryable error, an absence retire that the actor cannot
+/// confirm: something is at the path, or an unfinished replace moved it aside.
+/// Runs on the actor thread, so no materialization is between its two renames.
+pub(super) fn confirm_absent_on_disk(
+    store: &EngineStore,
+    root_dir: Option<&std::path::Path>,
+    workspace_id: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    let refuse =
+        |reason| RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason });
+    if store.path_is_displaced(workspace_id, path)? {
+        return Err(refuse("path-displaced-by-replace"));
+    }
+    let Some(root_dir) = root_dir else {
+        return Err(refuse("absence-unconfirmed"));
+    };
+    let mut absolute = root_dir.to_path_buf();
+    absolute.extend(path.split('/'));
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(_) => Err(refuse("path-present-on-disk")),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(_) => Err(refuse("absence-unconfirmed")),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
     root_dir: Option<&std::path::Path>,
     root_guard: Option<&dyn WorkspaceRootGuard>,
+    confirm_absent: bool,
     self_writes: Option<&dyn SelfWriteRecorder>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
@@ -1055,6 +1104,9 @@ fn capture_retire_on_store(
     )?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if confirm_absent {
+        confirm_absent_on_disk(store, root_dir, &input.workspace_id, &input.path)?;
     }
     let outcome = store.write_with(faults, |tx| {
         let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
@@ -1294,6 +1346,7 @@ mod capture_secret_root_guard_tests {
                     blocker_actor.capture_retire_materialized_blocking_guarded(
                         blocker_input,
                         root,
+                        false,
                         Arc::new(()),
                         LeaseRegistry::new(),
                         Arc::new(NoFaults),
@@ -1538,6 +1591,7 @@ mod capture_secret_root_guard_tests {
             blocker_actor.capture_retire_materialized_blocking_guarded(
                 input,
                 blocker_root,
+                false,
                 Arc::new(()),
                 LeaseRegistry::new(),
                 Arc::new(NoFaults),
@@ -1685,6 +1739,7 @@ mod capture_secret_root_guard_tests {
             blocker_actor.capture_retire_materialized_blocking_guarded(
                 input,
                 blocker_root,
+                false,
                 Arc::new(()),
                 LeaseRegistry::new(),
                 Arc::new(NoFaults),
