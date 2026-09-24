@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { getConfig } from "@testing-library/dom";
 import { describe, expect, it } from "vitest";
 
 // Guards that `vitest.setup.ts` is registered, not what it does.
@@ -22,5 +23,9 @@ describe("apps/desktop vitest setup", () => {
 
   it("answers a hit test rather than throwing the TypeError that failed whole runs", () => {
     expect(() => document.elementFromPoint(0, 0)).not.toThrow();
+  });
+
+  it("gives Testing Library waits the loaded-machine window, not its own 1 s default", () => {
+    expect(getConfig().asyncUtilTimeout).toBe(5_000);
   });
 });

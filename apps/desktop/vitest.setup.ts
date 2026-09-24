@@ -38,3 +38,14 @@ if (
     value: () => null,
   });
 }
+
+// Testing Library's own 1 s default for waitFor and findBy* failed loaded runs
+// with "Unable to find" while the product was healthy. 5 s sits about 3x above
+// the slowest loaded wait measured, and inside vitest.config.ts's 15 s test
+// timeout, so a stuck wait still reports what it waited for.
+if (typeof document !== "undefined") {
+  const { configure } = await import("@testing-library/dom");
+  configure({ asyncUtilTimeout: 5_000 });
+}
+
+export {};

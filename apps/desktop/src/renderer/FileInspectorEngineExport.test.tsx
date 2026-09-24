@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { configure } from "@testing-library/dom";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,9 +18,6 @@ import { markdownToYDoc } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
-
-configure({ asyncUtilTimeout: 5_000 });
-vi.setConfig({ testTimeout: 15_000 });
 
 const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 

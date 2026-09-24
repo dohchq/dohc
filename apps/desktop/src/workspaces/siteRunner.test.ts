@@ -9,15 +9,6 @@ import {
   GetSitePreviewLogsResult,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
-
-// Every test here spawns real node children, honest work a busy machine
-// stretches. Measured 2026-08-03 on a 24-process load (12 runs):
-// individual tests passed at up to 2.3s against vitest's 5s default test
-// deadline, and the dev-server cancel completed in up to 3.3s against its
-// old 2s promptness ceiling — limits inside the loaded-healthy range. The
-// test deadline goes to 15s (~6x measured); the cancel ceilings and their
-// widened timeout bands are documented at the tests.
-vi.setConfig({ testTimeout: 15_000 });
 import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
