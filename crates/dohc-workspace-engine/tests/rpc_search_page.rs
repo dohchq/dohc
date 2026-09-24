@@ -230,7 +230,7 @@ async fn query_page_returns_ranked_snippets_from_the_active_version() {
     assert_eq!(chat_results[0]["surface"], "chat");
     assert_eq!(chat_results[0]["threadId"], "projection-thread");
     assert_eq!(chat_results[0]["line"], 1);
-    assert_eq!(chat_results[0]["preview"], "# projection sentinel");
+    assert_eq!(chat_results[0]["preview"], "projection sentinel");
     assert!(
         chat_results[0]["path"]
             .as_str()
