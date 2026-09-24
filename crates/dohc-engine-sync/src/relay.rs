@@ -971,15 +971,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
         now_ms: i64,
         max_read_bytes: usize,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let mut sharing_declined =
-            crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
-                .map_err(local)?;
+        let mut sharing_declined = crate::live_audit::enrollment::prepare_exports(
+            store,
+            workspace_id,
+            faults,
+            leases,
+            now_ms,
+        )
+        .map_err(local)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1006,6 +1012,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 &identity.origin_id,
                 response.current_max_origin_seq,
                 faults,
+                leases,
                 now_ms,
             )
             .map_err(local)?
@@ -1016,8 +1023,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
             }
             sharing_declined.extend(
-                crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
-                    .map_err(local)?,
+                crate::live_audit::enrollment::prepare_exports(
+                    store,
+                    workspace_id,
+                    faults,
+                    leases,
+                    now_ms,
+                )
+                .map_err(local)?,
             );
             enrollment_prepared = true;
             // Re-read so the probe's backfill enters the push loop.
@@ -1087,6 +1100,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         faults,
+                        leases,
                         now_ms,
                     )
                     .map_err(local)?
@@ -1102,6 +1116,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 store,
                                 workspace_id,
                                 faults,
+                                leases,
                                 now_ms,
                             )
                             .map_err(local)?,
@@ -1365,8 +1380,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         for (origin_id, max_seq) in pulled_foreign_max {
             if max_seq > read_pushed_seq(store, workspace_id, &origin_id).map_err(local)? {
-                match write_pushed_seq(store, workspace_id, &origin_id, max_seq, faults, now_ms)
-                    .map_err(local)?
+                match write_pushed_seq(
+                    store,
+                    workspace_id,
+                    &origin_id,
+                    max_seq,
+                    faults,
+                    leases,
+                    now_ms,
+                )
+                .map_err(local)?
                 {
                     TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                     TxnOutcome::Crashed { .. } => {
@@ -1419,9 +1442,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         cursor: &RelayCursor,
         faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
-        commit_relay_cursor(store, workspace_id, cursor, faults, now_ms).map_err(local)
+        commit_relay_cursor(store, workspace_id, cursor, faults, leases, now_ms).map_err(local)
     }
 
     pub fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {

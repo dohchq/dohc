@@ -11,7 +11,7 @@ import {
   DaemonRefusalError,
   isYdocUnsettledCloseRefusal,
 } from "../live/daemonLiveAdapter";
-import type { JsonValue, Request, Response } from "../protocol";
+import type { JsonValue, Request } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
@@ -23,7 +23,6 @@ import {
   YdocLiveAdapter,
   YdocOwnerDraftPendingError,
   isWellFormedUtf16,
-  isYDocClaimPromotion,
   type EngineTransport,
 } from "./ydocLiveAdapter";
 import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
@@ -36,52 +35,6 @@ import {
   YDOC_METHOD,
   type YdocSettleResult,
 } from "./ydocWireContract";
-
-describe("isYDocClaimPromotion", () => {
-  const docFrom = (...updates: Uint8Array[]): Y.Doc => {
-    const doc = new Y.Doc();
-    for (const update of updates) Y.applyUpdate(doc, update);
-    return doc;
-  };
-  const claimOf = (doc: Y.Doc) => {
-    const state = Y.encodeStateAsUpdate(doc);
-    return {
-      lineageClaimId: createHash("sha256").update(state).digest("hex"),
-      state,
-    };
-  };
-  const shared = new Y.Doc();
-  shared.getText("plainText").insert(0, "shared text");
-  const sharedState = Y.encodeStateAsUpdate(shared);
-
-  it("accepts the claimed base itself and a document that extends it", () => {
-    const extended = docFrom(sharedState);
-    extended.getText("plainText").insert(11, " typed");
-    expect(isYDocClaimPromotion(docFrom(sharedState), claimOf(shared))).toBe(true);
-    expect(isYDocClaimPromotion(extended, claimOf(shared))).toBe(true);
-  });
-
-  it("refuses a fork, a claim that is ahead, and a deletion the document lacks", () => {
-    const local = docFrom(sharedState);
-    local.getText("plainText").insert(11, " local");
-    const fork = docFrom(sharedState);
-    fork.getText("plainText").insert(11, " fork");
-    const deleted = docFrom(sharedState);
-    deleted.getText("plainText").delete(0, 7);
-    expect(isYDocClaimPromotion(local, claimOf(fork))).toBe(false);
-    expect(isYDocClaimPromotion(docFrom(sharedState), claimOf(local))).toBe(false);
-    expect(isYDocClaimPromotion(local, claimOf(deleted))).toBe(false);
-  });
-
-  it("refuses a claim state that depends on updates the document never saw", () => {
-    const later = docFrom(sharedState);
-    later.getText("plainText").insert(11, " later");
-    const delta = Y.encodeStateAsUpdate(later, Y.encodeStateVector(shared));
-    expect(
-      isYDocClaimPromotion(new Y.Doc(), { lineageClaimId: "claim", state: delta }),
-    ).toBe(false);
-  });
-});
 
 const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
@@ -1242,118 +1195,6 @@ describe("YdocLiveAdapter", () => {
       insert: " fresh",
     });
     expect(recordCount).toBe(2);
-    await session.close({ settle: false });
-    adapter.dispose();
-  });
-
-  // Turning sync on claims every local-only lineage, including the one an
-  // open session is recording into. The claim names this session's own
-  // history, so the session keeps its document and records under the claim.
-  function claimedWhileOpenTransport(engine: YdocLoopbackEngine) {
-    const state = { claimed: false, sessionKnowsClaim: false, records: 0 };
-    const withClaim = (response: Response): Response =>
-      state.claimed
-        ? {
-            ...response,
-            result: {
-              ...(response.result as Record<string, JsonValue>),
-              lineageClaimId: "promoted-claim",
-            },
-          }
-        : response;
-    const transport: EngineTransport = {
-      ...forwardYdocBlobEgress(engine),
-      onEvent: (handler) => engine.onEvent(handler),
-      async sendRequest(request) {
-        if (request.method === YDOC_METHOD.recordUpdate) {
-          state.records += 1;
-          if (state.claimed && !state.sessionKnowsClaim) {
-            throw new Error("ydoc-lineage-stale");
-          }
-          return withClaim(await engine.sendRequest(request));
-        }
-        if (request.method === YDOC_METHOD.resync) {
-          if (state.claimed) state.sessionKnowsClaim = true;
-          return withClaim(await engine.sendRequest(request));
-        }
-        return engine.sendRequest(request);
-      },
-    };
-    return { transport, state };
-  }
-
-  it("records under the claim when enabling sync claims the open lineage", async () => {
-    const engine = seedPlaintextEngine("local");
-    const { transport, state } = claimedWhileOpenTransport(engine);
-    const adapter = new YdocLiveAdapter(transport);
-    const session = await adapter.openSession({
-      workspace: WORKSPACE,
-      versionId: VERSION,
-      path: PATH,
-      contentKind: "plaintext",
-    });
-    const openedDoc = session.doc;
-    const replacements: Y.Doc[] = [];
-    session.onLineageReplaced((doc) => replacements.push(doc));
-    await session.applyLocalTextEdit({
-      root: "plainText",
-      index: "local".length,
-      insert: " before",
-    });
-    state.claimed = true;
-    const recordsBeforeClaim = state.records;
-
-    await session.applyLocalTextEdit({
-      root: "plainText",
-      index: "local before".length,
-      insert: " after",
-    });
-    await session.applyLocalTextEdit({
-      root: "plainText",
-      index: "local before after".length,
-      insert: " later",
-    });
-
-    expect(session.doc).toBe(openedDoc);
-    expect(replacements).toEqual([]);
-    expect(session.lineageClaimId).toBe("promoted-claim");
-    // The refused record, its replay under the claim, and the next edit.
-    expect(state.records - recordsBeforeClaim).toBe(3);
-    await expect(session.settle()).resolves.toMatchObject({
-      content: "local before after later",
-    });
-    await session.close({ settle: false });
-    adapter.dispose();
-  });
-
-  it("keeps its document when a resync finds the open lineage claimed", async () => {
-    const engine = seedPlaintextEngine("local");
-    const { transport, state } = claimedWhileOpenTransport(engine);
-    const adapter = new YdocLiveAdapter(transport);
-    const session = await adapter.openSession({
-      workspace: WORKSPACE,
-      versionId: VERSION,
-      path: PATH,
-      contentKind: "plaintext",
-    });
-    const openedDoc = session.doc;
-    const replacements: Y.Doc[] = [];
-    session.onLineageReplaced((doc) => replacements.push(doc));
-    await session.applyLocalTextEdit({
-      root: "plainText",
-      index: "local".length,
-      insert: " edit",
-    });
-    state.claimed = true;
-
-    await session.resync();
-
-    expect(session.doc).toBe(openedDoc);
-    expect(replacements).toEqual([]);
-    expect(session.lineageClaimId).toBe("promoted-claim");
-    await expect(session.settle()).resolves.toMatchObject({
-      content: "local edit",
-    });
     await session.close({ settle: false });
     adapter.dispose();
   });

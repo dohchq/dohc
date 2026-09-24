@@ -806,10 +806,14 @@ it("keeps a locally promoted lineage after later updates change its full state",
   await capture.stop();
 });
 
-// Turning sync on claims the lineage from what the engine has recorded. An
-// edit the old generation could not record is then ahead of that claim, and
-// it must be replayed into the claimed lineage, not set aside.
-it("keeps typing the old generation could not record when sync claims the lineage", async () => {
+// A claim can reach the engine while this session's generation is gone. The
+// next keystroke finds the generation gone, and the reopened generation
+// carries the claim. `claimedState` is the lineage the claim names.
+async function typeIntoLostGeneration(input: {
+  base: string;
+  claimedState: (base: Uint8Array) => Uint8Array;
+  edit: (text: Y.Text) => void;
+}) {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-claim-typing-");
   const loopback = new VersionedLoopbackEngine();
   const client = (): EngineDaemonClient & EngineTransport => ({
@@ -835,9 +839,10 @@ it("keeps typing the old generation could not record when sync claims the lineag
     { sleep: async () => undefined },
   );
   const base = new Y.Doc();
-  base.getText("plainText").insert(0, "recorded");
+  base.getText("plainText").insert(0, input.base);
   const baseUpdate = Y.encodeStateAsUpdate(base);
-  const claimId = createHash("sha256").update(baseUpdate).digest("hex");
+  const claimedUpdate = input.claimedState(baseUpdate);
+  const claimId = createHash("sha256").update(claimedUpdate).digest("hex");
   const claimedRecords: Uint8Array[] = [];
   const claimedDocs: Y.Doc[] = [];
   const openProvider = async (
@@ -845,7 +850,7 @@ it("keeps typing the old generation could not record when sync claims the lineag
   ): Promise<EngineYdocProviderSession> => {
     const unclaimed = options.transport === unclaimedClient;
     const doc = new Y.Doc();
-    Y.applyUpdate(doc, baseUpdate);
+    Y.applyUpdate(doc, unclaimed ? baseUpdate : claimedUpdate);
     if (!unclaimed) claimedDocs.push(doc);
     return {
       doc,
@@ -858,7 +863,6 @@ it("keeps typing the old generation could not record when sync claims the lineag
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         if (unclaimed) {
-          // Enabling sync closed this binding and claimed the lineage.
           currentClient = claimedClient;
           throw Object.assign(new Error("daemon exited"), {
             code: "transport-error",
@@ -893,36 +897,63 @@ it("keeps typing the old generation could not record when sync claims the lineag
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
   });
-  const replacements: Y.Doc[] = [];
+  const replacements: string[] = [];
   const session = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
     onLineageReplaced: (update) => {
       const replacement = new Y.Doc();
       Y.applyUpdate(replacement, update);
-      replacements.push(replacement);
+      replacements.push(replacement.getText("plainText").toString());
     },
   });
-  const stableDoc = session.doc;
+  const openedDoc = session.doc;
   const rendererDoc = new Y.Doc();
   Y.applyUpdate(rendererDoc, session.initialUpdate);
   const before = Y.encodeStateVector(rendererDoc);
-  rendererDoc.getText("plainText").insert("recorded".length, " typed");
+  input.edit(rendererDoc.getText("plainText"));
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  const settled = await session.settleNow();
+  return {
+    settled,
+    session,
+    openedDoc,
+    claimId,
+    replacements,
+    claimedRecords,
+    claimedTexts: () => claimedDocs.map((doc) => doc.getText("plainText").toString()),
+    close: async () => {
+      await session.close({ settle: false });
+      await capture.stop();
+    },
+  };
+}
 
-  await expect(session.settleNow()).resolves.toMatchObject({
-    content: "recorded typed",
+// Another machine forked the same base and its claim reached this engine
+// first. The claim's deletion of "a" is inside the local deletion of "ab",
+// so containment would call it the same document. It is not, and the local
+// word must not be replayed into it.
+it("replaces the document when a foreign fork claims it while the generation is lost", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "abcdef",
+    claimedState: (base) => {
+      const fork = new Y.Doc();
+      Y.applyUpdate(fork, base);
+      fork.getText("plainText").delete(0, 1);
+      return Y.encodeStateAsUpdate(fork);
+    },
+    edit: (text) => {
+      text.delete(0, 2);
+      text.insert(text.length, " local");
+    },
   });
-  expect(replacements).toEqual([]);
-  expect(session.doc).toBe(stableDoc);
-  expect(session.lineageClaimId).toBe(claimId);
-  expect(claimedRecords).toHaveLength(1);
-  expect(claimedDocs.map((doc) => doc.getText("plainText").toString())).toEqual([
-    "recorded typed",
-  ]);
 
-  await session.close({ settle: false });
-  await capture.stop();
+  expect(typed.settled).toMatchObject({ content: "bcdef" });
+  expect(typed.replacements).toEqual(["bcdef"]);
+  expect(typed.session.doc).not.toBe(typed.openedDoc);
+  expect(typed.claimedRecords).toEqual([]);
+  expect(typed.claimedTexts()).toEqual(["bcdef"]);
+  await typed.close();
 });
 
 it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {

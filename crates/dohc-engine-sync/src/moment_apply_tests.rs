@@ -461,7 +461,15 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     assert!(!waiting.has_more);
     assert!(waiting.changes.is_empty());
     // Advancing ordinary sync and reopening must preserve the waiting row.
-    crate::commit_relay_cursor(&mut store, "ws", &waiting_cursor, &NoFaults, 7).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &waiting_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        7,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         1
@@ -556,13 +564,29 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .unwrap();
     assert_eq!(replay.changes, settled_changes);
     assert_ne!(replay.report_id, applied_cursor.settlement_report_id);
-    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 10).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &applied_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        10,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         1
     );
     applied_cursor.settlement_report_id = replay.report_id;
-    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 11).unwrap();
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &applied_cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        11,
+    )
+    .unwrap();
     assert_eq!(
         store.table_row_count("owner_pending_settlements").unwrap(),
         0
@@ -1176,6 +1200,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
             settlement_report_id: None,
         },
         &NoFaults,
+        &crate::NoLiveLeases,
         3_000,
     )
     .expect("report commit");

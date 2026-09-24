@@ -289,36 +289,6 @@ export function isWellFormedUtf16(value: string): boolean {
     : !ILL_FORMED_UTF16_PATTERN.test(value);
 }
 
-/**
- * Whether a claim on a local-only lineage names this document's own history.
- *
- * Turning sync on claims every local-only lineage for the relay: the engine
- * stores the lineage's durable state as its base and names the claim by that
- * base's SHA-256. A document equal to the base, or holding every update and
- * deletion of the claimed lineage's current state, is the same document under
- * a new claim. Its extra edits append to the claimed lineage without losing or
- * duplicating anything. A fork holds updates the claim lacks, or lacks updates
- * the claim holds, and fails both tests.
- */
-export function isYDocClaimPromotion(
-  doc: Y.Doc,
-  claim: { lineageClaimId: string; state: Uint8Array },
-): boolean {
-  const docState = Y.encodeStateAsUpdate(doc);
-  if (createHash("sha256").update(docState).digest("hex") === claim.lineageClaimId) {
-    return true;
-  }
-  const probe = new Y.Doc({ gc: false });
-  Y.applyUpdate(probe, docState);
-  const before = Y.snapshot(probe);
-  Y.applyUpdate(probe, claim.state);
-  return (
-    probe.store.pendingStructs === null &&
-    probe.store.pendingDs === null &&
-    Y.equalSnapshots(before, Y.snapshot(probe))
-  );
-}
-
 function bytesToBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
 }
@@ -895,7 +865,7 @@ export class YdocAdapterSession {
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
       const durableState = await this.requestResyncState();
-      if (!this.continuesLineage(durableState)) {
+      if (durableState.lineageClaimId !== this.lineageClaimId) {
         throw new YdocAdapterError(
           "lineage-changed",
           "The document lineage changed before missing local state could be resent. The edit remains in this editor and was not applied to the winning lineage.",
@@ -967,7 +937,7 @@ export class YdocAdapterSession {
     YdocRecordUpdateResult | undefined
   > {
     const durableState = await this.requestResyncState();
-    if (!this.continuesLineage(durableState)) {
+    if (durableState.lineageClaimId !== this.lineageClaimId) {
       throw new YdocAdapterError(
         "lineage-changed",
         "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
@@ -1138,7 +1108,7 @@ export class YdocAdapterSession {
         const result = await this.requestResyncState();
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
-        if (!this.continuesLineage(result)) {
+        if (result.lineageClaimId !== this.lineageClaimId) {
           const replacement = new Y.Doc();
           declareDohcRootSchema(replacement);
           Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
@@ -1179,31 +1149,6 @@ export class YdocAdapterSession {
       // Release the coalesced read before observers' queued invalidations run.
       this.resyncPending = null;
     }
-  }
-
-  /**
-   * Whether durable state read back from the engine continues this session's
-   * lineage. A claim on the lineage this session opened unclaimed is a
-   * promotion, not a replacement: the session takes the claim and keeps its
-   * document.
-   */
-  private continuesLineage(durable: {
-    update: Uint8Array;
-    lineageClaimId: string | null;
-  }): boolean {
-    if (durable.lineageClaimId === this.lineageClaimId) return true;
-    if (
-      this.lineageClaimId !== null ||
-      durable.lineageClaimId === null ||
-      !isYDocClaimPromotion(this.doc, {
-        lineageClaimId: durable.lineageClaimId,
-        state: durable.update,
-      })
-    ) {
-      return false;
-    }
-    this.lineageClaimId = durable.lineageClaimId;
-    return true;
   }
 
   private async requestResyncState(): Promise<{

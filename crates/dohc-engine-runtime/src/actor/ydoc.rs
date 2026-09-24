@@ -2836,12 +2836,31 @@ fn ydoc_close_session_on_store(
         }
         Err(error) => return Err(error.into()),
     };
-    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+    let Some(mut marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(YdocCloseSessionOutcome {
             outcome: None,
             record_facts: Vec::new(),
         });
     };
+    // The enrolment sweep leaves a lineage alone while a session holds it. If
+    // the workspace now replicates, this close originates it; a local-only
+    // close would prune it and keep the document off the relay.
+    if restore_generation.is_none()
+        && !marker.lineage_claim_status.has_claimed_base()
+        && marker.head_update_seq > 0
+    {
+        match store.write_with(faults, |tx| {
+            dohc_engine_sync::originate_closing_ydoc_base_in_tx(tx, key, now_ms)
+        })? {
+            TxnOutcome::Committed(dohc_engine_sync::BaseOrigination::Declined(declined)) => {
+                eprintln!("engine: {declined}");
+            }
+            TxnOutcome::Committed(_) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        marker = dohc_engine_collab::read_marker(store, key)?
+            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    }
     // Richdoc settles like plaintext now, so the local-only close follows the
     // same workspace-file artifact rule (close_session refuses a dirty local
     // prune either way, and persists every replicated lineage internally).

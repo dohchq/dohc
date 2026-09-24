@@ -1052,7 +1052,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     assert_eq!(pending, (None, 0, 1));
 
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_300, 0)
+        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_300, 0)
         .expect("push local coordinate");
     client
         .pull_chat_workspace(
@@ -1148,7 +1148,14 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
     assert_eq!(
         client
-            .push_workspace(&mut engine, "ws", faults.as_ref(), 1_000, 0)
+            .push_workspace(
+                &mut engine,
+                "ws",
+                faults.as_ref(),
+                &crate::NoLiveLeases,
+                1_000,
+                0
+            )
             .expect("push fault"),
         SyncPassOutcome::CrashedAfterRemoteCommit
     );
@@ -1159,7 +1166,14 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
         -1
     );
     client
-        .push_workspace(&mut reopened, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(
+            &mut reopened,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+            0,
+        )
         .expect("retry push");
     assert_eq!(
         read_pushed_seq(&reopened, "ws", "local").expect("cursor"),
@@ -1296,7 +1310,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     };
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
+            .commit_pull_cursor(
+                &mut reopened,
+                "ws",
+                &pending,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                1_000
+            )
             .expect("commit"),
         TxnOutcome::Committed(Vec::new())
     );
@@ -1486,7 +1507,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     };
     assert_eq!(replay_cursor.cursor, 2);
     client
-        .commit_pull_cursor(&mut engine, "ws", &replay_cursor, &NoFaults, 3_400)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &replay_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            3_400,
+        )
         .expect("commit replay cursor");
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -1945,7 +1973,14 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         [(0, crate::model::MAX_PULL_OPS_PER_PASS)]
     );
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults, 1_000)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &pending,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
         .expect("commit bounded prefix");
 
     let second = client
@@ -2055,7 +2090,7 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
         .expect("seed imported share origin");
     let client = RelaySyncClient::new(FakeRelay::default());
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_000, 0)
         .expect("push owner lane");
     assert_eq!(
         client.transport().pushes.lock().expect("push calls").len(),
@@ -2108,7 +2143,8 @@ fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
         .expect("stamp autonomous capture origin");
     let client = RelaySyncClient::new(FakeRelay::default());
 
-    let outcome = client.push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0);
+    let outcome =
+        client.push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_000, 0);
 
     assert!(
         matches!(outcome, Ok(SyncPassOutcome::Complete { pushed: 2, .. })),
@@ -2182,10 +2218,17 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
         panic!("pull must return a pending cursor: {pull:?}");
     };
     client
-        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
         .expect("the pull cursor ends enrollment");
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
+        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_000, 0)
         .expect("next push");
 
     let pushes = client.transport().pushes.lock().expect("pushes");
@@ -2228,7 +2271,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
         .expect("seed local secret moment");
 
     assert!(matches!(
-        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, 7_001),
+        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, &crate::NoLiveLeases, 7_001),
         Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     let after_first: i64 = engine
@@ -2246,7 +2289,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
     assert_eq!(after_first, 2, "the local secret moment is backfilled once");
 
     assert!(matches!(
-        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, 7_002),
+        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, &crate::NoLiveLeases, 7_002),
         Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     let after_second: i64 = engine
@@ -2862,11 +2905,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         settlement_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, 1_000),
+        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
         Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, 1_000),
+        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, &crate::NoLiveLeases, 1_000),
         Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert_eq!(
@@ -3375,7 +3418,14 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     assert_eq!(persisted(&engine), 1, "the refusal is persisted");
 
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults, 1_000)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &pending_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
         .expect("commit cursor");
     assert_eq!(
         persisted(&engine),
@@ -3510,7 +3560,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     first_client
-        .commit_pull_cursor(&mut engine, "ws", &first_cursor, &NoFaults, 1_000)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &first_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
         .expect("commit first cursor");
     let survivors: Vec<(String, Option<String>)> = engine
         .read_with(|conn| {
@@ -3579,7 +3636,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         "the next pull is the explicit reader for non-pull drain refusals"
     );
     second_client
-        .commit_pull_cursor(&mut engine, "ws", &second_cursor, &NoFaults, 1_000)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &second_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_000,
+        )
         .expect("commit second cursor");
     let remaining: i64 = engine
         .read_with(|conn| {
@@ -3624,7 +3688,15 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         refusal_report_id: report_id,
         settlement_report_id: None,
     };
-    commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000).expect("cursor commit");
+    commit_relay_cursor(
+        &mut engine,
+        "ws",
+        &cursor,
+        &NoFaults,
+        &crate::NoLiveLeases,
+        1_000,
+    )
+    .expect("cursor commit");
     let replayed = read_replayed_refusal(&engine, &direct)
         .expect("read direct refusal")
         .expect("direct refusal survives");
@@ -3647,7 +3719,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         settlement_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000),
+        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
         Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     let stored = engine

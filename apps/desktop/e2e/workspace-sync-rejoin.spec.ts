@@ -871,13 +871,20 @@ type EnableSyncWindow = {
   enableSync: Promise<string>;
 };
 
-// Turning sync on claims the open document's history for the relay while the
-// person keeps typing. Every word must reach the document and the disk. None
-// may be set aside, and the editor must not stay on Saving.
-test("every word typed while sync turns on reaches the document and the disk", async () => {
-  test.setTimeout(300_000);
+type RelayOp = { opKind: string; payload: { path?: unknown } };
+
+// When the person types relative to the enable call:
+// - "through": keeps typing from before the call until after it finishes.
+// - "pause": stops before the call and resumes after the first sync pass, so
+//   the first word lands on a lineage that was claimed while no session held
+//   it.
+// - "stop": stops inside the settle delay, just before the call, and then
+//   closes the document without typing again.
+type TypingPattern = "through" | "pause" | "stop";
+
+async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
   const temp = await createTempWorkspace();
-  const workspaceId = "enable-open-doc-e2e";
+  const workspaceId = `enable-open-doc-${pattern}`;
   const path = "notes/plan.md";
   const readPlan = () =>
     readFile(join(temp.rootPath, path), "utf8").catch(() => "");
@@ -889,7 +896,8 @@ test("every word typed while sync turns on reaches the document and the disk", a
     await writeWorkspaceFiles(temp, [
       { path, contents: "# Plan\n\nLocal draft.\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    const relayDb = join(temp.baseDir, "relay.sqlite");
+    relay = await spawnSyncRelay({ dbPath: relayDb });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
@@ -919,6 +927,17 @@ test("every word typed while sync turns on reaches the document and the disk", a
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
 
+    const words: string[] = [];
+    const typeWord = async (): Promise<void> => {
+      const word = `w${words.length}`;
+      words.push(word);
+      await page.keyboard.type(` ${word}`, { delay: 20 });
+    };
+    if (pattern === "stop") {
+      // The settle waits for a quiet moment, so this word is still unsettled
+      // when the enable call starts.
+      await typeWord();
+    }
     await page.evaluate((id) => {
       const target = window as unknown as EnableSyncWindow;
       target.enableSync = target.dohcDesktop.cloudEnableSync({ workspaceId: id }).then(
@@ -926,31 +945,38 @@ test("every word typed while sync turns on reaches the document and the disk", a
         (error: unknown) => String(error),
       );
     }, workspaceId);
+    const enableResult = () =>
+      page.evaluate(() => (window as unknown as EnableSyncWindow).enableSync);
 
-    // Type through the whole enable call and a few words past it, so words
-    // land before, during, and after the claim.
-    const enableSettled = () =>
-      page.evaluate(() =>
-        Promise.race([
-          (window as unknown as EnableSyncWindow).enableSync,
-          Promise.resolve(null),
-        ]),
-      );
-    const words: string[] = [];
-    const deadline = Date.now() + 120_000;
-    let enabled: string | null = null;
-    let wordsAfterEnable = 0;
-    while (wordsAfterEnable < 5) {
-      if (Date.now() > deadline) throw new Error("enabling sync never finished");
-      const word = `w${words.length}`;
-      words.push(word);
-      await page.keyboard.type(` ${word}`, { delay: 20 });
-      enabled ??= await enableSettled();
-      if (enabled !== null) wordsAfterEnable += 1;
+    if (pattern === "through") {
+      const settled = () =>
+        page.evaluate(() =>
+          Promise.race([
+            (window as unknown as EnableSyncWindow).enableSync,
+            Promise.resolve(null),
+          ]),
+        );
+      const deadline = Date.now() + 120_000;
+      let enabled: string | null = null;
+      let wordsAfterEnable = 0;
+      while (wordsAfterEnable < 5) {
+        if (Date.now() > deadline) throw new Error("enabling sync never finished");
+        await typeWord();
+        enabled ??= await settled();
+        if (enabled !== null) wordsAfterEnable += 1;
+      }
     }
-    expect(enabled).toBe("ok");
+    expect(await enableResult()).toBe("ok");
+    if (pattern === "pause") {
+      // The first completed sync pass has swept every lineage no session
+      // holds. Only then type again.
+      await expect
+        .poll(readSyncedAt(page, workspaceId), { timeout: 60_000 })
+        .not.toBeNull();
+      for (let index = 0; index < 5; index += 1) await typeWord();
+    }
 
-    const typed = `Before sync. ${words.join(" ")}`;
+    const typed = ["Before sync.", ...words].join(" ");
     await expect(editor).toContainText(typed);
     await expect.poll(readPlan, { timeout: 60_000 }).toContain(typed);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
@@ -965,10 +991,25 @@ test("every word typed while sync turns on reaches the document and the disk", a
     expect(
       desktop.logs
         .filter((entry) =>
-          /lineage changed|quarantined|lineage handoff failed/.test(entry.text),
+          /lineage changed|quarantined|lineage handoff failed|ydoc-lineage-stale/.test(
+            entry.text,
+          ),
         )
         .map((entry) => entry.text.slice(0, 300)),
     ).toEqual([]);
+
+    if (pattern === "stop") {
+      // The engine left the open lineage to its session, so closing the
+      // document is what sends its history to the relay.
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(editor).toHaveCount(0);
+      await expect
+        .poll(() => relayOpsFor(relay!, relayDb, workspaceId, path), {
+          timeout: 60_000,
+        })
+        .toContain("ydoc.update");
+      return;
+    }
 
     // The words live in the claimed lineage, not only in the file. After a
     // restart the document opens from the engine with every word.
@@ -985,4 +1026,51 @@ test("every word typed while sync turns on reaches the document and the disk", a
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
   }
-});
+}
+
+function readSyncedAt(page: Page, workspaceId: string) {
+  return async (): Promise<number | null> =>
+    (await readSyncStatus(page, workspaceId)).lastSyncedAtMs;
+}
+
+async function relayOpsFor(
+  relay: SyncRelayHandle,
+  relayDb: string,
+  workspaceId: string,
+  path: string,
+): Promise<string[]> {
+  const identity = relayAdoptedIdentity(relayDb, workspaceId);
+  if (!identity) return [];
+  const query = new URLSearchParams({
+    since: "0",
+    limit: "500",
+    replicationEpoch: identity.replicationEpoch,
+    streamIdentity: identity.streamIdentity,
+  });
+  const response = await fetch(
+    `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query}`,
+    { headers: { authorization: `Bearer ${TOKEN}` } },
+  );
+  if (!response.ok) return [];
+  return ((await response.json()) as { ops: RelayOp[] }).ops
+    .filter((op) => op.payload.path === path)
+    .map((op) => op.opKind);
+}
+
+// Turning sync on claims open documents for the relay. Every word typed
+// before, during, or after that must reach the document and the disk. None
+// may be set aside, and the editor must end on Saved.
+for (const pattern of ["through", "pause", "stop"] as const) {
+  test(`every word reaches the disk when typing is ${pattern} while sync turns on`, async () => {
+    // Enabling sync drops the engine session, so a pause lets the sweep claim
+    // the lineage with no session holding it. Main then compares the claim
+    // with a document that holds unrecorded and garbage-collected state, the
+    // hashes differ, and the next words are set aside.
+    test.fixme(
+      pattern === "pause",
+      "a lineage claimed while its session is gone is treated as a fork",
+    );
+    test.setTimeout(300_000);
+    await typeWhileEnablingSync(pattern);
+  });
+}

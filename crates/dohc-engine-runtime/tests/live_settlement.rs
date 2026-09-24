@@ -576,6 +576,7 @@ impl Fixture {
                     settlement_report_id: None,
                 },
                 &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
                 0,
             )
             .unwrap();
@@ -1203,6 +1204,7 @@ async fn resolve_imported_history_successor(
             settlement_report_id: None,
         },
         &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
         50,
     )
     .unwrap();

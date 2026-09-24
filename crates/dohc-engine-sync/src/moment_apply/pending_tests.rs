@@ -91,6 +91,7 @@ fn commit_report(store: &mut EngineStore, report_id: Option<String>) {
             settlement_report_id: report_id,
         },
         &NoFaults,
+        &crate::NoLiveLeases,
         3_000,
     )
     .unwrap();

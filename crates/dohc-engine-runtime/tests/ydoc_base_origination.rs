@@ -1484,8 +1484,15 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         refusal_report_id: None,
         settlement_report_id: None,
     };
-    commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, 400)
-        .expect("first relay position enrolls the workspace");
+    commit_relay_cursor(
+        &mut store,
+        WS,
+        &cursor,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+        400,
+    )
+    .expect("first relay position enrolls the workspace");
     let (markers, snapshots): (i64, i64) = store
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((

@@ -108,6 +108,7 @@ fn contact(store: &mut EngineStore) {
             settlement_report_id: None,
         },
         &NoFaults,
+        &crate::NoLiveLeases,
         1,
     )
     .unwrap();
@@ -222,7 +223,7 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
             .collect::<Vec<_>>()
     };
     assert!(paired(&f.store).is_empty());
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 301).unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 301).unwrap();
     let published = paired(&f.store);
     assert_eq!(published.len(), 2);
     assert_eq!(published[0].op_kind, settlement_record::SETTLEMENT_OP);
@@ -234,7 +235,7 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
             journal_live_settlement_in_tx(tx, "ws", &id, 302)
         })
         .unwrap();
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 303).unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 303).unwrap();
     assert_eq!(paired(&f.store), published);
 }
 
@@ -362,7 +363,14 @@ fn first_push_exports_native_history_after_actual_contact() {
     accept_enrollment_event(&mut f, 1);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     let outcome = client
-        .push_workspace(&mut f.store, "ws", &NoFaults, 201, 100_000_000)
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            201,
+            100_000_000,
+        )
         .unwrap();
     assert!(matches!(
         outcome,
@@ -401,13 +409,25 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     let before = operations(&f.store);
     let fault = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert!(matches!(
-        enrollment::prepare_exports(&mut f.store, "ws", fault.as_ref(), 201),
+        enrollment::prepare_exports(
+            &mut f.store,
+            "ws",
+            fault.as_ref(),
+            &crate::NoLiveLeases,
+            201
+        ),
         Err(SyncError::FaultCrash)
     ));
     assert_eq!(operations(&f.store), before);
     let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
     assert!(matches!(
-        enrollment::prepare_exports(&mut f.store, "ws", fault.as_ref(), 202),
+        enrollment::prepare_exports(
+            &mut f.store,
+            "ws",
+            fault.as_ref(),
+            &crate::NoLiveLeases,
+            202
+        ),
         Err(SyncError::FaultCrash)
     ));
     assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
@@ -419,7 +439,7 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
         1,
         "new writes defer behind unfinished history"
     );
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 204).unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 204).unwrap();
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
     assert_eq!(count(&f.store, "live_audit_event_publications"), 3);
     assert_eq!(count(&f.store, "replication_pending_conflict_bundles"), 0);
@@ -440,7 +460,7 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
         successor.origin_seq > audit.last().unwrap().origin_seq,
         "retained predecessor history precedes successor bundle"
     );
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 205).unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 205).unwrap();
     assert_eq!(operations(&f.store), ops);
     accept_enrollment_event(&mut f, 4);
     assert_eq!(
@@ -470,7 +490,7 @@ fn retained_base_export_preserves_a_different_current_marker() {
         Ok::<_,SyncError>(())
     }).unwrap();
     contact(&mut f.store);
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 201).unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 201).unwrap();
     assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
     let key = DocKey::new("ws", "main", "object").unwrap();
     let marker = f
