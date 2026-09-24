@@ -964,3 +964,17 @@ it('journal refuses keyed body topology that the generic cut accepts', () => {
   if (generic.kind === 'accepted') { expect(generic.cut.finishAfterProjection().kind).toBe('accepted'); generic.cut.document.destroy() }
   expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
 })
+
+it('never projects a preserved source that holds table cells the document lacks', () => {
+  const table = '| a | b |\n|---|---|\n| c | d |\n'
+  const canonical = projection.yDocToMarkdown(markdownToYDoc(table))
+  const digest = (text: string) => hash(new TextEncoder().encode(text))
+  for (const source of ['| a | b |\n|---|---|\n| c | d | hidden |\n', 'a | b\n--- | ---\nc | d | hidden\n']) {
+    const result = validate(input(encode(table, doc => {
+      doc.getMap('meta').set('dohcMarkdownSource', source)
+      doc.getMap('meta').set('dohcMarkdownSourceSha256', digest(source))
+      doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', digest(canonical))
+    })))
+    expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, source).toBe(canonical)
+  }
+})

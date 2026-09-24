@@ -1755,6 +1755,30 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toBe(input)
   })
 
+  it('ends a table at a row with more cells than its header so no cell text disappears', () => {
+    for (const input of [
+      '| a | b |\n|---|---|\n| c | d | hidden |\n',
+      'a | b\n--- | ---\nc | d\ne | f | hidden\n',
+      '> | a | b |\n> |---|---|\n> | c | d | hidden |\n',
+      '- [ ] task\n  | a | b |\n  |---|---|\n  | c | d | hidden |\n',
+      '| a | b |\n|---|---|\n| `c|x` | d | hidden |\n',
+    ]) {
+      expect(yDocToMarkdown(markdownToYDoc(input)), JSON.stringify(input)).toContain('hidden')
+    }
+  })
+
+  it('still reads an empty extra cell and a pipe inside inline code as one table', () => {
+    for (const [input, rows] of [
+      ['| a | b |\n|---|---|\n| c | d |  |\n', [['a', 'b'], ['c', 'd']]],
+      ['| a | b |\n|---|---|\n| `c|x` | d |\n', [['a', 'b'], ['c|x', 'd']]],
+    ] as const) {
+      const table = yDocBodyJSON(markdownToYDoc(input)).content?.[0]
+      expect(table?.type, input).toBe('table')
+      expect(table?.content?.map(row => row.content?.map(cell =>
+        cell.content?.[0]?.content?.[0]?.text ?? ''))).toEqual(rows)
+    }
+  })
+
   it('escapes literal table-cell pipes before computing column widths', () => {
     const doc = yDocFromBody([
       {
