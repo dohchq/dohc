@@ -249,7 +249,7 @@ test("an agent creates a document and comments on it where the person reads comm
     // The agent comments on it right after the person opened it: a chat
     // linked to the file, the same kind a person starts from the file's Chats
     // panel. Finding the file first waits for dohc to finish capturing the
-    // workspace, which the editor's open keeps busy for a moment.
+    // workspace, which an open editor on the new file does not hold up.
     const comment = await agentCli(temp, "fileChatStart", {
       path: "notes/itinerary.md",
       title: "Friday plan",

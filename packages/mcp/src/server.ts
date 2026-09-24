@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { documentAgentNameSchema, documentEditTextSchema } from "@dohc/cli/protocol";
+import { documentAgentNameSchema, documentEditTextSchema, fileChatRequestIdSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -435,11 +435,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_start_file_chat",
     {
       description:
-        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `runId` behaves as in dohc_start_channel_chat.",
+        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a key you choose: sending the same key again, after a timeout for example, returns the first result instead of starting a second chat. `runId` behaves as in dohc_start_channel_chat.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         title: z.string().min(1).max(200),
         body: chatWriteInput.body,
+        requestId: fileChatRequestIdSchema.optional(),
         runId: chatWriteInput.runId,
       },
     },

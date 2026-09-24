@@ -150,9 +150,12 @@ const documentCreateArgsSchema = z
   })
   .strict();
 // A comment on a file: a chat linked to it, started with its first message.
+// A caller's request id makes a retry return the first result.
+export const fileChatRequestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
 const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
+    requestId: fileChatRequestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,
     title: z.string().min(1).max(200),

@@ -1462,6 +1462,28 @@ describe("CLI socket server", () => {
       cwd: workspaceRoot, actor: "agent", path: "untracked.md", title: "T", body: "B",
     })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track untracked.md") });
 
+    // A comment through the socket is an agent's, whatever the caller claims.
+    await expect(invoke("fileChatStart", {
+      cwd: workspaceRoot, actor: "human", path: "tracked.md", title: "T", body: "B",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+    });
+
+    // A retry with the same request id returns the first chat instead of
+    // starting a second; the id cannot be reused for a different comment.
+    const once = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Once", body: "One chat.", requestId: "req-1" };
+    const first = await invoke("fileChatStart", once);
+    if (!first.ok) throw new Error(first.reason);
+    await expect(invoke("fileChatStart", once)).resolves.toEqual(first);
+    await expect(invoke("fileChatStart", { ...once, body: "Another." })).resolves.toEqual({
+      ok: false,
+      reason: "request id req-1 was already used for a different comment",
+    });
+    const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
+    if (!chats.ok) throw new Error(chats.reason);
+    expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
+
     // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;

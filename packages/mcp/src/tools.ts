@@ -2648,7 +2648,7 @@ export async function createDocument(
 // way a person's comment starts.
 export async function startFileChat(
   ctx: ToolContext,
-  args: { path: string; title: string; body: string; runId?: string },
+  args: { path: string; title: string; body: string; requestId?: string; runId?: string },
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };

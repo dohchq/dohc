@@ -270,14 +270,14 @@ describe("MCP tool results", () => {
       request: async (request) => {
         expect(request).toMatchObject({
           verb: "fileChatStart",
-          args: { cwd: root, actor: "agent", path: "notes/budget.md", title: "Food", body: "Is 400 enough?" },
+          args: { cwd: root, actor: "agent", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
         });
         return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
       },
     });
     const result = await client.callTool({
       name: "dohc_start_file_chat",
-      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?" },
+      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
     });
     expect(result.structuredContent).toEqual({
       ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",

@@ -1592,6 +1592,116 @@ async function linkRunMessage(
   return warning;
 }
 
+interface FileChatStart {
+  path: string;
+  title: string;
+  body: string;
+  runId?: string;
+}
+
+// A comment on a file takes the path a person's does: a chat linked to the
+// file, then its first message, through the one chat write module. `created`
+// says whether a chat now exists, so a retry knows whether it may start one.
+async function startFileChat(
+  context: CliWorkspaceContext,
+  input: FileChatStart,
+  options: CliServerOptions,
+): Promise<{ created: boolean; result: unknown }> {
+  let thread: ChatThread;
+  try {
+    thread = await options.chatWrites.createFileThread(context, {
+      title: input.title,
+      linkedFile: async () => {
+        const objectId = await context.fileObjectIdForPath(input.path);
+        if (!objectId) {
+          throw new Error(
+            `dohc does not track ${input.path} yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file.`,
+          );
+        }
+        return { objectId, pathHint: input.path };
+      },
+    });
+  } catch (error) {
+    return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
+  }
+  let message: ChatMessage;
+  try {
+    message = await options.chatWrites.sendMessage(context, {
+      writer: { via: "cli", actor: "agent" },
+      threadId: thread.id,
+      body: input.body,
+      resolveAttachments: async () => [],
+    });
+  } catch (error) {
+    // The chat exists now. Name it, so the caller replies there instead
+    // of starting a second one.
+    await notifyWrite(options, context);
+    const cause = error instanceof Error ? error.message : String(error);
+    return {
+      created: true,
+      result: {
+        ok: false as const,
+        reason: `dohc started chat ${thread.id} on ${input.path}, but could not post its first message (${cause}). Reply in that chat to post it.`,
+      },
+    };
+  }
+  const linkWarning = await linkRunMessage(context, {
+    actor: "agent",
+    ...(input.runId ? { runId: input.runId } : {}),
+    messageId: message.id,
+  }, options);
+  await notifyWrite(options, context);
+  return {
+    created: true,
+    result: {
+      ok: true as const,
+      path: input.path,
+      threadId: thread.id,
+      messageId: message.id,
+      ...(linkWarning ? { warning: linkWarning } : {}),
+    },
+  };
+}
+
+// The results of comments started with a caller's request id. A caller whose
+// request passed the socket deadline retries with the same id and gets the
+// first result instead of a second chat. Kept in memory for this app run.
+const MAX_REMEMBERED_FILE_CHATS = 256;
+const rememberedFileChats = new Map<string, { input: string; result: Promise<unknown> }>();
+
+async function startFileChatOnce(
+  context: CliWorkspaceContext,
+  requestId: string,
+  input: FileChatStart,
+  options: CliServerOptions,
+): Promise<unknown> {
+  const key = `${context.workspaceId}\u0000${requestId}`;
+  const inputKey = JSON.stringify([input.path, input.title, input.body, input.runId ?? null]);
+  const remembered = rememberedFileChats.get(key);
+  if (remembered) {
+    if (remembered.input !== inputKey) {
+      return { ok: false as const, reason: `request id ${requestId} was already used for a different comment` };
+    }
+    return await remembered.result;
+  }
+  const started = startFileChat(context, input, options);
+  const result = started.then((outcome) => outcome.result);
+  rememberedFileChats.set(key, { input: inputKey, result });
+  if (rememberedFileChats.size > MAX_REMEMBERED_FILE_CHATS) {
+    const oldest = rememberedFileChats.keys().next().value;
+    if (oldest !== undefined) rememberedFileChats.delete(oldest);
+  }
+  try {
+    const outcome = await started;
+    // Nothing was created, so a retry with this id may try again.
+    if (!outcome.created) rememberedFileChats.delete(key);
+    return outcome.result;
+  } catch (error) {
+    rememberedFileChats.delete(key);
+    throw error;
+  }
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -2011,57 +2121,23 @@ async function dispatch(
     // A comment on a file takes the path a person's does: a chat linked to
     // the file, then its first message, through the one chat write module.
     case "fileChatStart": {
-      const validated = validateUserReadPath(request.args.path);
-      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
-      const path = validated.normalized;
-      let thread: ChatThread;
-      try {
-        thread = await options.chatWrites.createFileThread(context, {
-          title: request.args.title,
-          linkedFile: async () => {
-            const objectId = await context.fileObjectIdForPath(path);
-            if (!objectId) {
-              throw new Error(
-                `dohc does not track ${path} yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file.`,
-              );
-            }
-            return { objectId, pathHint: path };
-          },
-        });
-      } catch (error) {
-        return mcpFailure(error, `failed to start a chat on: ${path}`);
-      }
-      let message: ChatMessage;
-      try {
-        message = await options.chatWrites.sendMessage(context, {
-          writer: { via: "cli", actor: request.args.actor },
-          threadId: thread.id,
-          body: request.args.body,
-          resolveAttachments: async () => [],
-        });
-      } catch (error) {
-        // The chat exists now. Name it, so the caller replies there instead
-        // of starting a second one.
-        await notifyWrite(options, context);
-        const cause = error instanceof Error ? error.message : String(error);
+      if (request.args.actor !== "agent") {
         return {
           ok: false as const,
-          reason: `dohc started chat ${thread.id} on ${path}, but could not post its first message (${cause}). Reply in that chat to post it.`,
+          reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
         };
       }
-      const linkWarning = await linkRunMessage(context, {
-        actor: request.args.actor,
+      const validated = validateUserReadPath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const input = {
+        path: validated.normalized,
+        title: request.args.title,
+        body: request.args.body,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
-        messageId: message.id,
-      }, options);
-      await notifyWrite(options, context);
-      return {
-        ok: true as const,
-        path,
-        threadId: thread.id,
-        messageId: message.id,
-        ...(linkWarning ? { warning: linkWarning } : {}),
       };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await startFileChat(context, input, options)).result;
+      return await startFileChatOnce(context, requestId, input, options);
     }
   }
 

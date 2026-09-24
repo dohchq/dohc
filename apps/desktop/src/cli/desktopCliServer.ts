@@ -32,9 +32,19 @@ import {
 import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
-import { readWorkspaceText, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
-import { createFile } from "../workspaces/workspaceFiles";
+import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import type { DocumentProjection } from "../workspaces/documentProjection";
+import type { LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
+import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+
+// The History author of a document an agent creates: the agent under the
+// name it gave, on behalf of the local owner, or no author without a name.
+function momentAuthorFor(origin: LiveDocumentEditOrigin): MomentAuthor | null {
+  return origin.actorOriginId === undefined
+    ? null
+    : { kind: "agent", agentId: origin.actorOriginId, onBehalfOf: "local" };
+}
 import { lstat } from "node:fs/promises";
 
 // With no editor open, the file holds the document's settled text.
@@ -54,7 +64,7 @@ interface DesktopCliServerDependencies<State> {
   activity: {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
-      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
+      "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment" | "writeAuthoredTextFile"
     > | null;
     queueCloudSync(workspaceId: string): void;
   };
@@ -263,20 +273,28 @@ export function createDesktopCliServer<State>(
               documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
           }),
         create: async ({ path, markdown, origin }) => {
-          // An empty file, as the explorer's New file writes, and then the
-          // text through the new file's live session, like typing into it.
+          // Frontmatter would land as body blocks, so it is refused before
+          // anything exists.
+          if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
+          // An empty file written on the capture chain, which refuses a path
+          // that exists and records the agent as the file's author, and then
+          // the text through the new file's live session, like typing into it.
           await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
             operation.assertCurrent();
             if (sharedViewOf(workspace.workspaceId)) {
               throw new Error("A shared view cannot create documents.");
             }
-            const root = operation.workspace.rootPath;
-            await withStaleSensitiveWorkspaceOperation(root, async () => {
-              if (await lstat(join(root, path)).then(() => true, () => false)) {
-                throw new Error(`${path} already exists. Edit it instead.`);
+            const current = activity.engineCaptureFor(workspace.workspaceId);
+            if (!current) throw new Error("dohc could not start the engine for this workspace, so it cannot create documents. Restart dohc to try again.");
+            const absolute = join(operation.workspace.rootPath, path);
+            try {
+              await current.writeAuthoredTextFile(absolute, "", momentAuthorFor(origin), { createOnly: true });
+            } catch (error) {
+              if (await lstat(absolute).then(() => true, () => false)) {
+                throw new Error(`${path} already exists. Edit it instead.`, { cause: error });
               }
-              await createFile(root, path, "");
-            });
+              throw error;
+            }
           });
           try {
             await liveDocuments.editDocument({
