@@ -206,13 +206,13 @@ import {
 } from "./workspaces/sharedChannels";
 import {
   resolveChatRelayIdentity,
-  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -822,13 +822,7 @@ async function noticeSession(): Promise<NoticeSession | null> {
     // An owned workspace is named; a share view is reached through its share.
     reachFor: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
-      if (!workspace) return null;
-      if (workspace.shareView) {
-        return resolveShareViewRelayAuthorId(workspace.shareView, credentials) === undefined
-          ? null
-          : { shareId: workspace.shareView.shareId };
-      }
-      return resolveWorkspaceRelayAuthorId(workspace, credentials) === undefined ? null : { workspaceId };
+      return workspace ? noticeReachFor(workspace, credentials) : null;
     },
   };
 }

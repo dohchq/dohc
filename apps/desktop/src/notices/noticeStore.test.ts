@@ -342,6 +342,29 @@ describe("notices on one person's computers", () => {
     })]);
   });
 
+  it("keeps your notice on this computer when the relay refuses it", async () => {
+    const server = await relay();
+    const shareId = await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const laptop = await computer(account(server, "ana"));
+    laptop.reach = new Map([["ana-trip", { shareId }]]);
+    server.online = false;
+    await laptop.store.postNotice(notice({ workspaceId: "ana-trip" }));
+    const readAtMs = clock;
+    await laptop.store.mark({ store: "account", noticeId: "agent-run:1" }, "read");
+
+    // The share ends before the notice leaves, so the relay refuses it.
+    expect(server.storage.revokeShare(shareId, clock)).toBe(true);
+    server.online = true;
+    clock += 1;
+    await laptop.store.sync();
+    await laptop.store.sync();
+    expect(await laptop.store.list()).toEqual([expect.objectContaining({
+      store: "local", noticeId: "agent-run:1", workspaceId: "ana-trip", title: "Your agent finished", readAtMs,
+    })]);
+    const outbox = await file(laptop, "account");
+    expect([outbox.posts, outbox.marks]).toEqual([[], []]);
+  });
+
   it("drops a notice the relay removed to make room", async () => {
     const server = await relay();
     await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });

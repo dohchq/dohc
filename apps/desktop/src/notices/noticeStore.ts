@@ -165,6 +165,9 @@ const AccountFile = z.object({
   rows: z.array(RelayRow),
   posts: z.array(z.object({
     request: PostRequest,
+    // This computer's workspace, which a notice through a share does not
+    // name, so the notice can move to this computer's list.
+    workspaceId: z.string().min(1),
     createdAtMs: NoticeRow.shape.createdAtMs,
     // The relay accepted it; the next finished pull settles it.
     sent: z.boolean(),
@@ -344,9 +347,9 @@ export function createNoticeStore(deps: {
       const file = await loadAccount(account);
       if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       const local = await loadLocal();
-      for (const { request, createdAtMs } of file.posts) {
+      for (const { request, workspaceId, createdAtMs } of file.posts) {
         addLocal(local, {
-          noticeId: request.noticeId, kind: request.kind, workspaceId: request.workspaceId ?? null,
+          noticeId: request.noticeId, kind: request.kind, workspaceId,
           title: request.title, body: request.body, target: request.target,
         }, createdAtMs);
       }
@@ -370,14 +373,15 @@ export function createNoticeStore(deps: {
     if (changed) deps.onChanged();
   }
 
-  // Sends waiting posts one at a time. A refused post is dropped; anything
-  // else leaves the rest waiting for the next pass.
+  // Sends waiting posts one at a time. A post the relay refuses, such as one
+  // through a share that ended, moves to this computer's list; an invalid one
+  // is dropped. Anything else leaves the rest waiting for the next pass.
   async function sendPosts(session: NoticeSession): Promise<"done" | "routes-missing"> {
     const account = session.account;
     for (;;) {
       const post = await locked(async () => (await loadAccount(account)).posts.find((waiting) => !waiting.sent));
       if (!post) return "done";
-      let accepted = true;
+      let outcome: "sent" | "refused" | "invalid" = "sent";
       try {
         await relay(session, "/sync/notices", post.request);
       } catch (error) {
@@ -387,15 +391,38 @@ export function createNoticeStore(deps: {
           return "done";
         }
         if (error.reason === "routes-missing") return "routes-missing";
-        console.error("[notices] the server refused a notice; it was dropped", error.reason);
-        accepted = false;
+        if (error.reason === "invalid") {
+          console.error("[notices] the server refused a notice as invalid; it was dropped");
+          outcome = "invalid";
+        } else {
+          outcome = "refused";
+        }
       }
-      await locked(async () => {
+      const moved = await locked(async () => {
         const file = await loadAccount(account);
-        if (accepted) post.sent = true;
-        else file.posts = file.posts.filter((waiting) => waiting !== post);
+        if (outcome === "sent") {
+          post.sent = true;
+          await saveAccount(account, file);
+          return false;
+        }
+        file.posts = file.posts.filter((waiting) => waiting !== post);
+        const mark = file.marks.find((waiting) => waiting.noticeId === post.request.noticeId);
+        file.marks = file.marks.filter((waiting) => waiting !== mark);
+        if (outcome === "refused") {
+          const local = await loadLocal();
+          const { request } = post;
+          addLocal(local, {
+            noticeId: request.noticeId, kind: request.kind, workspaceId: post.workspaceId,
+            title: request.title, body: request.body, target: request.target,
+          }, post.createdAtMs);
+          const row = local.rows.find((candidate) => candidate.noticeId === request.noticeId);
+          if (row && mark?.mark === "read") row.readAtMs ??= mark.atMs;
+          await saveLocal(local);
+        }
         await saveAccount(account, file);
+        return outcome === "refused";
       });
+      if (moved) deps.onChanged();
     }
   }
 
@@ -570,7 +597,9 @@ export function createNoticeStore(deps: {
           file.posts.some((post) => post.request.noticeId === content.noticeId);
         if (known) return false;
         dropOldestUnsent(file);
-        file.posts.push({ request: request(session.account.userId, reach), createdAtMs, sent: false });
+        file.posts.push({
+          request: request(session.account.userId, reach), workspaceId: content.workspaceId, createdAtMs, sent: false,
+        });
         await saveAccount(session.account, file);
         return true;
       }
