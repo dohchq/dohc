@@ -70,8 +70,10 @@ export type PersistentResult = DatasetCursor | PreparedOperation | MigratedCheck
 export type PersistentReply = {id:number;ok:true;result:PersistentResult}
   | {id:number;ok:false;error:string;code:string;refusal?:AppOperationRefusal};
 // Sent by the worker as each step of a command starts, so the host can tell
-// slow work from a worker that stopped.
-export type PersistentProgress = {id:number;progress:string};
+// slow work from a worker that stopped. A step that runs under a CPU budget of
+// its own and reports nothing inside, such as the integrity check, names that
+// budget, and the host lets the step stay quiet long enough to use it.
+export type PersistentProgress = {id:number;progress:string;cpuBudgetMs?:number};
 // Written into the dataset directory by the worker's CPU budget watch just
 // before it ends the worker, so the host can say why the worker stopped. It
 // holds the budget that ran out and its size: "app 5000" or "checks 9000".
@@ -92,6 +94,8 @@ export function databaseBytes(db:DatabaseSync):number {
 export const HEARTBEAT_ROWS=1000;
 
 export class PersistentRuntimeError extends Error {
+  /** Set by the supervisor when this failure makes the dataset wait before it reopens. */
+  retryAfterMs?: number;
   constructor(readonly code:string, message:string) { super(message); this.name="PersistentRuntimeError"; }
 }
 export function reject(code:string, message:string):never { throw new PersistentRuntimeError(code,message); }

@@ -37,7 +37,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
   if (!Number.isSafeInteger(queueDeadlineMs) || queueDeadlineMs<1 || queueDeadlineMs>60_000) reject("invalid_input","Invalid worker queue deadline.");
   const silenceMs=options.silenceMs ?? WORKER_SILENCE_MS, commandCapMs=options.commandCapMs ?? WORKER_COMMAND_CAP_MS;
   type Entry={id:number;bytes:number;command:PersistentCommand;resolve:(result:PersistentResult)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;
-    cap?:ReturnType<typeof setTimeout>;step?:string;progress:number};
+    cap?:ReturnType<typeof setTimeout>;step?:string;progress:number;silence:number};
   const queue:Entry[]=[];
   let active:Entry | undefined, child:AppRuntimeChild | undefined, stopped:Error | undefined, closing=false, sequence=0;
   let exited=false, retainedBytes=0;
@@ -46,18 +46,18 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
   const duration=(ms:number)=>ms<1000 ? `${ms} ms` : ms<60_000 ? `${Math.round(ms/1000)} s` : `${Math.round(ms/60_000)} minutes`;
   function settle(entry:Entry):void {clearTimeout(entry.timer);clearTimeout(entry.cap);}
   function during(entry:Entry|undefined):string {return entry?.step ? ` while ${entry.step}` : "";}
-  function watchSilence(entry:Entry):void {
+  function watchSilence(entry:Entry, limitMs=silenceMs):void {
     clearTimeout(entry.timer);
-    const seen=entry.progress;
+    const seen=entry.progress;entry.silence=limitMs;
     entry.timer=setTimeout(()=>{
       // A stalled host fires this before it reads messages that arrived meanwhile.
       // In Node the check phase follows the poll that delivers them; Electron's
       // main process runs its own loop, where this recheck is best effort.
       setImmediate(()=>{
         if(active!==entry || entry.progress!==seen) return;
-        fail(new PersistentRuntimeError("worker_stalled",`The dataset worker made no progress for ${duration(silenceMs)}${during(entry)}. Reopen it from the journal.`));
+        fail(new PersistentRuntimeError("worker_stalled",`The dataset worker made no progress for ${duration(entry.silence)}${during(entry)}. Try again.`));
       });
-    },silenceMs);
+    },limitMs);
   }
   const budgetMarker=()=>join(config.directory,CPU_BUDGET_MARKER);
   // The worker's CPU budget watch leaves this marker as it ends the worker.
@@ -82,7 +82,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
     watchSilence(entry);
-    entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Reopen it from the journal.`)),commandCapMs);
+    entry.cap=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline",`The dataset worker did not finish in ${duration(commandCapMs)}${during(entry)}. Try again.`)),commandCapMs);
     try {child.postMessage({id:entry.id,command:entry.command});}catch(error){fail(error instanceof Error ? error : new Error(String(error)));}
   }
   function send(command:PersistentCommand):Promise<PersistentResult> {
@@ -95,7 +95,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     if(command.kind==="applyBatch") command={...command,input:command.input.map(event=>({...event,changeset:Uint8Array.from(event.changeset)}))};
     retainedBytes+=bytes;
     return new Promise((resolve,rejectEntry)=>{
-      const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,progress:0,timer:setTimeout(()=>{
+      const entry:Entry={id:++sequence,bytes,command,resolve,reject:rejectEntry,progress:0,silence:silenceMs,timer:setTimeout(()=>{
         const index=queue.indexOf(entry);
         if(index>=0){queue.splice(index,1);retainedBytes-=entry.bytes;rejectEntry(new PersistentRuntimeError("queue_deadline","The operation expired while waiting for the dataset worker."));}
       },queueDeadlineMs)};
@@ -110,7 +110,10 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         const progress=message as PersistentProgress;
         if(active && progress && progress.id===active.id && typeof progress.progress==="string" && progress.progress.length<=128) {
           active.step=progress.progress;active.progress++;
-          watchSilence(active);
+          // Such a step's own CPU budget bounds it. Waiting on the disk can
+          // double its wall time, and the command cap still applies.
+          const budget=progress.cpuBudgetMs;
+          watchSilence(active,Number.isSafeInteger(budget) && budget!>0 ? Math.min(silenceMs+2*budget!,commandCapMs) : silenceMs);
           return;
         }
         const reply=message as PersistentReply;
@@ -122,8 +125,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       },onError:fail,onExit(){
         exited=true;resolveExit();
         const budget=exceededBudget();
-        if(budget!==undefined) fail(new PersistentRuntimeError("worker_budget",`${budget} Reopen it from the journal.`));
-        else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Reopen it from the journal.`));
+        if(budget!==undefined) fail(new PersistentRuntimeError("worker_budget",`${budget} Try again.`));
+        else if(!closing || active || queue.length) fail(new PersistentRuntimeError("worker_stopped",`The dataset worker stopped${during(active)}. Try again.`));
       },
     });
     if(stopped) child.kill();

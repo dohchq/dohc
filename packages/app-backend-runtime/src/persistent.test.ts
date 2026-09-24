@@ -402,7 +402,7 @@ describe("persistent dataset worker",()=>{
       const worker=await open({limits:{cpuBudgetMs:1000,evaluationMs:100}});
       const expensive={...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`};
       await expect(worker.prepare(expensive)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 s of CPU time while running the app operation. Reopen it from the journal."});
+        message:"The app's code ran too long: it used more than 1 s of CPU time while running the app operation. Try again."});
       await expect(worker.prepare({...operation(),readOnly:true})).rejects.toMatchObject({code:"worker_budget"});
       await worker.close();
       const recovered=await open();
@@ -431,7 +431,7 @@ describe("persistent dataset worker",()=>{
         ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200000) SELECT x FROM n)");return 1}}`});
       const committed=event(prepared);
       await expect((await open({limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Reopen it from the journal."});
+        message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Try again."});
       await expect((await open()).apply(committed)).resolves.toMatchObject({revision:1});
     });
   },60_000);
@@ -448,7 +448,7 @@ describe("persistent dataset worker",()=>{
       const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
       // The integrity check at open computes the index for every row.
       await expect(open({schemaSql:heavySchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
-        message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Reopen it from the journal\.$/)});
+        message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Try again\.$/)});
       await expect(open({schemaSql:heavySchema,checkpointPath,cursor})).resolves.toBeDefined();
     });
   },60_000);

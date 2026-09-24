@@ -113,6 +113,17 @@ export class DatasetReopenWaitError extends Error {
     this.name = "DatasetReopenWaitError";
   }
 }
+// A worker that ran out of CPU or time, stopped, or could not save its replay.
+const WORKER_FAILURES = new Set(["worker_budget", "worker_stalled", "worker_deadline", "worker_stopped", "replay_not_saved"]);
+/**
+ * A dataset worker failure the caller can retry. `retryAfterMs` is set when the failure made the dataset wait before it
+ * reopens. Public package entrypoints can contain separate bundled copies of the error class.
+ */
+export function isDatasetWorkerFailure(error: unknown): error is Error & { code: string; retryAfterMs?: number } {
+  const code = (error as {code?: unknown} | undefined)?.code, retryAfterMs = (error as {retryAfterMs?: unknown} | undefined)?.retryAfterMs;
+  return error instanceof Error && error.name === "PersistentRuntimeError" && typeof code === "string" && WORKER_FAILURES.has(code) &&
+    (retryAfterMs === undefined || (Number.isSafeInteger(retryAfterMs) && Number(retryAfterMs) > 0));
+}
 /** Public package entrypoints can contain separate bundled copies of the error class. */
 export function isDatasetReopenWaitError(error: unknown): error is DatasetReopenWaitError {
   return error instanceof Error && error.name === "DatasetReopenWaitError" && (error as Partial<DatasetReopenWaitError>).code === "dataset_reopen_wait" &&
@@ -151,11 +162,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   // starts over once the longest wait has passed since the last wait ended.
   const reopenWaits = new Map<string, { failures: number; untilMs: number }>();
   function noteReopenFailure(scope: DatasetScope, error: unknown): void {
-    const code = (error as {code?: unknown}).code;
-    if (!reopenWaitCapMs || (code !== "worker_budget" && code !== "worker_stalled" && code !== "worker_deadline" && code !== "replay_not_saved")) return;
+    if (!reopenWaitCapMs || !(error instanceof PersistentRuntimeError) || !WORKER_FAILURES.has(error.code)) return;
     const key = JSON.stringify(scope), previous = reopenWaits.get(key), at = now();
     const failures = previous && at - previous.untilMs < reopenWaitCapMs ? previous.failures + 1 : 1;
-    reopenWaits.set(key, { failures, untilMs: at + Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs) });
+    error.retryAfterMs = Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs);
+    reopenWaits.set(key, { failures, untilMs: at + error.retryAfterMs });
   }
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;

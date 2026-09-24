@@ -422,13 +422,16 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
 // A dataset with one committed event, reopened by a supervisor whose worker
 // runs out of CPU in the chosen command.
 async function failingReopens(options:Partial<DatasetSupervisorOptions>) {
-  const state={now:1_000_000,failing:"applyBatch" as string|undefined,replayed:[] as number[]};
+  const state={now:1_000_000,failing:"applyBatch" as string|undefined,marker:true,replayed:[] as number[]};
   let directory="";
   const launch=launcher((command,controls)=>{
     if(command.command.kind==="open")directory=command.command.input.directory;
     if(command.command.kind==="applyBatch")state.replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
     // The worker's CPU budget watch leaves this marker, then ends the worker.
-    if(command.command.kind===state.failing){void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);return;}
+    if(command.command.kind===state.failing){
+      if(state.marker)void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);else controls.stop();
+      return;
+    }
     controls.deliver();
   });
   const f=await fixture();
@@ -442,7 +445,7 @@ async function failingReopens(options:Partial<DatasetSupervisorOptions>) {
 
 it("waits longer before each reopen of a dataset whose replay ran out of CPU",async()=>{
   const {state,read}=await failingReopens({reopenWaitCapMs:20_000});
-  await expect(read()).rejects.toMatchObject({code:"worker_budget"});
+  await expect(read()).rejects.toMatchObject({code:"worker_budget",retryAfterMs:5_000});
   await expect(read()).rejects.toMatchObject({code:"dataset_reopen_wait",retryAfterMs:5_000,
     message:"The dataset stopped before its work finished. Try again in 5 s."});
   expect(state.replayed).toEqual([1]);
@@ -471,6 +474,15 @@ it("reopens at once after a failed replay when the host turns the wait off",asyn
   await expect(read()).rejects.toMatchObject({code:"worker_budget"});
   await expect(read()).rejects.toMatchObject({code:"worker_budget"});
   expect(state.replayed).toEqual([1,1]);
+});
+
+it("waits to reopen when the worker stops during a replay without saying why",async()=>{
+  // A budget kill whose marker could not be written, for example on a full disk.
+  const {state,read}=await failingReopens({});
+  state.marker=false;
+  await expect(read()).rejects.toMatchObject({code:"worker_stopped",retryAfterMs:5_000});
+  await expect(read()).rejects.toMatchObject({code:"dataset_reopen_wait"});
+  expect(state.replayed).toEqual([1]);
 });
 
 it("waits to reopen when a costly replay cannot be saved",async()=>{

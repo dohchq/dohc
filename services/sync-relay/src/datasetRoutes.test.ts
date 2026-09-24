@@ -12,6 +12,7 @@ import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
+import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
@@ -113,6 +114,19 @@ it("tells callers when to retry a dataset that waits to reopen", async () => {
   expect(waiting.status).toBe(503);
   expect(waiting.headers.get("retry-after")).toBe("10");
   expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "The dataset stopped before its work finished. Try again in 10 s."});
+  // The failure that starts a wait says why, and when to retry.
+  const message = "The app's code ran too long: it used more than 5 s of CPU time while replaying journal event 3 of 64. Try again.";
+  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("worker_budget", message), {retryAfterMs: 5_000}); };
+  const failed = await f.invoke();
+  expect(failed.status).toBe(503);
+  expect(failed.headers.get("retry-after")).toBe("5");
+  expect(await failed.json()).toEqual({code: "worker_budget", message});
+  // A failed operation starts no wait.
+  f.host.invoke = async () => { throw new PersistentRuntimeError("worker_stalled", "The dataset worker made no progress for 30 s while running the app operation. Try again."); };
+  const stalled = await f.invoke();
+  expect(stalled.status).toBe(503);
+  expect(stalled.headers.get("retry-after")).toBeNull();
+  expect((await stalled.json()).code).toBe("worker_stalled");
 });
 
 it("archives and restores a dataset with its rows, app bindings, and retry receipts intact", async () => {
