@@ -3074,6 +3074,40 @@ fn button_field_keeps_a_stray_value_flagged_and_refuses_filter_sort_and_group() 
             reason: "collection query cannot group by a button field"
         }
     ));
+
+    // Button names are cached by schema content, so a changed schema is
+    // read again: once Mark paid is text, a sort on it works.
+    write_text_for_object(
+        &mut store,
+        "invoices/collection.yaml",
+        "fields:\n  Title:\n    type: text\n  Mark paid:\n    type: text\n",
+        "object-2",
+        "moment-4",
+        4,
+    )
+    .expect("invoice schema without the button");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile the changed schema");
+    store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "invoices",
+                &CollectionQuery {
+                    sort: vec![CollectionSort {
+                        field: "Mark paid".into(),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("a text field sorts")
+        .expect("invoice collection");
 }
 
 #[test]

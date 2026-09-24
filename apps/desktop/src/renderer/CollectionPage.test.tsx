@@ -1354,6 +1354,31 @@ describe("record click-through", () => {
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
+  it("shows a table, not a board, when the board groups by a button", async () => {
+    const parsed = parseCollectionSchema([
+      "fields:",
+      "  title:",
+      "    type: text",
+      "  Mark paid:",
+      "    type: button",
+      "views:",
+      "  - name: Board",
+      "    kind: board",
+      "    groupBy: Mark paid",
+    ].join("\n"));
+    expect(parsed.schema.views[0]?.groupBy).toBeNull();
+    const bridge = makeBridge([record("rec-1", "Plan")], parsed.schema, {
+      groups: [{ value: null, records: [record("rec-1", "Plan")] }],
+    });
+    renderPage(bridge);
+
+    expect(await screen.findByRole("grid")).toBeDefined();
+    expect(screen.queryByRole("list")).toBeNull();
+    expect(bridge.queryCollectionRecords.mock.calls.map(([params]) => params)).not.toContainEqual(
+      expect.objectContaining({ groupBy: expect.anything() }),
+    );
+  });
+
   it("opens the record's file from a calendar event", async () => {
     const dated: CollectionRecord = {
       id: "rec-1",

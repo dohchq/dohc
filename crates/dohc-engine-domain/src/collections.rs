@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
@@ -4862,16 +4863,70 @@ fn cursor_after_predicate(
     format!("({})", branches.join(" OR "))
 }
 
+// A schema blob never changes, so its button names never go stale. The cache
+// starts over when it holds this many schemas.
+const MAX_CACHED_SCHEMA_BUTTONS: usize = 64;
+static SCHEMA_BUTTONS: LazyLock<Mutex<HashMap<String, Arc<HashSet<String>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// The collection's button field names. A filtered, sorted, or grouped page
+/// asks for them, so they are parsed once per schema blob, not once per page.
+fn collection_button_fields(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Arc<HashSet<String>>, crate::DomainError> {
+    let schema_sha256: String = conn
+        .query_row(
+            "SELECT s.blob_sha256 FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let cache = || {
+        SCHEMA_BUTTONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    };
+    if let Some(buttons) = cache().get(&schema_sha256) {
+        return Ok(Arc::clone(buttons));
+    }
+    let text: String = conn
+        .query_row(
+            "SELECT text FROM blobs WHERE sha256=?1",
+            params![schema_sha256],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let buttons = Arc::new(
+        parse_collection_schema(&text)
+            .schema
+            .fields
+            .into_iter()
+            .filter_map(|field| match field {
+                FieldDefinition::Button { name } => Some(name),
+                _ => None,
+            })
+            .collect::<HashSet<_>>(),
+    );
+    let mut cached = cache();
+    if cached.len() >= MAX_CACHED_SCHEMA_BUTTONS {
+        cached.clear();
+    }
+    cached.insert(schema_sha256, Arc::clone(&buttons));
+    Ok(buttons)
+}
+
 /// A button stores no value, so a query cannot filter, sort, or group by one.
 fn reject_button_field_references(
-    schema: &CollectionSchema,
+    buttons: &HashSet<String>,
     query: &CollectionQuery,
 ) -> Result<(), crate::DomainError> {
-    let is_button = |name: &str| {
-        schema.fields.iter().any(
-            |field| matches!(field, FieldDefinition::Button { name: button } if button == name),
-        )
-    };
+    let is_button = |name: &str| buttons.contains(name);
     let reason = if query
         .filter
         .as_ref()
@@ -4928,8 +4983,8 @@ pub fn query_collection_records(
         return Ok(None);
     };
     if query.filter.is_some() || !query.sort.is_empty() || query.group_by.is_some() {
-        let schema = load_collection_schema(conn, workspace_id, &version_id, collection_path)?;
-        reject_button_field_references(&schema, query)?;
+        let buttons = collection_button_fields(conn, workspace_id, &version_id, collection_path)?;
+        reject_button_field_references(&buttons, query)?;
     }
     register_collection_query_sql(conn)?;
     let mut parameters = vec![
