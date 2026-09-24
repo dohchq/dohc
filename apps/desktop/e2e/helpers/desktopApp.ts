@@ -136,7 +136,9 @@ export async function launchDesktopApp(input: {
     processHandle.stdout?.setEncoding("utf8").on("data", onStdoutData);
     processHandle.stderr?.setEncoding("utf8").on("data", onStderrData);
 
-    const page = await app.firstWindow({ timeout: 10_000 });
+    // A loaded gate host can take well over 10 s to start Electron. Two 20 s
+    // boot waits fit inside the shortest 60 s test timeout.
+    const page = await app.firstWindow({ timeout: 20_000 });
     page.on("console", (message) => {
       record({
         source: "renderer",
