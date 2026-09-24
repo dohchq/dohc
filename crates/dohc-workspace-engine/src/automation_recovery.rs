@@ -262,9 +262,10 @@ mod tests {
         // Start two claims after the snapshot in the very same millisecond:
         // one absent from the snapshot, one reusing its claim ID for attempt 2.
         for (id, expected_attempts) in [("live", 1), ("reused", 2)] {
-            let claimed = actor
+            let (claimed, _) = actor
                 .automation_claim_next(
                     WORKSPACE.to_owned(),
+                    None,
                     OPENED_AT,
                     Arc::new(NoFaults),
                     CancellationToken::new(),

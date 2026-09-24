@@ -544,17 +544,42 @@ describe("workspace wire schemas", () => {
 });
 
 describe("automations wire schemas", () => {
-  const claim = {
+  const summary = {
     claimId: "claim-1",
     automationId: "hello-plugin/triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
     depth: 0,
+    change: {
+      kind: "changed",
+      actor: { kind: "agent", id: "agent-editor" },
+    },
     state: "pending",
     attempts: 1,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
+  };
+  const claim = {
+    ...summary,
+    change: {
+      ...summary.change,
+      fields: [
+        {
+          field: "body",
+          historyId: 11,
+          previous: null,
+          next: { truncated: true, bytes: 9_000 },
+        },
+        {
+          field: "status",
+          historyId: 12,
+          previous: { value: "open" },
+          next: { value: null },
+        },
+      ],
+      fieldsOmitted: 0,
+    },
   };
 
   it("decodes the subscription round trip", () => {
@@ -570,7 +595,7 @@ describe("automations wire schemas", () => {
     ).toEqual({ unsubscribed: false });
   });
 
-  it("decodes a coordinate-keyed claim from claimNext", () => {
+  it("decodes a claim from claimNext with its change's field facts", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
     ).toEqual(claim);
@@ -582,16 +607,35 @@ describe("automations wire schemas", () => {
     ).toBeNull();
   });
 
-  it("decodes a history-keyed failed claim from settle", () => {
+  it("decodes a history-keyed failed claim from settle and retry without facts", () => {
     const failed = {
-      ...claim,
+      ...summary,
       trigger: { historyId: 41 },
+      change: { kind: "added", actor: { kind: null, id: null } },
       state: "failed",
       error: "handler threw",
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, failed),
     ).toEqual(failed);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
+    ).toEqual(summary);
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
+    ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes the claim history", () => {
+    const history = { claims: [summary, { ...summary, state: "done" }] };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history),
+    ).toEqual(history);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, {
+        claims: [],
+      }),
+    ).toEqual({ claims: [] });
   });
 
   it("decodes the failure listing and refuses a row without a generation", () => {
@@ -618,18 +662,37 @@ describe("automations wire schemas", () => {
     ).toThrow(ProtocolShapeError);
   });
 
-  it("refuses a claim with an unknown state or a malformed trigger", () => {
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, {
+  it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
+    for (const malformed of [
+      { ...claim, state: "paused" },
+      { ...claim, trigger: { originId: "origin-a" } },
+      { ...claim, change: { ...claim.change, kind: "moved" } },
+      { ...claim, change: { ...claim.change, actor: { kind: "robot", id: null } } },
+      {
         ...claim,
-        state: "paused",
-      }),
-    ).toThrow(ProtocolShapeError);
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
+        change: {
+          ...claim.change,
+          fields: [{ field: "status", historyId: 1, previous: "open", next: null }],
+        },
+      },
+      {
         ...claim,
-        trigger: { originId: "origin-a" },
-      }),
-    ).toThrow(ProtocolShapeError);
+        change: {
+          ...claim.change,
+          fields: [
+            {
+              field: "status",
+              historyId: 1,
+              previous: { truncated: false, bytes: 1 },
+              next: null,
+            },
+          ],
+        },
+      },
+    ]) {
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed),
+      ).toThrow(ProtocolShapeError);
+    }
   });
 });

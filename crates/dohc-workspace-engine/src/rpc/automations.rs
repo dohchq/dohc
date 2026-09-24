@@ -3,9 +3,12 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use dohc_engine_domain::AutomationChangeKind;
 use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationFailure;
+use dohc_engine_domain::AutomationFieldFacts;
 use dohc_engine_domain::AutomationSettle;
+use dohc_engine_domain::AutomationSubscription;
 use dohc_engine_domain::AutomationTrigger;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -27,7 +30,17 @@ pub(crate) const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomationSubscriptionParams {
+struct AutomationSubscribeParams {
+    automation_id: String,
+    path: String,
+    kinds: Vec<AutomationChangeKind>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    fields: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationUnsubscribeParams {
     automation_id: String,
     path: String,
 }
@@ -36,6 +49,8 @@ struct AutomationSubscriptionParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationClaimNextParams {
     now_ms: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    automation_id_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +63,19 @@ struct AutomationSettleParams {
     now_ms: Option<i64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationRetryParams {
+    claim_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationListClaimsParams {
+    automation_id: String,
+}
+
 fn automation_failure_json(failure: &AutomationFailure) -> Value {
     json!({
         "automationId": failure.automation_id,
@@ -57,6 +85,8 @@ fn automation_failure_json(failure: &AutomationFailure) -> Value {
     })
 }
 
+/// A claim without its field facts: what `automation.claimed`, settle,
+/// retry, and the claim history carry.
 pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
     let trigger = match &claim.trigger {
         AutomationTrigger::Coordinate {
@@ -72,6 +102,13 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
         "recordId": claim.record_id,
         "collectionPath": claim.collection_path,
         "depth": claim.depth,
+        "change": {
+            "kind": claim.change.kind.as_str(),
+            "actor": {
+                "kind": claim.change.actor_kind.map(|kind| kind.as_str()),
+                "id": claim.change.actor_id,
+            },
+        },
         "state": claim.state.as_str(),
         "attempts": claim.attempts,
         "createdAtMs": claim.created_at_ms,
@@ -84,6 +121,17 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
     value
 }
 
+/// A claim `claimNext` serves: the claim plus its change's field facts.
+fn served_automation_claim_json(claim: &AutomationClaim, facts: &AutomationFieldFacts) -> Value {
+    let mut value = automation_claim_json(claim);
+    let change = value["change"]
+        .as_object_mut()
+        .expect("claim change is an object");
+    change.insert("fields".to_owned(), json!(facts.fields));
+    change.insert("fieldsOmitted".to_owned(), json!(facts.omitted));
+    value
+}
+
 impl EngineService {
     pub(super) async fn automations_subscribe(
         &self,
@@ -91,7 +139,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: AutomationSubscriptionParams = parse(params)?;
+        let params: AutomationSubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let subscribed = Self::read_under_ctx(
@@ -99,8 +147,12 @@ impl EngineService {
             "automations.subscribe",
             open.actor.automation_subscribe(
                 open.workspace_id.clone(),
-                params.automation_id,
-                params.path,
+                AutomationSubscription {
+                    automation_id: params.automation_id,
+                    prefix: params.path,
+                    kinds: params.kinds,
+                    fields: params.fields,
+                },
                 now_ms()?,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -116,7 +168,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: AutomationSubscriptionParams = parse(params)?;
+        let params: AutomationUnsubscribeParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let unsubscribed = Self::read_under_ctx(
@@ -143,29 +195,29 @@ impl EngineService {
         let params: AutomationClaimNextParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let claim = Self::read_under_ctx(
+        let served = Self::read_under_ctx(
             &cancellation,
             "automations.claimNext",
             open.actor.automation_claim_next(
                 open.workspace_id.clone(),
+                params.automation_id_prefix,
                 params.now_ms.unwrap_or(now_ms()?),
                 Arc::new(NoFaults),
                 cancellation.token(),
             ),
         )
         .await?;
-        Ok(claim
+        Ok(served
             .as_ref()
-            .map(automation_claim_json)
+            .map(|(claim, facts)| served_automation_claim_json(claim, facts))
             .unwrap_or(Value::Null))
     }
 
     /// The owner-visible failure surface's read: one row per automation
     /// with at least one failed claim (chain-stopped, handler error, or
     /// reaper-exhausted), carrying the newest error and a generation the
-    /// desktop acknowledges against. The generation is the automation's
-    /// failed-claim count — failed rows are never deleted, so it only
-    /// grows.
+    /// desktop acknowledges against. The generation counts every failure of
+    /// the automation's claims, so it only grows.
     pub(super) async fn automations_failures(
         &self,
         ctx: &RequestContext,
@@ -184,6 +236,29 @@ impl EngineService {
                 .iter()
                 .map(automation_failure_json)
                 .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// One automation's run history: its newest claims in every state,
+    /// newest first, without field facts.
+    pub(super) async fn automations_list_claims(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationListClaimsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claims = Self::read_under_ctx(
+            &cancellation,
+            "automations.listClaims",
+            open.actor
+                .automation_claims(open.workspace_id.clone(), params.automation_id),
+        )
+        .await?;
+        Ok(json!({
+            "claims": claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
         }))
     }
 
@@ -225,6 +300,32 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.claim_id,
                 settle,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(automation_claim_json(&claim))
+    }
+
+    /// The owner's re-run: a failed claim goes back to pending with the
+    /// facts it already holds.
+    pub(super) async fn automations_retry(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationRetryParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.retry",
+            open.actor.automation_retry(
+                open.workspace_id.clone(),
+                params.claim_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 Arc::new(NoFaults),
                 cancellation.token(),

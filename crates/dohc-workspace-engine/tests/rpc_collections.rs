@@ -8,8 +8,9 @@ use dohc_engine_collab::{
     BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Ydoc, claim_base_at_relay,
 };
 use dohc_engine_domain::{
-    CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
-    set_collection_adoption_state_in_tx, subscribe_automation_in_tx,
+    AutomationChangeKind, AutomationSubscription, CaptureIngest, NoFaults, TxnOutcome,
+    VersionedTextStore, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    subscribe_automation_in_tx,
 };
 use dohc_engine_protocol::{
     limits::WireLimits,
@@ -2583,7 +2584,17 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     // of this synced update; only its origin device claims.
     store
         .write_with(&NoFaults, |tx| {
-            subscribe_automation_in_tx(tx, WORKSPACE_ID, "plugin:triage", "tasks", 20)
+            subscribe_automation_in_tx(
+                tx,
+                WORKSPACE_ID,
+                &AutomationSubscription {
+                    automation_id: "plugin:triage".to_owned(),
+                    prefix: "tasks".to_owned(),
+                    kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+                    fields: None,
+                },
+                20,
+            )
         })
         .expect("subscribe automation");
     drop(store);

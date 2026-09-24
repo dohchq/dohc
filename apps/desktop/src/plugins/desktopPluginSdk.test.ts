@@ -175,7 +175,9 @@ async function fixture() {
 
 function claim(): AutomationClaim {
   return { claimId: "claim", automationId: "plugin/triage", trigger: { originId: "origin", originSeq: 4 },
-    recordId: "record", collectionPath: "tasks", depth: 2, state: "running", attempts: 1, createdAtMs: 1, updatedAtMs: 1 };
+    recordId: "record", collectionPath: "tasks", depth: 2,
+    change: { kind: "changed", actor: { kind: "human", id: null }, fields: [], fieldsOmitted: 0 },
+    state: "running", attempts: 1, createdAtMs: 1, updatedAtMs: 1 };
 }
 
 describe("desktop plugin SDK authority", () => {

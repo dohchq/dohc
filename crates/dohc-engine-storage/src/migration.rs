@@ -2095,6 +2095,37 @@ CREATE INDEX owner_pending_settlement_binary_blobs
     ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 ";
 
+/// Collection automations. A subscription names the change kinds it wants
+/// and, for changed records, the fields. A claim carries the kind, actor, and
+/// bounded field facts of its change, and counts its own failures so the
+/// failure generation survives a retry. Rows written before this migration
+/// were plugin subscriptions (added and changed records, any field) and
+/// changed-record claims without facts.
+const V2_AUTOMATION_CHANGE_FACTS_DDL: &str = "\
+ALTER TABLE automation_subscriptions ADD COLUMN on_added INTEGER NOT NULL DEFAULT 1
+    CHECK (on_added IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN on_changed INTEGER NOT NULL DEFAULT 1
+    CHECK (on_changed IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN on_removed INTEGER NOT NULL DEFAULT 0
+    CHECK (on_removed IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN field_names_json TEXT
+    CHECK (field_names_json IS NULL OR json_valid(field_names_json));
+ALTER TABLE automation_claims ADD COLUMN change_kind TEXT NOT NULL DEFAULT 'changed'
+    CHECK (change_kind IN ('added', 'changed', 'removed'));
+ALTER TABLE automation_claims ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation'));
+ALTER TABLE automation_claims ADD COLUMN actor_id TEXT;
+ALTER TABLE automation_claims ADD COLUMN change_fields_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(change_fields_json));
+ALTER TABLE automation_claims ADD COLUMN change_fields_omitted INTEGER NOT NULL DEFAULT 0
+    CHECK (change_fields_omitted >= 0);
+ALTER TABLE automation_claims ADD COLUMN failures INTEGER NOT NULL DEFAULT 0
+    CHECK (failures >= 0);
+UPDATE automation_claims SET failures = 1 WHERE state = 'failed';
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2125,6 +2156,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 4,
         id: "v2-owner-pending-settlements",
         sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: "v2-automation-change-facts",
+        sql: V2_AUTOMATION_CHANGE_FACTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2363,6 +2400,10 @@ mod tests {
                 "v2-owner-pending-settlements",
                 "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
             ),
+            (
+                "v2-automation-change-facts",
+                "aa3b51480535cd57e4d01eed0f0f210068516c50734627f29263df9eedfbd2a5",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2411,7 +2452,9 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 3 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 2
+            }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2436,7 +2479,12 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 1
+            }
+        );
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),

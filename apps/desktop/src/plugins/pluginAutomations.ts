@@ -1,4 +1,7 @@
-import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import type {
+  AutomationChangeKind,
+  AutomationClaim,
+} from "@dohc/workspace-engine-client";
 import type { PluginAutomationRunParams } from "./pluginHostProtocol";
 import type { PluginAutomationDeclaration } from "./pluginManifestSchema";
 import type { PluginPipelineStatusEvent } from "./PluginPipeline";
@@ -8,7 +11,7 @@ import type { PluginAutomationRunAuthority } from "./pluginSdkHost";
 //
 // It keeps the engine's automation subscriptions in step with the installed,
 // enabled plugins' declared automations, and drains the engine's durable
-// claim table: take the oldest pending claim, start the owning plugin if
+// claim table: take each plugin's oldest pending claim, start the plugin if
 // needed, run the registered handler, settle on the outcome. The engine's
 // `automation.claimed` event is only the wake-up — the claim table is the
 // transport, so a claim inserted while the desktop was away drains on the
@@ -46,17 +49,24 @@ const UNREGISTER_STATUSES = new Set([
   "uninstalling",
 ]);
 
+// A plugin automation runs for every change that adds a record or changes
+// its fields under the declared path.
+const PLUGIN_AUTOMATION_KINDS: AutomationChangeKind[] = ["added", "changed"];
+
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
 export interface AutomationEngineAdapter {
   subscribeAutomation(input: {
     automationId: string;
     path: string;
+    kinds: AutomationChangeKind[];
   }): Promise<unknown>;
   unsubscribeAutomation(input: {
     automationId: string;
     path: string;
   }): Promise<unknown>;
-  claimNextAutomation(): Promise<AutomationClaim | null>;
+  claimNextAutomation(input: {
+    automationIdPrefix: string;
+  }): Promise<AutomationClaim | null>;
   settleAutomationClaim(input: {
     claimId: string;
     state: "done" | "failed";
@@ -117,6 +127,15 @@ function engineAutomationId(
   return `${pluginId}/${automationId}`;
 }
 
+/**
+ * The claim prefix one plugin drains. A plugin name is an npm package name,
+ * which has no ":", so "<plugin>/" never matches another plugin's ids or
+ * the Collection executor's "collection:" ids.
+ */
+function pluginClaimPrefix(pluginId: string): string {
+  return `${pluginId}/`;
+}
+
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const bounded = message.trim().slice(0, MAX_SETTLE_ERROR_CHARS);
@@ -136,6 +155,11 @@ export class PluginAutomations {
    * idle bound requeues it — that is the backstop, not the path.
    */
   private readonly deferred = new Map<string, AutomationClaim>();
+  /**
+   * Every plugin the pipeline has reported this session. The drain takes
+   * these plugins' claims and no others: other executors drain their own.
+   */
+  private readonly reportedPlugins = new Set<string>();
   /** Serializes subscription reconciles so diffs cannot interleave. */
   private reconcileChain: Promise<void> = Promise.resolve();
   private draining = false;
@@ -156,11 +180,13 @@ export class PluginAutomations {
   handlePipelineStatus(event: PluginPipelineStatusEvent): void {
     if (this.disposed) return;
     if (event.kind === "removed") {
+      this.reportedPlugins.add(event.pluginId);
       this.enqueueReconcile(event.pluginId, []);
       return;
     }
     if (event.kind !== "changed") return;
     const plugin = event.plugin;
+    this.reportedPlugins.add(plugin.id);
     if (!plugin.valid || UNREGISTER_STATUSES.has(plugin.status)) {
       this.enqueueReconcile(plugin.id, []);
       return;
@@ -228,6 +254,7 @@ export class PluginAutomations {
     this.registered.clear();
     this.activeRuns.clear();
     this.deferred.clear();
+    this.reportedPlugins.clear();
     this.runAbort.abort();
   }
 
@@ -311,6 +338,7 @@ export class PluginAutomations {
         adapter.subscribeAutomation({
           automationId,
           path: declaration.collection,
+          kinds: PLUGIN_AUTOMATION_KINDS,
         }),
       );
       if (this.disposed) return;
@@ -333,16 +361,20 @@ export class PluginAutomations {
         const outcome = await this.execute(claim);
         if (outcome === "settled") this.deferred.delete(claim.claimId);
       }
-      while (!this.disposed) {
-        const claim = await this.withLiveAdapter((adapter) =>
-          adapter.claimNextAutomation(),
-        );
-        // Null is both "drained" and "engine unavailable": either way the
-        // next wake-up (event or reconcile) resumes.
-        if (this.disposed || claim === null) break;
-        const outcome = await this.execute(claim);
-        if (outcome !== "settled") {
-          this.deferred.set(claim.claimId, claim);
+      for (const pluginId of [...this.reportedPlugins]) {
+        while (!this.disposed) {
+          const claim = await this.withLiveAdapter((adapter) =>
+            adapter.claimNextAutomation({
+              automationIdPrefix: pluginClaimPrefix(pluginId),
+            }),
+          );
+          // Null is both "drained" and "engine unavailable": either way the
+          // next wake-up (event or reconcile) resumes.
+          if (this.disposed || claim === null) break;
+          const outcome = await this.execute(claim);
+          if (outcome !== "settled") {
+            this.deferred.set(claim.claimId, claim);
+          }
         }
       }
     } catch (error) {
@@ -396,9 +428,8 @@ export class PluginAutomations {
       // a claim that arrives that early waits, like one for a plugin that
       // has not registered yet.
       if (declares === undefined || declares) {
-        // Startup ordering: claimNext serves the oldest pending claim
-        // workspace-wide, but `registered` fills per plugin as each one's
-        // pipeline status lands. An installed declarer that has not
+        // Startup ordering: the pipeline reports a plugin before its
+        // automations register. An installed declarer that has not
         // registered yet is not a failure — that plugin's own reconcile
         // re-drains this claim.
         return "defer";

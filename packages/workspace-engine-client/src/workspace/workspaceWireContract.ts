@@ -38,14 +38,16 @@ export const WORKSPACE_METHOD = {
   automationsUnsubscribe: "automations.unsubscribe",
   automationsClaimNext: "automations.claimNext",
   automationsFailures: "automations.failures",
+  automationsListClaims: "automations.listClaims",
   automationsSettle: "automations.settle",
+  automationsRetry: "automations.retry",
 } as const;
 
 /**
  * Emitted by the daemon post-commit, once per automation claim a LOCAL apply
  * inserted (ADR 0008: a synced apply claims nothing). A wake-up for the
  * desktop's drain loop, not the claim transport — the claim is taken with
- * `automations.claimNext`.
+ * `automations.claimNext`. The payload is the claim without its field facts.
  */
 export const AUTOMATION_CLAIMED_EVENT = "automation.claimed";
 
@@ -151,15 +153,40 @@ export type WatcherStatusResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.watcherStatus];
 
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
-/** Mirrors AutomationSubscriptionParams in crates/dohc-workspace-engine. */
-export type AutomationSubscriptionParams = WorkspaceJsonObject & {
+/** A kind of record change a subscription wants and a claim runs for. */
+export type AutomationChangeKind = "added" | "changed" | "removed";
+
+/** Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine. */
+export type AutomationSubscribeParams = WorkspaceJsonObject & {
   automationId: string;
   /** Collection path prefix; "." covers the whole workspace. */
+  path: string;
+  /** The change kinds that claim; at least one. */
+  kinds: AutomationChangeKind[];
+  /**
+   * A changed record claims only when one of these fields changed (at most
+   * 64). Omitted, any field change claims. Added and removed records ignore
+   * it.
+   */
+  fields?: string[];
+};
+
+/** Mirrors AutomationUnsubscribeParams in crates/dohc-workspace-engine. */
+export type AutomationUnsubscribeParams = WorkspaceJsonObject & {
+  automationId: string;
   path: string;
 };
 
 export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
+  /**
+   * Serve only claims whose automation id starts with this, so each
+   * executor drains its own automations: the plugin executor
+   * "<plugin name>/" per plugin, the Collection executor "collection:"
+   * (its ids are "collection:<collection path>#<automation id>").
+   * Omitted, the oldest pending claim of any automation.
+   */
+  automationIdPrefix?: string;
 };
 
 export type AutomationSettleParams = WorkspaceJsonObject & {
@@ -170,7 +197,20 @@ export type AutomationSettleParams = WorkspaceJsonObject & {
   nowMs?: number;
 };
 
+export type AutomationRetryParams = WorkspaceJsonObject & {
+  claimId: string;
+  nowMs?: number;
+};
+
+export type AutomationListClaimsParams = WorkspaceJsonObject & {
+  automationId: string;
+};
+
+/** A claim `automations.claimNext` serves, with its change's field facts. */
 export type AutomationClaim = typeof AutomationClaimSchema.Type;
+
+/** A claim without its field facts, as settle, retry, and the history answer. */
+export type AutomationClaimSummary = typeof AutomationClaimSummarySchema.Type;
 
 export type AutomationSubscribeResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsSubscribe];
@@ -184,6 +224,10 @@ export type AutomationClaimNextResult =
 
 export type AutomationFailuresResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsFailures];
+
+/** One automation's newest claims in every state, newest first (at most 100). */
+export type AutomationListClaimsResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsListClaims];
 
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
@@ -213,11 +257,13 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
-  [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscriptionParams;
-  [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationSubscriptionParams;
+  [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
+  [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
   [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
+  [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
 };
 
 type CollectionMethodResultMap = {
@@ -757,7 +803,7 @@ const CaptureFlushResultSchema = mutableStruct({
   degraded: Schema.Boolean,
 });
 
-const AutomationClaimSchema = mutableStruct({
+const automationClaimFields = {
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**
@@ -773,10 +819,61 @@ const AutomationClaimSchema = mutableStruct({
   collectionPath: Schema.NonEmptyString,
   depth: Schema.Int,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
+  /** The attempt a running claim is on; each claimNext adds one. */
   attempts: Schema.Int,
   createdAtMs: Schema.Int,
   updatedAtMs: Schema.Int,
   error: Schema.optionalKey(Schema.String),
+};
+
+/**
+ * The change a claim runs for and who made it: the declared actor kind and
+ * the author origin id, each null when the write did not declare it.
+ */
+const automationChangeFields = {
+  kind: Schema.Literals(["added", "changed", "removed"]),
+  actor: mutableStruct({
+    kind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+    id: NullableString,
+  }),
+};
+
+/**
+ * One side of a changed field, null where the field was absent. A value
+ * over 8 KiB of JSON, nested deeper than 16 levels, or past the claim's
+ * 64 KiB budget travels as its size; the whole value is in the history row
+ * the fact names.
+ */
+const AutomationFactValueSchema = Schema.NullOr(
+  Schema.Union([
+    mutableStruct({ value: Schema.MutableJson }),
+    mutableStruct({ truncated: Schema.Literal(true), bytes: Schema.Int }),
+  ]),
+);
+
+const AutomationClaimSummarySchema = mutableStruct({
+  ...automationClaimFields,
+  change: mutableStruct(automationChangeFields),
+});
+
+const AutomationClaimSchema = mutableStruct({
+  ...automationClaimFields,
+  change: mutableStruct({
+    ...automationChangeFields,
+    /** The changed fields in field-name order. */
+    fields: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          field: Schema.String,
+          historyId: Schema.Int,
+          previous: AutomationFactValueSchema,
+          next: AutomationFactValueSchema,
+        }),
+      ),
+    ),
+    /** Changed fields whose names alone did not fit; read the history. */
+    fieldsOmitted: Schema.Int,
+  }),
 });
 
 const WorkspaceResultSchemas = {
@@ -823,6 +920,7 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),
+  /** True when the call inserted the pair or replaced its filter. */
   [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
     subscribed: Schema.Boolean,
   }),
@@ -833,8 +931,8 @@ const WorkspaceResultSchemas = {
   /**
    * One automation with at least one failed claim. Mirrors AutomationFailure
    * in crates/dohc-workspace-engine: the newest error and its time, plus a
-   * generation — the automation's failed-claim count, which only grows
-   * (failed rows are never deleted), so an acknowledgment at generation N
+   * generation — every failure of the automation's claims, counted even
+   * across a retry, so it only grows and an acknowledgment at generation N
    * hides the owner's notice exactly until a newer failure passes N.
    */
   [WORKSPACE_METHOD.automationsFailures]: mutableStruct({
@@ -849,7 +947,11 @@ const WorkspaceResultSchemas = {
       ),
     ),
   }),
-  [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSchema,
+  [WORKSPACE_METHOD.automationsListClaims]: mutableStruct({
+    claims: Schema.mutable(Schema.Array(AutomationClaimSummarySchema)),
+  }),
+  [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
+  [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
 } as const;
 
 function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
