@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { PropertiesPanel } from "./PropertiesPanel";
 
 function ControlledPropertiesPanel(props: { initialBody: string }) {
@@ -240,6 +241,18 @@ describe("PropertiesPanel", () => {
     expect(frontmatter.get("id")).toBe("note-1");
     expect(frontmatter.get("title")).toBe("Plan");
     expect(frontmatter.get("status")).toBe("ready");
+  });
+
+  it("removes a deleted shared property's lines and comment from the kept frontmatter text", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody");
+
+    render(<PropertiesPanel ydoc={doc} />);
+    await user.click(screen.getByLabelText("Remove property wifi"));
+    doc.getMap("frontmatter").set("wifi", "new");
+
+    expect(yDocToMarkdown(doc)).toBe("---\nbudget: 100\nwifi: new\n---\n\nBody");
+    doc.destroy();
   });
 
   it("does not rewrite unrelated shared frontmatter keys", async () => {

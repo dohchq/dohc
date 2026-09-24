@@ -377,11 +377,12 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
  * reads as `current`, the text comes back unchanged. Otherwise a key whose
  * value did not change keeps its lines and the comments above them, a
  * changed key gets its canonical entry in place, a removed key loses its
- * lines, and a new key is added after the others. A new key with the same
- * value as a removed key is a rename and takes its place. Undefined when the
- * source is too large or unreadable, when no key or comment is left, or when
- * the result would not read back as `current`; the caller then writes
- * canonical frontmatter. The engine keeps frontmatter the same way (`kept` in
+ * lines, and a new key is added after the others. Edits that delete or
+ * rename a key also rewrite the stored text (`editKeptFrontmatterKeys`), so
+ * a deleted key's lines and comments never return. Undefined when the source
+ * is too large or unreadable, when no key or comment is left, or when the
+ * result would not read back as `current`; the caller then writes canonical
+ * frontmatter. The engine keeps frontmatter the same way (`kept` in
  * crates/dohc-engine-collab/src/ydoc/frontmatter_yaml.rs).
  */
 export function keptFrontmatter(
@@ -403,18 +404,6 @@ export function keptFrontmatter(
     if (entries === undefined || entries.length !== block.keys.length) return undefined
     const crlf = (entry: string): string =>
       block.open.endsWith('\r\n') ? entry.replaceAll('\n', '\r\n') : entry
-    const added = Object.keys(orderFrontmatter(current))
-      .filter(key => !Object.hasOwn(block.value, key))
-    // A new key with the same value as a removed key is a rename.
-    const valueText = (value: unknown): string => frontmatterYaml({ value })
-    const renames = new Map<string, string>()
-    for (const key of block.keys) {
-      if (Object.hasOwn(current, key)) continue
-      const removed = valueText(block.value[key])
-      const renamed = added.find(candidate =>
-        ![...renames.values()].includes(candidate) && valueText(current[candidate]) === removed)
-      if (renamed !== undefined) renames.set(key, renamed)
-    }
     // Comments above the first key belong to it, like those above any other.
     let kept = entries.length === 0 ? block.yaml : ''
     let lead = entries.length === 0 ? '' : block.yaml.slice(0, entries[0]!.line)
@@ -422,10 +411,7 @@ export function keptFrontmatter(
       const entry = entries[index]!
       const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
       const split = entryTextEnd(region, entry.keptBlankLines)
-      const renamed = renames.get(key)
-      if (renamed !== undefined) {
-        kept += `${lead}${crlf(rendered.get(renamed)!)}`
-      } else if (Object.hasOwn(current, key)) {
+      if (Object.hasOwn(current, key)) {
         kept += lead
         kept += parsed.get(key) === rendered.get(key)
           ? region.slice(0, split)
@@ -433,13 +419,94 @@ export function keptFrontmatter(
       }
       lead = region.slice(split)
     })
-    const renamedTo = new Set(renames.values())
-    for (const key of added) if (!renamedTo.has(key)) kept += crlf(rendered.get(key)!)
+    for (const key of Object.keys(orderFrontmatter(current))) {
+      if (!Object.hasOwn(block.value, key)) kept += crlf(rendered.get(key)!)
+    }
     kept += lead
     if (kept === '') return undefined
     const candidate = `${block.open}${kept}${block.closing}`
     const reread = readFrontmatterBlock(candidate)
     return reread && /^(?:\r?\n)*$/u.test(reread.rest) && readsAsCurrent(renderedEntries(reread.value))
+      ? candidate
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The Y.Doc meta key that holds the frontmatter text a document keeps. */
+export const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
+
+/** The Y.Doc `meta` map, or anything that reads and writes it the same way. */
+export type FrontmatterSourceMeta = {
+  get(key: string): unknown
+  set(key: string, value: string): unknown
+  delete(key: string): void
+}
+
+/**
+ * Rewrite the frontmatter text a document keeps when a person deletes or
+ * renames keys. Call it in the same transaction as the edit. A deleted key
+ * loses its lines and the comments above them, so a later key of the same
+ * name or value never brings them back. A renamed key keeps its place and
+ * comments under the new name. Text that cannot be rewritten is dropped, and
+ * the document then settles canonical frontmatter.
+ */
+/** Keys an edit deletes, and keys it renames with their values. */
+export type FrontmatterKeyEdit = {
+  deleted?: readonly string[]
+  renamed?: readonly { from: string; to: string; value: unknown }[]
+}
+
+export function editKeptFrontmatterKeys(
+  meta: FrontmatterSourceMeta,
+  edit: FrontmatterKeyEdit,
+): void {
+  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  if (typeof source !== 'string') return
+  const next = rewrittenKeptFrontmatter(source, edit)
+  if (next === source) return
+  if (next === undefined) meta.delete(FRONTMATTER_SOURCE_META_KEY)
+  else meta.set(FRONTMATTER_SOURCE_META_KEY, next)
+}
+
+function rewrittenKeptFrontmatter(source: string, edit: FrontmatterKeyEdit): string | undefined {
+  const deleted = new Set(edit.deleted)
+  const renamed = new Map((edit.renamed ?? []).map(rename => [rename.from, rename]))
+  try {
+    const block = readFrontmatterBlock(source)
+    if (!block || !/^(?:\r?\n)*$/u.test(block.rest)) return undefined
+    if (!block.keys.some(key => deleted.has(key) || renamed.has(key))) return source
+    const entries = rootKeyEntries(block.yaml)
+    if (entries === undefined || entries.length !== block.keys.length) return undefined
+    const crlf = (entry: string): string =>
+      block.open.endsWith('\r\n') ? entry.replaceAll('\n', '\r\n') : entry
+    const expected = nullPrototypeRecord()
+    let yaml = ''
+    let lead = block.yaml.slice(0, entries[0]!.line)
+    block.keys.forEach((key, index) => {
+      const entry = entries[index]!
+      const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
+      const split = entryTextEnd(region, entry.keptBlankLines)
+      const rename = renamed.get(key)
+      if (rename !== undefined) {
+        yaml += `${lead}${crlf(frontmatterYaml({ [rename.to]: rename.value }))}`
+        expected[rename.to] = rename.value
+      } else if (!deleted.has(key)) {
+        yaml += `${lead}${region.slice(0, split)}`
+        expected[key] = block.value[key]
+      }
+      lead = region.slice(split)
+    })
+    yaml += lead
+    // With no key or comment left, nothing of the written text remains.
+    if (yaml.trim() === '') return undefined
+    const candidate = `${block.open}${yaml}${block.closing}`
+    const reread = readFrontmatterBlock(candidate)
+    const want = renderedEntries(expected)
+    const got = reread ? renderedEntries(reread.value) : undefined
+    return got !== undefined && got.size === want.size
+      && [...want].every(([key, value]) => got.get(key) === value)
       ? candidate
       : undefined
   } catch {
@@ -547,13 +614,17 @@ export function frontmatterBlockFor(
 
 /**
  * Write frontmatter values into a Markdown document, keeping the text of every
- * entry whose value did not change.
+ * entry whose value did not change. `edit` names the keys the change deletes
+ * or renames, so a renamed key keeps its place and comments.
  */
 export function writeMarkdownFrontmatter(
   markdown: string,
   frontmatter: Record<string, unknown>,
+  edit: FrontmatterKeyEdit = {},
 ): string {
   const lineEnding = markdown.includes('\r\n') ? '\r\n' : '\n'
-  const { body, frontmatterSource } = parseFrontmatter(markdown, lineEnding === '\r\n')
-  return `${frontmatterBlockFor(frontmatter, frontmatterSource, body, lineEnding)}${body}`
+  const { body } = parseFrontmatter(markdown, lineEnding === '\r\n')
+  const written = markdown.slice(0, markdown.length - body.length)
+  const source = written === '' ? undefined : rewrittenKeptFrontmatter(written, edit)
+  return `${frontmatterBlockFor(frontmatter, source, body, lineEnding)}${body}`
 }

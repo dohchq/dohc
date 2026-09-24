@@ -30,6 +30,7 @@ import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
+  FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
   isFrontmatterMap,
   normalizeFrontmatterValue,
@@ -42,7 +43,6 @@ const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const DOHC_SCHEMA_VERSION = 1
 const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
-const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.

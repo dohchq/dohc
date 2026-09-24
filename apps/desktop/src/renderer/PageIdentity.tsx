@@ -1,3 +1,4 @@
+import { editKeptFrontmatterKeys } from "@dohc/ydoc-projection/frontmatter";
 import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -85,7 +86,11 @@ export function PageIdentity(props: PageIdentityProps) {
     if (ydoc) {
       ydoc.transact(() => {
         const map = ydoc.getMap(FRONTMATTER_FIELD);
-        if (value === undefined || value === "") map.delete(key);
+        if (value === undefined || value === "") {
+          map.delete(key);
+          // The kept frontmatter text forgets the key and its comments.
+          editKeptFrontmatterKeys(ydoc.getMap("meta"), { deleted: [key] });
+        }
         else map.set(key, value);
       });
       return;
@@ -93,7 +98,9 @@ export function PageIdentity(props: PageIdentityProps) {
     const next = { ...parseFrontmatter(body).meta };
     if (value === undefined || value === "") delete next[key];
     else next[key] = value;
-    props.onChange?.(applyFrontmatter(body, orderFrontmatter(next)));
+    props.onChange?.(
+      applyFrontmatter(body, orderFrontmatter(next), value ? {} : { deleted: [key] }),
+    );
   }
 
   // The title keeps its own draft so typing stays smooth; it re-syncs from

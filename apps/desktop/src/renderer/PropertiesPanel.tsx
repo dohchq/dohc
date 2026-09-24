@@ -1,3 +1,7 @@
+import {
+  editKeptFrontmatterKeys,
+  type FrontmatterKeyEdit,
+} from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
@@ -114,11 +118,32 @@ function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> 
   return values;
 }
 
+/** The keys a change deletes, and the keys it renames with their values. */
+function keyEdit(
+  previousEntries: FrontmatterEntry[],
+  nextEntries: FrontmatterEntry[],
+): FrontmatterKeyEdit {
+  const previous = valuesByEditableKey(previousEntries);
+  const next = valuesByEditableKey(nextEntries);
+  const renamed = nextEntries.flatMap((entry) => {
+    const from = entry.sourceKey;
+    const to = propertyKey(entry);
+    return from !== undefined && to !== null && from !== to && previous.has(from) && !next.has(from)
+      ? [{ from, to, value: entryValue(entry) }]
+      : [];
+  });
+  const deleted = [...previous.keys()].filter(
+    (key) => !next.has(key) && !renamed.some((rename) => rename.from === key),
+  );
+  return { deleted, renamed };
+}
+
 function applySharedFrontmatterPatch(
-  map: Y.Map<unknown>,
+  doc: Y.Doc,
   previousEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
 ) {
+  const map = doc.getMap(FRONTMATTER_FIELD);
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
 
@@ -130,6 +155,9 @@ function applySharedFrontmatterPatch(
       map.set(key, value);
     }
   }
+  // The frontmatter text the document keeps forgets a deleted key and moves
+  // a renamed one, so a later settle cannot bring either back.
+  editKeptFrontmatterKeys(doc.getMap("meta"), keyEdit(previousEntries, nextEntries));
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
@@ -164,12 +192,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (hasDuplicateKeys(next)) return;
     if (ydoc) {
       ydoc.transact(() => {
-        const map = ydoc.getMap(FRONTMATTER_FIELD);
-        applySharedFrontmatterPatch(map, previous, next);
+        applySharedFrontmatterPatch(ydoc, previous, next);
       });
       return;
     }
-    props.onChange?.(applyFrontmatter(body, buildProperties(sourceEntries, next)));
+    props.onChange?.(
+      applyFrontmatter(body, buildProperties(sourceEntries, next), keyEdit(previous, next)),
+    );
   }
 
   function setKey(index: number, key: string) {

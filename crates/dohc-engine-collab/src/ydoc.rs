@@ -925,7 +925,7 @@ impl Ydoc {
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
-            if let Some(kept) = frontmatter_yaml::kept(&source, &entries, &rendered) {
+            if let Some(kept) = frontmatter_yaml::kept(&source, &rendered) {
                 let mut preserved = ProjectionBuffer::new();
                 preserved.push_str(&kept)?;
                 // A closing delimiter at the end of the file needs a line
@@ -1156,8 +1156,23 @@ impl Ydoc {
                 map.insert(txn, key, json_to_any(&retained));
             }))
         } else if value.as_str() == Some(target_record_id) {
+            let meta = self.doc.get_or_insert_map(ROOT_META);
             Some(self.with_delta(|txn| {
                 map.remove(txn, key);
+                // The kept frontmatter text forgets the key and its comments.
+                if let Some(Out::Any(Any::String(source))) =
+                    meta.get(txn, FRONTMATTER_SOURCE_META_KEY)
+                {
+                    match frontmatter_yaml::without_key(&source, key) {
+                        Some(next) if next == *source => {}
+                        Some(next) => {
+                            meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, next);
+                        }
+                        None => {
+                            meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
+                        }
+                    }
+                }
             }))
         } else {
             None
@@ -6331,6 +6346,45 @@ fn main() {}
                     .is_err());
             }
         }
+    }
+
+    /// Dropping a single relation deletes its key, and the kept frontmatter
+    /// text forgets the key and its comment, so a key of the same name added
+    /// later does not bring the comment back.
+    #[test]
+    fn a_dropped_relation_takes_its_comment_with_it() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            "---
+# owner until handover
+owner: rec_a
+status:   open
+---
+
+Body",
+        )
+        .unwrap();
+        doc.frontmatter_drop_relation_target("owner", "rec_a", false)
+            .expect("the relation is dropped");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---
+status:   open
+---
+
+Body"
+        );
+        doc.frontmatter_set("owner", "rec_b");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---
+status:   open
+owner: rec_b
+---
+
+Body"
+        );
     }
 
     #[test]

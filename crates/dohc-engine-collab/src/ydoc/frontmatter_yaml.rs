@@ -285,11 +285,7 @@ pub(super) fn source(
 /// frontmatter; the caller then writes canonical frontmatter. `rendered` holds
 /// each current key's canonical entry. The desktop keeps frontmatter the same
 /// way (`keptFrontmatter` in packages/ydoc-projection/src/frontmatter.ts).
-pub(super) fn kept(
-    source: &str,
-    current: &BTreeMap<String, Value>,
-    rendered: &BTreeMap<String, String>,
-) -> Option<String> {
+pub(super) fn kept(source: &str, rendered: &BTreeMap<String, String>) -> Option<String> {
     if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
         return None;
     }
@@ -318,23 +314,6 @@ pub(super) fn kept(
         .filter(|key| !block.value.contains_key(*key))
         .collect();
     added.sort_by(|left, right| compare_keys(left, right, true));
-    // A new key with the same value as a removed key is a rename.
-    let value_text = |value: &Value| project_frontmatter("value", value).ok();
-    let mut renames: BTreeMap<&str, &String> = BTreeMap::new();
-    for entry in entries
-        .iter()
-        .filter(|entry| !rendered.contains_key(&entry.key))
-    {
-        let removed = block.value.get(&entry.key).and_then(value_text);
-        let pair = added.iter().position(|key| {
-            !renames.values().any(|taken| taken == key)
-                && removed.is_some()
-                && removed == current.get(*key).and_then(value_text)
-        });
-        if let Some(index) = pair {
-            renames.insert(entry.key.as_str(), added[index]);
-        }
-    }
     // Comments above the first key belong to it, like those above any other.
     let (mut kept, mut lead) = match entries.first() {
         Some(first) => (String::new(), &yaml[..first.line]),
@@ -344,10 +323,7 @@ pub(super) fn kept(
         let end = entries.get(index + 1).map_or(yaml.len(), |next| next.line);
         let region = &yaml[entry.line..end];
         let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
-        if let Some(renamed) = renames.get(entry.key.as_str()) {
-            kept.push_str(lead);
-            kept.push_str(&crlf(&rendered[*renamed]));
-        } else if let Some(current) = rendered.get(&entry.key) {
+        if let Some(current) = rendered.get(&entry.key) {
             kept.push_str(lead);
             if parsed.get(entry.key.as_str()) == Some(&Some(current.clone())) {
                 kept.push_str(text);
@@ -358,9 +334,7 @@ pub(super) fn kept(
         lead = trivia;
     }
     for key in added {
-        if !renames.values().any(|renamed| *renamed == key) {
-            kept.push_str(&crlf(&rendered[key]));
-        }
+        kept.push_str(&crlf(&rendered[key]));
     }
     kept.push_str(lead);
     if kept.is_empty() {
@@ -373,6 +347,43 @@ pub(super) fn kept(
     let reread = markdown_frontmatter_block(&candidate)?;
     (only_line_breaks(reread.body) && reads_as_current(&rendered_entries(&reread.value)))
         .then_some(candidate)
+}
+
+/// The frontmatter text a document keeps, without `key`'s lines and the
+/// comments above them, for an edit that deletes the key. `None` when the
+/// text cannot be rewritten or nothing of it would remain; the caller then
+/// drops it. The desktop rewrites the text the same way
+/// (`editKeptFrontmatterKeys` in packages/ydoc-projection/src/frontmatter.ts).
+pub(super) fn without_key(source: &str, key: &str) -> Option<String> {
+    let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
+    if !block.value.contains_key(key) {
+        return Some(source.to_owned());
+    }
+    let entries = block.entries.as_ref()?;
+    let yaml = block.yaml;
+    let mut kept = String::new();
+    let mut lead = &yaml[..entries.first()?.line];
+    for (index, entry) in entries.iter().enumerate() {
+        let end = entries.get(index + 1).map_or(yaml.len(), |next| next.line);
+        let region = &yaml[entry.line..end];
+        let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
+        if entry.key != key {
+            kept.push_str(lead);
+            kept.push_str(text);
+        }
+        lead = trivia;
+    }
+    kept.push_str(lead);
+    if kept.trim().is_empty() {
+        return None;
+    }
+    let candidate = format!("{}{kept}{}", block.open, block.closing);
+    let mut expected = block.value.clone();
+    expected.remove(key);
+    let reread = markdown_frontmatter_block(&candidate)?;
+    (only_line_breaks(reread.body)
+        && rendered_entries(&reread.value) == rendered_entries(&expected))
+    .then_some(candidate)
 }
 
 /// Each parsed value rendered once, to compare with the current entries.

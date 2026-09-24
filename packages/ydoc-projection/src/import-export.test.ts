@@ -17,7 +17,7 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { loadMarkdownFrontmatter } from './frontmatter.js'
+import { editKeptFrontmatterKeys, loadMarkdownFrontmatter } from './frontmatter.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -417,20 +417,43 @@ describe('Y.Doc markdown import/export', () => {
         'rating: 5', 'status: booked', '---', '', 'Body',
       ].join('\n'))
     } finally { doc.destroy() }
-    // A new key with the removed key's value is a rename and keeps the place;
-    // a new key with another value goes after the others.
+    // A rename from the Properties panel keeps the place and comments.
     const renamed = markdownToYDoc(written)
     try {
-      renamed.getMap('frontmatter').delete('title')
-      renamed.getMap('frontmatter').set('heading', 'Lisbon')
+      renamed.transact(() => {
+        renamed.getMap('frontmatter').delete('title')
+        renamed.getMap('frontmatter').set('heading', 'Lisbon')
+        editKeptFrontmatterKeys(renamed.getMap('meta'), { renamed: [{ from: 'title', to: 'heading', value: 'Lisbon' }] })
+      })
       expect(yDocToMarkdown(renamed)).toBe(written.replace('title:   Lisbon', 'heading: Lisbon'))
-      renamed.getMap('frontmatter').delete('score')
-      renamed.getMap('frontmatter').set('rating', 5)
-      expect(yDocToMarkdown(renamed)).toBe([
-        '---', '# Trip', 'heading: Lisbon', 'id: 99999999999999999999', 'zero: -0',
-        'tags:', '- a', 'rating: 5', '---', '', 'Body',
-      ].join('\n'))
     } finally { renamed.destroy() }
+  })
+
+  it.each([
+    {
+      name: 'a deleted key whose name comes back',
+      markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody',
+      deleted: 'wifi',
+      added: ['wifi', 'new'] as const,
+      settled: '---\nbudget: 100\nwifi: new\n---\n\nBody',
+    },
+    {
+      name: 'a deleted key whose value comes back',
+      markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody',
+      deleted: 'draft',
+      added: ['featured', true] as const,
+      settled: '---\ntitle: A\nfeatured: true\n---\n\nBody',
+    },
+  ])('never brings back the comments of $name', ({ markdown, deleted, added, settled }) => {
+    const doc = markdownToYDoc(markdown)
+    try {
+      doc.transact(() => {
+        doc.getMap('frontmatter').delete(deleted)
+        editKeptFrontmatterKeys(doc.getMap('meta'), { deleted: [deleted] })
+      })
+      doc.getMap('frontmatter').set(added[0], added[1])
+      expect(yDocToMarkdown(doc)).toBe(settled)
+    } finally { doc.destroy() }
   })
 
   // A collaborator can write any frontmatter source. One too deep, too large,
