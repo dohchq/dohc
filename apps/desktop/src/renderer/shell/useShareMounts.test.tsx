@@ -41,3 +41,27 @@ it.each([false, true])("keeps newer mount props when an older registry reload re
   expect(onExplorerPathsChanged).toHaveBeenCalledTimes(folderLeft ? 0 : 1);
   expect(reportShellError).not.toHaveBeenCalled();
 });
+
+// Each announced refresh's summary replaces the last one's row: a clean
+// refresh clears an earlier failure, and repeated refreshes keep one row.
+it("reports every announced share refresh under one kind", async () => {
+  const refresh = vi.fn()
+    .mockResolvedValueOnce({ results: [{ label: "alex", status: "damaged", changedPaths: 0 }] })
+    .mockResolvedValueOnce({ results: [{ label: "alex", status: "unchanged", changedPaths: 0 }] })
+    .mockRejectedValueOnce(new Error("relay down"));
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const reportShellError = vi.fn();
+  const showSuccessNotice = vi.fn();
+  const { result } = renderHook(() => useShareMounts(
+    "ws-1", [{ shareId: "share-1", label: "alex", granterEmail: null }], vi.fn().mockResolvedValue([]), vi.fn(),
+    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice,
+  ));
+
+  await act(async () => { await result.current.refreshShareMounts(true); });
+  await act(async () => { await result.current.refreshShareMounts(true); });
+  await act(async () => { await result.current.refreshShareMounts(true); });
+
+  expect(reportShellError.mock.calls.map((call) => call[3])).toEqual(["share-refresh", "share-refresh"]);
+  expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), "share-refresh");
+  vi.unstubAllGlobals();
+});

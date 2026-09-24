@@ -447,6 +447,39 @@ describe("notice center", () => {
     expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
+  // An import notice and the failed refresh right after it can share a
+  // millisecond. The later one is the news.
+  it("shows the later of two messages from the same millisecond first", async () => {
+    const user = userEvent.setup();
+    const message = (id: string, text: string, tone?: "success") => ({
+      id,
+      ...(tone ? { tone } : {}),
+      message: text,
+      details: text,
+      atMs: 1_000,
+      canRetry: false,
+      seen: false,
+    });
+    renderNotices({
+      workspaceErrors: [
+        message("shell-error-1", "Imported 2 files.", "success"),
+        message("shell-error-2", "Files imported, but the explorer could not refresh."),
+      ],
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+      "Files imported, but the explorer could not refresh.",
+    );
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const rows = [...screen.getByTestId("notice-center").querySelectorAll('[data-testid^="notice-shell-error-"]')]
+      .filter((row) => /^notice-shell-error-\d+$/.test(row.getAttribute("data-testid") ?? ""))
+      .map((row) => row.getAttribute("data-testid"));
+    expect(rows).toEqual(["notice-shell-error-2", "notice-shell-error-1"]);
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderNotices({
       syncStatus: {

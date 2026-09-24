@@ -2037,6 +2037,9 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // Set once refreshShareView exists below; a failed import's Try again
+  // calls it.
+  const refreshShareViewRef = useRef<() => Promise<void>>(async () => undefined);
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2045,6 +2048,11 @@ export function DesktopWorkspaceShell(props: {
   // where, and how many sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (droppedPaths?: string[], targetDir?: string) => {
+      // Try again on a failed import refreshes the shared view first, since
+      // some files may have landed, then asks for files for the same folder.
+      const retry = () => {
+        void refreshShareViewRef.current().then(() => importFiles(undefined, targetDir));
+      };
       let outcome: ImportWorkspaceFilesResult;
       try {
         outcome = await bridge().importWorkspaceFiles({
@@ -2053,15 +2061,17 @@ export function DesktopWorkspaceShell(props: {
           ...(targetDir ? { targetDir } : {}),
         });
       } catch (error) {
-        reportShellError("Could not import files.", error);
+        reportShellError("Could not import files.", error, retry, "import-files");
         return;
       }
       const count = outcome.imported.length;
       if (outcome.interrupted) {
-        showShellError(
+        reportShellError(
           count === 0
             ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
             : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
+          null,
+          retry,
           "import-files",
         );
         try {
@@ -2078,7 +2088,7 @@ export function DesktopWorkspaceShell(props: {
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
       if (count === 0) {
-        showShellError(`Nothing imported${skippedSuffix}.`, "import-files");
+        reportShellError(`Nothing imported${skippedSuffix}.`, null, retry, "import-files");
         return;
       }
       showSuccessNotice(
@@ -2093,7 +2103,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellError, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3914,6 +3924,7 @@ export function DesktopWorkspaceShell(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
+  refreshShareViewRef.current = refreshShareView;
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
     if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {

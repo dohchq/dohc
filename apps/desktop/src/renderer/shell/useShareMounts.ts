@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import type { ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
 import {
   goneMountProjections,
@@ -14,8 +15,13 @@ export function useShareMounts(
   refreshWorkspaceRegistry: () => Promise<WorkspaceSummary[]>,
   onExplorerPathsChanged: (changes: PendingTreeChange[]) => void,
   refreshFiles: () => Promise<unknown>,
-  reportShellError: (fallback: string, error: unknown) => void,
-  showSuccessNotice: (message: string) => void,
+  reportShellError: (
+    fallback: string,
+    error: unknown,
+    retry?: (() => void) | null,
+    kind?: ShellErrorKind,
+  ) => void,
+  showSuccessNotice: (message: string, kind?: ShellErrorKind) => void,
 ) {
   // Share mounts: the registry is loaded once at boot, so the shell owns a
   // live copy of this workspace's mounts — reloaded after every mount /
@@ -79,7 +85,7 @@ export function useShareMounts(
       try {
         results = (await bridge().refreshShareMounts({ workspaceId })).results;
       } catch (error) {
-        if (announce) reportShellError("Couldn't refresh shares.", error);
+        if (announce) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
       }
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
@@ -89,10 +95,15 @@ export function useShareMounts(
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
       if (!announce) return;
-      // A share dohc cannot read is a failure the person has to act on.
+      // A share dohc cannot read is a failure the person has to act on. Each
+      // refresh's summary replaces the last one's row, so a clean refresh
+      // clears an earlier failure.
       const summary = shareRefreshSummary(results);
-      if (results.some((row) => row.status === "damaged")) reportShellError(summary, null);
-      else showSuccessNotice(summary);
+      if (results.some((row) => row.status === "damaged")) {
+        reportShellError(summary, null, null, "share-refresh");
+      } else {
+        showSuccessNotice(summary, "share-refresh");
+      }
     },
     [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts],
   );

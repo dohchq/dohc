@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
-type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search" | "import-files";
+export type ShellErrorKind =
+  | "singleton-tab-split"
+  | "tab-limit"
+  | "workspace-search"
+  | "import-files"
+  | "share-refresh";
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -98,7 +103,7 @@ export function useShellError(workspaceId: string) {
       fallback: string,
       error: unknown,
       retry: (() => void) | null = null,
-      kind?: "workspace-search",
+      kind?: ShellErrorKind,
     ) => {
       const detail = error instanceof Error ? error.message.trim() : "";
       push({
