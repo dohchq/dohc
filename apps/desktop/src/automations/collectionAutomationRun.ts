@@ -110,6 +110,8 @@ export type ClaimRuns =
        * one from the start could repeat what that one did.
        */
       changedSince: StoredRun | null;
+      /** A person chose to run this definition over from the start before. */
+      startedOver: boolean;
     };
 
 export async function runsForClaim(
@@ -128,6 +130,7 @@ export async function runsForClaim(
     // A run is saved only once its plan is ready to write, so any saved run
     // of another definition may have written.
     changedSince: live.find((run) => run.definitionHash !== hash) ?? null,
+    startedOver: runs.some((run) => run.superseded && run.definitionHash === hash),
   };
 }
 
@@ -140,7 +143,7 @@ export async function runCollectionAutomation(
   const runs = await runsForClaim(store, claim, automation);
   // Never start over as if nothing had run.
   if (runs.unreadable) return failed(UNREADABLE_RUN_ERROR);
-  const { done, current, changedSince } = runs;
+  const { done, current, changedSince, startedOver } = runs;
   // It finished before this computer could settle the claim, whatever the
   // automation says now.
   if (done !== null) return { kind: "done" };
@@ -174,10 +177,13 @@ export async function runCollectionAutomation(
 
   let run = current?.plan ? current : null;
   const resumed = run !== null;
+  // A run started over under a definition that ran before takes keys and
+  // record ids of its own, so the engine takes its writes as new ones.
+  const keySeed = startedOver ? `${definitionHash(automation)}-${claim.run}` : definitionHash(automation);
   if (run === null) {
     let planned: Awaited<ReturnType<typeof plan>>;
     try {
-      planned = await plan(dependencies, input);
+      planned = await plan(dependencies, input, keySeed);
     } catch (error) {
       return failed(errorText(error));
     }
@@ -188,6 +194,7 @@ export async function runCollectionAutomation(
       claimId: claim.claimId,
       automationId: claim.automationId,
       definitionHash: definitionHash(automation),
+      keySeed,
       startedAtMs: now,
       updatedAtMs: now,
       plan: planned.steps,
@@ -222,6 +229,7 @@ export async function runCollectionAutomation(
 async function plan(
   dependencies: CollectionAutomationRunDependencies,
   input: CollectionAutomationRunInput,
+  keySeed: string,
 ): Promise<{ kind: "plan"; steps: PlannedStep[] } | { kind: "stop"; outcome: CollectionAutomationRunOutcome }> {
   const { claim, automation } = input;
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
@@ -269,7 +277,7 @@ async function plan(
     ? []
     : await dependencies.evaluator.evaluate(claim.automationId, request.scope, request.formulas);
   if (results === "busy") return stop({ kind: "wait", reason: "busy" });
-  const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: definitionHash(automation) });
+  const planned = planRun(inputs, request, results, { claimId: claim.claimId, hash: keySeed });
   if (planned.kind === "skip") return stop({ kind: "skipped" });
   if (planned.kind === "failed") return stop(failed(planned.error, planned.timedOut));
   return { kind: "plan", steps: planned.steps };
@@ -386,7 +394,7 @@ async function applyEffect(
   mode: EffectMode,
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
-  const key = stepKey(run.claimId, run.definitionHash, ordinal);
+  const key = stepKey(run.claimId, run.keySeed, ordinal);
   const seam = (edit: CollectionRecordEditContext, path: string, recordId: string, fields: readonly PlannedField[]) =>
     setCollectionRecordFields(edit, {
       recordPath: path,
