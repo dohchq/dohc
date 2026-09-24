@@ -15336,7 +15336,7 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
   });
 
-  it("names what landed and why an ordinary import stopped, and Try again asks for files for the same folder", async () => {
+  it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
@@ -15344,7 +15344,11 @@ describe("file transfers", () => {
       imported: ["notes/one.md"],
       skipped: 0,
       interrupted: true,
-      stopReason: "EACCES: permission denied, copyfile 'two.md'",
+      stop: {
+        file: "two.md",
+        code: "EACCES",
+        detail: "EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
+      },
     });
     renderShell(bridge);
     const user = userEvent.setup();
@@ -15352,7 +15356,12 @@ describe("file transfers", () => {
     await importIntoNotes(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "Imported notes/one.md before the import stopped. EACCES: permission denied, copyfile 'two.md' Import only the files that are still missing.",
+      "Imported notes/one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
+    );
+    expect(toast.textContent).not.toContain("EACCES");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(
+      "Cause: EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
     );
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
 

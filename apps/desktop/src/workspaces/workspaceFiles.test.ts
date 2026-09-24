@@ -887,7 +887,8 @@ describe("copyIntoWorkspace", () => {
 
     const outcome = await copyIntoWorkspace(root, [join(outside, "one.md"), missing]);
     expect(outcome).toMatchObject({ imported: ["one.md"], skipped: 0, interrupted: true });
-    expect(outcome.stopReason).toContain("gone.md");
+    expect(outcome.stop).toMatchObject({ file: "gone.md", code: "ENOENT" });
+    expect(outcome.stop?.detail).toContain("gone.md");
     expect(await readFile(join(root, "one.md"), "utf8")).toBe("one");
 
     await expect(copyIntoWorkspace(root, [missing])).rejects.toThrow(/gone\.md/);

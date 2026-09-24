@@ -20,6 +20,9 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
+  // A technical cause for a report. It goes into Copy details, not the text
+  // a person reads.
+  detail?: string;
   retry: (() => void) | null;
   kind?: ShellErrorKind;
   atMs: number;
@@ -117,6 +120,23 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // A failure already worded for the person, with the raw cause kept for
+  // Copy details only.
+  const reportShellFailure = useCallback(
+    (failure: {
+      message: string;
+      detail?: string | undefined;
+      retry: (() => void) | null;
+      kind?: ShellErrorKind;
+    }) =>
+      push({
+        message: failure.message,
+        retry: failure.retry,
+        ...(failure.detail ? { detail: failure.detail } : {}),
+        ...(failure.kind ? { kind: failure.kind } : {}),
+      }),
+    [push],
+  );
   // Content search lives in the shell so its results survive panel switches.
   // Invocation failures use the shell's persistent error and retry contract;
   // they must not look like a successful search with no matches.
@@ -179,6 +199,7 @@ export function useShellError(workspaceId: string) {
   return {
     shellErrors,
     reportShellError,
+    reportShellFailure,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,

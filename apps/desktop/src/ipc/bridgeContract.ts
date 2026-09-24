@@ -821,8 +821,16 @@ export const ImportWorkspaceFilesResult = z.object({
   // retry, and importing the same sources again would copy the landed files
   // a second time.
   interrupted: z.literal(true).optional(),
-  // What stopped an interrupted import, when main knows.
-  stopReason: z.string().min(1).max(500).optional(),
+  // What stopped an interrupted ordinary import: the source file's name, the
+  // filesystem's error code, and the raw error text, which only goes into
+  // copied details.
+  stop: z
+    .object({
+      file: z.string().min(1).max(4096),
+      code: z.string().min(1).max(64).optional(),
+      detail: z.string().min(1).max(500).optional(),
+    })
+    .optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult

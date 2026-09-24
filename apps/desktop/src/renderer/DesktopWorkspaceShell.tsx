@@ -72,6 +72,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
+import { importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
@@ -519,16 +520,6 @@ function shareUnjournalableNotice(
   return lines.join(" ");
 }
 
-// Up to three paths by name, then how many more, for a sentence a person
-// reads: "a.md and b.md", "a.md, b.md, and c.md", "a.md, b.md, c.md, and 2 more".
-function namedPaths(paths: readonly string[]): string {
-  const shown = paths.slice(0, 3);
-  const more = paths.length - shown.length;
-  if (more > 0) return `${shown.join(", ")}, and ${more} more`;
-  if (shown.length <= 2) return shown.join(" and ");
-  return `${shown.slice(0, -1).join(", ")}, and ${shown.at(-1)}`;
-}
-
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -784,6 +775,7 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportShellFailure,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,
@@ -2081,16 +2073,17 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.interrupted) {
         // Importing the same files again would land second copies under
         // collision names, so name what already landed.
-        reportShellError(
-          count === 0
-            ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-            : `Imported ${namedPaths(outcome.imported)} before the import stopped.${
-                outcome.stopReason ? ` ${outcome.stopReason}` : ""
-              } Import only the files that are still missing.`,
-          null,
+        reportShellFailure({
+          message:
+            count === 0
+              ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
+              : `Imported ${namedPaths(outcome.imported)} before the import stopped.${
+                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : ""
+                } Import only the files that are still missing.`,
+          detail: outcome.stop?.detail,
           retry,
-          "import-files",
-        );
+          kind: "import-files",
+        });
         try {
           await refreshFiles();
         } catch (error) {
@@ -2122,7 +2115,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellError, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showShellError, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -4412,7 +4405,11 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
+        details: errorDetails([
+          [error.tone === "success" ? "Notice" : "Error", error.message],
+          ["Cause", error.detail],
+          ...reportFacts(),
+        ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,

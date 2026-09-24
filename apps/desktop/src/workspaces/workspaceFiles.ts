@@ -337,18 +337,25 @@ export async function createFile(
 //
 // `interrupted` means the import stopped after some files landed. Importing
 // the same sources again would copy those files a second time under
-// collision names, so callers name what landed. `stopReason` says what
-// stopped it, when known.
+// collision names, so callers name what landed. `stop` says which file
+// stopped it, the filesystem's error code when there is one, and the raw
+// error text for a report.
 export interface ImportCopyOutcome {
   imported: string[];
   skipped: number;
   interrupted?: true;
-  stopReason?: string;
+  stop?: ImportStop;
 }
 
-// The longest stop reason an import result carries; the IPC contract holds
-// the same bound.
-export const IMPORT_STOP_REASON_MAX_CHARS = 500;
+export interface ImportStop {
+  file: string;
+  code?: string;
+  detail?: string;
+}
+
+// The longest raw error text an import result carries; the IPC contract
+// holds the same bound.
+export const IMPORT_STOP_DETAIL_MAX_CHARS = 500;
 
 // Resolve + validate an import destination folder ("" / undefined = workspace
 // root). The folder must be a user-writable workspace-relative path (traversal
@@ -700,12 +707,17 @@ export async function copyIntoWorkspace(
       // A failure before anything landed is the whole import's failure. After
       // that, the files already copied stay, and the result names them.
       if (imported.length === 0) throw error;
-      const reason = (error instanceof Error ? error.message : String(error)).trim();
+      const code = (error as NodeJS.ErrnoException).code;
+      const detail = (error instanceof Error ? error.message : String(error)).trim();
       return {
         imported,
         skipped,
         interrupted: true,
-        ...(reason ? { stopReason: reason.slice(0, IMPORT_STOP_REASON_MAX_CHARS) } : {}),
+        stop: {
+          file: validated.normalized,
+          ...(typeof code === "string" && code ? { code } : {}),
+          ...(detail ? { detail: detail.slice(0, IMPORT_STOP_DETAIL_MAX_CHARS) } : {}),
+        },
       };
     }
     if (landed === null) {
