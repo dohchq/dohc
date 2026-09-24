@@ -26,6 +26,6 @@ describe("apps/desktop vitest setup", () => {
   });
 
   it("gives Testing Library waits the loaded-machine window, not its own 1 s default", () => {
-    expect(getConfig().asyncUtilTimeout).toBe(5_000);
+    expect(getConfig().asyncUtilTimeout).toBe(10_000);
   });
 });
