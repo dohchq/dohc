@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  SitePreviewReplacedEvent,
   GetSitePreviewLogsResult,
   SitePackageInfo,
   SitePackagePayload,
@@ -59,13 +60,22 @@ const bridgeMock = {
     url: "http://127.0.0.1:49152/",
     logs: [],
     exited: false,
+    generation: 1,
   })),
   getSitePreviewLogs: vi.fn(
     async (): Promise<GetSitePreviewLogsResult> => ({ logs: [], exited: false }),
   ),
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
+  onSitePreviewReplaced: vi.fn((listener: (event: SitePreviewReplacedEvent) => void) => {
+    replacedListeners.add(listener);
+    return () => { replacedListeners.delete(listener); };
+  }),
 };
+const replacedListeners = new Set<(event: SitePreviewReplacedEvent) => void>();
+function replace(event: SitePreviewReplacedEvent) {
+  act(() => { for (const listener of replacedListeners) listener(event); });
+}
 
 describe("SitePreviewPage", () => {
   beforeEach(() => {
@@ -120,6 +130,56 @@ describe("SitePreviewPage", () => {
     expect(onUnpin).toHaveBeenCalledOnce();
   });
 
+  it("follows a preview another surface started again, and ignores an older one", async () => {
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(new URL(frame.getAttribute("src") ?? "").port).toBe("49152");
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    const next = (generation: number, port: number): SitePreviewReplacedEvent => ({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation,
+      preview: { siteRoot: "report", mode: "build", url: `http://127.0.0.1:${port}/`, logs: [], exited: false, generation },
+    });
+
+    replace(next(3, 49160));
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49160");
+    expect(screen.getByTestId("site-preview-mode").textContent).toBe("Build");
+    // An older start, or one meant for another surface, changes nothing.
+    replace(next(2, 49170));
+    replace({ ...next(4, 49180), holderId: "another-surface" });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49160");
+
+    // A restart that failed after stopping the preview leaves nothing to show.
+    replace({ ...next(5, 49190), preview: null });
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.getByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
+  });
+
+  it("never paints its own older answer over a newer preview another surface started", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await screen.findByTestId("site-preview-frame");
+    const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
+    const own = deferred<StartSitePreviewResult>();
+    bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
+    await user.click(screen.getByTestId("site-preview-options"));
+    await user.click(screen.getByTestId("site-preview-static"));
+    replace({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId,
+      generation: 7,
+      preview: { siteRoot: "report", mode: "static", url: "http://127.0.0.1:49177/", logs: [], exited: false, generation: 7 },
+    });
+    await act(async () => {
+      own.resolve({ siteRoot: "report", mode: "static", url: "http://127.0.0.1:49166/", logs: [], exited: false, generation: 6 });
+      await own.promise;
+    });
+    expect(new URL(screen.getByTestId("site-preview-frame").getAttribute("src") ?? "").port).toBe("49177");
+  });
+
   it("starts the best available preview automatically and embeds the local URL", async () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -161,6 +221,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -189,6 +250,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -246,6 +308,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -623,6 +686,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
       exited: false,
+      generation: 1,
     });
     bridgeMock.getSitePreviewLogs.mockResolvedValueOnce({
       logs: [
@@ -668,6 +732,7 @@ describe("SitePreviewPage", () => {
         },
       ],
       exited: true,
+      generation: 1,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -696,6 +761,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
       exited: false,
+      generation: 1,
     });
     bridgeMock.getSitePreviewLogs.mockReturnValueOnce(exitedLogs.promise);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -749,6 +815,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "report ready", at: 1 }],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -756,6 +823,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
         exited: false,
+        generation: 1,
       });
     bridgeMock.getSitePreviewLogs
       .mockReturnValueOnce(pendingLogs.promise)
@@ -808,6 +876,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "ready", at: 1 }],
         exited: false,
+        generation: 1,
       });
       // Every poll returns a content-equal but reference-DIFFERENT ring: only
       // the sameLogs bailout keeps the previous state and skips the commit.
@@ -866,6 +935,7 @@ describe("SitePreviewPage", () => {
           { stream: "stdout", text: "ready", at: 1 },
         ],
         exited: false,
+        generation: 1,
       });
       // At the ring cap a new chunk shifts the interior while the length stays
       // pinned, and multi-line chunks share one `at` — length plus last entry
@@ -1036,6 +1106,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -1043,6 +1114,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const onShareSite = vi.fn();
     const user = userEvent.setup();
@@ -1109,6 +1181,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
@@ -1116,6 +1189,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const user = userEvent.setup();
     const view = render(
@@ -1197,6 +1271,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49999/",
         logs: [],
         exited: false,
+        generation: 1,
       });
 
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -1213,6 +1288,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       });
       await pendingStart.promise;
     });
@@ -1325,6 +1401,7 @@ describe("SitePreviewPage", () => {
       url: "https://example.com/preview",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1344,6 +1421,7 @@ describe("SitePreviewPage", () => {
       url: "https://127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1360,6 +1438,7 @@ describe("SitePreviewPage", () => {
       url: "http://user:pass@127.0.0.1:49152/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -1421,6 +1500,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })
       .mockResolvedValueOnce({
         siteRoot: "report",
@@ -1428,6 +1508,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [],
         exited: false,
+        generation: 1,
       });
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -1457,6 +1538,7 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "ready", at: 1 }],
         exited: false,
+        generation: 1,
       })
       .mockRejectedValueOnce(new Error("Replacement preview failed"));
     const user = userEvent.setup();
@@ -1492,6 +1574,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49153/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 
@@ -1527,6 +1610,7 @@ describe("SitePreviewPage", () => {
       url: "http://127.0.0.1:49153/",
       logs: [],
       exited: false,
+      generation: 1,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 

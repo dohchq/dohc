@@ -190,6 +190,7 @@ export const CHANNELS = {
   startSitePreview: "desktop:start-site-preview",
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
+  sitePreviewReplaced: "desktop:site-preview-replaced",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",

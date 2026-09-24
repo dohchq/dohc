@@ -232,6 +232,7 @@ import {
   parsePluginWebAppTabPath,
   appViewId,
   clearPluginView,
+  isActiveViewShown,
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
@@ -254,7 +255,7 @@ import {
   toggleFolderExpanded,
   togglePinned,
   toggleSidebar,
-  VIEW_IDS,
+  type ActivityViewId,
   type EditorGroup,
   type WorkbenchState,
   type WorkbenchTab,
@@ -1166,13 +1167,27 @@ export function DesktopWorkspaceShell(props: {
     mutateWb(clearPluginView);
   }, [selectedPluginViewState?.status, mutateWb]);
 
+  // Every view on the rail, in its order: dohc's own, plugin views, pinned
+  // apps.
+  const railOrder = useMemo<readonly ActivityViewId[]>(
+    () => [
+      ...railViews,
+      ...railPluginViews.map((view) => view.viewId),
+      ...pinnedRoots.map(appViewId),
+    ],
+    [pinnedRoots, railPluginViews, railViews],
+  );
   // A view the sidebar stopped showing, hidden or unpinned, leaves no
-  // selection behind. Until the settings arrive the selection stands, so a
-  // restart keeps the view that was open.
+  // selection behind, and the side panel never shows it, even when toggled
+  // open. Until the settings arrive the selection stands, so a restart keeps
+  // the view that was open.
+  const sidePanelOpen =
+    wb.sidebarVisible &&
+    (!props.userSettings || isActiveViewShown(wb.activeView, railOrder));
   useEffect(() => {
     if (!props.userSettings) return;
-    mutateWb((state) => keepActiveViewShown(state, railViews, pinnedRoots));
-  }, [mutateWb, pinnedRoots, props.userSettings, railViews, wb.activeView]);
+    mutateWb((state) => keepActiveViewShown(state, railOrder));
+  }, [mutateWb, props.userSettings, railOrder, wb.activeView, wb.sidebarVisible]);
 
   // A pin is a personal setting. Main applies each pin to the file as it is
   // now, so two quick pins both land; the root hears the save through the
@@ -3705,7 +3720,8 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle chats panel",
         run: () => mutateWb(toggleChats),
       },
-      ...VIEW_IDS.map((view) => ({
+      // The views the sidebar shows; a hidden view has no command either.
+      ...railViews.map((view) => ({
         id: `show-${view}`,
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
@@ -3820,6 +3836,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      railViews,
       railPluginViews,
       pinnedApps,
       pluginCommandItems,
@@ -4836,7 +4853,7 @@ export function DesktopWorkspaceShell(props: {
         >
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
-        {wb.sidebarVisible ? (
+        {sidePanelOpen ? (
           <SidePanel
             title={sidePanelTitle}
             width={wb.sidebarWidth}

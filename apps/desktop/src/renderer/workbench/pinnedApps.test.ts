@@ -6,7 +6,10 @@ import { pinnedAppInitial, usePinnedApps } from "./pinnedApps";
 import {
   appViewId,
   defaultWorkbenchState,
+  isActiveViewShown,
   keepActiveViewShown,
+  pluginViewId,
+  toggleSidebar,
   parseAppViewId,
   parseUiState,
   serializeUiState,
@@ -27,25 +30,36 @@ describe("sidebar views", () => {
       .toEqual(["explorer", "search", "graph", "sites", "history", "plugins"]);
   });
 
-  it("moves the selection to the first shown view when its view is hidden or its app unpinned", () => {
+  it("moves the selection to the first view on the rail when its view is hidden or its app unpinned", () => {
     const onSearch = setView(defaultWorkbenchState(), "search");
-    expect(keepActiveViewShown(onSearch, ["sites", "explorer"], [])).toMatchObject({
+    const plugin = pluginViewId("dohc-sites", "sites");
+    expect(keepActiveViewShown(onSearch, ["sites", "explorer"])).toMatchObject({
       activeView: "sites",
       sidebarVisible: true,
     });
-    expect(keepActiveViewShown(onSearch, ["search"], [])).toBe(onSearch);
+    expect(keepActiveViewShown(onSearch, ["search"])).toBe(onSearch);
 
     const onApp = setView(defaultWorkbenchState(), appViewId("apps/trip"));
-    expect(keepActiveViewShown(onApp, ["history"], ["apps/trip"])).toBe(onApp);
-    // Explorer is hidden too, so the first shown view takes over.
-    expect(keepActiveViewShown(onApp, ["history"], []).activeView).toBe("history");
-    // With no view of dohc's shown, a pinned app takes over, and with nothing
-    // at all the side panel closes.
-    expect(keepActiveViewShown(onSearch, [], ["report"]).activeView).toBe(appViewId("report"));
-    expect(keepActiveViewShown(onSearch, [], [])).toMatchObject({
-      activeView: "search",
-      sidebarVisible: false,
-    });
+    expect(keepActiveViewShown(onApp, ["history", appViewId("apps/trip")])).toBe(onApp);
+    // Explorer is hidden too, so the first view on the rail takes over.
+    expect(keepActiveViewShown(onApp, ["history"]).activeView).toBe("history");
+    // With every view of dohc's hidden, a plugin's view comes first, then a
+    // pinned app.
+    expect(keepActiveViewShown(onSearch, [plugin, appViewId("report")]).activeView).toBe(plugin);
+    expect(keepActiveViewShown(onSearch, [appViewId("report")]).activeView).toBe(appViewId("report"));
+    // A plugin's view is its plugin list's to judge, even before that loads.
+    const onPlugin = setView(defaultWorkbenchState(), plugin);
+    expect(keepActiveViewShown(onPlugin, [])).toBe(onPlugin);
+  });
+
+  it("keeps the side panel closed when the rail shows nothing, even after a toggle", () => {
+    const onSearch = setView(defaultWorkbenchState(), "search");
+    const closed = keepActiveViewShown(onSearch, []);
+    expect(closed).toMatchObject({ activeView: "search", sidebarVisible: false });
+    expect(keepActiveViewShown(closed, [])).toBe(closed);
+    const toggled = toggleSidebar(closed);
+    expect(isActiveViewShown(toggled.activeView, [])).toBe(false);
+    expect(keepActiveViewShown(toggled, []).sidebarVisible).toBe(false);
   });
 
   it("keeps a pinned app selected across a restart", () => {
@@ -79,6 +93,20 @@ describe("pinned apps", () => {
       { root: "gone", label: "gone", missing: true },
     ]);
     expect(getSitePackage).toHaveBeenCalledTimes(3);
+  });
+
+  it("answers the same list while the pins and titles stay the same", async () => {
+    vi.stubGlobal("dohcDesktop", { getSitePackage: vi.fn(async () => site("apps/trip", "Trip planner")) });
+    const { result, rerender } = renderHook(({ roots }) => usePinnedApps("ws-a", roots), {
+      initialProps: { roots: ["apps/trip"] },
+    });
+    await waitFor(() => expect(result.current[0]!.label).toBe("Trip planner"));
+    const first = result.current;
+    // A new array with the same pins, as every settings change hands over.
+    rerender({ roots: ["apps/trip"] });
+    expect(result.current).toBe(first);
+    rerender({ roots: ["apps/trip", "report"] });
+    expect(result.current).not.toBe(first);
   });
 
   it("never names an app at the workspace root by a dot", () => {

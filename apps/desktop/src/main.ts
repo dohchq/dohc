@@ -93,6 +93,7 @@ import { dirname, join } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
+  SitePreviewReplacedEvent,
   McpConfigResult,
   DesktopUserSettingsResult,
   SyncStatusResult,
@@ -1192,6 +1193,12 @@ function createDesktopWorkspaceAuthorityState(
     pluginSurfaces,
     sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
+      notifyReplaced: (senderId, replacement) => {
+        const parsed = SitePreviewReplacedEvent.safeParse(replacement);
+        const target = webContents.fromId(senderId);
+        if (!parsed.success || !target || target.isDestroyed()) return;
+        target.send(CHANNELS.sitePreviewReplaced, parsed.data);
+      },
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),

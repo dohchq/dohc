@@ -156,6 +156,7 @@ describe("start site preview IPC", () => {
       url: test.handle.url,
       logs: [],
       exited: false,
+      generation: expect.any(Number),
     });
     expect(result).not.toHaveProperty("handle");
     expect(test.subjects).toEqual([

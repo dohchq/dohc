@@ -101,25 +101,30 @@ export function clearPluginView(state: WorkbenchState): WorkbenchState {
     : { ...state, activeView: defaultWorkbenchState().activeView };
 }
 /**
+ * Whether the sidebar shows the selected view. `rail` is every view the
+ * sidebar shows, in its order. A plugin's view answers for itself: only its
+ * loaded plugin list can say it is gone.
+ */
+export function isActiveViewShown(
+  activeView: ActivityViewId,
+  rail: readonly ActivityViewId[],
+): boolean {
+  return parsePluginViewId(activeView) !== null || rail.includes(activeView);
+}
+
+/**
  * Moves the selection off a view the sidebar no longer shows: one of dohc's
- * views the person hid, or an app they unpinned. The first view the sidebar
- * shows takes its place, and with none left the side panel closes.
+ * views the person hid, or an app they unpinned. The first view on the rail
+ * takes its place, and with none the side panel stays closed.
  */
 export function keepActiveViewShown(
   state: WorkbenchState,
-  shownViews: readonly ViewId[],
-  pinnedApps: readonly string[],
+  rail: readonly ActivityViewId[],
 ): WorkbenchState {
-  const appRoot = parseAppViewId(state.activeView);
-  const shown = appRoot !== null
-    ? pinnedApps.includes(appRoot)
-    : !isViewId(state.activeView) || shownViews.includes(state.activeView);
-  if (shown) return state;
-  const [first] = shownViews;
-  const fallback = first ?? (pinnedApps[0] === undefined ? null : appViewId(pinnedApps[0]));
-  return fallback === null
-    ? { ...state, sidebarVisible: false }
-    : { ...state, activeView: fallback };
+  if (isActiveViewShown(state.activeView, rail)) return state;
+  const [first] = rail;
+  if (first !== undefined) return { ...state, activeView: first };
+  return state.sidebarVisible ? { ...state, sidebarVisible: false } : state;
 }
 // Reserved for dohc's own tabs. A workspace file path is never spelled this
 // way, so a persisted tab carrying it is always one of the kinds below.

@@ -233,6 +233,10 @@ export function SitePreviewPage(props: {
   // This surface, among the tabs and pinned panels that can show one app's
   // preview. Main keeps the preview running while any of them shows it.
   const holderId = useRef(crypto.randomUUID()).current;
+  // The newest start of this app's preview this surface has shown. Another
+  // surface can start it again; main tells this one, and an older answer
+  // never paints over a newer preview.
+  const generationRef = useRef(0);
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
 
@@ -248,6 +252,7 @@ export function SitePreviewPage(props: {
     setLogsOpen(false);
     previewStartRequestRef.current += 1;
     logsRequestRef.current += 1;
+    generationRef.current = 0;
     setRunningMode(null);
     setIdleReason(null);
     autoStartKeyRef.current = null;
@@ -314,6 +319,48 @@ export function SitePreviewPage(props: {
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
+  // Shows one start of the app's preview, or nothing when none runs.
+  const showPreview = useCallback((result: StartSitePreviewResult | null) => {
+    logsRequestRef.current += 1;
+    setActionError(null);
+    if (!result) {
+      setPreview(null);
+      setPreviewLogs([]);
+      setLogsOpen(false);
+      setIdleReason("stopped");
+      return;
+    }
+    setPreviewLogs(result.logs);
+    if (result.exited) {
+      setPreview(null);
+      setIdleReason("exited");
+      setLogsOpen(result.logs.length > 0);
+      return;
+    }
+    setPreview(result);
+    setIdleReason(null);
+  }, []);
+
+  // Another surface, such as this app's pinned panel or its tab, started the
+  // preview again. This surface follows it instead of keeping a frame whose
+  // server has stopped.
+  useEffect(
+    () =>
+      bridge().onSitePreviewReplaced((event) => {
+        if (
+          event.holderId !== holderId ||
+          event.workspaceId !== props.workspaceId ||
+          event.siteRoot !== props.siteRoot ||
+          event.generation <= generationRef.current
+        ) {
+          return;
+        }
+        generationRef.current = event.generation;
+        showPreview(event.preview);
+      }),
+    [holderId, props.siteRoot, props.workspaceId, showPreview],
+  );
+
   // `restart` is a start the person asked for: it runs the preview again
   // even when another surface already shows it in this mode.
   const start = useCallback(async (mode: SitePreviewMode, restart: boolean) => {
@@ -322,6 +369,7 @@ export function SitePreviewPage(props: {
     const isCurrent = () =>
       request === previewStartRequestRef.current &&
       requestContext === siteContextRef.current;
+    const generationAtStart = generationRef.current;
     logsRequestRef.current += 1;
     setLogsOpen(false);
     setPreviewLogs([]);
@@ -337,18 +385,15 @@ export function SitePreviewPage(props: {
         restart,
       });
       if (!isCurrent()) return;
-      setPreviewLogs(result.logs);
       rememberMode(props.workspaceId, props.siteRoot, mode);
-      if (result.exited) {
-        setPreview(null);
-        setIdleReason("exited");
-        setLogsOpen(result.logs.length > 0);
-        return result;
-      }
-      setPreview(result);
+      // A newer start another surface made is already on screen.
+      if (result.generation < generationRef.current) return result;
+      generationRef.current = result.generation;
+      showPreview(result);
       return result;
     } catch (error) {
-      if (!isCurrent()) return;
+      // A newer start another surface made replaced this one.
+      if (!isCurrent() || generationRef.current > generationAtStart) return;
       setPreview(null);
       setActionError(
         error instanceof Error
@@ -359,7 +404,7 @@ export function SitePreviewPage(props: {
     } finally {
       if (isCurrent()) setRunningMode(null);
     }
-  }, [holderId, props.siteRoot, props.workspaceId, siteContext]);
+  }, [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext]);
 
   const prepareShare = useCallback(async () => {
     const request = ++shareRequestRef.current;

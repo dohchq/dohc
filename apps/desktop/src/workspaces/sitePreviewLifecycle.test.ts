@@ -20,8 +20,10 @@ import {
 } from "../window/createMainWindow";
 import {
   createSitePreviewLifecycle,
+  START_CANCELLED_MESSAGE,
   type SitePreviewExecution,
 } from "./sitePreviewLifecycle";
+import { deferred } from "../testing/deferred";
 import type {
   SiteLogEntry,
   SiteProcessHandle,
@@ -1098,25 +1100,46 @@ describe("site preview lifecycle", () => {
 });
 
 describe("an app preview shown by more than one surface", () => {
+  type Result = { logs: SiteLogEntry[]; mode: string };
+
   function surfaces() {
-    const { lifecycle } = testLifecycle();
+    const notifyReplaced = vi.fn();
+    const lifecycle = createSitePreviewLifecycle<Result>({
+      allowOrigin: () => () => undefined,
+      notifyReplaced,
+    });
     const handles: StaticSitePreview[] = [];
-    const prepare = vi.fn(async () => async () => {
+    // A start waits here when a test holds it.
+    let gate: Promise<void> = Promise.resolve();
+    let failNext = false;
+    const prepare = vi.fn(async () => async (): Promise<SitePreviewExecution<Result>> => {
+      await gate;
+      if (failNext) {
+        failNext = false;
+        throw new Error("build failed");
+      }
       const handle = fakeStaticHandle(`http://127.0.0.1:${4200 + handles.length}/`);
       handles.push(handle);
-      return execution(handle);
+      return { handle, result: { logs: [], mode: "" } };
     });
-    const show = (holderId: string, input: { mode?: string; restart?: boolean; senderId?: number } = {}) =>
-      lifecycle.acquire({
+    const current = new Map<number, boolean>();
+    const show = (
+      holderId: string,
+      input: { mode?: string; restart?: boolean; senderId?: number } = {},
+    ) => {
+      const senderId = input.senderId ?? 1;
+      current.set(senderId, true);
+      return lifecycle.acquire({
         holderId,
-        senderId: input.senderId ?? 1,
+        senderId,
         workspaceId: "workspace-1",
         siteRoot: "site",
         mode: input.mode ?? "static",
         restart: input.restart ?? false,
-        isCurrent: () => true,
+        isCurrent: () => current.get(senderId) === true,
         prepare,
       });
+    };
     const hide = (holderId: string) =>
       lifecycle.release({
         getActiveWorkspaceId: () => "workspace-1",
@@ -1124,7 +1147,17 @@ describe("an app preview shown by more than one surface", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
       });
-    return { lifecycle, handles, prepare, show, hide };
+    // A window closes: its session stops being current, and main lets go of
+    // what it showed.
+    const close = (senderId: number) => {
+      current.set(senderId, false);
+      lifecycle.cancelSender(senderId);
+    };
+    return {
+      lifecycle, handles, prepare, show, hide, close, notifyReplaced,
+      hold: (value: Promise<void>) => { gate = value; },
+      failNextStart: () => { failNext = true; },
+    };
   }
 
   it.each([["tab", "pin"], ["pin", "tab"]])("shares one preview when %s opens before %s, and stops it after both close", async (first, second) => {
@@ -1139,6 +1172,7 @@ describe("an app preview shown by more than one surface", () => {
     await s.hide(second);
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
   });
 
   it("keeps the preview when the pinned panel is switched away and back", async () => {
@@ -1158,29 +1192,98 @@ describe("an app preview shown by more than one surface", () => {
     expect(s.prepare).toHaveBeenCalledOnce();
   });
 
-  it("starts again for a mode change or a restart the person asked for", async () => {
+  it.each([["pin", "tab", 1], ["tab", "pin", 2]])("tells the other surface when %s starts the preview again", async (restarting, other, otherSender) => {
     const s = surfaces();
-    await s.show("tab");
-    await s.show("pin");
-    const rebuilt = await s.show("tab", { mode: "build" });
+    const first = await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    const restarted = await s.show(restarting, { senderId: restarting === "tab" ? 1 : 2, restart: true });
+    expect(restarted.generation).toBeGreaterThan(first.generation);
+    expect(restarted.url).toBe(s.handles[1]!.url);
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
-    expect(rebuilt.url).toBe(s.handles[1]!.url);
-    // The pinned panel lost the static preview to the mode change; closing
-    // it leaves the new preview running.
-    await s.hide("pin");
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(otherSender, {
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      holderId: other,
+      generation: restarted.generation,
+      preview: restarted,
+    });
+    // Both still hold the new preview.
+    await s.hide(restarting);
     expect(s.handles[1]!.stop).not.toHaveBeenCalled();
-    await s.show("tab", { mode: "build", restart: true });
+    await s.hide(other);
     expect(s.handles[1]!.stop).toHaveBeenCalledOnce();
-    expect(s.prepare).toHaveBeenCalledTimes(3);
+  });
+
+  it("moves every surface to a new mode, such as the build Share starts", async () => {
+    const s = surfaces();
+    await s.show("tab", { mode: "dev", senderId: 1 });
+    await s.show("pin", { mode: "dev", senderId: 1 });
+    const built = await s.show("pin", { mode: "build", restart: true, senderId: 1 });
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      generation: built.generation,
+      preview: expect.objectContaining({ url: s.handles[1]!.url }),
+    }));
+    // The tab asking for build now shares it instead of starting again.
+    await expect(s.show("tab", { mode: "build" })).resolves.toEqual(built);
+    expect(s.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the others their preview is gone when a restart fails after stopping it", async () => {
+    const s = surfaces();
+    await s.show("tab", { senderId: 1 });
+    await s.show("pin", { senderId: 2 });
+    s.failNextStart();
+    await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("build failed");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
+      holderId: "tab",
+      preview: null,
+    }));
+    // The surfaces still count: the last to let go stops what is left.
+    await s.hide("tab");
+    await s.hide("pin");
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+  });
+
+  it("keeps a shared start alive when the window that asked first closes", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    const joined = s.show("pin", { senderId: 2 });
+    asked.catch(() => undefined);
+    s.close(1);
+    release.resolve();
+    const shown = await joined;
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    await s.hide("pin");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a shared start once every window holding it closes", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const asked = s.show("tab", { senderId: 1 });
+    const joined = s.show("pin", { senderId: 2 });
+    const cancelled = expect(joined).rejects.toThrow(START_CANCELLED_MESSAGE);
+    asked.catch(() => undefined);
+    s.close(1);
+    s.close(2);
+    release.resolve();
+    await cancelled;
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
   });
 
   it("stops a preview only a closed window showed", async () => {
     const s = surfaces();
     await s.show("tab", { senderId: 1 });
     await s.show("pin", { senderId: 2 });
-    s.lifecycle.cancelSender(1);
+    s.close(1);
     expect(s.handles[0]!.stop).not.toHaveBeenCalled();
-    s.lifecycle.cancelSender(2);
+    s.close(2);
     // A later stop runs in the same lane, so once it answers the stop that
     // closing the window queued has run.
     await s.hide("nobody");

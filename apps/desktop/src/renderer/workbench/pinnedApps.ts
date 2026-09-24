@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { bridge } from "../bridge";
 import { useRequestSequence } from "../useRequestSequence";
 
@@ -56,12 +56,20 @@ export function usePinnedApps(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, requests, workspaceId]);
 
-  return roots.map((root) => {
-    const known = read.get(root);
-    return {
-      root,
-      label: known?.title ?? folderLabel(root),
-      missing: known?.missing ?? false,
-    };
-  });
+  // The same pins and titles answer the same list, so what reads it, such
+  // as the command palette, does not rebuild on every render.
+  return useMemo(
+    () =>
+      roots.map((root) => {
+        const known = read.get(root);
+        return {
+          root,
+          label: known?.title ?? folderLabel(root),
+          missing: known?.missing ?? false,
+        };
+      }),
+    // The joined key stands for the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, read],
+  );
 }

@@ -2926,6 +2926,9 @@ export const StartSitePreviewResult = z.object({
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
   exited: z.boolean(),
+  // Which start of the app's preview this is. Every surface showing the app
+  // shows the newest one it has heard of.
+  generation: z.number().int().nonnegative(),
   build: z
     .object({
       ok: z.boolean(),
@@ -2937,6 +2940,17 @@ export const StartSitePreviewResult = z.object({
     .optional(),
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+// Another surface started the app's preview again. The surface named here
+// shows `preview` from now on, or nothing when no preview runs.
+export const SitePreviewReplacedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  generation: z.number().int().nonnegative(),
+  preview: StartSitePreviewResult.nullable(),
+});
+export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6308,6 +6322,9 @@ export interface DohcDesktopBridge
     payload: GetSitePreviewLogsPayload,
   ): Promise<GetSitePreviewLogsResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
+  onSitePreviewReplaced(
+    listener: (event: SitePreviewReplacedEvent) => void,
+  ): () => void;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(
     listener: (event: PluginPanelOpenedEvent) => void,

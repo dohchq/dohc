@@ -146,7 +146,7 @@ describe("registered app preview IPC", () => {
 
   it("uses canonical workspace execution and the same lifecycle for logs and stop", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.startSitePreview, startPayload)).resolves.toEqual({ siteRoot: "app", mode: "static", logs: [], url: h.handles.a.url, exited: false });
+    await expect(h.invoke(CHANNELS.startSitePreview, startPayload)).resolves.toEqual({ siteRoot: "app", mode: "static", logs: [], url: h.handles.a.url, exited: false, generation: expect.any(Number) });
     expect(h.get).toHaveBeenCalledWith(h.workspaceA, "app", "static");
     expect(h.executeAppPreview).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "a", workspaceRoot: "/canonical/a", sharedView: false, signal: expect.any(AbortSignal), isCurrent: expect.any(Function) }));
     await expect(h.invoke(CHANNELS.getSitePreviewLogs, appPayload)).resolves.toEqual({ logs: h.handles.a.logs(), exited: false });

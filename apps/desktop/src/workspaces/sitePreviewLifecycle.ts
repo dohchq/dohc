@@ -66,7 +66,9 @@ type PreviewRecord = RunningPreview | ExitedPreview | StoppingPreview;
 
 type PendingStart = {
   sequence: number;
-  senderId: number;
+  // The window whose closing cancels this start, or null for a start the
+  // surfaces holding it own.
+  senderId: number | null;
   workspaceId: string;
   siteKey: string;
   phase: "preparing" | "queued" | "executing";
@@ -87,21 +89,46 @@ export type SitePreviewExecution<T extends { logs: SiteLogEntry[] }> = {
 };
 
 type StartedPreview<T> = T & { url: string; exited: boolean };
+export type HeldPreview<T> = StartedPreview<T> & { generation: number };
+
+// One surface showing an app's preview, in the window it lives in.
+type PreviewHolder = { senderId: number; isCurrent: () => boolean };
 
 // The surfaces showing one app's preview: an app's tab and its pinned panel
-// can show the same preview at once. Each holder is one surface, with the
-// window it lives in.
+// can show the same preview at once. Each start is a new generation; the
+// surfaces that did not ask for it are told when it settles.
 type PreviewHold<T> = {
+  workspaceId: string;
+  siteRoot: string;
+  generation: number;
   mode: string;
-  holders: Map<string, number>;
-  answer: Promise<StartedPreview<T>>;
-  settled: boolean;
+  holders: Map<string, PreviewHolder>;
+  // The holders this generation's start answers directly.
+  answered: Set<string>;
+  answer: Promise<HeldPreview<T>>;
+  state: "starting" | "ready" | "failed";
 };
+
+// What a surface that did not ask for a new start is told: the preview it now
+// shows, or null when none runs.
+export type SitePreviewReplacement<T> = {
+  workspaceId: string;
+  siteRoot: string;
+  holderId: string;
+  generation: number;
+  preview: HeldPreview<T> | null;
+};
+
+// One count for every lifecycle in the process, so a surface can compare the
+// generations it sees even when its workspace is attached again.
+let lastGeneration = 0;
 
 export function createSitePreviewLifecycle<
   T extends { logs: SiteLogEntry[] } = { logs: SiteLogEntry[] },
 >(input: {
   allowOrigin: (url: string) => () => void;
+  // Tells one surface, in its window, that the app's preview was replaced.
+  notifyReplaced?: (senderId: number, replacement: SitePreviewReplacement<T>) => void;
 }) {
   const startLanes = new Map<string, Promise<void>>();
   const holds = new Map<string, PreviewHold<T>>();
@@ -128,9 +155,11 @@ export function createSitePreviewLifecycle<
 
   const removePending = (pending: PendingStart): void => {
     pendingStarts.delete(pending);
-    const senderStarts = pendingBySender.get(pending.senderId);
-    senderStarts?.delete(pending);
-    if (senderStarts?.size === 0) pendingBySender.delete(pending.senderId);
+    if (pending.senderId !== null) {
+      const senderStarts = pendingBySender.get(pending.senderId);
+      senderStarts?.delete(pending);
+      if (senderStarts?.size === 0) pendingBySender.delete(pending.senderId);
+    }
     const siteStarts = pendingBySite.get(pending.siteKey);
     siteStarts?.delete(pending);
     if (siteStarts?.size === 0) pendingBySite.delete(pending.siteKey);
@@ -138,7 +167,7 @@ export function createSitePreviewLifecycle<
   };
 
   const beginPending = (
-    senderId: number,
+    senderId: number | null,
     workspaceId: string,
     siteRoot: string,
   ): PendingStart => {
@@ -158,9 +187,11 @@ export function createSitePreviewLifecycle<
     };
     nextStartSequence += 1;
     pendingStarts.add(pending);
-    const senderStarts = pendingBySender.get(senderId) ?? new Set<PendingStart>();
-    senderStarts.add(pending);
-    pendingBySender.set(senderId, senderStarts);
+    if (senderId !== null) {
+      const senderStarts = pendingBySender.get(senderId) ?? new Set<PendingStart>();
+      senderStarts.add(pending);
+      pendingBySender.set(senderId, senderStarts);
+    }
     const siteStarts = pendingBySite.get(pending.siteKey) ?? new Set<PendingStart>();
     siteStarts.add(pending);
     pendingBySite.set(pending.siteKey, siteStarts);
@@ -342,7 +373,7 @@ export function createSitePreviewLifecycle<
   };
 
   async function start(startInput: {
-    senderId: number;
+    senderId: number | null;
     workspaceId: string;
     siteRoot: string;
     isCurrent: () => boolean;
@@ -426,8 +457,9 @@ export function createSitePreviewLifecycle<
   /**
    * Shows the app's preview in one more surface. A surface that asks for the
    * mode already running, or starting, shares it. A different mode, or a
-   * restart the person asked for, starts the app's preview again: every
-   * surface showing the old one loses it, as a mode change always did.
+   * restart the person asked for, starts the app's preview again, and every
+   * other surface showing the app is told what it shows now. A start lasts as
+   * long as any surface holding it does, whichever window asked first.
    */
   function acquire(acquireInput: {
     holderId: string;
@@ -440,29 +472,77 @@ export function createSitePreviewLifecycle<
     prepare: () => Promise<
       (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
     >;
-  }): Promise<StartedPreview<T>> {
+  }): Promise<HeldPreview<T>> {
     const key = previewKey(acquireInput.workspaceId, acquireInput.siteRoot);
+    const holder: PreviewHolder = {
+      senderId: acquireInput.senderId,
+      isCurrent: acquireInput.isCurrent,
+    };
     const held = holds.get(key);
-    const sameMode = held?.mode === acquireInput.mode;
     const running = activePreviews.get(key)?.state === "running";
-    if (held && sameMode && (!held.settled || (!acquireInput.restart && running))) {
-      held.holders.set(acquireInput.holderId, acquireInput.senderId);
+    if (
+      held?.mode === acquireInput.mode &&
+      (held.state === "starting" ||
+        (held.state === "ready" && !acquireInput.restart && running))
+    ) {
+      held.holders.set(acquireInput.holderId, holder);
+      held.answered.add(acquireInput.holderId);
       return held.answer;
     }
-    const holders = held && sameMode ? held.holders : new Map<string, number>();
-    holders.set(acquireInput.holderId, acquireInput.senderId);
+    // Every surface that showed the app follows the new start.
+    const holders = new Map(held?.holders);
+    holders.set(acquireInput.holderId, holder);
+    const generation = ++lastGeneration;
+    const started = start({
+      senderId: null,
+      workspaceId: acquireInput.workspaceId,
+      siteRoot: acquireInput.siteRoot,
+      isCurrent: () => [...holders.values()].some((each) => each.isCurrent()),
+      prepare: acquireInput.prepare,
+    });
     const hold: PreviewHold<T> = {
+      workspaceId: acquireInput.workspaceId,
+      siteRoot: acquireInput.siteRoot,
+      generation,
       mode: acquireInput.mode,
       holders,
-      answer: start(acquireInput),
-      settled: false,
+      answered: new Set([acquireInput.holderId]),
+      answer: started.then((preview) => ({ ...preview, generation })),
+      state: "starting",
     };
     holds.set(key, hold);
     hold.answer.then(
-      () => { hold.settled = true; },
-      () => { if (holds.get(key) === hold) holds.delete(key); },
+      (preview) => {
+        hold.state = "ready";
+        tellOthers(key, hold, preview);
+      },
+      () => {
+        hold.state = "failed";
+        // The old preview may be gone: a start stops it before it runs.
+        if (activePreviews.get(key)?.state !== "running") tellOthers(key, hold, null);
+      },
     );
     return hold.answer;
+  }
+
+  // Tells the surfaces that did not ask for this generation what they show
+  // now. A generation another start already replaced tells no one.
+  function tellOthers(
+    key: string,
+    hold: PreviewHold<T>,
+    preview: HeldPreview<T> | null,
+  ): void {
+    if (holds.get(key) !== hold || !input.notifyReplaced) return;
+    for (const [holderId, holder] of hold.holders) {
+      if (hold.answered.has(holderId)) continue;
+      input.notifyReplaced(holder.senderId, {
+        workspaceId: hold.workspaceId,
+        siteRoot: hold.siteRoot,
+        holderId,
+        generation: hold.generation,
+        preview,
+      });
+    }
   }
 
   /**
@@ -478,8 +558,7 @@ export function createSitePreviewLifecycle<
     const key = previewKey(releaseInput.workspaceId, releaseInput.siteRoot);
     const held = holds.get(key);
     if (held) {
-      // Another surface still shows it, or this surface lost it to a mode
-      // change another surface made.
+      // Another surface still shows it, or this surface already let go.
       if (!held.holders.delete(releaseInput.holderId) || held.holders.size > 0) return;
       holds.delete(key);
     }
@@ -541,12 +620,12 @@ export function createSitePreviewLifecycle<
   }
 
   // A window that went away shows nothing any more: its surfaces let go, and
-  // a preview only it showed stops.
+  // a preview, or a start, only it showed stops.
   function cancelSender(senderId: number): void {
     abortPending(pendingBySender.get(senderId) ?? []);
     for (const [key, held] of holds) {
-      for (const [holderId, holderSender] of held.holders) {
-        if (holderSender === senderId) held.holders.delete(holderId);
+      for (const [holderId, holder] of held.holders) {
+        if (holder.senderId === senderId) held.holders.delete(holderId);
       }
       if (held.holders.size > 0) continue;
       holds.delete(key);

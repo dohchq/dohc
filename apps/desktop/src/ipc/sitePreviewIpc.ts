@@ -16,7 +16,7 @@ import {
 
 export type SitePreviewResultBody = Omit<
   StartSitePreviewResult,
-  "url" | "exited"
+  "url" | "exited" | "generation"
 >;
 
 export type SitePreviewExecutionInput = {

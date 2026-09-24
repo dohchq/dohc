@@ -125,6 +125,7 @@ import {
   pluginPanelTabPath,
   pluginWebAppTabPath,
   versionCompareTabPath,
+  VIEW_IDS,
 } from "./workbench/workbenchState";
 import {
   captureOrphanedDraft,
@@ -16917,6 +16918,33 @@ describe("workbench render cost", () => {
 });
 
 describe("apps pinned to the sidebar", () => {
+  it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: [...VIEW_IDS] },
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        userSettings={{ settings, source: "stored" }}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    const shell = await screen.findByTestId("workspace-shell");
+    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+    for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.queryByTestId("file-tree")).toBeNull();
+  });
+
   it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
     const user = userEvent.setup();
     const site: SitePackageInfo = {
@@ -16946,8 +16974,10 @@ describe("apps pinned to the sidebar", () => {
         url: "http://127.0.0.1:49152/",
         logs: [],
         exited: false,
+        generation: 1,
       })),
       stopSitePreview: vi.fn(async () => undefined),
+      onSitePreviewReplaced: vi.fn(() => () => undefined),
       getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
       setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
     });
