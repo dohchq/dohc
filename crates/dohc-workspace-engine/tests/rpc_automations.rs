@@ -275,6 +275,10 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "a blank automation id",
         ),
         (
+            json!({ "automationId": "hello/triage", "path": "tasks", "kinds": ["changed"] }),
+            "an id outside the executor namespaces",
+        ),
+        (
             json!({ "automationId": AUTOMATION, "path": "tasks" }),
             "no kinds",
         ),
@@ -615,6 +619,11 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     let rows = failures["failures"].as_array().expect("failures array");
     assert_eq!(rows.len(), 1, "one row per automation: {rows:?}");
     assert_eq!(rows[0]["automationId"], json!(AUTOMATION));
+    assert_eq!(
+        rows[0]["chainStopped"],
+        json!(false),
+        "the newest failure ran and can be retried"
+    );
     assert_eq!(
         rows[0]["generation"],
         json!(3),

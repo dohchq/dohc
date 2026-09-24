@@ -189,6 +189,14 @@ fn subscriptions_round_trip_replace_their_filter_and_validate() {
             "a blank automation id",
         ),
         (
+            subscription("hello/triage", "tasks", ADDED_AND_CHANGED, None),
+            "an id outside the executor namespaces",
+        ),
+        (
+            subscription("plugin:", "tasks", ADDED_AND_CHANGED, None),
+            "a bare namespace",
+        ),
+        (
             subscription("plugin:triage", "", ADDED_AND_CHANGED, None),
             "a blank path",
         ),
@@ -228,25 +236,40 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     for filter in [
-        subscription("added", "tasks", &[AutomationChangeKind::Added], None),
-        subscription("any-field", "tasks", &[AutomationChangeKind::Changed], None),
         subscription(
-            "status",
+            "collection:tasks#added",
+            "tasks",
+            &[AutomationChangeKind::Added],
+            None,
+        ),
+        subscription(
+            "collection:tasks#any-field",
+            "tasks",
+            &[AutomationChangeKind::Changed],
+            None,
+        ),
+        subscription(
+            "collection:tasks#status",
             "tasks",
             &[AutomationChangeKind::Changed],
             Some(&["status"]),
         ),
-        subscription("removed", "tasks", &[AutomationChangeKind::Removed], None),
+        subscription(
+            "collection:tasks#removed",
+            "tasks",
+            &[AutomationChangeKind::Removed],
+            None,
+        ),
         // Two subscriptions for one automation: a title change under
         // "tasks" misses the first filter and matches the second.
         subscription(
-            "split",
+            "collection:tasks#split",
             "tasks",
             &[AutomationChangeKind::Changed],
             Some(&["status"]),
         ),
         subscription(
-            "split",
+            "collection:tasks#split",
             ".",
             &[AutomationChangeKind::Changed],
             Some(&["title"]),
@@ -260,13 +283,16 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
     let claims = claim_for(&mut store, WS, &created, 20);
     assert_eq!(
         claimed_ids(&claims),
-        vec!["added"],
+        vec!["collection:tasks#added"],
         "the apply that writes a record's first fields is an added record"
     );
     assert_eq!(claims[0].change.kind, AutomationChangeKind::Added);
 
     let title = claim_for(&mut store, WS, &field_change(2, &["title"]), 30);
-    assert_eq!(claimed_ids(&title), vec!["any-field", "split"]);
+    assert_eq!(
+        claimed_ids(&title),
+        vec!["collection:tasks#any-field", "collection:tasks#split"]
+    );
     assert!(
         title
             .iter()
@@ -281,12 +307,16 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
     );
     assert_eq!(
         claimed_ids(&status),
-        vec!["any-field", "split", "status"],
+        vec![
+            "collection:tasks#any-field",
+            "collection:tasks#split",
+            "collection:tasks#status",
+        ],
         "one claim per automation, however many of its subscriptions match"
     );
 
     let unwatched = claim_for(&mut store, WS, &field_change(4, &["priority"]), 50);
-    assert_eq!(claimed_ids(&unwatched), vec!["any-field"]);
+    assert_eq!(claimed_ids(&unwatched), vec!["collection:tasks#any-field"]);
 }
 
 #[test]
@@ -667,6 +697,10 @@ fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_gen
         failures[0].claim_id, stopped[0].claim_id,
         "the row names the newest failed claim"
     );
+    assert!(
+        failures[0].chain_stopped,
+        "the newest failure is a chain stop"
+    );
     assert_eq!(
         failures[0].error, AUTOMATION_CHAIN_STOPPED,
         "the newest failure's error wins"
@@ -975,30 +1009,50 @@ fn a_crash_requeue_keeps_the_run_and_a_retried_run_that_crashes_is_exhausted() {
 }
 
 #[test]
-fn a_claim_row_without_the_newer_columns_reads_as_a_first_run_changed_claim() {
+fn an_upgraded_plugin_claim_drains_and_retries_in_the_plugin_namespace() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    // The columns a claim written before the change facts migration held.
+    // Claims as the change facts migration leaves them: only the columns a
+    // claim held before it, and the legacy id moved into `plugin:`.
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(
                 "INSERT INTO automation_claims \
                  (workspace_id, claim_id, automation_id, trigger_history_id, record_id, \
                   collection_path, depth, state, attempts, error, created_at_ms, updated_at_ms) \
-                 VALUES (?1, 'atc_old', 'plugin:triage', 1, 'rec', 'tasks', 0, 'failed', 1, \
-                         'threw', 5, 5)",
+                 VALUES (?1, 'atc_failed', 'plugin:hello/triage', 1, 'rec', 'tasks', 0, \
+                         'failed', 1, 'threw', 5, 5), \
+                        (?1, 'atc_pending', 'plugin:hello/triage', 2, 'rec', 'tasks', 0, \
+                         'pending', 0, NULL, 6, 6)",
                 [WS],
             )
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
             Ok::<_, dohc_engine_storage::StorageError>(())
         })
-        .expect("seed an old claim row");
-    let history = list_automation_claims(&store, WS, "plugin:triage").expect("history");
-    assert_eq!(history[0].run, 1);
-    assert_eq!(history[0].change.kind, AutomationChangeKind::Changed);
+        .expect("seed upgraded claim rows");
     let failures = list_automation_failures(&store, WS).expect("failures");
     assert_eq!(failures[0].generation, 1, "the old failure still counts");
-    assert_eq!(failures[0].claim_id, "atc_old");
+    assert_eq!(failures[0].claim_id, "atc_failed");
+    assert!(!failures[0].chain_stopped, "it ran, so it is no chain stop");
+
+    let (served, facts) = claim_next_pending_automation(&mut store, WS, "plugin:", 10, &NO_FAULTS)
+        .expect("claim next")
+        .expect("the pending upgraded claim drains in the plugin namespace");
+    assert_eq!(served.claim_id, "atc_pending");
+    assert_eq!(
+        (served.run, served.change.kind),
+        (1, AutomationChangeKind::Changed)
+    );
+    assert!(facts.fields.is_empty(), "an upgraded claim has no facts");
+
+    let AutomationRetry::Requeued(retried) =
+        retry_automation_claim(&mut store, WS, "atc_failed", 20, &NO_FAULTS).expect("retry")
+    else {
+        panic!("the upgraded failed claim is retryable");
+    };
+    assert_eq!(retried.run, 2);
+    let again = claim_next(&mut store, "plugin:", 30).expect("the retried claim drains");
+    assert_eq!((again.claim_id.as_str(), again.run), ("atc_failed", 2));
 }
 
 #[test]

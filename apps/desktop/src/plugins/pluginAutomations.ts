@@ -382,7 +382,9 @@ export class PluginAutomations {
    */
   private installedPluginDeclares(automationId: string): boolean | undefined {
     const name = automationId.slice(PLUGIN_AUTOMATION_NAMESPACE.length);
-    const slash = name.indexOf("/");
+    // A scoped plugin name ("@acme/tools") has its own "/", and an
+    // automation id never has one, so the last "/" separates the two.
+    const slash = name.lastIndexOf("/");
     if (slash <= 0) return false;
     const pluginId = name.slice(0, slash);
     const declared = this.options.declaredAutomations(pluginId);

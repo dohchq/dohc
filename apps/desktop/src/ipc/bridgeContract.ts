@@ -5114,6 +5114,8 @@ export const AutomationFailureNotice = z.object({
   automationId: z.string().min(1),
   // The newest failed claim: the one a Try again re-runs.
   claimId: z.string().min(1),
+  // A chain stop never ran, and no Try again can run it.
+  chainStopped: z.boolean(),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),

@@ -650,6 +650,7 @@ describe("automations wire schemas", () => {
     const failure = {
       automationId: "plugin:hello-plugin/triage",
       claimId: "claim-1",
+      chainStopped: true,
       error: "chain-stopped",
       updatedAtMs: 2_000,
       generation: 3,

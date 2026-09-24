@@ -63,6 +63,8 @@ interface Harness {
   errors: Array<{ context: string; error: unknown }>;
   pendingClaims: AutomationClaim[];
   claimFailures: string[];
+  /** Every plugin id the executor asked for declarations. */
+  declarationsAsked: string[];
 }
 
 function harness(input: {
@@ -92,15 +94,18 @@ function harness(input: {
   const runs: Harness["runs"] = [];
   const errors: Harness["errors"] = [];
   const claimFailures: string[] = [];
+  const declarationsAsked: string[] = [];
   const automations = new PluginAutomations({
     onClaimFailed: (automationId) => {
       claimFailures.push(automationId);
     },
     withAdapter: (work) => work(adapter as unknown as AutomationEngineAdapter),
-    declaredAutomations: () =>
-      input.discoveryPending
+    declaredAutomations: (pluginId) => {
+      declarationsAsked.push(pluginId);
+      return input.discoveryPending
         ? undefined
-        : (input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }]),
+        : (input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }]);
+    },
     proveReadable: input.proveReadable ?? (async () => undefined),
     runOnPlugin:
       input.runOnPlugin ??
@@ -112,7 +117,15 @@ function harness(input: {
       errors.push({ context, error });
     },
   });
-  return { automations, adapter, runs, errors, pendingClaims, claimFailures };
+  return {
+    automations,
+    adapter,
+    runs,
+    errors,
+    pendingClaims,
+    claimFailures,
+    declarationsAsked,
+  };
 }
 
 describe("PluginAutomations", () => {
@@ -321,6 +334,20 @@ describe("PluginAutomations", () => {
         error: 'No installed plugin declares automation "plugin:gone-plugin/auto".',
       });
     });
+    expect(h.runs).toEqual([]);
+  });
+
+  it("resolves a scoped plugin by its whole name before it registers", async () => {
+    const h = harness();
+    // "@acme/tools" declares triage but has not registered yet: its claim
+    // waits instead of settling failed as undeclared.
+    h.pendingClaims.push(claimOf({ automationId: "plugin:@acme/tools/triage" }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation.mock.calls.length).toBeGreaterThan(1),
+    );
+    expect(h.declarationsAsked).toEqual(["@acme/tools"]);
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
     expect(h.runs).toEqual([]);
   });
 

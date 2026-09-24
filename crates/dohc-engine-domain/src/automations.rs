@@ -40,6 +40,13 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 /// Bound on the error text a failed settle records.
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
+/// The namespaces an automation id lives in, one per executor: plugin
+/// automations are `plugin:<plugin name>/<automation id>`, Collection
+/// automations `collection:<collection path>#<automation id>`. Each executor
+/// drains its own namespace, so a subscription outside them would claim
+/// work nothing ever runs.
+pub const AUTOMATION_ID_NAMESPACES: [&str; 2] = ["plugin:", "collection:"];
+
 /// The most field names one subscription may list. An automation that
 /// watches more fields subscribes to every field.
 pub const MAX_AUTOMATION_SUBSCRIPTION_FIELDS: usize = 64;
@@ -445,6 +452,13 @@ pub fn subscribe_automation_in_tx(
 ) -> Result<bool, DomainError> {
     let automation_id =
         normalize_automation_identifier(&subscription.automation_id, "Automation id is invalid.")?;
+    if !AUTOMATION_ID_NAMESPACES.iter().any(|namespace| {
+        automation_id.len() > namespace.len() && automation_id.starts_with(namespace)
+    }) {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation id must start with plugin: or collection:.",
+        });
+    }
     let prefix = normalize_automation_identifier(
         &subscription.prefix,
         "Automation subscription path is invalid.",
@@ -765,6 +779,9 @@ pub struct AutomationFailure {
     pub automation_id: String,
     /// The newest failed claim, so the owner's Try again can name it.
     pub claim_id: String,
+    /// Whether the newest failed claim is a chain stop, which no retry can
+    /// run ([`AutomationClaim::chain_stopped`]).
+    pub chain_stopped: bool,
     pub error: String,
     pub updated_at_ms: i64,
     pub generation: i64,
@@ -778,13 +795,14 @@ pub(crate) fn list_automation_failures_in_tx(
 ) -> Result<Vec<AutomationFailure>, DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT newest.automation_id, newest.claim_id, newest.error, newest.updated_at_ms, \
+            "SELECT newest.automation_id, newest.claim_id, newest.attempts = 0, newest.error, \
+                    newest.updated_at_ms, \
                     (SELECT SUM(every.run - 1 + (every.state = 'failed')) \
                      FROM automation_claims every \
                      WHERE every.workspace_id = ?1 \
                        AND every.automation_id = newest.automation_id) \
              FROM ( \
-                 SELECT automation_id, claim_id, error, updated_at_ms, \
+                 SELECT automation_id, claim_id, attempts, error, updated_at_ms, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY automation_id \
                             ORDER BY updated_at_ms DESC, claim_id DESC \
@@ -796,16 +814,17 @@ pub(crate) fn list_automation_failures_in_tx(
         .map_err(DomainError::sql_corrupt)?;
     let failures = statement
         .query_map(params![workspace_id], |row| {
-            let error: Option<String> = row.get(2)?;
+            let error: Option<String> = row.get(3)?;
             Ok(AutomationFailure {
                 automation_id: row.get(0)?,
                 claim_id: row.get(1)?,
+                chain_stopped: row.get(2)?,
                 // A failed claim always records why; a NULL here would be
                 // corruption, surfaced as an empty reason rather than a
                 // refused listing.
                 error: error.unwrap_or_default(),
-                updated_at_ms: row.get(3)?,
-                generation: row.get(4)?,
+                updated_at_ms: row.get(4)?,
+                generation: row.get(5)?,
             })
         })
         .map_err(DomainError::sql_corrupt)?

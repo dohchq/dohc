@@ -1175,7 +1175,10 @@ export class VersionedLiveAdapter {
   /**
    * Queues a failed claim as its next run, with its facts. A pending or
    * running claim comes back unchanged; a done or chain-stopped claim is
-   * refused.
+   * refused. The engine announces a requeued claim with
+   * `automation.claimed`, but that event can drop under backpressure and a
+   * repeated retry announces nothing, so after this resolves the caller
+   * wakes its executor's drain and re-reads `automations.failures` itself.
    */
   async retryAutomationClaim(
     input: AutomationRetryParams,

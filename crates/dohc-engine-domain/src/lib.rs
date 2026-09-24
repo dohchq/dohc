@@ -38,10 +38,10 @@ pub mod store;
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_CLAIM_HISTORY_LIMIT,
-    AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange, AutomationChangeKind, AutomationClaim,
-    AutomationClaimAttempt, AutomationClaimState, AutomationFactValue, AutomationFailure,
-    AutomationFieldFact, AutomationFieldFacts, AutomationRetry, AutomationSettle,
-    AutomationSubscription, AutomationTrigger, MAX_AUTOMATION_ERROR_BYTES,
+    AUTOMATION_ID_NAMESPACES, AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange, AutomationChangeKind,
+    AutomationClaim, AutomationClaimAttempt, AutomationClaimState, AutomationFactValue,
+    AutomationFailure, AutomationFieldFact, AutomationFieldFacts, AutomationRetry,
+    AutomationSettle, AutomationSubscription, AutomationTrigger, MAX_AUTOMATION_ERROR_BYTES,
     MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
     claim_automation_triggers_in_tx, claim_next_pending_automation, list_automation_claims,
     list_automation_failures, list_running_automation_attempts, reclaim_running_automations,

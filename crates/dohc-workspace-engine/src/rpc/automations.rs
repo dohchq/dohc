@@ -81,6 +81,7 @@ fn automation_failure_json(failure: &AutomationFailure) -> Value {
     json!({
         "automationId": failure.automation_id,
         "claimId": failure.claim_id,
+        "chainStopped": failure.chain_stopped,
         "error": failure.error,
         "updatedAtMs": failure.updated_at_ms,
         "generation": failure.generation,

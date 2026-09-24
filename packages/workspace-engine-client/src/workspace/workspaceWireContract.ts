@@ -951,6 +951,8 @@ const WorkspaceResultSchemas = {
         mutableStruct({
           automationId: Schema.NonEmptyString,
           claimId: Schema.NonEmptyString,
+          /** The newest failed claim is a chain stop, which no retry runs. */
+          chainStopped: Schema.Boolean,
           error: Schema.String,
           updatedAtMs: Schema.Int,
           generation: Schema.Int,

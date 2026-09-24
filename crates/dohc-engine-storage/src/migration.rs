@@ -2100,7 +2100,8 @@ CREATE INDEX owner_pending_settlement_binary_blobs
 /// and bounded field facts of its change, and its run: 1, plus one per
 /// retry. Rows written before this migration were plugin subscriptions
 /// (added and changed records, any field) and first-run, changed-record
-/// claims without facts.
+/// claims without facts. Their automation ids were `<plugin>/<id>`, with no
+/// namespace; they move into `plugin:`, where the plugin executor drains.
 const V2_AUTOMATION_CHANGE_FACTS_DDL: &str = "\
 ALTER TABLE automation_subscriptions ADD COLUMN on_added INTEGER NOT NULL DEFAULT 1
     CHECK (on_added IN (0, 1));
@@ -2121,6 +2122,10 @@ ALTER TABLE automation_claims ADD COLUMN change_fields_json TEXT NOT NULL DEFAUL
 ALTER TABLE automation_claims ADD COLUMN change_fields_omitted INTEGER NOT NULL DEFAULT 0
     CHECK (change_fields_omitted >= 0);
 ALTER TABLE automation_claims ADD COLUMN run INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1);
+UPDATE automation_subscriptions SET automation_id = 'plugin:' || automation_id
+    WHERE instr(automation_id, ':') = 0;
+UPDATE automation_claims SET automation_id = 'plugin:' || automation_id
+    WHERE instr(automation_id, ':') = 0;
 CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
@@ -2401,7 +2406,7 @@ mod tests {
             ),
             (
                 "v2-automation-change-facts",
-                "9de2e3270054c8e42eced4ff15b6fbf3ac8a3a851846064e99566dfbedf9db82",
+                "664e71f126144d9f2e90379cf12a84952dd768f765070bfbc62a0e0989a78f9c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2461,8 +2466,10 @@ mod tests {
 
     /// Plugin subscriptions and claims written before the automation facts
     /// migration keep their meaning: a subscription wants added and changed
-    /// records on any field, and a claim is a first-run changed-record claim
-    /// without facts.
+    /// records on any field, a claim is a first-run changed-record claim
+    /// without facts, and both move into the `plugin:` namespace the plugin
+    /// executor drains, keeping each claim's id and trigger. The domain
+    /// tests drain and retry a claim of this shape.
     #[test]
     fn automation_rows_from_before_the_change_facts_upgrade_with_their_meaning() {
         let dir = tempdir();
@@ -2493,7 +2500,7 @@ mod tests {
         let subscription: (i64, i64, i64, Option<String>) = conn
             .query_row(
                 "SELECT on_added, on_changed, on_removed, field_names_json \
-                 FROM automation_subscriptions WHERE automation_id = 'hello/triage'",
+                 FROM automation_subscriptions WHERE automation_id = 'plugin:hello/triage'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -2502,7 +2509,8 @@ mod tests {
         let mut statement = conn
             .prepare(
                 "SELECT claim_id, change_kind, author_origin_id, actor_kind, on_behalf_of, \
-                        change_fields_json, change_fields_omitted, run \
+                        change_fields_json, change_fields_omitted, run, automation_id, \
+                        trigger_history_id \
                  FROM automation_claims ORDER BY claim_id",
             )
             .expect("claim query");
@@ -2517,12 +2525,14 @@ mod tests {
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .expect("claims")
             .collect::<Result<Vec<_>, _>>()
             .expect("claim rows");
-        for claim_id in ["atc_failed", "atc_pending"] {
+        for (claim_id, history_id) in [("atc_failed", 1), ("atc_pending", 2)] {
             assert!(
                 claims.contains(&(
                     claim_id.to_owned(),
@@ -2533,6 +2543,8 @@ mod tests {
                     "[]".to_owned(),
                     0,
                     1,
+                    "plugin:hello/triage".to_owned(),
+                    history_id,
                 )),
                 "{claim_id} upgrades to a first-run changed claim: {claims:?}"
             );
