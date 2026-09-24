@@ -67,6 +67,38 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
+// A click in the preview never reaches the page, so Preview options closes
+// when the preview takes focus.
+test("@apps closes Preview options when a click lands in the preview", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      {
+        path: "demo/index.html",
+        contents: "<!doctype html><title>Launch app</title><main><button>Inside the app</button></main>",
+      },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await page.getByTestId("activity-sites").click();
+    await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
+    const frame = page.frameLocator('[data-testid="site-preview-frame"]');
+    await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
+
+    await page.getByTestId("site-preview-options").click();
+    const staticMode = page.getByTestId("site-preview-static");
+    await expect(staticMode).toBeVisible();
+    await frame.getByRole("button", { name: "Inside the app" }).click();
+    await expect(staticMode).toBeHidden();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("@apps creates and opens the first app inside an existing app folder", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

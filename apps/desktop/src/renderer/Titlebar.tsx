@@ -1,8 +1,9 @@
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
+import { useDismiss } from "./ui/useDismiss";
 
 // Workspace labels use the final folder name on either platform.
 export function workspaceName(workspace: WorkspaceSummary): string {
@@ -80,27 +81,12 @@ export function Titlebar(props: {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const switcherTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // The switcher is a menu: Escape and a press anywhere else close it.
-  // Escape hands focus back to the trigger, so the keyboard stays put.
-  useEffect(() => {
-    if (!switcherOpen) return;
-    function onPointerDown(event: PointerEvent) {
-      if (switcherRef.current?.contains(event.target as Node)) return;
-      setSwitcherOpen(false);
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setSwitcherOpen(false);
-      switcherTriggerRef.current?.focus();
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [switcherOpen]);
+  useDismiss({
+    open: switcherOpen,
+    container: switcherRef,
+    trigger: switcherTriggerRef,
+    onClose: () => setSwitcherOpen(false),
+  });
   // macOS draws traffic lights on the left and never populates the
   // titlebar-area-* env vars (WCO is only enabled on the non-darwin branch of
   // createMainWindow) — lay out around them with fixed insets there, and
@@ -112,7 +98,10 @@ export function Titlebar(props: {
   return (
     <header
       data-testid="titlebar"
-      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel-2"
+      // A drag region takes presses before the page sees them, so while the
+      // switcher is open the bar stops dragging and a press on it closes the
+      // switcher.
+      className={`${switcherOpen ? "titlebar-no-drag" : "titlebar-drag"} relative flex shrink-0 items-center gap-2 border-b border-line bg-panel-2`}
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}

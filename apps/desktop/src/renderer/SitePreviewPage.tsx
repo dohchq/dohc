@@ -13,6 +13,7 @@ import {
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "./ui/controls";
+import { useDismiss } from "./ui/useDismiss";
 import type {
   SitePackageInfo,
   SitePreviewMode,
@@ -310,27 +311,12 @@ export function SitePreviewPage(props: {
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
-  // Preview options is a menu: Escape and a press anywhere else close it.
-  // Escape hands focus back to its trigger.
-  useEffect(() => {
-    if (!optionsOpen) return;
-    function onPointerDown(event: PointerEvent) {
-      if (optionsRef.current?.contains(event.target as Node)) return;
-      setOptionsOpen(false);
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setOptionsOpen(false);
-      optionsTriggerRef.current?.focus();
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [optionsOpen]);
+  useDismiss({
+    open: optionsOpen,
+    container: optionsRef,
+    trigger: optionsTriggerRef,
+    onClose: () => setOptionsOpen(false),
+  });
 
   const start = useCallback(async (mode: SitePreviewMode) => {
     const request = ++previewStartRequestRef.current;

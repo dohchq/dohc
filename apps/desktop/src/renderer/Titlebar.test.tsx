@@ -125,7 +125,9 @@ describe("Titlebar", () => {
 
     fireEvent.click(trigger);
     expect(screen.getByRole("listbox", { name: "Workspaces" })).toBeTruthy();
-    fireEvent.keyDown(document, { key: "Escape" });
+    const option = screen.getByTestId("workspace-switcher-option").querySelector("button")!;
+    option.focus();
+    fireEvent.keyDown(option, { key: "Escape" });
 
     expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
@@ -146,6 +148,22 @@ describe("Titlebar", () => {
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Elsewhere" }));
     expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+  });
+
+  // A drag region takes presses before the page sees them.
+  it("stops the titlebar dragging while the switcher is open, so a press on it closes the switcher", () => {
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+    );
+    const titlebar = screen.getByTestId("titlebar");
+    expect(titlebar.className).toContain("titlebar-drag");
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    expect(titlebar.className).toContain("titlebar-no-drag");
+    fireEvent.pointerDown(titlebar);
+
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+    expect(titlebar.className).not.toContain("titlebar-no-drag");
   });
 
   it("omits the chats layout control when the workspace has no chats sidebar", () => {
