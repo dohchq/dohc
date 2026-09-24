@@ -1,20 +1,22 @@
-//! The relay derives a shared rich document's current Markdown in TypeScript
-//! (`createSettledMarkdownProjector` in `packages/ydoc-projection`). Recipients
-//! must read the bytes an owner device settles, so these vectors pin that
-//! projection to `project_ydoc_with_store`, the function both the editor settle
-//! and remote apply write from.
+//! The relay derives a shared document's current Markdown with the engine's
+//! `ydoc.project` method, which returns `project_ydoc_updates`: the stored
+//! updates applied to an empty document and projected by
+//! `project_ydoc_with_store`, the function both the editor settle and remote
+//! apply write from. These vectors pin that output, so a change to what an
+//! owner device settles shows up here as a changed file.
 //!
 //! `settle-parity/yjs.json` is written by the TypeScript test from Yjs updates
-//! the desktop produces. `settle-parity/yrs.json` is written here from updates
-//! the engine produces. Both sides assert both files. Regenerate with
-//! `DOHC_WRITE_SETTLE_PARITY_VECTORS=1`.
+//! the desktop produces, with Markdown from the engine method.
+//! `settle-parity/yrs.json` is written here from updates the engine produces.
+//! This test and the TypeScript test, which runs the engine binary, assert
+//! both files. Regenerate with `DOHC_WRITE_SETTLE_PARITY_VECTORS=1`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_collab::{
     ContentKind, DocKey, SuccessorIdentity, SuccessorIdentityInput, Ydoc, fresh_successor_base,
 };
-use dohc_engine_sync::project_ydoc_with_store;
+use dohc_engine_sync::project_ydoc_updates;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -41,16 +43,7 @@ fn key() -> DocKey {
 }
 
 fn settle(updates: &[Vec<u8>]) -> String {
-    let doc = Ydoc::wire();
-    for update in updates {
-        doc.apply(update).expect("apply update");
-    }
-    assert!(
-        !doc.has_pending_dependencies(),
-        "a settle refuses pending updates"
-    );
-    let connection = rusqlite::Connection::open_in_memory().expect("open database");
-    project_ydoc_with_store(&connection, &key(), &doc, ContentKind::Richdoc)
+    project_ydoc_updates(updates.iter().map(Vec::as_slice), ContentKind::Richdoc)
         .expect("settle projection")
         .content
 }
@@ -58,6 +51,15 @@ fn settle(updates: &[Vec<u8>]) -> String {
 const RICH: &str = "# Plan\n\nSome **bold**, _italic_, `code`, ~~gone~~ and a [link](https://example.com \"Title\").\n\n- one\n  - nested\n- two\n\n1. first\n2. second\n\n- [ ] open task\n- [x] done task\n\n> quoted\n\n> [!note] Callout title\n> Callout body\n\n```ts\nconst value = 1\n```\n\n| Left | Right |\n| :--- | ---: |\n| a | b |\n\n$$\nx^2\n$$\n\nInline $y$ math, a [[Wiki Page|label]] and ![alt](image.png).\n\n---\n\nTail 🦀 世界.\n";
 
 const RESOLVED: &str = "# Resolved\n\nChosen text with **bold**, a [link](https://example.com), and a list:\n\n- one\n- two\n";
+
+// YAML scalars that js-yaml and the engine's loader read differently. The
+// TypeScript test seeds the same files the way the desktop opens them.
+const YAML_NON_FINITE: &str = "---\nnan: .nan\ninf: .inf\nneg: -.inf\n---\n\nBody\n";
+const YAML_BEYOND_I64: &str =
+    "---\nbig: 9223372036854775808\nsmall: -9223372036854775809\n---\n\nBody\n";
+const YAML_NEGATIVE_ZERO: &str = "---\nzero: -0\nfloat: -0.0\n---\n\nBody\n";
+const YAML_EXPLICIT_INT: &str = "---\ntagged: !!int 7\noctal: !!int 0o7\n---\n\nBody\n";
+const YAML_SEPARATED_RADIX: &str = "---\nhex: 0x_1F\nbin: 0b1010_1010\nsep: 1_000\n---\n\nBody\n";
 
 const TABLE: &str =
     "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
@@ -184,6 +186,29 @@ fn yrs_vectors() -> Vec<Vector> {
             .vector("rewrite-annotated-table"),
         Lineage::imported("> quote\n>\n> > nested\n\n3. three\n4. four\n")
             .vector("import-quotes-and-ordinals"),
+        Lineage::imported(YAML_NON_FINITE).vector("import-yaml-non-finite"),
+        Lineage::imported(YAML_BEYOND_I64).vector("import-yaml-beyond-i64"),
+        Lineage::imported(YAML_NEGATIVE_ZERO).vector("import-yaml-negative-zero"),
+        Lineage::imported(YAML_EXPLICIT_INT).vector("import-yaml-explicit-int"),
+        Lineage::imported(YAML_SEPARATED_RADIX).vector("import-yaml-separated-radix"),
+        Lineage::imported("Plain start")
+            .edit(|doc| {
+                doc.rewrite_content_to_markdown_preserving_source(
+                    ContentKind::Richdoc,
+                    "---\na: .nan\n---\n\nBody\n",
+                )
+                .expect("rewrite")
+            })
+            .vector("rewrite-yaml-nan"),
+        Lineage::imported("Plain start")
+            .edit(|doc| {
+                doc.rewrite_content_to_markdown_preserving_source(
+                    ContentKind::Richdoc,
+                    "---\na: !!int 0o7\n---\n\nBody\n",
+                )
+                .expect("rewrite")
+            })
+            .vector("rewrite-yaml-explicit-octal"),
         successor(&canonical(RESOLVED)).vector("successor-base"),
         successor(&canonical(RESOLVED))
             .edit(|doc| doc.richdoc_append_paragraph("After the resolution"))

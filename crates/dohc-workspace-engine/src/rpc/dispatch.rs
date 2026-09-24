@@ -261,6 +261,9 @@ impl EngineService {
                     .await?
             }
             "engine.ping" => engine_ping(),
+            "ydoc.project" => {
+                super::ydoc_project::project(request.workspace.as_ref(), request.params).await?
+            }
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "sync.push" => {
@@ -1247,6 +1250,7 @@ mod tests {
             "ydoc.close",
             "ydoc.evict",
             "ydoc.open",
+            "ydoc.project",
             "ydoc.recordUpdate",
             "ydoc.resync",
             "ydoc.settle",

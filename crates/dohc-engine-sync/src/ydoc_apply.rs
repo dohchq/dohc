@@ -2090,6 +2090,54 @@ pub fn project_ydoc_with_store(
     })
 }
 
+/// Project a document from its Y.Doc updates alone, applied in order to an
+/// empty document, to the bytes an owner device settles
+/// ([`project_ydoc_with_store`]). It reads no workspace store, so a host that
+/// holds only the updates, such as the relay, derives the same file. Output
+/// above the live-editing limit is refused, as live editing refuses it. Scenes
+/// read their images from the workspace store, so they are refused too.
+pub fn project_ydoc_updates<'a>(
+    updates: impl IntoIterator<Item = &'a [u8]>,
+    content_kind: ContentKind,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
+    if content_kind == ContentKind::Scene {
+        return Err(SyncError::InvalidInput {
+            reason: "a scene projection reads its images from the workspace store",
+        });
+    }
+    let doc = dohc_engine_collab::Ydoc::wire();
+    let mut empty = true;
+    for update in updates {
+        doc.apply(update).map_err(|_| SyncError::InvalidInput {
+            reason: "a ydoc update is malformed",
+        })?;
+        empty = false;
+    }
+    if empty {
+        return Err(SyncError::InvalidInput {
+            reason: "there are no ydoc updates to project",
+        });
+    }
+    if doc.has_pending_dependencies() {
+        return Err(SyncError::InvalidInput {
+            reason: "the ydoc updates are missing a dependency",
+        });
+    }
+    let store = Connection::open_in_memory().map_err(SyncError::corrupt)?;
+    let key = DocKey::new("projection", "projection", "projection")
+        .map_err(|_| local_corruption("projection key is invalid"))?;
+    let projection = project_ydoc_with_store(&store, &key, &doc, content_kind)?;
+    let limit = dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES;
+    if projection.content.len() > limit {
+        return Err(SyncError::ProjectionTooLarge {
+            constraint: "MAX_PUBLIC_MARKDOWN_BYTES",
+            actual_bytes: projection.content.len(),
+            limit_bytes: limit,
+        });
+    }
+    Ok(projection)
+}
+
 /// Resolve a scene asset whose generated sidecar head was retired after the
 /// file disappeared from disk. The current delete and its exact producer are
 /// the authority; a blob referenced elsewhere in the workspace is not.
