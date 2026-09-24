@@ -199,13 +199,15 @@ function isViewKind(value: string): value is ViewKind {
 }
 
 // A relative path with forward slashes and no empty, ".", or ".." segment, so
-// it cannot leave the folder it is resolved against.
+// it cannot leave the folder it is resolved against. A colon is refused on
+// every host: on Windows, "C:x" names a drive and "a.js:x" a hidden stream.
 export function isNormalizedRelativePath(value: string): boolean {
   if (
     value.length === 0 ||
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.includes("\\") ||
+    value.includes(":") ||
     /[\u0000-\u001f\u007f-\u009f]/u.test(value)
   ) {
     return false;

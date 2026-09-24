@@ -1,8 +1,8 @@
 import {
   CORE_SCHEMA,
+  defineMappingTag,
   dump,
   load,
-  realMapTag,
   visit,
   YAMLException,
   type Document as YamlDocument,
@@ -24,7 +24,7 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 //         to: Done
 //       do:
 //         - set:
-//             Finished on: =today()
+//             Finished on: '=today()'
 //
 // `when` holds one trigger and `do` holds steps that run in order. A trigger
 // or step is a mapping with exactly one kind key, such as `field-changed` or
@@ -32,18 +32,33 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // kind's options. A trigger without an argument can be written as its kind
 // alone: `when: record-added`.
 //
-// Values, conditions, and message text each follow one rule:
+// Text that starts with "=" is a formula: a JavaScript expression after the
+// "=". Only values take formulas.
 //
-// - A value is a YAML scalar. Text that starts with "=" is a formula, and the
-//   rest of it is a JavaScript expression: `Finished on: =today()`. Any other
-//   scalar is itself. To store text that starts with "=", use a formula that
-//   returns it: `="=5"`. The writer does this for a literal that starts
-//   with "=".
-// - A condition (`if`, `find`, `starts-matching`) is always an expression,
-//   without "=".
+// - A value is a scalar or a list of scalars. Text that starts with one "="
+//   is a formula: `Finished on: =today()`. Text that starts with "==" is
+//   literal text without its first "=", so `Code: ==5` stores "=5". Any other
+//   scalar is itself. A list is always literal; its items follow the "=="
+//   rule and cannot be formulas.
+// - A formula in a trigger's `to:` computes the value the field must change
+//   to. It is compared for equality; it is not a condition.
+// - A condition (`if`, `find`, `starts-matching`) is always an expression, so
+//   it has no "=".
 // - Message text (`notify`, `post`, `direct-message`, `wake-agent`) is a
 //   template. `{expression}` inserts a value, and `{{` and `}}` write one
-//   brace. Braces inside an expression must balance.
+//   brace. An expression ends at the first "}" outside its own braces,
+//   strings, template literals, regular expressions, and comments. To start
+//   a message with "=", write `{"="}`.
+// - All other text, such as a name or a reference, cannot start with "=".
+//
+// The writer quotes every formula. Quote a formula you write by hand when it
+// contains " #": YAML reads the rest of an unquoted line as a comment.
+//
+// `as` names a step's result for later steps and formulas. A find step binds
+// a list of records, an add-record step binds the one record it added, and a
+// run step binds the value its code returns. A name is a JavaScript
+// identifier. It cannot be a reserved word, a standard global such as Math,
+// or one of AUTOMATION_FORMULA_NAMES.
 //
 // Fields, Groups, and Button fields are referenced by name. Collections are
 // workspace-relative folder paths. A code file is relative to the
@@ -51,12 +66,15 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // automation are the people who can edit its code.
 //
 // An invalid automation turns off only itself and keeps its own diagnostics.
-// A problem with the whole file, such as broken YAML or an unknown version,
-// turns every automation off with one diagnostic. js-yaml cannot edit a
-// document in place, so writeAutomationsFile rewrites the whole file. The
-// output is deterministic, so a save changes only the lines of the
-// automation that changed. Comments and hand formatting do not survive the
-// first save through the writer.
+// That includes a key written twice inside it. A problem with the whole file,
+// such as broken YAML, an unknown version, or a repeated top-level key, turns
+// every automation off with one diagnostic.
+//
+// js-yaml cannot edit a document in place, so writeAutomationsFile rewrites
+// the whole file. The output is deterministic, so a save changes only the
+// lines of the automation that changed. Comments and hand formatting do not
+// survive the first save through the writer. The writer reads its output
+// back and refuses text that does not read as the same data.
 
 const AUTOMATIONS_FILE_VERSION = 1;
 
@@ -92,10 +110,36 @@ export const MAX_INLINE_CODE_LENGTH = 8_000;
 // changes, and at this bound a parse takes about 10 ms.
 export const MAX_AUTOMATIONS_FILE_BYTES = 256 * 1024;
 
-type AutomationLiteral = string | number | boolean | null;
+// The names every formula can use: the values record, previous, trigger,
+// person, and message (for a Group trigger), and the helpers. The evaluator
+// provides exactly these, and a binding cannot take one of them.
+export const AUTOMATION_FORMULA_NAMES = [
+  "record",
+  "previous",
+  "trigger",
+  "person",
+  "message",
+  "today",
+  "now",
+  "dateAdd",
+  "dateBetween",
+  "formatDate",
+  "lower",
+  "upper",
+  "trim",
+  "contains",
+  "join",
+  "length",
+  "sum",
+  "min",
+  "max",
+  "round",
+] as const;
+
+type AutomationScalar = string | number | boolean | null;
 
 type AutomationValue =
-  | { kind: "literal"; value: AutomationLiteral }
+  | { kind: "literal"; value: AutomationScalar | AutomationScalar[] }
   /** `expression` is the formula without its leading "=". */
   | { kind: "formula"; expression: string };
 
@@ -109,10 +153,14 @@ type AutomationWeekday = (typeof AUTOMATION_WEEKDAYS)[number];
 
 const AUTOMATION_SCHEDULE_FREQUENCIES = ["hour", "day", "weekday", "week", "month"] as const;
 
-// `at` is "HH:MM" on a 24-hour clock, or ":MM" past each hour for an hourly
-// schedule. Without `at` in the file, a schedule runs at "00:00" or ":00".
-// Without `days`, a weekly schedule runs on Monday and a monthly schedule on
-// the 1st. The parser fills these defaults in, so the model is explicit.
+// A schedule runs in `timezone`, an IANA name such as "Europe/London".
+// `weekday` runs Monday to Friday there. `at` is "HH:MM" on a 24-hour clock,
+// or ":MM" past each hour for an hourly schedule. `days` are in calendar
+// order. A monthly day past the end of a shorter month, such as 31 in April,
+// runs on that month's last day. Without `at` in the file, a schedule runs at
+// "00:00" or ":00". Without `days`, a weekly schedule runs on Monday and a
+// monthly schedule on the 1st. The parser fills these defaults in, so the
+// model is explicit.
 type AutomationScheduleTrigger =
   | { kind: "schedule"; every: "hour" | "day" | "weekday"; at: string; timezone: string }
   | { kind: "schedule"; every: "week"; at: string; days: AutomationWeekday[]; timezone: string }
@@ -133,8 +181,8 @@ type AutomationTrigger =
 
 type AutomationStep =
   /**
-   * Sets fields on the triggering record, or on the records bound to
-   * `records` by an earlier find or add-record step.
+   * Sets fields on the triggering record, or on the record or records bound
+   * to `records` by an earlier add-record or find step.
    */
   | { kind: "set"; values: AutomationFieldValue[]; records: string | null }
   /** `collection` is null for this Collection. */
@@ -172,6 +220,7 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   // Problems with a property, in the file or in one automation.
   "unknown-property",
   "missing-property",
+  "duplicate-key",
   "expected-mapping",
   "expected-sequence",
   "expected-text",
@@ -201,6 +250,8 @@ export const AUTOMATION_DIAGNOSTIC_CODES = [
   "too-many-automations",
   "too-many-steps",
   "if-too-deep",
+  // A write that would not read back as the same automation.
+  "changed-on-reread",
 ] as const;
 
 export type AutomationDiagnosticCode = (typeof AUTOMATION_DIAGNOSTIC_CODES)[number];
@@ -221,7 +272,7 @@ export type AutomationEntry =
       id: string | null;
       name: string | null;
       diagnostics: AutomationDiagnostic[];
-      /** The entry as YAML loaded it. The writer writes it back unchanged. */
+      /** The entry as YAML loaded it. The writer writes the same data back. */
       raw: unknown;
     };
 
@@ -231,20 +282,65 @@ export type AutomationsFileParseResult =
   | { status: "read"; entries: AutomationEntry[] }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic };
 
+export type AutomationsFileWriteResult =
+  | { status: "ok"; text: string }
+  /** The text would not read back as the same entries. Nothing was written. */
+  | { status: "refused"; diagnostics: AutomationDiagnostic[] };
+
 export type AutomationTextPart =
   | { kind: "text"; text: string }
   | { kind: "expression"; expression: string };
 
+// Keys that a mapping repeats. js-yaml loads in json mode so a repeated key
+// does not fail the whole file; this tag records it, and the reader turns
+// off only the automation that holds it.
+const REPEATED_KEYS = new WeakMap<Map<unknown, unknown>, unknown[]>();
+
 // Mappings load as Maps, so keys keep their order and a key such as
-// "__proto__" stays data. Anchors and aliases are refused: the writer cannot
-// keep them, and an alias can make a small file expensive to walk.
-const AUTOMATIONS_YAML_SCHEMA = CORE_SCHEMA.withTags(realMapTag);
+// "__proto__" stays data.
+const MAP_TAG = defineMappingTag<Map<unknown, unknown>>("tag:yaml.org,2002:map", {
+  create: () => new Map(),
+  addPair: (map, key, value) => {
+    if (map.has(key)) REPEATED_KEYS.set(map, [...(REPEATED_KEYS.get(map) ?? []), key]);
+    map.set(key, value);
+    return "";
+  },
+  has: (map, key) => map.has(key),
+  keys: (map) => map.keys(),
+  get: (map, key) => map.get(key),
+  identify: (data) => data instanceof Map,
+});
+
+// Anchors and aliases are refused: the writer cannot keep them, and an alias
+// can make a small file expensive to walk.
+const AUTOMATIONS_YAML_SCHEMA = CORE_SCHEMA.withTags(MAP_TAG);
 const MAX_YAML_DEPTH = 32;
 const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-// A binding name is used in formulas, so it must be a JavaScript identifier.
 const BINDING_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const DAY_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const HOUR_TIME_PATTERN = /^:[0-5]\d$/;
+
+// Names a binding cannot take because JavaScript already gives them a
+// meaning: reserved words, including strict-mode ones, and the global
+// object's properties in ECMA-262 and ECMA-402.
+const JAVASCRIPT_NAMES: ReadonlySet<string> = new Set(
+  [
+    "await break case catch class const continue debugger default delete do else enum",
+    "export extends false finally for function if implements import in instanceof",
+    "interface let new null package private protected public return static super switch",
+    "this throw true try typeof var void while with yield arguments eval",
+    "globalThis Infinity NaN undefined isFinite isNaN parseFloat parseInt decodeURI",
+    "decodeURIComponent encodeURI encodeURIComponent AggregateError Array ArrayBuffer",
+    "BigInt BigInt64Array BigUint64Array Boolean DataView Date Error EvalError",
+    "FinalizationRegistry Float32Array Float64Array Function Int8Array Int16Array",
+    "Int32Array Iterator Map Number Object Promise Proxy RangeError ReferenceError RegExp",
+    "Set SharedArrayBuffer String Symbol SyntaxError TypeError Uint8Array",
+    "Uint8ClampedArray Uint16Array Uint32Array URIError WeakMap WeakRef WeakSet Atomics",
+    "JSON Math Reflect Intl",
+  ]
+    .join(" ")
+    .split(" "),
+);
 
 const TRIGGER_OPTIONS = {
   "record-added": [],
@@ -281,7 +377,8 @@ const RECORD_TRIGGERS: ReadonlySet<AutomationTrigger["kind"]> = new Set([
 ]);
 
 type Issues = AutomationDiagnostic[];
-type BindingKind = "records" | "value";
+// What a binding holds: one record, a list of records, or a code step's value.
+type BindingKind = "record" | "records" | "value";
 
 // Any diagnostic discards the whole automation, so a reader returns null only
 // where the caller needs a value to build the model.
@@ -296,6 +393,10 @@ function pointer(parent: string, key: string | number): string {
   return `${parent}/${String(key).replaceAll("~", "~0").replaceAll("/", "~1")}`;
 }
 
+function keyPointer(parent: string, key: unknown): string {
+  return pointer(parent, yamlKeyText(key) ?? "<non-text-key>");
+}
+
 function isEmptyYamlDocument(text: string): boolean {
   return text.split(/\r?\n/u).every((line) => {
     const trimmed = line.trim();
@@ -303,15 +404,22 @@ function isEmptyYamlDocument(text: string): boolean {
   });
 }
 
-function unreadable(
-  code: AutomationDiagnosticCode,
-  path: string,
-  line?: number,
-): AutomationsFileParseResult {
+function unreadable(code: AutomationDiagnosticCode, path: string, line?: number) {
   return {
-    status: "unreadable",
+    status: "unreadable" as const,
     diagnostic: line === undefined ? { code, path } : { code, path, line },
   };
+}
+
+function reportRepeatedKeys(value: unknown, path: string, issues: Issues): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => reportRepeatedKeys(item, pointer(path, index), issues));
+  } else if (value instanceof Map) {
+    for (const key of REPEATED_KEYS.get(value) ?? []) {
+      issues.push({ code: "duplicate-key", path: keyPointer(path, key) });
+    }
+    for (const [key, entry] of value) reportRepeatedKeys(entry, keyPointer(path, key), issues);
+  }
 }
 
 // A mapping whose keys are all in `allowed`. Other keys are reported.
@@ -331,7 +439,7 @@ function readMapping(
     if (text !== null && allowed.includes(text)) {
       entries.set(text, entry);
     } else {
-      issues.push({ code: "unknown-property", path: pointer(path, text ?? "<non-text-key>") });
+      issues.push({ code: "unknown-property", path: keyPointer(path, key) });
     }
   }
   return entries;
@@ -371,8 +479,9 @@ function required(
   return entries.get(key);
 }
 
-// Readers take undefined for an absent key and return null without a
-// diagnostic, so optional keys need no separate check.
+// Text in a place that takes no formula. Readers take undefined for an
+// absent key and return null without a diagnostic, so optional keys need no
+// separate check.
 function readText(value: unknown, path: string, max: number, issues: Issues): string | null {
   if (value === undefined) return null;
   if (value !== null && typeof value !== "string") {
@@ -381,6 +490,10 @@ function readText(value: unknown, path: string, max: number, issues: Issues): st
   }
   if (value === null || value.trim().length === 0) {
     issues.push({ code: "empty-value", path });
+    return null;
+  }
+  if (value.startsWith("=")) {
+    issues.push({ code: "unexpected-formula-marker", path });
     return null;
   }
   if (value.length > max) {
@@ -404,12 +517,7 @@ function readPath(value: unknown, path: string, issues: Issues): string | null {
 }
 
 function readCondition(value: unknown, path: string, issues: Issues): string | null {
-  const text = readText(value, path, MAX_EXPRESSION_LENGTH, issues);
-  if (text !== null && text.trimStart().startsWith("=")) {
-    issues.push({ code: "unexpected-formula-marker", path });
-    return null;
-  }
-  return text;
+  return readText(value, path, MAX_EXPRESSION_LENGTH, issues);
 }
 
 function readTemplate(value: unknown, path: string, issues: Issues): string | null {
@@ -421,29 +529,55 @@ function readTemplate(value: unknown, path: string, issues: Issues): string | nu
   return text;
 }
 
-function readValue(value: unknown, path: string, issues: Issues): AutomationValue | null {
-  if (typeof value === "string" && value.startsWith("=")) {
-    const expression = readText(value.slice(1), path, MAX_EXPRESSION_LENGTH, issues);
-    return expression === null ? null : { kind: "formula", expression };
+function isFormula(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("=") && !value.startsWith("==");
+}
+
+// A literal scalar, or undefined after a diagnostic. Text that starts with
+// "==" loses its first "="; text that starts with one "=" is a formula.
+function readScalar(value: unknown, path: string, issues: Issues): AutomationScalar | undefined {
+  if (isFormula(value)) {
+    issues.push({ code: "unexpected-formula-marker", path });
+    return undefined;
   }
-  if (typeof value === "string" && value.length > MAX_AUTOMATION_TEXT_LENGTH) {
+  if (typeof value === "string") {
+    const text = value.startsWith("==") ? value.slice(1) : value;
+    if (text.length <= MAX_AUTOMATION_TEXT_LENGTH) return text;
     issues.push({ code: "too-long", path });
-    return null;
+    return undefined;
   }
   if (typeof value === "number" && !Number.isFinite(value)) {
     issues.push({ code: "number-not-finite", path });
-    return null;
+    return undefined;
   }
-  if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    value === null
-  ) {
-    return { kind: "literal", value };
-  }
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
   issues.push({ code: "expected-scalar", path });
-  return null;
+  return undefined;
+}
+
+function readValue(value: unknown, path: string, issues: Issues): AutomationValue | null {
+  if (isFormula(value)) {
+    const expression = value.slice(1);
+    if (expression.trim().length === 0) {
+      issues.push({ code: "empty-value", path });
+      return null;
+    }
+    if (expression.length > MAX_EXPRESSION_LENGTH) {
+      issues.push({ code: "too-long", path });
+      return null;
+    }
+    return { kind: "formula", expression };
+  }
+  if (Array.isArray(value)) {
+    const items: AutomationScalar[] = [];
+    value.forEach((item, index) => {
+      const scalar = readScalar(item, pointer(path, index), issues);
+      if (scalar !== undefined) items.push(scalar);
+    });
+    return items.length === value.length ? { kind: "literal", value: items } : null;
+  }
+  const scalar = readScalar(value, path, issues);
+  return scalar === undefined ? null : { kind: "literal", value: scalar };
 }
 
 function readSequence(value: unknown, path: string, issues: Issues): unknown[] | null {
@@ -466,15 +600,12 @@ function readPeople(value: unknown, path: string, issues: Issues): AutomationVal
   const people: AutomationValue[] = [];
   items.forEach((item, index) => {
     const itemPath = pointer(path, index);
-    if (typeof item !== "string") {
-      issues.push({ code: "expected-text", path: itemPath });
+    if (typeof item !== "string" || item.trim().length === 0) {
+      issues.push({ code: typeof item === "string" ? "empty-value" : "expected-text", path: itemPath });
       return;
     }
-    const person = item.startsWith("=")
-      ? readValue(item, itemPath, issues)
-      : readReference(item, itemPath, issues);
-    if (typeof person === "string") people.push({ kind: "literal", value: person });
-    else if (person !== null) people.push(person);
+    const person = readValue(item, itemPath, issues);
+    if (person !== null) people.push(person);
   });
   return people;
 }
@@ -510,7 +641,7 @@ function readFieldValues(
   const values: AutomationFieldValue[] = [];
   for (const [key, entry] of value) {
     const keyText = yamlKeyText(key);
-    const fieldPath = pointer(path, keyText ?? "<non-text-key>");
+    const fieldPath = keyPointer(path, key);
     if (keyText === null) {
       issues.push({ code: "expected-text", path: fieldPath });
       continue;
@@ -520,7 +651,8 @@ function readFieldValues(
     if (field === RECORD_ID_FRONTMATTER_KEY) {
       issues.push({ code: "reserved-field-name", path: fieldPath });
     } else if (values.some((existing) => existing.field === field)) {
-      issues.push({ code: "duplicate-value", path: fieldPath });
+      // Keys such as 2024 and "2024" differ in YAML but name one field.
+      issues.push({ code: "duplicate-key", path: fieldPath });
     } else if (field !== null && fieldValue !== null) {
       values.push({ field, value: fieldValue });
     }
@@ -528,10 +660,15 @@ function readFieldValues(
   return values;
 }
 
-function isTimeZone(value: string): boolean {
+// An IANA name, spelled as IANA spells it. A fixed offset such as "+08:00"
+// ignores daylight saving time, so it is refused. Intl may resolve a name to
+// an alias from its own data, such as Asia/Kolkata to Asia/Calcutta, so only
+// a difference in letter case counts as a misspelling.
+function isTimeZoneName(value: string): boolean {
+  if (!value.split("/").every((segment) => /^[A-Z]/.test(segment))) return false;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: value });
-    return true;
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
+    return resolved === value || resolved.toLowerCase() !== value.toLowerCase();
   } catch {
     return false;
   }
@@ -584,7 +721,7 @@ function readSchedule(
 
   const timezonePath = pointer(path, "timezone");
   const timezone = readReference(required(entries, "timezone", path, issues), timezonePath, issues);
-  if (timezone !== null && !isTimeZone(timezone)) {
+  if (timezone !== null && !isTimeZoneName(timezone)) {
     issues.push({ code: "invalid-timezone", path: timezonePath });
   }
   if (timezone === null) return null;
@@ -648,6 +785,15 @@ function readTrigger(value: unknown, path: string, issues: Issues): AutomationTr
   }
 }
 
+function isBindingName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    BINDING_NAME_PATTERN.test(value) &&
+    !JAVASCRIPT_NAMES.has(value) &&
+    !AUTOMATION_FORMULA_NAMES.some((name) => name === value)
+  );
+}
+
 // Binds a step's result to `as`, so later steps can use it. Names are unique
 // in the whole automation.
 function bindName(
@@ -658,7 +804,7 @@ function bindName(
   context: StepContext,
 ): string | null {
   if (value === undefined) return null;
-  if (typeof value !== "string" || !BINDING_NAME_PATTERN.test(value)) {
+  if (!isBindingName(value)) {
     context.issues.push({ code: "invalid-binding-name", path });
     return null;
   }
@@ -717,7 +863,8 @@ function readStep(
       if (records === undefined && !context.hasRecord) {
         issues.push({ code: "step-needs-record", path });
       }
-      if (records !== undefined && (typeof records !== "string" || scope.get(records) !== "records")) {
+      const bound = typeof records === "string" ? scope.get(records) : undefined;
+      if (records !== undefined && bound !== "record" && bound !== "records") {
         issues.push({ code: "unknown-binding", path: option("records") });
       }
       if (values === null) return null;
@@ -726,7 +873,7 @@ function readStep(
     case "add-record": {
       const values = readFieldValues(argument, argumentPath, issues);
       const collection = readPath(entries.get("collection"), option("collection"), issues);
-      const as = bindName(entries.get("as"), option("as"), "records", scope, context);
+      const as = bindName(entries.get("as"), option("as"), "record", scope, context);
       return values === null ? null : { kind, values, collection, as };
     }
     case "find": {
@@ -783,6 +930,7 @@ function readAutomation(
   issues: Issues,
   seenIds: Set<string>,
 ): Automation | null {
+  reportRepeatedKeys(value, path, issues);
   const entries = readMapping(value, path, ["id", "name", "enabled", "when", "if", "do"], issues);
   if (entries === null) return null;
   const property = (key: string) => pointer(path, key);
@@ -850,16 +998,20 @@ function invalidEntry(raw: unknown, diagnostics: AutomationDiagnostic[]): Automa
   return { status: "invalid", id: text("id"), name: text("name"), diagnostics, raw };
 }
 
-export function parseAutomationsFile(text: string): AutomationsFileParseResult {
+// The `automations` list as YAML loaded it, or the problem with the file.
+function loadAutomationList(
+  text: string,
+): { status: "read"; list: unknown[] } | ReturnType<typeof unreadable> {
   if (new TextEncoder().encode(text).byteLength > MAX_AUTOMATIONS_FILE_BYTES) {
     return unreadable("file-too-large", "");
   }
-  if (isEmptyYamlDocument(text)) return { status: "read", entries: [] };
+  if (isEmptyYamlDocument(text)) return { status: "read", list: [] };
 
   let root: unknown;
   try {
     root = load(text, {
       schema: AUTOMATIONS_YAML_SCHEMA,
+      json: true,
       maxAliases: 0,
       maxDepth: MAX_YAML_DEPTH,
     });
@@ -867,22 +1019,27 @@ export function parseAutomationsFile(text: string): AutomationsFileParseResult {
     const line = error instanceof YAMLException && error.mark ? error.mark.line + 1 : undefined;
     return unreadable("invalid-yaml", "", line);
   }
-  if (root === null) return { status: "read", entries: [] };
+  if (root === null) return { status: "read", list: [] };
   if (!(root instanceof Map)) return unreadable("root-not-mapping", "");
+  const [repeated] = REPEATED_KEYS.get(root) ?? [];
+  if (repeated !== undefined) return unreadable("duplicate-key", keyPointer("", repeated));
   if (root.get("version") !== AUTOMATIONS_FILE_VERSION) {
     return unreadable("unsupported-version", "/version");
   }
   for (const key of root.keys()) {
     if (key !== "version" && key !== "automations") {
-      return unreadable("unknown-property", pointer("", yamlKeyText(key) ?? "<non-text-key>"));
+      return unreadable("unknown-property", keyPointer("", key));
     }
   }
   const list = root.get("automations");
-  if (list === undefined || list === null) return { status: "read", entries: [] };
+  if (list === undefined || list === null) return { status: "read", list: [] };
   if (!Array.isArray(list)) return unreadable("expected-sequence", "/automations");
+  return { status: "read", list };
+}
 
+function readEntries(list: readonly unknown[]): AutomationEntry[] {
   const seenIds = new Set<string>();
-  const entries = list.map((raw, index): AutomationEntry => {
+  return list.map((raw, index): AutomationEntry => {
     const path = pointer("/automations", index);
     if (index >= MAX_AUTOMATIONS) {
       return invalidEntry(raw, [{ code: "too-many-automations", path }]);
@@ -891,7 +1048,117 @@ export function parseAutomationsFile(text: string): AutomationsFileParseResult {
     const automation = readAutomation(raw, path, issues, seenIds);
     return automation === null ? invalidEntry(raw, issues) : { status: "valid", automation };
   });
-  return { status: "read", entries };
+}
+
+export function parseAutomationsFile(text: string): AutomationsFileParseResult {
+  const loaded = loadAutomationList(text);
+  return loaded.status === "read" ? { status: "read", entries: readEntries(loaded.list) } : loaded;
+}
+
+// Words after which "/" starts a regular expression instead of dividing.
+const WORDS_BEFORE_REGEX = new Set([
+  "await",
+  "case",
+  "delete",
+  "do",
+  "else",
+  "in",
+  "instanceof",
+  "new",
+  "of",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+const WORD_CHARACTER = /[\p{ID_Continue}$‌‍]/u;
+
+function quotedEnd(source: string, start: number): number {
+  const quote = source[start];
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") index += 1;
+    else if (char === quote) return index + 1;
+    else if (char === "\n") return -1;
+  }
+  return -1;
+}
+
+function templateLiteralEnd(source: string, start: number): number {
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 1;
+    } else if (char === "`") {
+      return index + 1;
+    } else if (char === "$" && source[index + 1] === "{") {
+      const end = expressionEnd(source, index + 2);
+      if (end === -1) return -1;
+      index = end;
+    }
+  }
+  return -1;
+}
+
+function regexEnd(source: string, start: number): number {
+  let inClass = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 1;
+    } else if (char === "\n") {
+      return -1;
+    } else if (char === "[" || char === "]") {
+      inClass = char === "[";
+    } else if (char === "/" && !inClass) {
+      let end = index + 1;
+      while (end < source.length && WORD_CHARACTER.test(source[end]!)) end += 1;
+      return end;
+    }
+  }
+  return -1;
+}
+
+// The index of the "}" that ends a JavaScript expression starting at
+// `start`, or -1. Braces inside strings, template literals, regular
+// expressions, comments, and nested braces do not count.
+function expressionEnd(source: string, start: number): number {
+  let depth = 0;
+  let regexAllowed = true;
+  let index = start;
+  while (index !== -1 && index < source.length) {
+    const char = source[index]!;
+    const next = source[index + 1];
+    if (/\s/u.test(char)) {
+      index += 1;
+    } else if (char === "/" && next === "/") {
+      const newline = source.indexOf("\n", index);
+      index = newline === -1 ? -1 : newline;
+    } else if (char === "/" && next === "*") {
+      const close = source.indexOf("*/", index + 2);
+      index = close === -1 ? -1 : close + 2;
+    } else if (char === '"' || char === "'" || char === "`" || (char === "/" && regexAllowed)) {
+      index =
+        char === "`" ? templateLiteralEnd(source, index)
+        : char === "/" ? regexEnd(source, index)
+        : quotedEnd(source, index);
+      regexAllowed = false;
+    } else if (WORD_CHARACTER.test(char)) {
+      let end = index + 1;
+      while (end < source.length && WORD_CHARACTER.test(source[end]!)) end += 1;
+      regexAllowed = WORDS_BEFORE_REGEX.has(source.slice(index, end));
+      index = end;
+    } else if (char === "}" && depth === 0) {
+      return index;
+    } else {
+      if (char === "{") depth += 1;
+      if (char === "}") depth -= 1;
+      regexAllowed = char !== ")" && char !== "]" && char !== "}";
+      index += 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -915,18 +1182,13 @@ export function automationTextParts(template: string): AutomationTextPart[] | nu
       index += 1;
       continue;
     }
-    let depth = 1;
-    let end = index + 1;
-    for (; end < template.length && depth > 0; end += 1) {
-      if (template[end] === "{") depth += 1;
-      else if (template[end] === "}") depth -= 1;
-    }
-    const expression = template.slice(index + 1, end - 1);
-    if (depth > 0 || expression.trim().length === 0) return null;
+    const end = expressionEnd(template, index + 1);
+    const expression = end === -1 ? "" : template.slice(index + 1, end);
+    if (expression.trim().length === 0) return null;
     if (text.length > 0) parts.push({ kind: "text", text });
     parts.push({ kind: "expression", expression });
     text = "";
-    index = end;
+    index = end + 1;
   }
   if (text.length > 0) parts.push({ kind: "text", text });
   return parts;
@@ -934,15 +1196,16 @@ export function automationTextParts(template: string): AutomationTextPart[] | nu
 
 // The writer builds Maps so keys keep the order written here, and a field
 // named "__proto__" or "2024" stays in place.
-function valueYaml(value: AutomationValue): AutomationLiteral {
-  if (value.kind === "formula") return `=${value.expression}`;
-  if (typeof value.value === "string" && value.value.startsWith("=")) {
-    return `=${JSON.stringify(value.value)}`;
-  }
-  return value.value;
+function scalarYaml(value: AutomationScalar): AutomationScalar {
+  return typeof value === "string" && value.startsWith("=") ? `=${value}` : value;
 }
 
-function fieldValuesYaml(values: readonly AutomationFieldValue[]): Map<string, AutomationLiteral> {
+function valueYaml(value: AutomationValue): AutomationScalar | AutomationScalar[] {
+  if (value.kind === "formula") return `=${value.expression}`;
+  return Array.isArray(value.value) ? value.value.map(scalarYaml) : scalarYaml(value.value);
+}
+
+function fieldValuesYaml(values: readonly AutomationFieldValue[]): Map<string, unknown> {
   return new Map(values.map(({ field, value }) => [field, valueYaml(value)]));
 }
 
@@ -1032,35 +1295,84 @@ function automationYaml(automation: Automation): Map<string, unknown> {
   ]);
 }
 
+// YAML 1.1 readers, such as PyYAML, read an unquoted 12:30 as the number 750.
+const SEXAGESIMAL = /^\d+(?::\d+)+$/;
+
+// Quotes every formula, and every clock time for YAML 1.1 readers.
+function quoteScalars(documents: YamlDocument[]): void {
+  visit(documents, (node) => {
+    if (node.kind === "scalar" && (node.value.startsWith("=") || SEXAGESIMAL.test(node.value))) {
+      node.style.singleQuoted = true;
+    }
+  });
+}
+
 function indent(text: string): string {
   return text.replace(/^(?=.)/gmu, "  ");
 }
 
-// YAML 1.1 readers, such as PyYAML, read an unquoted 12:30 as the number 750.
-const SEXAGESIMAL = /^\d+(?::\d+)+$/;
-
-function quoteSexagesimal(documents: YamlDocument[]): void {
-  visit(documents, (node) => {
-    if (node.kind === "scalar" && SEXAGESIMAL.test(node.value)) node.style.singleQuoted = true;
-  });
+// Whether two loaded or modeled values hold the same data, including keys
+// that a mapping repeats.
+function sameData(left: unknown, right: unknown): boolean {
+  if (left instanceof Map || right instanceof Map) {
+    if (!(left instanceof Map && right instanceof Map) || left.size !== right.size) return false;
+    if (!sameData(REPEATED_KEYS.get(left) ?? [], REPEATED_KEYS.get(right) ?? [])) return false;
+    const rightEntries = [...right];
+    return [...left].every(([key, value], index) => {
+      const [rightKey, rightValue] = rightEntries[index]!;
+      return sameData(key, rightKey) && sameData(value, rightValue);
+    });
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameData(item, right[index]))
+    );
+  }
+  if (typeof left === "object" && left !== null && typeof right === "object" && right !== null) {
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const keys = Object.keys(leftRecord);
+    return (
+      keys.length === Object.keys(rightRecord).length &&
+      keys.every((key) => Object.hasOwn(rightRecord, key) && sameData(leftRecord[key], rightRecord[key]))
+    );
+  }
+  return Object.is(left, right);
 }
 
 /**
  * The file text for these entries: valid automations in a fixed key order,
- * invalid entries as they were read, and a blank line between entries.
+ * invalid entries with the data they were read with, and a blank line
+ * between entries. Refuses text that does not read back as the same entries,
+ * such as a file over MAX_AUTOMATIONS_FILE_BYTES or an automation the parser
+ * would turn off.
  */
-export function writeAutomationsFile(entries: readonly AutomationEntry[]): string {
-  const header = `version: ${AUTOMATIONS_FILE_VERSION}\n`;
-  if (entries.length === 0) return `${header}automations: []\n`;
+export function writeAutomationsFile(entries: readonly AutomationEntry[]): AutomationsFileWriteResult {
+  const header = `version: ${AUTOMATIONS_FILE_VERSION}\nautomations:`;
   const items = entries.map((entry) =>
     indent(
       dump([entry.status === "valid" ? automationYaml(entry.automation) : entry.raw], {
         schema: AUTOMATIONS_YAML_SCHEMA,
         lineWidth: -1,
         noRefs: true,
-        transform: quoteSexagesimal,
+        transform: quoteScalars,
       }),
     ),
   );
-  return `${header}automations:\n${items.join("\n")}`;
+  const text = items.length === 0 ? `${header} []\n` : `${header}\n${items.join("\n")}`;
+
+  const loaded = loadAutomationList(text);
+  if (loaded.status === "unreadable") return { status: "refused", diagnostics: [loaded.diagnostic] };
+  const reread = readEntries(loaded.list);
+  const diagnostics = entries.flatMap((entry, index): AutomationDiagnostic[] => {
+    const again = reread[index];
+    const changed = [{ code: "changed-on-reread" as const, path: pointer("/automations", index) }];
+    if (entry.status === "invalid") return sameData(loaded.list[index], entry.raw) ? [] : changed;
+    if (again?.status === "invalid") return again.diagnostics;
+    return again !== undefined && sameData(again.automation, entry.automation) ? [] : changed;
+  });
+  return diagnostics.length === 0 ? { status: "ok", text } : { status: "refused", diagnostics };
 }

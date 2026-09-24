@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AUTOMATION_DIAGNOSTIC_CODES,
+  AUTOMATION_FORMULA_NAMES,
   MAX_AUTOMATION_ID_LENGTH,
   MAX_AUTOMATION_NAME_LENGTH,
   MAX_AUTOMATION_STEPS,
@@ -64,6 +65,33 @@ function validAutomations(text: string): Automation[] {
   });
 }
 
+function written(list: readonly AutomationEntry[]): string {
+  const result = writeAutomationsFile(list);
+  if (result.status !== "ok") throw new Error(`refused: ${JSON.stringify(result.diagnostics)}`);
+  return result.text;
+}
+
+function refusal(list: readonly AutomationEntry[]): AutomationDiagnostic[] {
+  const result = writeAutomationsFile(list);
+  if (result.status !== "refused") throw new Error("expected the writer to refuse");
+  return result.diagnostics;
+}
+
+function valid(automation: Partial<Automation>): AutomationEntry {
+  return {
+    status: "valid",
+    automation: {
+      id: "a",
+      name: "A",
+      enabled: true,
+      when: { kind: "record-added" },
+      if: null,
+      do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null }],
+      ...automation,
+    },
+  };
+}
+
 // Rebuilds every object with its keys in reverse order, so the writer is
 // checked against models built in any property order.
 function reverseKeys<T>(value: T): T {
@@ -120,6 +148,9 @@ automations:
           Removed on: '=today()'
         collection: Archive/Removed tasks
         as: logged
+      - set:
+          Logged: true
+        records: logged
 
   - id: late
     name: Flag late tasks
@@ -158,6 +189,7 @@ automations:
       days:
         - 1
         - 15
+        - 31
       timezone: America/New_York
     do:
       - add-record:
@@ -165,6 +197,10 @@ automations:
           Amount: 100
           Sent: false
           Notes: null
+          Tags:
+            - billing
+            - monthly
+          Total cell: '==SUM(A1:A3)'
 
   - id: mark-paid
     name: Mark paid
@@ -195,7 +231,7 @@ describe("automations.yaml round trip", () => {
   it("reads every trigger and step kind and writes the same text back", () => {
     const parsed = entries(EVERY_KIND);
     expect(parsed.map((entry) => entry.status)).toEqual(parsed.map(() => "valid"));
-    expect(writeAutomationsFile(parsed)).toBe(EVERY_KIND);
+    expect(written(parsed)).toBe(EVERY_KIND);
   });
 
   it("reads the model each kind describes", () => {
@@ -228,6 +264,7 @@ describe("automations.yaml round trip", () => {
     expect(review?.if).toBe("record.Estimate > 8");
     expect(archive?.when).toEqual({ kind: "record-removed" });
     expect(archive?.do[0]).toMatchObject({ collection: "Archive/Removed tasks", as: "logged" });
+    expect(archive?.do[1]).toMatchObject({ kind: "set", records: "logged" });
     expect(late?.when).toEqual({
       kind: "starts-matching",
       condition: 'record.Due < today() && record.Status != "Done"',
@@ -238,7 +275,7 @@ describe("automations.yaml round trip", () => {
       kind: "schedule",
       every: "month",
       at: "08:30",
-      days: [1, 15],
+      days: [1, 15, 31],
       timezone: "America/New_York",
     });
     expect(invoice?.do[0]).toMatchObject({
@@ -247,6 +284,8 @@ describe("automations.yaml round trip", () => {
         { field: "Amount", value: { kind: "literal", value: 100 } },
         { field: "Sent", value: { kind: "literal", value: false } },
         { field: "Notes", value: { kind: "literal", value: null } },
+        { field: "Tags", value: { kind: "literal", value: ["billing", "monthly"] } },
+        { field: "Total cell", value: { kind: "literal", value: "=SUM(A1:A3)" } },
       ],
     });
     expect(markPaid?.when).toEqual({ kind: "button", field: "Mark paid" });
@@ -264,7 +303,7 @@ describe("automations.yaml round trip", () => {
 
   it("writes the same text whatever order the model's keys are in", () => {
     const shuffled = entries(EVERY_KIND).map(reverseKeys);
-    expect(writeAutomationsFile(shuffled)).toBe(EVERY_KIND);
+    expect(written(shuffled)).toBe(EVERY_KIND);
   });
 
   it("changes only the lines of the automation that changed", () => {
@@ -272,8 +311,8 @@ describe("automations.yaml round trip", () => {
     const [first] = parsed;
     if (first?.status !== "valid") throw new Error("expected a valid automation");
     const edited = [{ ...first, automation: { ...first.automation, enabled: false } }, ...parsed.slice(1)];
-    const before = writeAutomationsFile(parsed).split("\n\n");
-    const after = writeAutomationsFile(edited).split("\n\n");
+    const before = written(parsed).split("\n\n");
+    const after = written(edited).split("\n\n");
     expect(after.slice(1)).toEqual(before.slice(1));
     expect(after[0]).toContain("    enabled: false\n");
   });
@@ -285,7 +324,7 @@ describe("automations.yaml round trip", () => {
       when: {schedule: week, days: [fri, mon], timezone: UTC}
       do: [{add-record: {"2024": 1, "__proto__": x}}]
     `);
-    expect(writeAutomationsFile(entries(text))).toBe(`version: 1
+    expect(written(entries(text))).toBe(`version: 1
 automations:
   - id: a
     name: A
@@ -310,21 +349,21 @@ automations:
       name: Broken
       when: record-added
       colour: blue
-      do: [{set: {Done: true}}]
+      do: [{set: {Done: true, Note: =x}}]
       `,
       "id: fine\nname: Fine\nwhen: record-added\ndo: [{set: {Done: true}}]",
     );
     const parsed = entries(text);
     expect(parsed[0]).toMatchObject({ status: "invalid", id: "broken", name: "Broken" });
-    const written = writeAutomationsFile(parsed);
-    expect(written).toContain("    colour: blue\n");
-    const reread = entries(written);
+    const saved = written(parsed);
+    expect(saved).toContain("    colour: blue\n");
+    const reread = entries(saved);
     expect(reread).toEqual(parsed);
-    expect(writeAutomationsFile(reread)).toBe(written);
+    expect(written(reread)).toBe(saved);
   });
 
   it("writes an empty list", () => {
-    const text = writeAutomationsFile([]);
+    const text = written([]);
     expect(text).toBe("version: 1\nautomations: []\n");
     expect(entries(text)).toEqual([]);
   });
@@ -333,6 +372,101 @@ automations:
     for (const text of ["", "# nothing yet\n", "---\n", "version: 1\n", "version: 1\nautomations:\n"]) {
       expect(entries(text)).toEqual([]);
     }
+  });
+});
+
+// One automation whose add-record step holds fields of these lengths.
+function fieldsOfLengths(lengths: number[]): AutomationEntry[] {
+  return [
+    valid({
+      do: [
+        {
+          kind: "add-record",
+          values: lengths.map((length, index) => ({
+            field: `F${String(index).padStart(3, "0")}`,
+            value: { kind: "literal", value: "x".repeat(length) },
+          })),
+          collection: null,
+          as: null,
+        },
+      ],
+    }),
+  ];
+}
+
+const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
+
+// Field lengths whose file is exactly `bytes` long. A field line is ten
+// spaces, "F000: ", its value, and a newline.
+function lengthsForFileOf(bytes: number): number[] {
+  const lineOverhead = "          F000: \n".length;
+  let remaining = bytes - (byteLength(written(fieldsOfLengths([1]))) - (1 + lineOverhead));
+  const lengths: number[] = [];
+  while (remaining > 0) {
+    const length = Math.min(MAX_AUTOMATION_TEXT_LENGTH, remaining - lineOverhead);
+    lengths.push(length);
+    remaining -= length + lineOverhead;
+  }
+  return lengths;
+}
+
+describe("the checked writer", () => {
+  it("writes a file at the size bound and refuses one byte more", () => {
+    const atBound = written(fieldsOfLengths(lengthsForFileOf(MAX_AUTOMATIONS_FILE_BYTES)));
+    expect(byteLength(atBound)).toBe(MAX_AUTOMATIONS_FILE_BYTES);
+    expect(entries(atBound)[0]?.status).toBe("valid");
+    expect(refusal(fieldsOfLengths(lengthsForFileOf(MAX_AUTOMATIONS_FILE_BYTES + 1)))).toEqual([
+      { code: "file-too-large", path: "" },
+    ]);
+  });
+
+  it("keeps text and formulas at their bounds and refuses them past it", () => {
+    const setX = (value: Automation["do"][number]) => valid({ do: [value] });
+    const literal = (text: string) =>
+      setX({ kind: "set", values: [{ field: "X", value: { kind: "literal", value: text } }], records: null });
+    const formula = (expression: string) =>
+      setX({ kind: "set", values: [{ field: "X", value: { kind: "formula", expression } }], records: null });
+    for (const entry of [
+      literal(`=${"x".repeat(MAX_AUTOMATION_TEXT_LENGTH - 1)}`),
+      formula("1".repeat(MAX_EXPRESSION_LENGTH)),
+    ]) {
+      expect(entries(written([entry]))).toEqual([entry]);
+    }
+    expect(refusal([literal(`=${"x".repeat(MAX_AUTOMATION_TEXT_LENGTH)}`)])).toEqual([
+      { code: "too-long", path: "/automations/0/do/0/set/X" },
+    ]);
+    expect(refusal([formula("1".repeat(MAX_EXPRESSION_LENGTH + 1))])).toEqual([
+      { code: "too-long", path: "/automations/0/do/0/set/X" },
+    ]);
+  });
+
+  it("refuses an automation the parser would turn off or read differently", () => {
+    expect(refusal([valid({ id: "a" }), valid({ id: "a" })])).toEqual([
+      { code: "duplicate-value", path: "/automations/1/id" },
+    ]);
+    expect(refusal([valid({ name: "=Budget" })])).toEqual([
+      { code: "unexpected-formula-marker", path: "/automations/0/name" },
+    ]);
+    expect(
+      refusal([
+        valid({
+          when: { kind: "schedule", every: "week", at: "09:00", days: ["fri", "mon"], timezone: "UTC" },
+          do: [{ kind: "post", text: "Hi", group: "Team" }],
+        }),
+      ]),
+    ).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
+    expect(
+      refusal([
+        valid({
+          do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "=x" } }], records: null }],
+        }),
+      ]),
+    ).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
+  });
+
+  it("refuses to write back an invalid automation whose repeated key it would drop", () => {
+    const parsed = entries(automationsFile("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1, X: 2}}]"));
+    expect(refusal(parsed)).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
   });
 });
 
@@ -355,23 +489,75 @@ describe("values, conditions, and templates", () => {
     });
   });
 
-  it("writes literal text that starts with = as a formula that returns it", () => {
-    const automation: Automation = {
-      id: "a",
-      name: "A",
-      enabled: true,
-      when: { kind: "field-changed", field: "Code", to: { kind: "literal", value: "=5" } },
-      if: null,
-      do: [{ kind: "set", values: [{ field: "Code", value: { kind: "literal", value: "=5" } }], records: null }],
-    };
-    const text = writeAutomationsFile([{ status: "valid", automation }]);
-    expect(text).toContain(`Code: '="=5"'`);
-    const [reread] = validAutomations(text);
-    expect(reread?.when).toEqual({
-      kind: "field-changed",
-      field: "Code",
-      to: { kind: "formula", expression: '"=5"' },
+  it("reads text that starts with == as literal text without its first =", () => {
+    const [automation] = validAutomations(
+      automationsFile(withStep(`set: {A: ==5, B: '===x', C: [==a, b]}`)),
+    );
+    expect(automation?.do[0]).toMatchObject({
+      values: [
+        { field: "A", value: { kind: "literal", value: "=5" } },
+        { field: "B", value: { kind: "literal", value: "==x" } },
+        { field: "C", value: { kind: "literal", value: ["=a", "b"] } },
+      ],
     });
+  });
+
+  it("keeps a literal that starts with = a literal, and a formula a formula, after a save", () => {
+    const entry = valid({
+      when: { kind: "field-changed", field: "Code", to: { kind: "literal", value: "=5" } },
+      do: [
+        {
+          kind: "set",
+          values: [
+            { field: "Code", value: { kind: "literal", value: "=5" } },
+            { field: "Codes", value: { kind: "literal", value: ["=5", "6"] } },
+            { field: "Sum", value: { kind: "formula", expression: '"=" + 5' } },
+          ],
+          records: null,
+        },
+      ],
+    });
+    const text = written([entry]);
+    expect(text).toContain("to: '==5'\n");
+    expect(text).toContain(`Sum: '="=" + 5'\n`);
+    expect(entries(text)).toEqual([entry]);
+  });
+
+  it("reads a list as a literal", () => {
+    const [automation] = validAutomations(
+      automationsFile(
+        "id: a\nname: A\nwhen: {field-changed: Tags, to: [urgent]}\ndo: [{set: {Tags: [a, 2, true, null], None: []}}]",
+      ),
+    );
+    expect(automation?.when).toMatchObject({ to: { kind: "literal", value: ["urgent"] } });
+    expect(automation?.do[0]).toMatchObject({
+      values: [
+        { field: "Tags", value: { kind: "literal", value: ["a", 2, true, null] } },
+        { field: "None", value: { kind: "literal", value: [] } },
+      ],
+    });
+  });
+
+  it("reads a formula in to: as the value to compare, not a condition", () => {
+    const [automation] = validAutomations(
+      automationsFile("id: a\nname: A\nwhen: {field-changed: Due, to: '=record.Due > today()'}\ndo: [{set: {X: 1}}]"),
+    );
+    expect(automation?.when).toEqual({
+      kind: "field-changed",
+      field: "Due",
+      to: { kind: "formula", expression: "record.Due > today()" },
+    });
+  });
+
+  it("ends an unquoted formula at ' #', which YAML reads as a comment", () => {
+    const [automation] = validAutomations(automationsFile(withStep("set:\n  X: =a + 1 # the rest")));
+    expect(automation?.do[0]).toMatchObject({
+      values: [{ field: "X", value: { kind: "formula", expression: "a + 1" } }],
+    });
+    const entry = valid({
+      do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "a + 1 # b" } }], records: null }],
+    });
+    expect(written([entry])).toContain("X: '=a + 1 # b'\n");
   });
 
   it("tells a cleared field from any change", () => {
@@ -382,7 +568,7 @@ describe("values, conditions, and templates", () => {
     const [cleared, anyChange] = validAutomations(text);
     expect(cleared?.when).toMatchObject({ to: { kind: "literal", value: null } });
     expect(anyChange?.when).toMatchObject({ to: null });
-    expect(validAutomations(writeAutomationsFile(entries(text)))).toEqual([cleared, anyChange]);
+    expect(validAutomations(written(entries(text)))).toEqual([cleared, anyChange]);
   });
 
   it("splits message templates into text and expressions", () => {
@@ -394,13 +580,35 @@ describe("values, conditions, and templates", () => {
     expect(automationTextParts("{ ({a: 1}).a }")).toEqual([
       { kind: "expression", expression: " ({a: 1}).a " },
     ]);
-    for (const broken of ["{unclosed", "stray }", "{}", "{  }", "{a}}"]) {
+    for (const broken of ["{unclosed", "stray }", "{}", "{  }", "{a}}", "{a // }", "{'}", "{/* } */"]) {
       expect(automationTextParts(broken)).toBeNull();
     }
   });
 
+  it.each([
+    ['record.Name.replace("}", "")', "a double-quoted string"],
+    ["'{' + record.Name", "a single-quoted string"],
+    ["`}${record.Name}{`", "a template literal"],
+    ["`${ {a: '}'}.a }`", "an object inside a template literal"],
+    ["/}/.test(record.Name)", "a regular expression"],
+    ["record.Name.replace(/[{}]/g, '')", "a character class"],
+    ["record.Total / 2", "a division"],
+    ["record.Total /* } */ + 1", "a block comment"],
+    ["typeof /}/", "a regular expression after typeof"],
+  ])("ends a template expression after %s (%s)", (expression) => {
+    expect(automationTextParts(`Hi {${expression}}!`)).toEqual([
+      { kind: "text", text: "Hi " },
+      { kind: "expression", expression },
+      { kind: "text", text: "!" },
+    ]);
+  });
+
+  it("ends a line comment at the newline", () => {
+    expect(automationTextParts("{a // }\n}")).toEqual([{ kind: "expression", expression: "a // }\n" }]);
+  });
+
   it("quotes clock times so YAML 1.1 readers keep them as text", () => {
-    const text = writeAutomationsFile(
+    const text = written(
       entries(automationsFile("id: a\nname: A\nwhen: {schedule: day, at: '12:30', timezone: UTC}\ndo: [{post: Hi, group: Team}]")),
     );
     expect(text).toContain("at: '12:30'\n");
@@ -420,9 +628,9 @@ const FILE_CASES: FileCase[] = [
     expected: { code: "invalid-yaml", path: "", line: 4 },
   },
   {
-    name: "a duplicate key, which YAML forbids",
+    name: "a repeated top-level key",
     text: "version: 1\nversion: 1\n",
-    expected: { code: "invalid-yaml", path: "", line: 2 },
+    expected: { code: "duplicate-key", path: "/version" },
   },
   {
     name: "an alias",
@@ -476,6 +684,16 @@ const AUTOMATION_CASES: AutomationCase[] = [
     item: "id: a\nwhen: record-added\ndo: [{set: {X: 1}}]",
     expected: [{ code: "missing-property", path: at("/name") }],
   },
+  {
+    name: "a key written twice",
+    item: "id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1, X: 2}}]",
+    expected: [{ code: "duplicate-key", path: at("/do/0/set/X") }],
+  },
+  {
+    name: "one field written as a number and as text",
+    item: withStep(`set: {2024: 1, "2024": 2}`),
+    expected: [{ code: "duplicate-key", path: at("/do/0/set/2024") }],
+  },
   { name: "an entry that is not a mapping", item: "just text", expected: [{ code: "expected-mapping", path: at("") }] },
   {
     name: "steps that are not a list",
@@ -498,9 +716,14 @@ const AUTOMATION_CASES: AutomationCase[] = [
     expected: [{ code: "expected-boolean", path: at("/enabled") }],
   },
   {
-    name: "a list as a value",
-    item: withStep("set: {X: [1, 2]}"),
-    expected: [{ code: "expected-scalar", path: at("/do/0/set/X") }],
+    name: "a list inside a list",
+    item: withStep("set: {X: [1, [2]]}"),
+    expected: [{ code: "expected-scalar", path: at("/do/0/set/X/1") }],
+  },
+  {
+    name: "a formula inside a list",
+    item: withStep("set: {X: [a, =b]}"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/set/X/1") }],
   },
   {
     name: "an argument to record-added",
@@ -573,6 +796,26 @@ const AUTOMATION_CASES: AutomationCase[] = [
     expected: [{ code: "unexpected-formula-marker", path: at("/if") }],
   },
   {
+    name: "message text written as a formula",
+    item: withStep("notify: =record.Name\nto: [user_ana]"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/notify") }],
+  },
+  {
+    name: "starts-with written as a formula",
+    item: "id: a\nname: A\nwhen: {group-message: Team, starts-with: =x}\ndo: [{post: Hi, group: Team}]",
+    expected: [{ code: "unexpected-formula-marker", path: at("/when/starts-with") }],
+  },
+  {
+    name: "a personal step's person written as a formula",
+    item: withStep("wake-agent: Look\nperson: =record.Owner"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/person") }],
+  },
+  {
+    name: "a Group written as a formula",
+    item: withStep("post: Hi\ngroup: =record.Team"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/group") }],
+  },
+  {
     name: "an infinite number",
     item: withStep("set: {X: .inf}"),
     expected: [{ code: "number-not-finite", path: at("/do/0/set/X") }],
@@ -586,6 +829,26 @@ const AUTOMATION_CASES: AutomationCase[] = [
     name: "a code file outside the Collection",
     item: withStep("run-file: ../shared/tally.js"),
     expected: [{ code: "invalid-path", path: at("/do/0/run-file") }],
+  },
+  {
+    name: "a code file on a Windows drive",
+    item: withStep("run-file: C:/x/evil.js"),
+    expected: [{ code: "invalid-path", path: at("/do/0/run-file") }],
+  },
+  {
+    name: "a code file relative to a Windows drive",
+    item: withStep("run-file: C:evil.js"),
+    expected: [{ code: "invalid-path", path: at("/do/0/run-file") }],
+  },
+  {
+    name: "a code file's alternate data stream",
+    item: withStep("run-file: scripts/a.js:stream"),
+    expected: [{ code: "invalid-path", path: at("/do/0/run-file") }],
+  },
+  {
+    name: "a Collection on a Windows drive",
+    item: withStep("add-record: {X: 1}\ncollection: C:/Tasks"),
+    expected: [{ code: "invalid-path", path: at("/do/0/collection") }],
   },
   {
     name: "a record's id as a field",
@@ -677,10 +940,11 @@ describe("automations.yaml diagnostics", () => {
       automationsFile(
         "id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]",
         "id: b\nname: B\nwhen: record-added\nextra: 1\ndo: [{set: {X: 1}}]",
-        "id: c\nname: C\nwhen: record-added\ndo: [{set: {X: 1}}]",
+        "id: c\nname: C\nwhen: record-added\ndo: [{set: {X: 1, X: 2}}]",
+        "id: d\nname: D\nwhen: record-added\ndo: [{set: {X: 1}}]",
       ),
     );
-    expect(parsed.map((entry) => entry.status)).toEqual(["valid", "invalid", "valid"]);
+    expect(parsed.map((entry) => entry.status)).toEqual(["valid", "invalid", "invalid", "valid"]);
     expect(parsed[1]).toEqual({
       status: "invalid",
       id: "b",
@@ -717,6 +981,24 @@ describe("automations.yaml diagnostics", () => {
     });
   });
 
+  it.each(["new", "this", "class", "let", "undefined", "NaN", "Math", "JSON", "record", "today", "now"])(
+    "refuses %s as a binding name",
+    (name) => {
+      expect(diagnosticsOf(withStep(`find: 'true'\nas: ${name}`))).toEqual([
+        { code: "invalid-binding-name", path: at("/do/0/as") },
+      ]);
+    },
+  );
+
+  it("refuses every formula name as a binding name", () => {
+    for (const name of AUTOMATION_FORMULA_NAMES) {
+      expect(diagnosticsOf(withStep(`run: 'return 1'\nas: ${name}`))).toEqual([
+        { code: "invalid-binding-name", path: at("/do/0/as") },
+      ]);
+    }
+    expect(diagnosticsOf(withStep("run: 'return 1'\nas: records"))).toEqual([]);
+  });
+
   it("scopes a name bound in a branch to that branch", () => {
     expect(
       diagnosticsOf(
@@ -728,7 +1010,13 @@ describe("automations.yaml diagnostics", () => {
     ).toEqual([{ code: "unknown-binding", path: at("/do/1/records") }]);
   });
 
-  it("changes only records that a find or add-record step bound", () => {
+  it("changes only the records that an add-record or find step bound", () => {
+    expect(
+      diagnosticsOf(stepsItem(["{add-record: {X: 1}, as: added}", "{set: {Y: 1}, records: added}"])),
+    ).toEqual([]);
+    expect(
+      diagnosticsOf(stepsItem(["{find: 'true', as: open}", "{set: {Y: 1}, records: open}"])),
+    ).toEqual([]);
     expect(
       diagnosticsOf(stepsItem(["{run: 'return 1', as: result}", "{set: {X: 1}, records: result}"])),
     ).toEqual([{ code: "unknown-binding", path: at("/do/1/records") }]);
@@ -753,6 +1041,7 @@ describe("automations.yaml diagnostics", () => {
   it("checks schedule times and days against the frequency", () => {
     const schedule = (when: string) => diagnosticsOf(withStep("post: Hi\ngroup: Team", when));
     expect(schedule("{schedule: hour, at: ':15', timezone: UTC}")).toEqual([]);
+    expect(schedule("{schedule: month, days: [31], timezone: UTC}")).toEqual([]);
     expect(schedule("{schedule: hour, at: '09:15', timezone: UTC}")).toEqual([
       { code: "invalid-time", path: at("/when/at") },
     ]);
@@ -767,6 +1056,22 @@ describe("automations.yaml diagnostics", () => {
       { code: "missing-property", path: at("/when/timezone") },
     ]);
   });
+
+  it.each(["UTC", "Etc/UTC", "Etc/GMT+8", "Europe/London", "Asia/Kolkata", "Asia/Calcutta", "Europe/Kyiv"])(
+    "accepts the time zone %s",
+    (timezone) => {
+      expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([]);
+    },
+  );
+
+  it.each(["+08:00", "-05:00", "europe/london", "EUROPE/LONDON", "Utc", "asia/kolkata"])(
+    "refuses the time zone %s",
+    (timezone) => {
+      expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([
+        { code: "invalid-timezone", path: at("/when/timezone") },
+      ]);
+    },
+  );
 
   it("fills in schedule defaults", () => {
     const [weekly, monthly, hourly] = validAutomations(
@@ -787,7 +1092,9 @@ describe("automations.yaml diagnostics", () => {
       ...[...AUTOMATION_CASES, ...BOUND_CASES].flatMap((testCase) =>
         testCase.expected.map((diagnostic) => diagnostic.code),
       ),
+      // Covered by their own tests above.
       "too-many-automations",
+      "changed-on-reread",
     ]);
     expect([...AUTOMATION_DIAGNOSTIC_CODES].filter((code) => !covered.has(code))).toEqual([]);
   });
