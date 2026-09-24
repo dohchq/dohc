@@ -2095,6 +2095,29 @@ CREATE INDEX owner_pending_settlement_binary_blobs
     ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 ";
 
+/// Files the materializer moved off a target before writing or deleting it.
+/// An `open` row is written before the move and resolved after it; a `kept`
+/// row is the evidence of bytes another program wrote that the engine has not
+/// captured.
+const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
+CREATE TABLE materialization_displacements (
+    displacement_id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    displaced_name TEXT NOT NULL,
+    expected_sha256 TEXT NOT NULL,
+    content_sha256 TEXT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'kept')),
+    displaced_sha256 TEXT,
+    created_at_ms INTEGER NOT NULL,
+    resolved_at_ms INTEGER,
+    CHECK ((state = 'open') = (resolved_at_ms IS NULL))
+) STRICT;
+CREATE INDEX materialization_displacements_state
+    ON materialization_displacements(state, job_id);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2125,6 +2148,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 4,
         id: "v2-owner-pending-settlements",
         sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: "v2-materialization-displacements",
+        sql: V2_MATERIALIZATION_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2363,6 +2392,10 @@ mod tests {
                 "v2-owner-pending-settlements",
                 "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
             ),
+            (
+                "v2-materialization-displacements",
+                "bd1c71066e5d1b6fedeb7bc58732f04a6409de2e7e8f9f349a74d2c98d1868ba",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2411,7 +2444,9 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 3 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 2
+            }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2436,7 +2471,12 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 1
+            }
+        );
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),

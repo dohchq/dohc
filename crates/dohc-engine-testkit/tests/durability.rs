@@ -297,10 +297,11 @@ fn close_reopen_mutate_cycle_stays_writable() {
 
     let store = open(&db, 99);
     assert_eq!(moments(&store), 3);
-    // Each shipped migration, including pending owner settlements, runs once.
+    // Each shipped migration, including materialization displacements, runs
+    // once.
     assert_eq!(
         store.table_row_count("engine_migrations").expect("ledger"),
-        5
+        6
     );
     let conflict_objects = store
         .read_with(|conn| {

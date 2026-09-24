@@ -4,7 +4,7 @@
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
-use crate::materialize::MaterializationJob;
+use crate::materialize::{Displacement, DisplacementSpec, MaterializationJob};
 use crate::schema::{open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -273,6 +273,50 @@ impl EngineStore {
     /// The number of pending materialization jobs.
     pub fn pending_materialization_count(&self) -> Result<i64, StorageError> {
         materialize::pending_job_count(&self.conn)
+    }
+
+    /// Record, before the move, that the materializer is about to move a
+    /// target aside. Returns the id [`Self::discard_displacement`] and
+    /// [`Self::keep_displacement`] resolve.
+    pub fn open_displacement(&self, spec: &DisplacementSpec) -> Result<i64, StorageError> {
+        materialize::open_displacement(&self.conn, spec)
+    }
+
+    /// Delete an open displacement row.
+    pub fn discard_displacement(&self, displacement_id: i64) -> Result<(), StorageError> {
+        materialize::discard_displacement(&self.conn, displacement_id)
+    }
+
+    /// Keep an open displacement as the evidence of an outside change.
+    pub fn keep_displacement(
+        &self,
+        displacement_id: i64,
+        displaced_sha256: Option<&str>,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::keep_displacement(&self.conn, displacement_id, displaced_sha256, now_ms)
+    }
+
+    /// Every open displacement, oldest first.
+    pub fn list_open_displacements(&self) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_open_displacements(&self.conn, None)
+    }
+
+    /// The open displacements of one job, oldest first.
+    pub fn list_open_displacements_for_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_open_displacements(&self.conn, Some(job_id))
+    }
+
+    /// The kept displacements of one workspace, which are outside changes the
+    /// engine has not captured yet.
+    pub fn list_kept_displacements(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_kept_displacements(&self.conn, workspace_id)
     }
 
     /// The highest complete `target_generation` for `path` in `workspace_id`

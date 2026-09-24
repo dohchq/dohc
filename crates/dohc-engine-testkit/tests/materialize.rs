@@ -10,8 +10,9 @@ use dohc_engine_files::{
     StdReplacer, backoff_delay, materialize_secret_one, run_pending_jobs,
 };
 use dohc_engine_storage::{
-    EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
-    enqueue_delete_job, enqueue_job, hex_sha256,
+    DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
+    NoFaults, Preimage, StorageError, cancel_pending_jobs_for_path, enqueue_delete_job,
+    enqueue_job, hex_sha256,
 };
 use dohc_engine_testkit::{
     ScriptedFaults,
@@ -21,7 +22,7 @@ use dohc_test_scratch::ScratchDir;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Mutex,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 struct Scratch {
@@ -750,6 +751,8 @@ fn delete_job_replays_after_remove_before_complete() {
     .expect("replay");
     assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
     assert!(!sc.target("a.md").exists());
+    assert!(displaced_files(&sc).is_empty(), "the deleted copy is gone");
+    assert!(store.list_open_displacements().expect("open").is_empty());
     assert_eq!(store.pending_materialization_count().expect("pending"), 0);
 }
 
@@ -885,40 +888,53 @@ impl FlakyReplacer {
         }
     }
 }
-impl AtomicReplacer for FlakyReplacer {
-    fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+impl FlakyReplacer {
+    /// Count the attempt, and fail it while injected failures remain.
+    fn fail(&self) -> Option<std::io::Error> {
         self.attempts.fetch_add(1, Ordering::AcqRel);
-        if self
-            .remaining_failures
+        self.remaining_failures
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 n.checked_sub(1).or(Some(0))
             })
             .is_ok_and(|prev| prev > 0)
-        {
-            // The real transient shape per platform: a Windows
-            // AV/indexer handle surfaces ERROR_SHARING_VIOLATION; POSIX has
-            // no sharing violations, so its retryable class is EACCES-shaped.
-            // A fake injecting the ambiguous PermissionDenied kind on Windows
-            // would certify a classification the real error never takes.
-            #[cfg(windows)]
-            return Err(std::io::Error::from_raw_os_error(32));
-            #[cfg(not(windows))]
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected transient permission denial",
-            ));
+            .then(transient_lock_error)
+    }
+}
+impl AtomicReplacer for FlakyReplacer {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        match self.fail() {
+            Some(err) => Err(err),
+            None => StdReplacer.displace(target, displaced),
         }
-        std::fs::rename(from, to)
+    }
+
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        match self.fail() {
+            Some(err) => Err(err),
+            None => StdReplacer.place(incoming, target),
+        }
+    }
+}
+
+/// The real transient shape per platform: a Windows AV/indexer handle
+/// surfaces ERROR_SHARING_VIOLATION; POSIX has no sharing violations, so its
+/// retryable class is EACCES-shaped. A fake injecting the ambiguous
+/// PermissionDenied kind on Windows would certify a classification the real
+/// error never takes.
+fn transient_lock_error() -> std::io::Error {
+    if cfg!(windows) {
+        std::io::Error::from_raw_os_error(32)
+    } else {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected transient permission denial",
+        )
     }
 }
 
 struct NonTransientFailingReplacer;
 
 impl AtomicReplacer for NonTransientFailingReplacer {
-    fn try_replace(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other("injected non-transient failure"))
-    }
-
     fn try_replace_secret(
         &self,
         _from: &Path,
@@ -1101,22 +1117,27 @@ fn every_materialize_fault_point_has_a_live_call_site() {
     // Registry consistency: arming each materialize.* point crashes the pipeline
     // at that point — no dead/inert fault points. A new materialize FaultPoint
     // that is not wired would fail here.
+    // The displacement points only exist on an overwrite, so every point runs
+    // against a target that holds the job's preimage.
     let points = [
         FaultPoint::MaterializeAfterJobCommit,
         FaultPoint::MaterializeAfterTempWrite,
         FaultPoint::MaterializeAfterFlushBeforeRename,
         FaultPoint::MaterializeBeforePreimageRevalidate,
+        FaultPoint::MaterializeAfterDisplacementJournal,
+        FaultPoint::MaterializeAfterDisplaceBeforePlace,
         FaultPoint::MaterializeAfterRenameBeforeComplete,
     ];
     for (i, point) in points.into_iter().enumerate() {
         let sc = Scratch::new(&format!("live-{i}"));
         let mut store = EngineStore::open(&sc.db(), 1).expect("open");
         let content = format!("content-{i}");
+        std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage");
         let job = spec(
             "j1",
             "a.md",
             &hex_sha256(content.as_bytes()),
-            Preimage::Absent,
+            Preimage::Present(hex_sha256(PREIMAGE)),
             1,
             10,
         );
@@ -1142,4 +1163,555 @@ fn every_materialize_fault_point_has_a_live_call_site() {
             point.as_str()
         );
     }
+}
+
+// --- displace, then place: bytes another program wrote are never destroyed ---
+
+const PREIMAGE: &[u8] = b"preimage the engine already has";
+const OURS: &[u8] = b"content the job writes";
+const OUTSIDE: &[u8] = b"bytes another program wrote after the check";
+
+fn drain(
+    store: &EngineStore,
+    sc: &Scratch,
+    replacer: &dyn AtomicReplacer,
+    faults: &dyn FaultInjector,
+) -> Vec<JobOutcome> {
+    run_pending_jobs(
+        store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults,
+        },
+    )
+    .expect("run")
+    .into_iter()
+    .map(|result| result.outcome)
+    .collect()
+}
+
+/// Stage an overwrite of `a.md`, whose disk bytes are the job's preimage.
+fn stage_overwrite(sc: &Scratch, store: &mut EngineStore) {
+    std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage on disk");
+    let job = spec(
+        "j1",
+        "a.md",
+        &hex_sha256(OURS),
+        Preimage::Present(hex_sha256(PREIMAGE)),
+        1,
+        10,
+    );
+    stage_job(store, OURS, &job);
+}
+
+fn displaced_files(sc: &Scratch) -> Vec<String> {
+    std::fs::read_dir(sc.workspace())
+        .expect("workspace entries")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".displaced"))
+        .collect()
+}
+
+fn job_status(store: &EngineStore) -> JobStatus {
+    store
+        .load_materialization_job("j1")
+        .expect("load")
+        .expect("job")
+        .status
+}
+
+/// The bytes another program wrote after the check survive at the one kept
+/// displaced file, with evidence naming them, and the job is complete.
+fn assert_outside_change_kept(sc: &Scratch, store: &EngineStore, target_now: Option<&[u8]>) {
+    assert_eq!(std::fs::read(sc.target("a.md")).ok().as_deref(), target_now);
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "one outside change: {kept:?}");
+    assert_eq!(kept[0].target_path, "a.md");
+    assert_eq!(kept[0].state, DisplacementState::Kept);
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(OUTSIDE).as_str())
+    );
+    assert_eq!(
+        std::fs::read(sc.target(&kept[0].displaced_name)).expect("kept file"),
+        OUTSIDE
+    );
+    assert_eq!(displaced_files(sc), vec![kept[0].displaced_name.clone()]);
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert_eq!(job_status(store), JobStatus::Complete);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameStep {
+    Displace,
+    Place,
+}
+
+/// Lets another program act once, the moment before the named rename runs.
+struct RaceBefore {
+    step: RenameStep,
+    race: Box<dyn Fn() + Send + Sync>,
+    fired: AtomicBool,
+}
+
+impl RaceBefore {
+    fn new(step: RenameStep, race: impl Fn() + Send + Sync + 'static) -> Self {
+        RaceBefore {
+            step,
+            race: Box::new(race),
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    fn arrive(&self, step: RenameStep) {
+        if self.step == step && !self.fired.swap(true, Ordering::SeqCst) {
+            (self.race)();
+        }
+    }
+}
+
+impl AtomicReplacer for RaceBefore {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        self.arrive(RenameStep::Displace);
+        StdReplacer.displace(target, displaced)
+    }
+
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        self.arrive(RenameStep::Place);
+        StdReplacer.place(incoming, target)
+    }
+}
+
+/// An editor that writes into the existing file.
+fn write_in_place(path: PathBuf) -> impl Fn() + Send + Sync {
+    move || std::fs::write(&path, OUTSIDE).expect("outside in-place write")
+}
+
+/// An editor that saves atomically: a new file renamed over the old one, as
+/// git and vim do.
+fn rename_over(path: PathBuf) -> impl Fn() + Send + Sync {
+    move || {
+        let save = path.with_file_name("a.md.editor-save");
+        std::fs::write(&save, OUTSIDE).expect("editor temp");
+        std::fs::rename(&save, &path).expect("editor rename-over");
+    }
+}
+
+#[test]
+fn an_overwrite_moves_the_preimage_aside_and_deletes_it() {
+    let sc = Scratch::new("displace-clean");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+    assert!(displaced_files(&sc).is_empty(), "the preimage copy is gone");
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_write_in_place_between_check_and_swap_is_kept() {
+    let sc = Scratch::new("race-in-place");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racer = RaceBefore::new(RenameStep::Displace, write_in_place(sc.target("a.md")));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_outside_change_kept(&sc, &store, Some(OURS));
+}
+
+#[test]
+fn a_rename_over_between_check_and_swap_is_kept() {
+    let sc = Scratch::new("race-rename-over");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racer = RaceBefore::new(RenameStep::Displace, rename_over(sc.target("a.md")));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_outside_change_kept(&sc, &store, Some(OURS));
+}
+
+#[test]
+fn crash_after_displacement_journal_replays_to_completion() {
+    let sc = Scratch::new("crash-after-journal");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
+        assert_eq!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref()),
+            vec![JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterDisplacementJournal
+            )]
+        );
+        assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), PREIMAGE);
+        assert_eq!(store.list_open_displacements().expect("open").len(), 1);
+        assert!(displaced_files(&sc).is_empty());
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+#[test]
+fn crash_between_displace_and_place_puts_the_file_back_and_replays() {
+    let sc = Scratch::new("crash-mid-swap");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert_eq!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref()),
+            vec![JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterDisplaceBeforePlace
+            )]
+        );
+        assert!(!sc.target("a.md").exists(), "the name is empty mid-swap");
+        let displaced = displaced_files(&sc);
+        assert_eq!(displaced.len(), 1);
+        assert_eq!(
+            std::fs::read(sc.target(&displaced[0])).expect("displaced"),
+            PREIMAGE
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+#[test]
+fn crash_between_displace_and_place_returns_an_outside_change_to_its_path() {
+    let sc = Scratch::new("crash-mid-swap-outside");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(RenameStep::Displace, write_in_place(sc.target("a.md")));
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(!sc.target("a.md").exists());
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    // The outside bytes go back to their path, so the rerun sees them and
+    // conflicts instead of writing over them.
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OUTSIDE);
+    assert_eq!(
+        std::fs::read(sc.target("a.md.j1.conflict")).expect("conflict"),
+        OURS
+    );
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+}
+
+#[test]
+fn crash_after_the_swap_deletes_a_preimage_copy_on_replay() {
+    let sc = Scratch::new("crash-after-swap");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+        assert_eq!(displaced_files(&sc).len(), 1);
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::AlreadyMaterialized]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert!(
+        store
+            .list_kept_displacements("ws")
+            .expect("kept")
+            .is_empty()
+    );
+}
+
+#[test]
+fn crash_after_the_swap_keeps_an_outside_change_on_replay() {
+    let sc = Scratch::new("crash-after-swap-outside");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(RenameStep::Displace, rename_over(sc.target("a.md")));
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert!(
+            store
+                .list_kept_displacements("ws")
+                .expect("kept")
+                .is_empty()
+        );
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::AlreadyMaterialized]
+    );
+    assert_outside_change_kept(&sc, &store, Some(OURS));
+}
+
+/// The first displace hits a sharing violation, and another program writes
+/// the file while the engine backs off. The retry's recheck sees it.
+struct WriteDuringFirstLock {
+    target: PathBuf,
+    displaces: AtomicU32,
+}
+
+impl AtomicReplacer for WriteDuringFirstLock {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        if self.displaces.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::fs::write(&self.target, OUTSIDE).expect("outside write during the lock");
+            return Err(transient_lock_error());
+        }
+        StdReplacer.displace(target, displaced)
+    }
+}
+
+#[test]
+fn a_sharing_violation_retry_rechecks_the_preimage() {
+    let sc = Scratch::new("retry-recheck");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let replacer = WriteDuringFirstLock {
+        target: sc.target("a.md"),
+        displaces: AtomicU32::new(0),
+    };
+
+    assert_eq!(
+        drain(&store, &sc, &replacer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(replacer.displaces.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OUTSIDE);
+    assert_eq!(
+        std::fs::read(sc.target("a.md.j1.conflict")).expect("conflict"),
+        OURS
+    );
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert_eq!(job_status(&store), JobStatus::Conflict);
+}
+
+/// A real Windows sharing violation: a handle without FILE_SHARE_DELETE
+/// blocks the move. The engine retries, then fails closed with nothing moved.
+#[cfg(windows)]
+#[test]
+fn a_handle_without_delete_sharing_fails_closed_without_moving_anything() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let sc = Scratch::new("held-no-delete-share");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2) // read | write, no delete
+        .open(sc.target("a.md"))
+        .expect("hold the target");
+
+    let err = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
+    )
+    .expect_err("a held target cannot be moved");
+    drop(holder);
+
+    assert_eq!(err.code(), "file-locked");
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), PREIMAGE);
+    assert!(displaced_files(&sc).is_empty());
+    assert!(!sc.target(".dohc-write-j1.tmp").exists(), "temp removed");
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert_eq!(job_status(&store), JobStatus::Pending);
+}
+
+/// A program keeps the file open for writing across the swap. Its later
+/// writes land in the displaced file, which is kept whatever it held when
+/// inspected.
+#[cfg(windows)]
+#[test]
+fn a_displaced_file_still_open_for_writing_is_kept() {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt;
+    let sc = Scratch::new("held-for-writing");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let mut writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0x1 | 0x2 | 0x4) // read | write | delete
+        .open(sc.target("a.md"))
+        .expect("open for writing");
+
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OURS);
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].displaced_sha256, None, "not comparable while held");
+
+    writer.write_all(b"LATE").expect("late write");
+    drop(writer);
+    let displaced = std::fs::read(sc.target(&kept[0].displaced_name)).expect("displaced");
+    assert!(displaced.starts_with(b"LATE"), "the late write survives");
+}
+
+#[test]
+fn an_absent_target_created_before_the_rename_is_not_replaced() {
+    let sc = Scratch::new("race-create");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let job = spec("j1", "a.md", &hex_sha256(OURS), Preimage::Absent, 1, 10);
+    stage_job(&mut store, OURS, &job);
+    let racer = RaceBefore::new(RenameStep::Place, write_in_place(sc.target("a.md")));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OUTSIDE);
+    assert_eq!(
+        std::fs::read(sc.target("a.md.j1.conflict")).expect("conflict"),
+        OURS
+    );
+}
+
+#[test]
+fn a_file_created_between_displace_and_place_is_not_replaced() {
+    let sc = Scratch::new("race-recreate");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racer = RaceBefore::new(RenameStep::Place, write_in_place(sc.target("a.md")));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), OUTSIDE);
+    assert_eq!(
+        std::fs::read(sc.target("a.md.j1.conflict")).expect("conflict"),
+        OURS
+    );
+    assert!(displaced_files(&sc).is_empty(), "the preimage copy is gone");
+    assert!(store.list_open_displacements().expect("open").is_empty());
+}
+
+#[test]
+fn a_write_racing_a_delete_is_kept() {
+    let sc = Scratch::new("race-delete");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage on disk");
+    let job = spec(
+        "j1",
+        "a.md",
+        &hex_sha256(PREIMAGE),
+        Preimage::Present(hex_sha256(PREIMAGE)),
+        1,
+        10,
+    );
+    store.put_binary_blob(PREIMAGE).expect("blob");
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_delete_job(tx, &job)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue delete");
+    let racer = RaceBefore::new(RenameStep::Displace, write_in_place(sc.target("a.md")));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_outside_change_kept(&sc, &store, None);
+}
+
+/// A crash leaves a replace half done, and the job is cancelled before the
+/// next run. The sweep still puts the displaced file back.
+#[test]
+fn a_cancelled_job_still_gets_its_displaced_file_back() {
+    let sc = Scratch::new("sweep-cancelled");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplaceBeforePlace);
+        assert!(matches!(
+            drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                cancel_pending_jobs_for_path(tx, "ws", "a.md", 15)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("cancel");
+    }
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    assert!(drain(&store, &sc, &StdReplacer, &NoFaults).is_empty());
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), PREIMAGE);
+    assert!(displaced_files(&sc).is_empty());
+    assert!(store.list_open_displacements().expect("open").is_empty());
+    assert_eq!(job_status(&store), JobStatus::Cancelled);
 }

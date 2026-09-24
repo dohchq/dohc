@@ -63,9 +63,18 @@ pub enum FaultPoint {
     /// newer external content and does not overwrite (capture + preserve-both).
     /// `materialize.before-preimage-revalidate`.
     MaterializeBeforePreimageRevalidate,
+    /// The displacement row is durable, the target not yet moved aside. A
+    /// crash here ⇒ restart discards the row and replays the job.
+    /// `materialize.after-displacement-journal`.
+    MaterializeAfterDisplacementJournal,
+    /// The target moved aside, the temp not yet renamed into its name, which
+    /// is empty. A crash here ⇒ restart moves the displaced file back and
+    /// replays the job against it. `materialize.after-displace-before-place`.
+    MaterializeAfterDisplaceBeforePlace,
     /// File replaced, job not yet marked complete. A crash here ⇒ restart replay
-    /// is idempotent (preimage hash now matches the new content; no second
-    /// write, no duplicate). `materialize.after-rename-before-complete`.
+    /// settles any displaced file, then is idempotent (preimage hash now
+    /// matches the new content; no second write, no duplicate).
+    /// `materialize.after-rename-before-complete`.
     MaterializeAfterRenameBeforeComplete,
 
     // ---- rollback post-commit response -----------------------------------
@@ -130,6 +139,12 @@ impl FaultPoint {
             }
             FaultPoint::MaterializeBeforePreimageRevalidate => {
                 "materialize.before-preimage-revalidate"
+            }
+            FaultPoint::MaterializeAfterDisplacementJournal => {
+                "materialize.after-displacement-journal"
+            }
+            FaultPoint::MaterializeAfterDisplaceBeforePlace => {
+                "materialize.after-displace-before-place"
             }
             FaultPoint::MaterializeAfterRenameBeforeComplete => {
                 "materialize.after-rename-before-complete"

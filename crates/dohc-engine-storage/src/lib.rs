@@ -51,8 +51,9 @@ pub use limits::{
     MAX_REPLACE_ATTEMPTS, SQLITE_DATABASE_HEADER_BYTES,
 };
 pub use materialize::{
-    JobStatus, MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job, record_completed_job,
-    stamp_secret_capture_owned, upsert_projection_job,
+    Displacement, DisplacementSpec, DisplacementState, JobStatus, MaterializationJob,
+    MaterializationJobSpec, MaterializationOperation, Preimage, cancel_pending_jobs_for_path,
+    enqueue_delete_job, enqueue_job, record_completed_job, stamp_secret_capture_owned,
+    upsert_projection_job,
 };
 pub use store::{EngineStore, TxnOutcome};

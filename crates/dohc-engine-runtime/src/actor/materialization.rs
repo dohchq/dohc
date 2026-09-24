@@ -8,7 +8,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one,
+    materialize_secret_delete_one, materialize_secret_one, recover_displacements,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
@@ -498,6 +498,20 @@ pub(super) fn replay_pending_materializations(
     selected: Option<&HashSet<String>>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    // A crash can leave a replace half done, including for a job that will not
+    // run again. Resolve those first, so no displaced file is left unsettled.
+    recover_displacements(
+        store,
+        root_dir,
+        Some(scope.workspace_id),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &StdBackoff,
+            now_ms,
+            faults,
+        },
+    )?;
     let jobs = store.list_pending_materialization_jobs()?;
     let mut summary = MaterializationReplaySummary {
         completed: 0,

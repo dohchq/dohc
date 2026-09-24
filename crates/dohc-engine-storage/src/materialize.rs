@@ -438,6 +438,197 @@ pub(crate) fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, 
     .map_err(StorageError::persist)
 }
 
+/// Whether a displaced file is still being resolved or has been kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplacementState {
+    /// Written before the materializer moves the target aside. A crash leaves
+    /// it open; replay resolves it before the job runs again.
+    Open,
+    /// The displaced file held bytes the engine never captured. The file stays
+    /// at its displaced name and this row is the evidence of that outside
+    /// change until the engine captures it.
+    Kept,
+}
+
+impl DisplacementState {
+    fn as_str(self) -> &'static str {
+        match self {
+            DisplacementState::Open => "open",
+            DisplacementState::Kept => "kept",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "open" => Some(DisplacementState::Open),
+            "kept" => Some(DisplacementState::Kept),
+            _ => None,
+        }
+    }
+}
+
+/// Inputs to [`open_displacement`], for the file the materializer is about to
+/// move off `target_path` before it writes or deletes that path.
+#[derive(Debug, Clone)]
+pub struct DisplacementSpec {
+    pub job_id: String,
+    pub workspace_id: String,
+    pub target_path: String,
+    /// File name, in the target's directory, the target moves to.
+    pub displaced_name: String,
+    /// The bytes the job expects to move aside, its preimage.
+    pub expected_sha256: String,
+    /// The bytes the job writes, or `None` for a delete.
+    pub content_sha256: Option<String>,
+    pub now_ms: i64,
+}
+
+/// A file the materializer moved off a target path.
+///
+/// The row is written `open` before the move. After the move the materializer
+/// compares the moved file with `expected_sha256` and `content_sha256`. When
+/// it holds one of them the engine already has those bytes, so the file and
+/// the row are deleted. Otherwise another program wrote it after the preimage
+/// check, and the row turns `kept`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displacement {
+    pub displacement_id: i64,
+    pub job_id: String,
+    pub workspace_id: String,
+    pub target_path: String,
+    pub displaced_name: String,
+    pub expected_sha256: String,
+    pub content_sha256: Option<String>,
+    pub state: DisplacementState,
+    /// For a kept file, the hash of the bytes it held when inspected. `None`
+    /// when they could not be read whole: over the cap, not a regular file,
+    /// unreadable, or still open for writing by another program.
+    pub displaced_sha256: Option<String>,
+    pub created_at_ms: i64,
+}
+
+const DISPLACEMENT_COLUMNS: &str = "displacement_id, job_id, workspace_id, target_path, \
+     displaced_name, expected_sha256, content_sha256, state, displaced_sha256, created_at_ms";
+
+fn row_to_displacement(row: &rusqlite::Row<'_>) -> rusqlite::Result<Displacement> {
+    let state_raw: String = row.get(7)?;
+    let state = DisplacementState::parse(&state_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown displacement state",
+            )),
+        )
+    })?;
+    Ok(Displacement {
+        displacement_id: row.get(0)?,
+        job_id: row.get(1)?,
+        workspace_id: row.get(2)?,
+        target_path: row.get(3)?,
+        displaced_name: row.get(4)?,
+        expected_sha256: row.get(5)?,
+        content_sha256: row.get(6)?,
+        state,
+        displaced_sha256: row.get(8)?,
+        created_at_ms: row.get(9)?,
+    })
+}
+
+/// Record, durably and before the move, that the materializer is about to move
+/// a target aside. Returns the row id the resolution names.
+pub(crate) fn open_displacement(
+    conn: &Connection,
+    spec: &DisplacementSpec,
+) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO materialization_displacements \
+         (job_id, workspace_id, target_path, displaced_name, expected_sha256, content_sha256, \
+          state, displaced_sha256, created_at_ms, resolved_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL)",
+        rusqlite::params![
+            spec.job_id,
+            spec.workspace_id,
+            spec.target_path,
+            spec.displaced_name,
+            spec.expected_sha256,
+            spec.content_sha256,
+            DisplacementState::Open.as_str(),
+            spec.now_ms,
+        ],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Delete an open row. Either nothing was moved, or the moved file held only
+/// bytes the engine already has and has been deleted.
+pub(crate) fn discard_displacement(
+    conn: &Connection,
+    displacement_id: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM materialization_displacements \
+         WHERE displacement_id = ?1 AND state = 'open'",
+        [displacement_id],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
+}
+
+/// Turn an open row into the evidence of an outside change.
+pub(crate) fn keep_displacement(
+    conn: &Connection,
+    displacement_id: i64,
+    displaced_sha256: Option<&str>,
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE materialization_displacements \
+         SET state = 'kept', displaced_sha256 = ?2, resolved_at_ms = ?3 \
+         WHERE displacement_id = ?1 AND state = 'open'",
+        rusqlite::params![displacement_id, displaced_sha256, now_ms],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
+}
+
+/// Open rows, oldest first. `job_id` narrows them to one job.
+pub(crate) fn list_open_displacements(
+    conn: &Connection,
+    job_id: Option<&str>,
+) -> Result<Vec<Displacement>, StorageError> {
+    let sql = format!(
+        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
+         WHERE state = 'open' AND (?1 IS NULL OR job_id = ?1) ORDER BY displacement_id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map([job_id], row_to_displacement)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
+/// Kept rows for one workspace, oldest first. They are the outside changes the
+/// engine has not captured yet.
+pub(crate) fn list_kept_displacements(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    let sql = format!(
+        "SELECT {DISPLACEMENT_COLUMNS} FROM materialization_displacements \
+         WHERE state = 'kept' AND workspace_id = ?1 ORDER BY displacement_id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id], row_to_displacement)
+        .map_err(StorageError::corrupt)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt)
+}
+
 /// The number of pending jobs (cheap gauge for tests / startup logging).
 pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row(

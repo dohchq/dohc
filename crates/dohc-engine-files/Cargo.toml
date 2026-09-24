@@ -64,8 +64,17 @@ serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative filesystem operations. On Linux this also exposes
-# openat2; other Unix targets use the portable openat/renameat path.
+# openat2; other Unix targets use the portable openat/renameat path. Linux and
+# macOS also get the exclusive rename (renameat2 RENAME_NOREPLACE,
+# renamex_np RENAME_EXCL) the materializer's no-replace step uses.
 rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+# The materializer's no-replace rename on filesystems without hard links (FAT,
+# exFAT): `TempPath::persist_noclobber` is MoveFileExW without
+# MOVEFILE_REPLACE_EXISTING, the only safe wrapper for it in the dependency
+# graph (already locked through proptest).
+tempfile = { version = "3", default-features = false }
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures

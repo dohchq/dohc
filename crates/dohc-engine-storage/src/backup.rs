@@ -94,6 +94,7 @@ const COMPARED_TABLES: &[&str] = &[
     "collection_field_history",
     "collection_relation_edges",
     "materialization_jobs",
+    "materialization_displacements",
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
