@@ -98,10 +98,7 @@ export function Titlebar(props: {
   return (
     <header
       data-testid="titlebar"
-      // A drag region takes presses before the page sees them, so while the
-      // switcher is open the bar stops dragging and a press on it closes the
-      // switcher.
-      className={`${switcherOpen ? "titlebar-no-drag" : "titlebar-drag"} relative flex shrink-0 items-center gap-2 border-b border-line bg-panel-2`}
+      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel-2"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}

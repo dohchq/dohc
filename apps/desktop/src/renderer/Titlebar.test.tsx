@@ -150,20 +150,21 @@ describe("Titlebar", () => {
     expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
   });
 
-  // A drag region takes presses before the page sees them.
-  it("stops the titlebar dragging while the switcher is open, so a press on it closes the switcher", () => {
+  // A drag region takes presses before the page sees them. styles.css turns
+  // drag regions off while the root says a menu is open.
+  it("marks a menu open while the switcher is open, so a press on the titlebar closes it", () => {
     render(
       <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
     );
     const titlebar = screen.getByTestId("titlebar");
-    expect(titlebar.className).toContain("titlebar-drag");
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
 
     fireEvent.click(screen.getByTestId("workspace-switcher"));
-    expect(titlebar.className).toContain("titlebar-no-drag");
+    expect(document.documentElement.dataset.menuOpen).toBe("");
     fireEvent.pointerDown(titlebar);
 
     expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
-    expect(titlebar.className).not.toContain("titlebar-no-drag");
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
   });
 
   it("omits the chats layout control when the workspace has no chats sidebar", () => {

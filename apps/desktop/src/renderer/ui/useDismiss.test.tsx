@@ -55,6 +55,19 @@ describe("useDismiss", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  // styles.css turns the titlebar's drag region off while this flag is set,
+  // so a press there reaches the page.
+  it("marks the root while any menu is open, until the last one closes", () => {
+    const first = render(<Menu />);
+    const second = render(<Menu />);
+    expect(document.documentElement.dataset.menuOpen).toBe("");
+
+    first.unmount();
+    expect(document.documentElement.dataset.menuOpen).toBe("");
+    second.unmount();
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
+  });
+
   it("takes Escape only while focus is inside, and returns focus to the trigger", () => {
     render(<Menu />);
     const escape = fireEvent.keyDown(document.body, { key: "Escape" });
