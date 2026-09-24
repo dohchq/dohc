@@ -4568,6 +4568,63 @@ describe("markdown editor unmount flush", () => {
     }
   });
 
+  // A busy renderer can deliver the first cell edit before the effects of the
+  // render that showed the table. The table must still recognize its own
+  // output (one serialize, no reparse, later edits keep the row offsets), and
+  // the draft must still save against the read it was built on.
+  it("saves an edit that lands before the table's effects, serializing it once", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42\n2026-06-11,43",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const expectedText = delimitedTextCodec.serialize(
+      [["date", "amount"], ["2026-06-10", "420"], ["2026-06-11", "430"]],
+      ",",
+    );
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    let observer: MutationObserver | undefined;
+    try {
+      // A MutationObserver callback runs as a microtask right after the commit
+      // that adds the cells, before the task that runs that commit's effects.
+      const edited = new Promise<void>((resolve) => {
+        observer = new MutationObserver(() => {
+          const cell = screen.queryByLabelText("Row 1 column 2");
+          if (!cell) return;
+          observer?.disconnect();
+          parse.mockClear();
+          serialize.mockClear();
+          fireEvent.change(cell, { target: { value: "420" } });
+          fireEvent.change(screen.getByLabelText("Row 2 column 2"), {
+            target: { value: "430" },
+          });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+      await edited;
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+      expect(
+        (screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value,
+      ).toBe("420");
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "data/table.csv",
+        text: expectedText,
+        expectedContentHash: TEST_CONTENT_HASH,
+      });
+    } finally {
+      observer?.disconnect();
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
   it("round-trips quoted CSV cells through the existing codec", () => {
     const text = [
       "name,note,quote",

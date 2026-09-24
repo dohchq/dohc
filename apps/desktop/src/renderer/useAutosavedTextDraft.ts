@@ -293,12 +293,9 @@ export function useAutosavedTextDraft(props: {
     setSaveState("saved");
   }, [orphanedDrafts, saveState, props.contentRequestId]);
 
-  useEffect(() => {
-    if (props.switchReadPending) return;
-    if (staleBaseline.current) {
-      reconcileConflictSnapshot();
-      return;
-    }
+  // Takes the read this surface renders as its baseline, unless a draft or a
+  // write owns the document.
+  function acceptLandedRead() {
     if (
       verifyAfterRequestId.current !== null &&
       latestSnapshot.current.requestId <= verifyAfterRequestId.current
@@ -307,8 +304,17 @@ export function useAutosavedTextDraft(props: {
     }
     if (unsavedDraft.current) return;
     if (writersLive.current > 0) return;
-    if (props.contentRequestId <= acceptedRequestFloor.current) return;
+    if (latestSnapshot.current.requestId <= acceptedRequestFloor.current) return;
     acceptSnapshot(latestSnapshot.current, "saved");
+  }
+
+  useEffect(() => {
+    if (props.switchReadPending) return;
+    if (staleBaseline.current) {
+      reconcileConflictSnapshot();
+      return;
+    }
+    acceptLandedRead();
     // acceptSnapshot reads mutable write state and the exact body/hash pair
     // above. The dependencies name the authoritative snapshot identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -551,6 +557,17 @@ export function useAutosavedTextDraft(props: {
   }
 
   function scheduleSave(next: string) {
+    // A busy renderer can deliver an edit before the effect above accepts the
+    // read this surface already shows. Once the edit marks the draft unsaved,
+    // that effect never accepts it, and the draft has no baseline to save
+    // against. An edit of exactly that read's text accepts it first.
+    if (
+      !switchReadPendingRef.current &&
+      !staleBaseline.current &&
+      latestDraft.current === latestSnapshot.current.body
+    ) {
+      acceptLandedRead();
+    }
     setDraft(next);
     latestDraft.current = next;
     props.localBuffer.publishDraft(next, localSource.current);
