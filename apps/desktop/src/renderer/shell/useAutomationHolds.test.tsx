@@ -39,3 +39,22 @@ it("never lets an Allow that finishes after a workspace switch repaint the new w
   expect(listAutomationHolds.mock.calls.map(([payload]) => payload.workspaceId)).toEqual(["Trip", "Home"]);
   expect(result.current.automationHolds).toEqual([hold("Home")]);
 });
+
+it("keeps the newest list when an older read in the same workspace answers last", async () => {
+  const answers: Array<(holds: AutomationHoldNotice[]) => void> = [];
+  const listeners: Array<(event: { workspaceId: string }) => void> = [];
+  vi.stubGlobal("dohcDesktop", {
+    listAutomationHolds: () => new Promise((resolve) => answers.push((holds) => resolve({ holds }))),
+    onAutomationHoldsChanged: (listener: (event: { workspaceId: string }) => void) => {
+      listeners.push(listener);
+      return () => undefined;
+    },
+    confirmCollectionAutomationStep: vi.fn(),
+  });
+  const { result } = renderHook(() => useAutomationHolds("Trip", true, vi.fn()));
+  // A poke asks again while the first read is still out.
+  act(() => listeners[0]!({ workspaceId: "Trip" }));
+  await act(async () => { answers[1]!([]); });
+  await act(async () => { answers[0]!([hold("Trip")]); });
+  expect(result.current.automationHolds).toEqual([]);
+});

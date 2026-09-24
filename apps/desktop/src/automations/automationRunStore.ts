@@ -28,6 +28,10 @@ export const MAX_RUN_FILE_BYTES = 4 * RUN_PLAN_BUDGET_BYTES;
 // Run history keeps this many finished runs per automation. A run a claim
 // may still resume is never dropped.
 const KEEP_FINISHED_RUNS = 20;
+// Compacted failures kept per automation, so an old claim's Try again still
+// refuses instead of starting over. Beyond this, only the engine's failure
+// row remains.
+const KEEP_COMPACTED_RUNS = 100;
 
 // Values are this computer's own writes, read back as JSON.parse left them;
 // the write seam checks each one again before it writes.
@@ -215,12 +219,12 @@ export interface AutomationRunStore {
   /** Saves a run before the executor goes on. Refuses a run too large to read back. */
   save(run: StoredRun): Promise<void>;
   /**
-   * Drops the oldest settled or superseded runs past the history bound, and
-   * compacts failed runs whose claims `listedClaims` no longer shows. It
-   * reads the folder only once it has grown by the history bound since the
-   * last prune.
+   * Drops the oldest settled or superseded runs past the history bound,
+   * compacts failed runs whose claims are not in `resumableClaims`, and
+   * drops the oldest compacted runs past their bound. It reads the folder
+   * only once it has grown by the history bound since the last prune.
    */
-  prune(automationId: string, listedClaims: () => Promise<ReadonlySet<string> | null>): Promise<void>;
+  prune(automationId: string, resumableClaims: () => Promise<ReadonlySet<string> | null>): Promise<void>;
   readSubscriptions(): Promise<StoredSubscription[]>;
   saveSubscriptions(subscriptions: readonly StoredSubscription[]): Promise<void>;
   readReachVerdicts(): Promise<StoredReachVerdict[]>;
@@ -273,13 +277,14 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
         await writeDurably(runFile(folder, run.claimId, run.definitionHash), run);
       });
     },
-    prune(automationId, listedClaims) {
+    prune(automationId, resumableClaims) {
       return serial(async () => {
         const folder = await runsFolder(automationId);
         const names = (await readdir(folder)).filter((name) => name.endsWith(".json"));
         if (names.length < (pruneAt.get(automationId) ?? KEEP_FINISHED_RUNS * 2)) return;
-        const listed = await listedClaims();
+        const resumable = await resumableClaims();
         const history: StoredRun[] = [];
+        const compacted: StoredRun[] = [];
         let kept = names.length;
         for (const name of names) {
           const run = await readRun(join(folder, name), automationId);
@@ -288,13 +293,20 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
           // a person chose to start it over.
           if ((run.settled && run.outcome?.state === "done") || run.superseded) {
             history.push(run);
-          } else if (listed !== null && run.outcome?.state === "failed" && !run.compacted && !listed.has(run.claimId)) {
-            // Run history no longer shows the claim, so only its failure stays.
-            await writeDurably(join(folder, name), { ...run, plan: null, applied: [], compacted: true });
+          } else if (run.compacted) {
+            compacted.push(run);
+          } else if (resumable !== null && run.outcome?.state === "failed" && !resumable.has(run.claimId)) {
+            // Nothing offers its Try again any more, so only its failure stays.
+            const tombstone = { ...run, plan: null, applied: [], compacted: true };
+            await writeDurably(join(folder, name), tombstone);
+            compacted.push(tombstone);
           }
         }
-        history.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-        for (const run of history.slice(KEEP_FINISHED_RUNS)) {
+        const newestFirst = (left: StoredRun, right: StoredRun) => right.updatedAtMs - left.updatedAtMs;
+        for (const run of [
+          ...history.sort(newestFirst).slice(KEEP_FINISHED_RUNS),
+          ...compacted.sort(newestFirst).slice(KEEP_COMPACTED_RUNS),
+        ]) {
           await rm(runFile(folder, run.claimId, run.definitionHash), { force: true });
           kept -= 1;
         }

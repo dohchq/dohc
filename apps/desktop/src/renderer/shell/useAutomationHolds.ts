@@ -7,9 +7,9 @@ export type AutomationHoldNotice = ListAutomationHoldsResult["holds"][number];
 /**
  * Automation steps that wait for someone who can edit the Collection to
  * allow them, as main lists them. Read once the workspace is ready and again
- * on every hold poke. Every answer carries the token it was asked with, and
- * leaving the workspace retires the token, so an answer for one workspace
- * never repaints another.
+ * on every hold poke. Leaving the workspace retires its token, so an answer
+ * for one workspace never repaints another, and only the newest read in a
+ * workspace sets the list.
  */
 export function useAutomationHolds(
   workspaceId: string,
@@ -18,9 +18,11 @@ export function useAutomationHolds(
 ) {
   const [automationHolds, setAutomationHolds] = useState<AutomationHoldNotice[]>([]);
   const token = useRef(0);
+  const reads = useRef(0);
   const reload = useCallback(async (asked: number) => {
+    const read = ++reads.current;
     const result = await bridge().listAutomationHolds({ workspaceId });
-    if (asked !== token.current) return;
+    if (asked !== token.current || read !== reads.current) return;
     setAutomationHolds(result.holds);
   }, [workspaceId]);
   useEffect(() => {

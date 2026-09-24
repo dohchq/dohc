@@ -8,6 +8,7 @@ export {
   engineStoreRefusalDetailOf,
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
+  isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
   isTransientEngineRefusal,

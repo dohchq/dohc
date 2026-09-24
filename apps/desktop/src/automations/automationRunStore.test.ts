@@ -84,4 +84,20 @@ describe("the automation run store", () => {
     await store.prune(AUTOMATION, async () => { listings += 1; return listed; });
     expect(listings).toBe(1);
   });
+
+  it("keeps at most 100 compacted failures per automation", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    for (let index = 0; index < 105; index += 1) {
+      await store.save({ ...run(`atc_old${String(index).padStart(3, "0")}`, "failed", index), compacted: true, applied: [] });
+    }
+    await store.prune(AUTOMATION, async () => new Set());
+    const kept: string[] = [];
+    for (let index = 0; index < 105; index += 1) {
+      const claimId = `atc_old${String(index).padStart(3, "0")}`;
+      if ((await store.runsOf(AUTOMATION, claimId)).runs.length > 0) kept.push(claimId);
+    }
+    expect(kept).toHaveLength(100);
+    expect(kept[0]).toBe("atc_old005");
+  });
 });
