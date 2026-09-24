@@ -23,7 +23,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LiveDocumentEditUnsavedError } from "../workspaces/engineYDocSessionIpc";
+import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -1389,7 +1389,11 @@ describe("CLI socket server", () => {
         if (input.edit.replacement === "Refused.") throw new Error("The text to replace is not in the document.");
         if (input.edit.replacement === "Unsaved.") {
           applied += 1;
-          throw new LiveDocumentEditUnsavedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+          throw new LiveDocumentEditAppliedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+        }
+        if (input.edit.replacement === "Lost.") {
+          applied += 1;
+          throw new LiveDocumentEditAppliedError("Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in notes/plan.md.");
         }
         applied += 1;
         await new Promise<void>((resolve) => { saving.release = resolve; });
@@ -1413,8 +1417,9 @@ describe("CLI socket server", () => {
       reason: "request id edit-1 was already used for a different request",
     });
 
-    // An edit that changed nothing may be sent again under its id, and one
-    // that reached the document unsaved may not.
+    // An edit that changed nothing may be sent again under its id. One that
+    // reached the document may not, whether it went unsaved or someone
+    // removed the block it went into.
     const refused = { ...append, replacement: "Refused.", requestId: "edit-2" };
     await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false });
     await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("not in the document") });
@@ -1422,7 +1427,11 @@ describe("CLI socket server", () => {
     const unsavedResult = await invoke("documentEdit", unsaved);
     expect(unsavedResult).toMatchObject({ ok: false, reason: expect.stringContaining("not saved it") });
     await expect(invoke("documentEdit", unsaved)).resolves.toEqual(unsavedResult);
-    expect(applied).toBe(2);
+    const lost = { ...append, replacement: "Lost.", requestId: "edit-4" };
+    const lostResult = await invoke("documentEdit", lost);
+    expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("is not in notes/plan.md") });
+    await expect(invoke("documentEdit", lost)).resolves.toEqual(lostResult);
+    expect(applied).toBe(3);
   });
 
   it("refuses document edits it cannot attribute or place", async () => {
