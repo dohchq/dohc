@@ -1589,6 +1589,11 @@ pub fn claim_record_lifecycle_in_tx(
 /// again, after a reply was lost, finds its claim instead of running twice.
 pub const AUTOMATION_PRESS_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// How far behind its schedule's mark a done schedule claim keeps its key.
+/// Main moves a changed schedule's mark to now, so only a clock set back
+/// could reach an older due time again, and this covers that.
+pub const AUTOMATION_SCHEDULE_KEY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 /// The most due times one `automations.claimSchedule` call runs. A scheduler
 /// runs the times it reached and skips the ones it missed, so a call
 /// normally runs one.
@@ -1633,7 +1638,7 @@ fn button_or_schedule_collection(automation_id: &str) -> Result<&str, DomainErro
 /// press only ever joins that person's claim:
 ///
 /// - A press id this computer remembers, or the key `press:<press id>` of
-///   a claim it still holds, answers that claim.
+///   a claim it still holds on any button, answers that claim.
 /// - When the automation already has a pending or running claim for the
 ///   record, the same person's press joins it, so a double click or two
 ///   windows run once. Another person's press is
@@ -1692,13 +1697,14 @@ pub fn press_automation_in_tx(
                 reason: "a remembered button press lost its claim",
             });
     }
-    // A press this computer forgot can still have its claim.
+    // A press this computer forgot can still have its claim, on any button.
     let key = format!("press:{press_id}");
     let keyed: Option<String> = conn
         .query_row(
             "SELECT claim_id FROM automation_claims \
-             WHERE workspace_id = ?1 AND automation_id = ?2 AND trigger_key = ?3",
-            params![workspace_id, press.automation_id, key],
+             WHERE workspace_id = ?1 AND trigger_key = ?2 AND change_kind = 'button' \
+             ORDER BY created_at_ms, claim_id LIMIT 1",
+            params![workspace_id, key],
             |row| row.get(0),
         )
         .optional()
@@ -1721,7 +1727,8 @@ pub fn press_automation_in_tx(
     let (claim, inserted) = match (keyed, active) {
         (Some(claim_id), _) => {
             let claim = existing(&claim_id)?;
-            if claim.record_id.as_deref() != Some(record_id.as_str())
+            if claim.automation_id != press.automation_id
+                || claim.record_id.as_deref() != Some(record_id.as_str())
                 || claim.change.on_behalf_of.as_deref() != Some(pressed_by.as_str())
             {
                 return Err(another_press);
@@ -2309,9 +2316,11 @@ pub(crate) fn settle_automation_claim_in_tx(
     // the row's key is what keeps it from claiming twice. A done message
     // claim keeps its key without its message for the same reason: a message
     // stored again after its thread was removed must not run twice. A done
-    // schedule claim keeps its key, so a due time a reset mark reaches again
-    // does not run twice. A done button claim stays while a remembered press
-    // names it, so the press sent again finds it.
+    // schedule claim keeps its key until its due time is
+    // AUTOMATION_SCHEDULE_KEY_RETENTION_MS behind the schedule's mark, so a
+    // due time a reset mark reaches again does not run twice. A done button
+    // claim stays while a remembered press names it, so the press sent
+    // again finds it.
     let prune = params![
         workspace_id,
         settled.automation_id,
@@ -2319,6 +2328,16 @@ pub(crate) fn settle_automation_claim_in_tx(
     ];
     conn.execute(PRUNE_SETTLED_RECORD_CLAIMS_SQL, prune)
         .map_err(DomainError::sql_persist)?;
+    conn.execute(
+        PRUNE_AGED_SCHEDULE_KEYS_SQL,
+        params![
+            workspace_id,
+            settled.automation_id,
+            AUTOMATION_CLAIM_HISTORY_LIMIT,
+            AUTOMATION_SCHEDULE_KEY_RETENTION_MS
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
     conn.execute(CLEAR_SETTLED_CLAIM_FACTS_SQL, prune)
         .map_err(DomainError::sql_persist)?;
     Ok(settled)
@@ -2336,6 +2355,21 @@ pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation
        AND NOT EXISTS (SELECT 1 FROM automation_presses p \
          WHERE p.workspace_id = automation_claims.workspace_id \
            AND p.claim_id = automation_claims.claim_id) \
+       AND claim_id NOT IN ( \
+           SELECT claim_id FROM automation_claims \
+           WHERE workspace_id = ?1 AND automation_id = ?2 \
+           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
+
+/// Delete an automation's settled schedule claims past its history whose due
+/// time is more than `?4` behind the schedule's mark. The `<> 'message'`
+/// term matches `idx_automation_claims_prunable`.
+pub(crate) const PRUNE_AGED_SCHEDULE_KEYS_SQL: &str = "DELETE FROM automation_claims \
+     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
+       AND trigger_moment_order IS NULL AND change_kind <> 'message' \
+       AND change_kind = 'schedule' \
+       AND CAST(substr(trigger_key, length('schedule:') + 1) AS INTEGER) < ( \
+           SELECT m.through_ms - ?4 FROM automation_schedule_marks m \
+           WHERE m.workspace_id = ?1 AND m.automation_id = ?2) \
        AND claim_id NOT IN ( \
            SELECT claim_id FROM automation_claims \
            WHERE workspace_id = ?1 AND automation_id = ?2 \

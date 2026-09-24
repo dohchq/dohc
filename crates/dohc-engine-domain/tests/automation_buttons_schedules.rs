@@ -18,7 +18,9 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-buttons-schedules";
 const PAY: &str = "collection:Invoices#mark-paid";
+const REMIND: &str = "collection:Invoices#send-reminder";
 const REPORT: &str = "collection:Invoices#weekday-report";
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const INVOICE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_INVOICE: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ADA: &str = "user:ada";
@@ -29,8 +31,9 @@ fn open_store(scratch: &ScratchDir) -> EngineStore {
     EngineStore::open(&db, 1).expect("open store")
 }
 
-fn press_as(
+fn press_on(
     store: &mut EngineStore,
+    automation_id: &str,
     pressed_by: &str,
     press_id: &str,
     record_id: &str,
@@ -41,13 +44,23 @@ fn press_as(
         WS,
         &AutomationPress {
             press_id: press_id.to_owned(),
-            automation_id: PAY.to_owned(),
+            automation_id: automation_id.to_owned(),
             record_id: record_id.to_owned(),
             pressed_by: pressed_by.to_owned(),
         },
         now_ms,
         &NoFaults,
     )
+}
+
+fn press_as(
+    store: &mut EngineStore,
+    pressed_by: &str,
+    press_id: &str,
+    record_id: &str,
+    now_ms: i64,
+) -> Result<AutomationPressed, DomainError> {
+    press_on(store, PAY, pressed_by, press_id, record_id, now_ms)
 }
 
 fn press(
@@ -294,6 +307,26 @@ fn a_press_finds_its_claim_while_remembered_or_while_its_key_remains() {
 }
 
 #[test]
+fn a_forgotten_press_id_is_refused_on_another_button() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    let paid = claimed(press(&mut store, "press-1", INVOICE, 10).expect("press"));
+    run(&mut store, AutomationSettle::Done, 11);
+
+    let later = 10 + AUTOMATION_PRESS_RETENTION_MS + 1_000;
+    claimed(press(&mut store, "press-forget", OTHER_INVOICE, later).expect("press"));
+    assert!(
+        matches!(
+            press_on(&mut store, REMIND, ADA, "press-1", INVOICE, later + 1),
+            Err(DomainError::InvalidInput { .. })
+        ),
+        "another button is refused, not run"
+    );
+    let found = joined(press(&mut store, "press-1", INVOICE, later + 2).expect("resend"));
+    assert_eq!(found.claim_id, paid.claim_id);
+}
+
+#[test]
 fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
@@ -407,6 +440,33 @@ fn a_done_schedule_claim_keeps_its_key_past_the_history() {
             .expect("repeat")
             .claims,
         Vec::new()
+    );
+}
+
+#[test]
+fn a_done_schedule_claim_goes_once_it_is_30_days_behind_the_mark() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    schedule(&mut store, "daily", &[], 0).expect("start");
+    let mut claims = Vec::new();
+    for due_ms in 1..=100 {
+        claims.extend(
+            schedule(&mut store, "daily", &[due_ms], due_ms)
+                .expect("run")
+                .claims,
+        );
+    }
+    schedule(&mut store, "daily", &[101], 40 * DAY_MS).expect("run later");
+    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
+        run(&mut store, AutomationSettle::Done, 40 * DAY_MS + step);
+    }
+    assert!(
+        !claim_exists(&store, &claims[0].claim_id),
+        "past the history and 30 days behind the mark"
+    );
+    assert!(
+        claim_exists(&store, &claims[1].claim_id),
+        "within the history"
     );
 }
 

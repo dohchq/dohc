@@ -2381,15 +2381,19 @@ CREATE INDEX idx_automation_claims_automation
 /// Buttons and schedules. A button claim keys on `press:<press id>` and a
 /// schedule claim on `schedule:<due ms>`, in the trigger key the claims
 /// table already has. One button claim at a time is pending or running per
-/// automation and record, so a double click runs once.
-/// `automation_presses` remembers each press for 30 days, so a press sent
-/// again after a lost reply finds its claim. `automation_schedule_marks`
-/// records, per schedule, the time up to which every due time was claimed
-/// or skipped.
+/// automation and record, so a double click runs once. A press key is
+/// looked up across the workspace's buttons, so a press id sent to another
+/// button is recognized. `automation_presses` remembers each press for 30
+/// days, so a press sent again after a lost reply finds its claim.
+/// `automation_schedule_marks` records, per schedule, the time up to which
+/// every due time was claimed or skipped.
 const V2_AUTOMATION_BUTTONS_AND_SCHEDULES_DDL: &str = "\
 CREATE UNIQUE INDEX idx_automation_claims_active_button
     ON automation_claims(workspace_id, automation_id, record_id)
     WHERE change_kind = 'button' AND state IN ('pending', 'running');
+CREATE INDEX idx_automation_claims_press_key
+    ON automation_claims(workspace_id, trigger_key)
+    WHERE change_kind = 'button';
 CREATE TABLE automation_presses (
     workspace_id  TEXT    NOT NULL,
     press_id      TEXT    NOT NULL,
@@ -2737,7 +2741,7 @@ mod tests {
             ),
             (
                 "v2-automation-buttons-and-schedules",
-                "b0830071ecc64bb5e5e7cbe44880daa28d5a6fcb38d83111bb6ab7a3baee2be4",
+                "64a653b710618fbc4ae3031f6cd1382c4fab7f8c730c9e79392ca6f45fa0ab00",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
