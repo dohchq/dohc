@@ -147,7 +147,7 @@ Each item is one or more pull requests with one concern. Each gets a review from
 9. The code step.
 10. Schedules, including the server running automations and the skipped-schedule notice.
 11. Settings file and sidebar pins (Part 3). This can run beside any item above.
-12. A direct lane under Edit for a Collection's own files, `collection.yaml` and `automations.yaml`, and for creating a Collection inside a shared folder, with the provenance, grant checks, and restore that ADR 0002 required for live documents. It changes an authorization contract, so it needs a security review.
+12. A direct lane under Edit for a Collection's own files, `collection.yaml` and `automations.yaml`, and for creating a Collection inside a shared folder, with the provenance, grant checks, and restore that ADR 0002 required for live documents. It changes an authorization contract, so it needs a security review. Ice approved this item on September 25.
 
 Items 5 to 12 can run in parallel once item 3 lands. The app experience work runs at the same time and changes the engine and the shell; coordinate with it before an item touches code it is changing.
 
