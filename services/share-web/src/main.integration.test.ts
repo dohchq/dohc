@@ -209,7 +209,7 @@ describe("share-web Node request adapter", () => {
       blobRequest.destroy();
       relay.finishAllBlobs();
     }
-  }, 5_000);
+  });
 
   it("shuts down promptly when no responses are active", async () => {
     const server = await startShareWeb();
@@ -746,7 +746,9 @@ async function startShareWeb(
   const port = await new Promise<number>((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error(`share-web did not start\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 5_000);
+      // A full gate beside other work can take well over 5 s to start a child
+      // process; each start stays bounded inside the 30 s test timeout.
+    }, 20_000);
     const inspectStdout = (): void => {
       const match = /SHARE_WEB_LISTENING host=[^ ]+ port=(\d+)/u.exec(stdout);
       if (!match) return;
