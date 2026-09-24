@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { dueTimes, nextDue } from "./automationSchedule";
+import { UnknownTimeZoneError, dueTimes, nextDue } from "./automationSchedule";
 import type { AutomationScheduleTrigger, AutomationWeekday } from "./automations";
 
 const hourly = (at: string, timezone: string): AutomationScheduleTrigger => ({
@@ -177,6 +177,59 @@ describe("dueTimes in Apia, which skipped 30 December 2011", () => {
   });
 });
 
+describe("dueTimes in Troll, where clocks change by 2 hours", () => {
+  const zone = "Antarctica/Troll";
+
+  it("moves a skipped time forward by the 2-hour gap", () => {
+    expect(next(daily("01:30", zone), "2026-03-28T12:00:00Z")).toBe("2026-03-29T01:30:00.000Z");
+  });
+
+  it("runs an hourly schedule once per elapsed hour across both clock changes", () => {
+    expect(due(hourly(":00", zone), "2026-03-28T23:30:00Z", "2026-03-29T03:30:00Z")).toEqual([
+      "2026-03-29T00:00:00.000Z",
+      "2026-03-29T01:00:00.000Z",
+      "2026-03-29T02:00:00.000Z",
+      "2026-03-29T03:00:00.000Z",
+    ]);
+    expect(due(hourly(":00", zone), "2026-10-24T21:30:00Z", "2026-10-25T03:30:00Z")).toEqual([
+      "2026-10-24T22:00:00.000Z",
+      "2026-10-24T23:00:00.000Z",
+      "2026-10-25T00:00:00.000Z",
+      "2026-10-25T01:00:00.000Z",
+      "2026-10-25T02:00:00.000Z",
+      "2026-10-25T03:00:00.000Z",
+    ]);
+  });
+});
+
+describe("dueTimes in Chatham, 12 hours 45 minutes ahead of UTC", () => {
+  const zone = "Pacific/Chatham";
+
+  it("moves a skipped time forward and runs a repeated one at the first", () => {
+    expect(next(daily("03:00", zone), "2026-09-26T00:00:00Z")).toBe("2026-09-26T14:15:00.000Z");
+    expect(next(daily("03:00", zone), "2026-04-04T00:00:00Z")).toBe("2026-04-04T13:15:00.000Z");
+  });
+});
+
+describe("dueTimes in São Paulo, where clocks went back to the previous day", () => {
+  it("runs the repeated late evening once, at the first occurrence", () => {
+    expect(due(daily("23:30", "America/Sao_Paulo"), "2019-02-15T12:00:00Z", "2019-02-18T12:00:00Z")).toEqual([
+      "2019-02-16T01:30:00.000Z",
+      "2019-02-17T01:30:00.000Z",
+      "2019-02-18T02:30:00.000Z",
+    ]);
+  });
+});
+
+describe("dueTimes in Casablanca, whose clocks go back for Ramadan", () => {
+  const zone = "Africa/Casablanca";
+
+  it("runs a repeated time at the first and a skipped one a gap later", () => {
+    expect(next(daily("02:30", zone), "2026-02-14T12:00:00Z")).toBe("2026-02-15T01:30:00.000Z");
+    expect(next(daily("02:30", zone), "2026-03-21T12:00:00Z")).toBe("2026-03-22T02:30:00.000Z");
+  });
+});
+
 describe("monthly days past the end of a month", () => {
   it("runs the 29th on 28 February outside a leap year and on 29 February in one", () => {
     expect(due(monthly([29], "09:00", "UTC"), "2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z")).toEqual([
@@ -195,6 +248,12 @@ describe("monthly days past the end of a month", () => {
       "2026-04-30T09:00:00.000Z",
     ]);
   });
+
+  it("follows the clock-change rules on a month day", () => {
+    const newYork = "America/New_York";
+    expect(next(monthly([8], "02:30", newYork), "2026-03-01T00:00:00Z")).toBe("2026-03-08T07:30:00.000Z");
+    expect(next(monthly([1], "01:30", newYork), "2026-10-15T00:00:00Z")).toBe("2026-11-01T05:30:00.000Z");
+  });
 });
 
 describe("dueTimes bounds", () => {
@@ -211,9 +270,34 @@ describe("dueTimes bounds", () => {
     expect(due(nine, "2026-09-26T00:00:00Z", "2026-09-25T00:00:00Z")).toEqual([]);
   });
 
-  it("refuses a zone this computer does not know and a bound that is not finite", () => {
-    expect(() => dueTimes(daily("09:00", "Mars/Olympus"), 0, 1, 1)).toThrow(RangeError);
-    expect(() => dueTimes(daily("09:00", "UTC"), 0, Number.POSITIVE_INFINITY, 1)).toThrow(RangeError);
+  it("stops at the limit inside a clock change's batch of runs", () => {
+    expect(due(hourly(":30", "America/Sao_Paulo"), "2019-02-17T00:00:00Z", "2019-02-17T06:00:00Z", 3)).toEqual([
+      "2019-02-17T00:30:00.000Z",
+      "2019-02-17T01:30:00.000Z",
+      "2019-02-17T02:30:00.000Z",
+    ]);
+  });
+
+  it("refuses bounds outside the years 1970 to 9999", () => {
+    const monday = weekly(["mon"], "09:00", "UTC");
+    for (const [after, until] of [
+      [1e300, 1.1e300],
+      [-1, 0],
+      [0, Date.UTC(10_000, 0, 1)],
+      [0, Number.POSITIVE_INFINITY],
+      [Number.NaN, 0],
+    ]) {
+      expect(() => dueTimes(monday, after!, until!, 1)).toThrow(RangeError);
+    }
+    expect(next(daily("09:00", "UTC"), "1970-01-01T00:00:00Z")).toBe("1970-01-01T09:00:00.000Z");
+    expect(next(daily("09:00", "UTC"), "9999-12-31T10:00:00Z")).toBeNull();
+  });
+
+  it("reports an unknown zone apart from a malformed schedule", () => {
+    expect(() => dueTimes(daily("09:00", "Mars/Olympus"), 0, 1, 1)).toThrow(UnknownTimeZoneError);
+    const malformed = () => dueTimes(hourly("00:30", "UTC"), 0, 1, 1);
+    expect(malformed).toThrow(RangeError);
+    expect(malformed).not.toThrow(UnknownTimeZoneError);
   });
 });
 
@@ -227,8 +311,9 @@ describe("nextDue", () => {
     expect(next(monthly([1], "00:00", "UTC"), "2026-01-01T00:00:00Z")).toBe("2026-02-01T00:00:00.000Z");
   });
 
-  it("returns null for a schedule with no days", () => {
+  it("returns nothing for a schedule with no days, without walking the window", () => {
     expect(next(weekly([], "09:00", "UTC"), "2026-09-25T00:00:00Z")).toBeNull();
+    expect(dueTimes(monthly([], "09:00", "UTC"), 0, Date.UTC(10_000, 0, 1) - 1, 1)).toEqual([]);
   });
 });
 
