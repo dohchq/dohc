@@ -318,6 +318,13 @@ fn corruption_kinds_are_distinct_per_error_family() {
             CorruptionKind::MigrationFailure,
         ),
         (
+            StorageError::MigratedByNewerBuild {
+                ordinal: 5,
+                id: "from-a-newer-build".to_owned(),
+            },
+            CorruptionKind::MigrationFailure,
+        ),
+        (
             StorageError::DiskFull {
                 needed: 10,
                 available: 1,
@@ -381,6 +388,52 @@ fn unsupported_fingerprint_open_is_refused_and_preserves_evidence() {
     assert!(!json.contains(&root_str), "no absolute path in the bundle");
     // Evidence lists the file basename only.
     assert!(bundle.evidence.iter().any(|e| e == "engine.db"));
+}
+
+/// A store a newer build migrated stops this build before any write, so a
+/// newer build still opens it. The newer build's migration is written as the
+/// rows it would commit: its table and a completed ledger row after the last.
+#[test]
+fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
+    let scratch = Scratch::new("newer-build-fence");
+    let db = scratch.db_path();
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open");
+        write_doc(&mut store, "doc-a", "kept");
+    }
+    {
+        let conn = Connection::open(&db).expect("raw");
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE from_a_newer_build (x INTEGER);
+             INSERT INTO engine_migrations
+                 (ordinal, id, checksum, engine_build, protocol_version,
+                  transactional, started_at, completed_at, integrity_ok)
+             SELECT MAX(ordinal) + 1, 'from-a-newer-build', 'newer', 'newer', 1, 1, 2, 2, 1
+             FROM engine_migrations;
+             COMMIT;",
+        )
+        .expect("a newer build migrates");
+        conn.close().expect("close");
+    }
+    let wal = scratch.sub("engine.db-wal");
+    assert!(!wal.exists(), "the last close checkpointed the WAL");
+    let before = std::fs::read(&db).expect("read before");
+
+    for refused in [
+        EngineStore::open(&db, 2).unwrap_err(),
+        EngineStore::open_read_only(&db).unwrap_err(),
+    ] {
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        assert_eq!(classify(&refused), CorruptionKind::MigrationFailure);
+    }
+
+    let after = std::fs::read(&db).expect("read after");
+    assert_eq!(before, after, "refused store left byte-identical");
+    assert!(
+        std::fs::metadata(&wal).map_or(true, |wal| wal.len() == 0),
+        "no WAL frames left behind"
+    );
 }
 
 #[test]

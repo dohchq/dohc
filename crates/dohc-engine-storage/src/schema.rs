@@ -11,7 +11,10 @@
 //! 4. Classify the fingerprint from read-only queries (`user_version`, table
 //!    presence). A v1/foreign store is rejected here, before any byte of the
 //!    file is touched.
-//! 5. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
+//! 5. Read the ledger's completed migrations. A store that completed one this
+//!    build does not define was migrated by a newer build and is rejected
+//!    here, still untouched.
+//! 6. Only for an accepted (fresh or v2) store: apply the *persistent* pragmas
 //!    (`journal_mode = WAL`, `synchronous = NORMAL`), then run the migration
 //!    ledger (`migration.rs`), then validate the required tables and
 //!    `quick_check`.
@@ -22,7 +25,8 @@ use crate::limits::{
     ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, SQLITE_DATABASE_HEADER_BYTES,
 };
 use crate::migration::{
-    BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome, run_migrations,
+    BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome,
+    refuse_store_from_newer_build, run_migrations,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -196,6 +200,7 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
+    refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)?;
 
     // Step 4: the store is ours — the file-mutating pragmas are now safe.
     apply_persistent_pragmas(&conn)?;
@@ -233,6 +238,7 @@ pub(crate) fn open_engine_db_read_only(path: &Path) -> Result<OpenedEngineDb, St
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
         return Err(StorageError::StateCorrupt { source: None });
     }
+    refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)?;
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     Ok(OpenedEngineDb {

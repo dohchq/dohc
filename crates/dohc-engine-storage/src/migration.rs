@@ -5,6 +5,9 @@
 //! change appends a new migration with the next ordinal and flows through the
 //! same runner.
 //!
+//! Before the runner, the open ritual refuses a store whose ledger holds a
+//! completed migration this list does not define: a newer build migrated it.
+//!
 //! The runner walks the list in order. A migration whose completed ledger row
 //! matches this build's checksum is skipped; a completed row with a different
 //! checksum fails closed; a missing row is applied. Body, `user_version`
@@ -2204,6 +2207,43 @@ fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError
     Ok(())
 }
 
+/// Refuse a store that completed a migration `migrations` does not define.
+/// A newer build ran it, and this build cannot know what it changed, so
+/// running against the store could damage it. Reads only: the open ritual
+/// calls this before any persistent pragma, so a refused file stays
+/// byte-identical.
+pub(crate) fn refuse_store_from_newer_build(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<(), StorageError> {
+    let mut completed = match conn.prepare(
+        "SELECT ordinal, id FROM engine_migrations \
+         WHERE completed_at IS NOT NULL ORDER BY ordinal",
+    ) {
+        Ok(statement) => statement,
+        // No ledger, no newer migration. The open's validation judges the
+        // rest of the file.
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            return Ok(());
+        }
+        Err(other) => return Err(StorageError::corrupt(other)),
+    };
+    let rows = completed
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(StorageError::corrupt)?;
+    for row in rows {
+        let (ordinal, id) = row.map_err(StorageError::corrupt)?;
+        if !migrations.iter().any(|migration| migration.id == id) {
+            // The id reaches the desktop's technical details; bound it.
+            let id = id.chars().take(64).collect();
+            return Err(StorageError::MigratedByNewerBuild { ordinal, id });
+        }
+    }
+    Ok(())
+}
+
 /// Run every pending migration in `migrations` (ordered) against `conn`,
 /// idempotently and crash-recoverably. Safe to call on every open: already-
 /// applied migrations are skipped after a checksum check.
@@ -2482,6 +2522,37 @@ mod tests {
     #[test]
     fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
+    }
+
+    /// An older build cannot know what a newer build's migration changed, so
+    /// it must not run against the store. The newer list here is this build's
+    /// plus one, so the test holds whatever the shipped count is.
+    #[test]
+    fn a_shorter_migration_list_refuses_a_store_with_an_extra_completed_row() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let mut newer = BASELINE_MIGRATIONS.to_vec();
+        newer.push(Migration {
+            ordinal: BASELINE_MIGRATIONS.len() as u32,
+            id: "from-a-newer-build",
+            sql: "CREATE TABLE from_a_newer_build (x INTEGER);",
+            sets_user_version: None,
+        });
+        run_migrations(&mut conn, &newer, &ctx, &NoFaults).expect("the newer build migrates");
+
+        refuse_store_from_newer_build(&conn, &newer).expect("the newer build opens its store");
+        let refused = refuse_store_from_newer_build(&conn, BASELINE_MIGRATIONS)
+            .expect_err("a shorter list refuses the store");
+        assert_eq!(refused.code(), "migrated-by-newer-build");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "the store completed migration {} (from-a-newer-build), which this build does not define",
+                BASELINE_MIGRATIONS.len()
+            )
+        );
     }
 
     /// A one-shot crash injector local to the storage crate's tests (the

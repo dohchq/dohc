@@ -56,6 +56,12 @@ pub enum StorageError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
+    /// The store completed a migration this build does not define, so a newer
+    /// build migrated it. Refused before any byte of the file changes; a
+    /// build that defines every completed migration opens it.
+    #[error("the store completed migration {ordinal} ({id}), which this build does not define")]
+    MigratedByNewerBuild { ordinal: i64, id: String },
+
     /// A backup operation failed (copy, manifest write, or restore-test). The
     /// only valid source database is never deleted on failure; a partial backup
     /// is left un-manifested and is therefore invalid-by-absence (never counted
@@ -111,6 +117,7 @@ impl StorageError {
             StorageError::InvalidInput { .. } => "invalid-input",
             StorageError::PersistFailed { .. } => "persist-failed",
             StorageError::MigrationFailed { .. } => "migration-failed",
+            StorageError::MigratedByNewerBuild { .. } => "migrated-by-newer-build",
             StorageError::BackupFailed { .. } => "backup-failed",
             StorageError::DiskFull { .. } => "disk-full",
             StorageError::PermissionDenied { .. } => "permission-denied",

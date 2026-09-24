@@ -206,12 +206,13 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
-// The store refusals the desktop recovers from by moving the store aside.
-// Each is the storage crate's `code()` for the variant.
+// The store refusals the desktop names and recovers from. Each is the
+// storage crate's `code()` for the variant.
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
+  "migrated-by-newer-build",
 ] as const;
 export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 

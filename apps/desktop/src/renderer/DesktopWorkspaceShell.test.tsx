@@ -7082,14 +7082,29 @@ describe("engine store recovery", () => {
     expect(dialog.textContent).not.toContain("not created by dohc");
   });
 
-  // A store this build could not migrate is intact and waits for a build
-  // that opens it. The workspace stops instead of offering a rebuild that
-  // would lose what the fixed build still opens.
-  it("stops the workspace on a migration failure instead of offering the rebuild", async () => {
+  // A store this build could not migrate, or one a newer build migrated, is
+  // intact and waits for a build that opens it. The workspace stops instead
+  // of offering a rebuild that would lose what that build still opens.
+  it.each([
+    {
+      cause: "migration-failed" as const,
+      detail: "migration v2-baseline was applied from a different definition than this build's",
+      sentence: "dohc could not update this workspace's data store to this version.",
+    },
+    {
+      cause: "migrated-by-newer-build" as const,
+      detail: "the store completed migration 5 (from-a-newer-build), which this build does not define",
+      sentence: "A newer version of dohc updated this workspace's data store.",
+    },
+  ])("stops the workspace on $cause instead of offering the rebuild", async ({
+    cause,
+    detail,
+    sentence,
+  }) => {
     const status = {
       ...refusedStatus,
-      engineStoreRefused: "migration-failed" as const,
-      engineStoreRefusedDetail: "migration v2-baseline was applied from a different definition than this build's",
+      engineStoreRefused: cause,
+      engineStoreRefusedDetail: detail,
     };
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => status);
@@ -7103,8 +7118,9 @@ describe("engine store recovery", () => {
     const details = await screen.findByTestId("workspace-update-details");
     await user.click(within(details).getByRole("button", { name: "Copy" }));
     const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("Code: migration-failed");
-    expect(copied).toContain("Engine: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain(`Problem: ${sentence}`);
+    expect(copied).toContain(`Code: ${cause}`);
+    expect(copied).toContain(`Engine: ${detail}`);
     expect(copied).toContain("Workspace id: ");
     expect(copied).toContain("Folder: ");
     expect(copied).toContain("Platform: ");
@@ -7113,9 +7129,7 @@ describe("engine store recovery", () => {
       expect(within(details).getByText(label!)).toBeTruthy();
       expect(details.textContent).toContain(value!);
     }
-    expect(blocked.textContent).toContain(
-      "dohc could not update this workspace's data store to this version.",
-    );
+    expect(blocked.textContent).toContain(`${sentence} Your files are unchanged.`);
     expect(blocked.textContent).toContain("Update dohc to continue");
     // The check answers inside the stop state, where the user can see it.
     bridge.checkForUpdates = vi.fn(async () => ({
