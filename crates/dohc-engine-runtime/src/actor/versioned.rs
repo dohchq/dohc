@@ -863,6 +863,7 @@ fn versioned_text_delete_on_store(
             Some(root_dir),
             &input.workspace_id,
             &input.path,
+            input.now_ms,
         )?;
     }
     let outcome = store.write_with(faults, |tx| {

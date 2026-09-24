@@ -7,7 +7,8 @@
 
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, ReplaceBackoff,
-    StdReplacer, backoff_delay, materialize_secret_one, run_pending_jobs,
+    StdReplacer, backoff_delay, materialize_secret_one, recover_path_displacements,
+    run_pending_jobs,
 };
 use dohc_engine_storage::{
     DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJobSpec,
@@ -1277,7 +1278,11 @@ fn assert_nothing_displaced(sc: &Scratch, store: &EngineStore) {
 /// Bytes another program wrote after the check are back at their path, the
 /// job's content is in the conflict sibling, and the job conflicts.
 fn assert_outside_change_returned(sc: &Scratch, store: &EngineStore) {
-    assert_eq!(read(sc, "a.md").as_deref(), Some(OUTSIDE));
+    assert_returned(sc, store, OUTSIDE);
+}
+
+fn assert_returned(sc: &Scratch, store: &EngineStore, outside: &[u8]) {
+    assert_eq!(read(sc, "a.md").as_deref(), Some(outside));
     assert_eq!(read(sc, "a.md.j1.conflict").as_deref(), Some(OURS));
     assert_nothing_displaced(sc, store);
     assert_eq!(job_status(store), JobStatus::Conflict);
@@ -1834,4 +1839,200 @@ fn a_cancelled_job_still_gets_its_displaced_file_back() {
     assert_eq!(read(&sc, "a.md").as_deref(), Some(PREIMAGE));
     assert_nothing_displaced(&sc, &store);
     assert_eq!(job_status(&store), JobStatus::Cancelled);
+}
+
+/// `git checkout -- notes.md` or an editor's revert writes an older head the
+/// store holds. It is still an outside change: only the preimage or the
+/// job's own content may be deleted.
+#[test]
+fn a_revert_to_an_older_stored_head_returns_and_conflicts() {
+    const OLDER: &[u8] = b"an older head the store still holds";
+    let sc = Scratch::new("revert-older");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    store.put_binary_blob(OLDER).expect("older head");
+    let racer = RaceBefore::new(
+        RenameStep::Displace,
+        write_in_place(sc.target("a.md"), OLDER),
+    );
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_returned(&sc, &store, OLDER);
+}
+
+/// Node's `writeFile`, VS Code and `echo x > f` truncate the file and then
+/// write it. A displaced file caught in between is empty, and still the
+/// writer's: only an empty preimage makes an empty file known.
+#[test]
+fn a_file_truncated_mid_write_returns_and_conflicts() {
+    let sc = Scratch::new("truncated");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racer = RaceBefore::new(RenameStep::Displace, write_in_place(sc.target("a.md"), b""));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_returned(&sc, &store, b"");
+}
+
+/// Refuses to move a displaced file back, as a lock that outlasts the
+/// return's budget would.
+struct ReturnsFail;
+
+impl AtomicReplacer for ReturnsFail {
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        if incoming.to_string_lossy().ends_with(".displaced") {
+            return Err(std::io::Error::other("injected return failure"));
+        }
+        StdReplacer.place(incoming, target)
+    }
+}
+
+/// A return that fails leaves the name empty. The next look at the path,
+/// which is what the actor does before it refuses an absence, tries again,
+/// and the outside bytes come back.
+#[test]
+fn a_failed_return_is_retried_and_the_file_comes_back() {
+    let sc = Scratch::new("failed-return");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let replacer = RaceBefore::new(
+        RenameStep::Displace,
+        write_in_place(sc.target("a.md"), OUTSIDE),
+    );
+    struct Both<'a>(&'a RaceBefore, ReturnsFail);
+    impl AtomicReplacer for Both<'_> {
+        fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+            self.0.displace(target, displaced)
+        }
+        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+            self.1.place(incoming, target)
+        }
+    }
+    let failing = Both(&replacer, ReturnsFail);
+    run_pending_jobs(
+        &store,
+        sc.workspace(),
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &failing,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
+    )
+    .expect_err("the return fails");
+    assert!(!sc.target("a.md").exists(), "the name is empty");
+    assert!(store.path_is_displaced("ws", "a.md").expect("query"));
+
+    recover_path_displacements(
+        &store,
+        sc.workspace(),
+        "ws",
+        "a.md",
+        &MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
+    )
+    .expect("retry the return");
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+    assert_nothing_displaced(&sc, &store);
+}
+
+/// Records every rename a replace makes.
+#[derive(Default)]
+struct RecordRenames {
+    steps: Mutex<Vec<String>>,
+    race: Option<RaceBefore>,
+}
+
+impl RecordRenames {
+    fn record(&self, step: &str, from: &Path, to: &Path) {
+        let name = |path: &Path| {
+            let name = path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .into_owned();
+            if name.ends_with(".displaced") {
+                "displaced".to_owned()
+            } else if name.ends_with(".tmp") {
+                "temp".to_owned()
+            } else {
+                name
+            }
+        };
+        self.steps
+            .lock()
+            .unwrap()
+            .push(format!("{step} {} -> {}", name(from), name(to)));
+    }
+}
+
+impl AtomicReplacer for RecordRenames {
+    fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+        self.record("displace", target, displaced);
+        match &self.race {
+            Some(race) => race.displace(target, displaced),
+            None => StdReplacer.displace(target, displaced),
+        }
+    }
+
+    fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<()> {
+        self.record("place", incoming, target);
+        StdReplacer.place(incoming, target)
+    }
+}
+
+/// The target name is empty only between the first two renames. The
+/// displaced file is read after the job's content is in place; an outside
+/// change found then is swapped back.
+#[test]
+fn the_name_is_empty_only_between_two_renames() {
+    let sc = Scratch::new("rename-order");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let clean = RecordRenames::default();
+    assert_eq!(
+        drain(&store, &sc, &clean, &NoFaults),
+        vec![JobOutcome::Completed]
+    );
+    assert_eq!(
+        *clean.steps.lock().unwrap(),
+        vec!["displace a.md -> displaced", "place temp -> a.md"]
+    );
+
+    let sc = Scratch::new("rename-order-race");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    let racing = RecordRenames {
+        race: Some(RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        )),
+        ..RecordRenames::default()
+    };
+    assert_eq!(
+        drain(&store, &sc, &racing, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(
+        *racing.steps.lock().unwrap(),
+        vec![
+            "displace a.md -> displaced",
+            "place temp -> a.md",
+            "displace a.md -> displaced",
+            "place displaced -> a.md",
+        ]
+    );
+    assert_outside_change_returned(&sc, &store);
 }

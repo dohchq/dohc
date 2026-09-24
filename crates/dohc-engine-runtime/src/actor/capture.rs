@@ -1052,15 +1052,33 @@ pub(super) fn confirm_absent_on_disk(
     root_dir: Option<&std::path::Path>,
     workspace_id: &str,
     path: &str,
+    now_ms: i64,
 ) -> Result<(), RuntimeError> {
     let refuse =
         |reason| RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason });
-    if store.path_is_displaced(workspace_id, path)? {
-        return Err(refuse("path-displaced-by-replace"));
-    }
     let Some(root_dir) = root_dir else {
         return Err(refuse("absence-unconfirmed"));
     };
+    if store.path_is_displaced(workspace_id, path)? {
+        // A replace could not put a displaced file back when it ran. Try
+        // again now; the check below then sees the file that returned.
+        let _ = dohc_engine_files::recover_path_displacements(
+            store,
+            root_dir,
+            workspace_id,
+            path,
+            &dohc_engine_files::MaterializeOptions {
+                policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                replacer: &dohc_engine_files::StdReplacer,
+                backoff: &dohc_engine_files::StdBackoff,
+                now_ms,
+                faults: &dohc_engine_storage::NoFaults,
+            },
+        );
+        if store.path_is_displaced(workspace_id, path)? {
+            return Err(refuse("path-displaced-by-replace"));
+        }
+    }
     let mut absolute = root_dir.to_path_buf();
     absolute.extend(path.split('/'));
     match std::fs::symlink_metadata(&absolute) {
@@ -1106,7 +1124,13 @@ fn capture_retire_on_store(
         return Err(RuntimeError::Cancelled);
     }
     if confirm_absent {
-        confirm_absent_on_disk(store, root_dir, &input.workspace_id, &input.path)?;
+        confirm_absent_on_disk(
+            store,
+            root_dir,
+            &input.workspace_id,
+            &input.path,
+            input.now_ms,
+        )?;
     }
     let outcome = store.write_with(faults, |tx| {
         let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;

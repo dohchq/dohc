@@ -1354,36 +1354,46 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
     );
     supervisor.close(&db).expect("close actor");
 
-    // A crash left a replace with the target moved aside.
-    std::fs::remove_file(scratch.path().join("notes/a.md")).expect("empty the name");
-    EngineStore::open(&db, 15)
-        .expect("store")
+    // A replace moved the target aside and could not put it back: the file
+    // sits at its displaced name with the target name empty.
+    std::fs::rename(
+        scratch.path().join("notes/a.md"),
+        scratch.path().join("notes/.dohc-write-job.displaced"),
+    )
+    .expect("empty the name");
+    let store = EngineStore::open(&db, 15).expect("store");
+    store.put_binary_blob(b"ours").expect("job content");
+    store
         .open_displacement(&dohc_engine_storage::DisplacementSpec {
             job_id: "job".to_owned(),
             workspace_id: WORKSPACE_ID.to_owned(),
             target_path: "notes/a.md".to_owned(),
             displaced_name: ".dohc-write-job.displaced".to_owned(),
-            expected_sha256: "sha".to_owned(),
-            content_sha256: Some("sha".to_owned()),
+            expected_sha256: dohc_engine_storage::hex_sha256(b"captured"),
+            content_sha256: Some(dohc_engine_storage::hex_sha256(b"ours")),
             now_ms: 15,
         })
         .expect("open displacement");
+    drop(store);
     let handle = supervisor.open(&db, 16).expect("reopen actor").actor;
     assert!(
         refused(retire_absent(&handle)),
         "a path an unfinished replace moved aside is not a delete"
     );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/a.md")).expect("returned"),
+        "captured",
+        "the refused confirmation put the displaced file back"
+    );
+    assert!(
+        !scratch
+            .path()
+            .join("notes/.dohc-write-job.displaced")
+            .exists()
+    );
     supervisor.close(&db).expect("close actor");
 
-    let mut store = EngineStore::open(&db, 17).expect("store");
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute("DELETE FROM materialization_displacements", [])
-                .map_err(|_| StorageError::PersistFailed { source: None })?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("resolve the displacement");
-    drop(store);
+    std::fs::remove_file(scratch.path().join("notes/a.md")).expect("a real delete");
     let handle = supervisor.open(&db, 18).expect("reopen actor").actor;
     let retired = retire_absent(&handle).expect("a confirmed absence retires");
     assert!(retired.retired.is_some(), "the head was intact until now");

@@ -306,6 +306,15 @@ impl EngineStore {
         materialize::list_unsettled_displacements(&self.conn)
     }
 
+    /// The open and placed displacements of one path, from any job.
+    pub fn list_unsettled_displacements_for_path(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<Vec<Displacement>, StorageError> {
+        materialize::list_unsettled_displacements_for_path(&self.conn, workspace_id, path)
+    }
+
     /// Every displacement of one job, in any state.
     pub fn list_displacements_for_job(
         &self,

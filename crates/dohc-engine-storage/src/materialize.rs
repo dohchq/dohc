@@ -643,6 +643,21 @@ pub(crate) fn list_unsettled_displacements(
     )
 }
 
+/// Open and placed rows for one path, from any job, oldest first. An empty
+/// `workspace_id` on either side matches every workspace.
+pub(crate) fn list_unsettled_displacements_for_path(
+    conn: &Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<Vec<Displacement>, StorageError> {
+    query_displacements(
+        conn,
+        "state IN ('open', 'placed') AND target_path = ?2 \
+         AND (?1 = '' OR workspace_id = ?1 OR workspace_id = '')",
+        [workspace_id, path],
+    )
+}
+
 /// Every row of one job, in any state, oldest first.
 pub(crate) fn list_displacements_for_job(
     conn: &Connection,
