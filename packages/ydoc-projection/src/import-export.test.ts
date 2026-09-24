@@ -1773,6 +1773,9 @@ describe('Y.Doc markdown import/export', () => {
   it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
     expect(yDocToMarkdown(markdownToYDoc('Hello\n\n[x]: https://h.example "kept"\n')))
       .toBe('Hello\n\n\\[x]: https://h.example "kept"')
+    // marked drops a second definition of a label without a token.
+    expect(yDocToMarkdown(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')))
+      .toBe('\\[x]: https://a.example\n\n\\[x]: https://b.example "kept"')
     const body = yDocBodyJSON(markdownToYDoc('See [docs][x].\n\n[x]: https://example.com\n'))
     expect(body.content?.[0]?.content?.[1]).toMatchObject({
       text: 'docs',

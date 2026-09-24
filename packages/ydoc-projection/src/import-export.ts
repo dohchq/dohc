@@ -388,8 +388,24 @@ const extensions: AnyExtension[] = [
   TableHeader,
   TableRow,
 ]
+// marked keeps a `def` token only for the first definition of a label and
+// discards a later one without a token. Each later one gets a tag that no
+// reference can name, since a label cannot hold an unescaped `]`, so marked
+// keeps its token too and the line stays as text.
+const markdownParser = new Marked({
+  tokenizer: {
+    def(src) {
+      const token = Tokenizer.prototype.def.call(this, src)
+      if (!token) return token
+      const links = this.lexer.tokens.links
+      while (Object.hasOwn(links, token.tag)) token.tag += ']'
+      return token
+    },
+  },
+})
+
 const markdownManager = new MarkdownManager({
-  marked: new Marked() as unknown as typeof marked,
+  marked: markdownParser as unknown as typeof marked,
   extensions,
   indentation: { style: 'space', size: 2 },
 })
