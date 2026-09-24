@@ -175,12 +175,13 @@ describe("closed app compiler", () => {
       inputs: [file("site/index.html", html), ...others] });
     const record = (result: Awaited<ReturnType<typeof compileClosedApp>>) => JSON.parse(new TextDecoder().decode(result.files.find(output => output.path === "page.json")!.bytes)) as AppPage;
     const require = createRequire(import.meta.url);
-    type Window = globalThis.Window & typeof globalThis & { log: string[]; errors: string[] };
+    type Window = globalThis.Window & typeof globalThis & { log: string[]; errors: string[]; blobs: Blob[] };
     const { JSDOM } = require("jsdom") as { JSDOM: new (html: string, options: { runScripts: "dangerously" }) => { window: Window } };
     /** Runs the published document in a DOM, as a guest's browser would load it, and waits until parsing ends. */
     const open = async (result: Awaited<ReturnType<typeof compileClosedApp>>) => {
       const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
-      const dom = new JSDOM(document.html.replace("</head>", "<script>window.log=[];window.errors=[];window.addEventListener('error',e=>window.errors.push(e.message))</script></head>"), { runScripts: "dangerously" });
+      const dom = new JSDOM(document.html.replace("</head>", "<script>window.log=[];window.errors=[];window.blobs=[];window.addEventListener('error',e=>window.errors.push(e.message));" +
+        "URL.createObjectURL=blob=>'blob:test/'+(window.blobs.push(blob)-1)</script></head>"), { runScripts: "dangerously" });
       await vi.waitFor(() => expect(dom.window.document.readyState).not.toBe("loading"));
       await new Promise(resolve => dom.window.setTimeout(resolve, 0));
       return dom;
@@ -246,7 +247,7 @@ describe("closed app compiler", () => {
       expect(css).toMatch(/}\s*}\s*(?:\/\*[^*]*\*\/\s*)?p {\s*margin: 0;/);
     });
 
-    it("embeds each local image once, from src, srcset, poster, style attributes, SVG, and template content", async () => {
+    it("embeds each local image once and shares one blob URL across its references", async () => {
       const result = await page(`<img alt="a" src="map.png"><img alt="b" srcset="map.png 1x, img/Big.PNG 2x" src="https://example.test/remote.png">
         <picture><source srcset="map.png"><img alt="c" src="//cdn.example.test/x.png"></picture><video poster="map.png" src="https://example.test/v.mp4"></video>
         <div style="background: url('img/Big.PNG')"></div><svg><image href="map.png"/><use xlink:href="#icon"/></svg>
@@ -257,19 +258,32 @@ describe("closed app compiler", () => {
       const dom = await open(result);
       try {
         const document = dom.window.document;
-        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe(dataUrl);
-        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe(`${dataUrl} 1x, ${dataUrl} 2x`);
+        expect(dom.window.blobs.map(blob => [blob.type, blob.size])).toEqual([["image/png", png.byteLength], ["image/png", png.byteLength]]);
+        expect(Buffer.from(await dom.window.blobs[0]!.arrayBuffer())).toEqual(Buffer.from(png));
+        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe("blob:test/0");
+        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe("blob:test/0 1x, blob:test/1 2x");
         expect(document.querySelector("img[alt=b]")!.getAttribute("src")).toBe("https://example.test/remote.png");
-        expect(document.querySelector("source")!.getAttribute("srcset")).toBe(dataUrl);
+        expect(document.querySelector("source")!.getAttribute("srcset")).toBe("blob:test/0");
         expect(document.querySelector("img[alt=c]")!.getAttribute("src")).toBe("//cdn.example.test/x.png");
-        expect(document.querySelector("video")!.getAttribute("poster")).toBe(dataUrl);
-        expect(document.querySelector("div")!.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
-        expect(document.querySelector("image")!.getAttribute("href")).toBe(dataUrl);
+        expect(document.querySelector("video")!.getAttribute("poster")).toBe("blob:test/0");
+        expect(document.querySelector("div")!.getAttribute("style")).toBe("background: url('blob:test/1')");
+        expect(document.querySelector("image")!.getAttribute("href")).toBe("blob:test/0");
         expect(document.querySelector("use")!.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("#icon");
         const template = document.querySelector("template")!.content;
-        expect(template.querySelector("img")!.getAttribute("src")).toBe(dataUrl);
+        expect(template.querySelector("img")!.getAttribute("src")).toBe("blob:test/0");
         expect(template.querySelector("script")!.textContent).toBe("window.fromTemplate = true;");
         expect((dom.window as unknown as { fromTemplate?: boolean }).fromTemplate).toBeUndefined();
+      } finally { dom.window.close(); }
+    });
+
+    it("keeps building the page after page markup or scripts replace document methods", async () => {
+      const dom = await open(await page(`<img name="createElement" alt="clobber"><form name="createComment"><input name="appendChild"><input name="setAttribute" value="x"></form>
+        <script>document.createElement = () => { throw new Error("replaced"); }; document.createTextNode = null; Node.prototype.appendChild = null;</script>
+        <!-- note --><p id="later" title="kept">Later</p><script>log.push("ran:" + document.getElementById("later").title)</script>`));
+      try {
+        expect(dom.window.log).toEqual(["ran:kept"]);
+        expect(dom.window.errors).toEqual([]);
+        expect(dom.window.document.querySelectorAll("form input")).toHaveLength(2);
       } finally { dom.window.close(); }
     });
 
@@ -332,6 +346,8 @@ describe("closed app compiler", () => {
       ['<script type="module">import "./secret.ts"</script>', "site/index.html imports ./secret.ts, which is not in the app. Add the file, or list it in app.publish.json."],
       ['<script type="module">import "./data.yaml"</script>', "site/index.html imports ./data.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml."],
       ["<frameset></frameset>", "site/index.html uses <frameset>. Published apps need a page with a <body>."],
+      ["<div =x>hi</div>", 'site/index.html has an attribute named "=x". A published page cannot carry that name. Rename or remove the attribute.'],
+      ["<div a\u00a0b>hi</div>", `site/index.html has an attribute named ${JSON.stringify("a\u00a0b")}. A published page cannot carry that name.`],
     ])("refuses %s and names the file", async (html, message) => {
       await expect(page(html, file("site/app.js", "document.writeln('x')"), file("site/app.css", "p{}"))).rejects.toThrow(message);
     });

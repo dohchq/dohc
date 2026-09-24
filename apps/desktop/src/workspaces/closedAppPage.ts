@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
 import { defaultTreeAdapter, parse as parseHtml, type DefaultTreeAdapterTypes } from "parse5";
-import { APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, APP_PAGE_MODULES_GLOBAL, type AppPage, type AppPageAttribute, type AppPageElement, type AppPageNode, type AppPageValue } from "@dohc/app-browser/document";
+import { APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, APP_PAGE_MODULES_GLOBAL, appPageProblem, type AppPage, type AppPageAttribute, type AppPageElement, type AppPageNode, type AppPageValue } from "@dohc/app-browser/document";
 
 type Element = DefaultTreeAdapterTypes.Element;
 type Node = DefaultTreeAdapterTypes.ChildNode;
@@ -325,6 +325,9 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
     head: convert(head.childNodes, 1, false), body: convert(body.childNodes, 1, false),
     scripts, images, modules: modules.length,
   };
+  // The app document refuses a record this check refuses, so the page is refused here, by name, before it is published.
+  const problem = appPageProblem(JSON.parse(JSON.stringify(page)));
+  if (problem) throw new Error(`${entry} ${problem}`);
   if (styles.length) inline.set(pageStyles, { contents: styles.join("\n"), loader: "css" });
   const module = (styles.length ? `import ${JSON.stringify(pageStyles)};\n` : "") +
     `globalThis.${APP_PAGE_MODULES_GLOBAL} = [${modules.map(specifier => `() => require(${JSON.stringify(specifier)})`).join(", ")}];`;

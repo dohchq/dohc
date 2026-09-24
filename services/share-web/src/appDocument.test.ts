@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
+import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_DEPTH, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
@@ -107,10 +107,26 @@ describe("compiled app document", () => {
       dom.window.close();
     });
 
-    it("fills each image reference from the page's one copy of the image", () => {
+    it("makes one blob URL for each image and shares it across every reference", async () => {
       const png = "data:image/png;base64,iVBORw0KGgo=";
-      const dom = new JSDOM(build(page({ head: [], body: [{ tag: "img", attrs: [["src", [0]], ["srcset", [0, " 1x, ", 0, " 2x"]]], children: [] }], scripts: [], images: [png] })).html, { runScripts: "dangerously" });
-      expect(dom.window.document.querySelector("img")!.getAttribute("srcset")).toBe(`${png} 1x, ${png} 2x`);
+      const uses = Array.from({ length: 50 }, (): AppPage["body"][number] => ({ tag: "img", attrs: [["src", [0]], ["srcset", [0, " 1x, ", 0, " 2x"]]], children: [] }));
+      // JSDOM has no URL.createObjectURL; the stub records each blob the loader makes.
+      const html = build(page({ head: [], body: uses, scripts: [], images: [png] })).html
+        .replace("</head>", "<script>window.blobs=[];URL.createObjectURL=blob=>'blob:test/'+(window.blobs.push(blob)-1)</script></head>");
+      const dom = new JSDOM(html, { runScripts: "dangerously" });
+      const window = dom.window as typeof dom.window & { blobs: Blob[] };
+      expect(window.blobs).toHaveLength(1);
+      expect([window.blobs[0]!.type, Buffer.from(await window.blobs[0]!.arrayBuffer()).toString("base64")]).toEqual(["image/png", "iVBORw0KGgo="]);
+      expect(new Set([...dom.window.document.querySelectorAll("img")].map(image => image.getAttribute("srcset")))).toEqual(new Set(["blob:test/0 1x, blob:test/0 2x"]));
+      dom.window.close();
+    });
+
+    it("keeps building the page when page markup names elements after document methods", () => {
+      const clobber = (name: string): AppPage["body"][number] => ({ tag: "img", attrs: [["name", name]], children: [] });
+      const dom = new JSDOM(build(page({ head: [], scripts: ["window.log = [!!document.getElementById('after')];"],
+        body: [clobber("createElement"), clobber("createElementNS"), clobber("createComment"), clobber("createTextNode"), clobber("readyState"),
+          { comment: " note " }, "text", { tag: "p", attrs: [["id", "after"]], children: [] }, { tag: "script", attrs: [], children: [], run: 0 }] })).html, { runScripts: "dangerously" });
+      expect(dom.window.log).toEqual([true]);
       dom.window.close();
     });
 
@@ -123,10 +139,22 @@ describe("compiled app document", () => {
       ["an attribute name with a space", page({ bodyAttributes: [["on click", "x"]] })],
       ["an unknown namespace", { ...page(), body: [{ tag: "x", ns: "xul", attrs: [], children: [] }] }],
       ["a script that is not text", page({ scripts: [1 as unknown as string] })],
+      ["an attribute name the HTML parser would split", page({ body: [{ tag: "div", attrs: [["=x", ""]], children: [] }] })],
+      ["an element name that does not start with a letter", page({ body: [{ tag: "!--", attrs: [], children: [] }] })],
+      ["template content on another element", page({ body: [{ tag: "div", attrs: [], children: [], content: [] }] })],
+      ["template content on an SVG element", page({ body: [{ tag: "template", ns: "svg", attrs: [], children: [], content: [] }] })],
+      ["an image that is not base64 image data", page({ images: ["data:image/png,<svg>"] })],
       [`more than ${APP_PAGE_MAX_SCRIPTS} scripts`, page({ scripts: Array.from({ length: APP_PAGE_MAX_SCRIPTS + 1 }, (_, index) => `${index}`) })],
       [`elements nested more than ${APP_PAGE_MAX_DEPTH} deep`, page({ body: [Array.from({ length: APP_PAGE_MAX_DEPTH + 1 }).reduce<AppPage["body"][number]>(child => ({ tag: "div", attrs: [], children: [child] }), "x")] })],
     ])("refuses a page record with %s", (_name, value) => {
       expect(() => build(value)).toThrow("Invalid app page.");
+      expect(appPageProblem(value)).not.toBeNull();
+    });
+
+    it("says what is wrong in words that follow the page's name", () => {
+      expect(appPageProblem(page())).toBeNull();
+      expect(appPageProblem(page({ body: [{ tag: "div", attrs: [["=x", ""]], children: [] }] }))).toBe('has an attribute named "=x". A published page cannot carry that name. Rename or remove the attribute.');
+      expect(appPageProblem(page({ body: [{ tag: "1x", attrs: [], children: [] }] }))).toBe('has an element named "1x". A published page cannot carry that name. Rename the element.');
     });
   });
 

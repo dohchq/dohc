@@ -206,6 +206,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
       <ul id="books"></ul>
       <img alt="Cover" src="cover.png">
       <img alt="Sharp cover" srcset="cover.png 1x, img/cover-2x.png 2x">
+      <img alt="" name="createElement" src="cover.png">
       <p role="status"></p>
       <p id="order"></p>
     </main>
@@ -280,7 +281,10 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await expect(app.locator("main")).toHaveCSS("color", "rgb(1, 2, 3)");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toHaveCSS("letter-spacing", "2px");
     await expect.poll(() => app.getByRole("img", { name: "Cover", exact: true }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
-    await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", /^data:image\/png;base64,\S+ 1x, data:image\/png;base64,\S+ 2x$/);
+    // Each image is one blob URL that every reference shares.
+    const cover = await app.getByRole("img", { name: "Cover", exact: true }).getAttribute("src");
+    expect(cover).toMatch(/^blob:/);
+    await expect(app.getByRole("img", { name: "Sharp cover" })).toHaveAttribute("srcset", new RegExp(`^${cover!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} 1x, blob:\\S+ 2x$`));
     await expect(app.locator("main")).toHaveCSS("background-image", /^url\("data:image\/png;base64,/);
     // Under the published hash-only policy the page runs as in a tab: head content and its ids stay, each classic script
     // sees only what precedes it, a throw stops only its own script, and deferred and module scripts run in document order.
