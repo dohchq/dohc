@@ -820,14 +820,19 @@ function noticeStore(): NoticeStore {
       await warmCredentialCache();
       return noticeAccount(cachedCredentials);
     },
-    accountForWorkspace: async (workspaceId) => {
+    // An owned workspace is named; a share view is reached through its share.
+    reachFor: async (workspaceId) => {
       await warmCredentialCache();
       const workspace = findWorkspace(workspaceId);
       if (!workspace) return null;
-      const author = workspace.shareView
-        ? resolveShareViewRelayAuthorId(workspace.shareView, cachedCredentials)
-        : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials);
-      return author === undefined ? null : noticeAccount(cachedCredentials);
+      if (workspace.shareView) {
+        return resolveShareViewRelayAuthorId(workspace.shareView, cachedCredentials) === undefined
+          ? null
+          : { shareId: workspace.shareView.shareId };
+      }
+      return resolveWorkspaceRelayAuthorId(workspace, cachedCredentials) === undefined
+        ? null
+        : { workspaceId };
     },
     installId: localReactorFallbackId,
     onChanged: () => {

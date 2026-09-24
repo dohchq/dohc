@@ -16,6 +16,8 @@ import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engin
 import {
   NOTICE_BODY_MAX_CHARS,
   NOTICE_ID_MAX_CHARS,
+  NOTICE_SENDER_LABEL_MAX_CHARS,
+  NOTICE_TARGET_FIELD_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
 } from "@dohc/workspace-contracts/relay";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
@@ -5840,35 +5842,44 @@ export const workspaceSearchOperations = {
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
 // through the signed-in server, or the server has no notice list. Dismissed
-// rows are not listed.
+// rows are not listed. Lengths count code points, as the relay does.
 export const NoticeStoreName = z.enum(["local", "account"]);
-const NOTICE_TARGET_FIELD = z.string().min(1).max(1_024).optional();
+const codePoints = (min: number, max: number) =>
+  z.string().refine((value) => {
+    const length = [...value].length;
+    return length >= min && length <= max;
+  });
+const NOTICE_TARGET_FIELD = codePoints(1, NOTICE_TARGET_FIELD_MAX_CHARS).optional();
+export const NoticeTargetShape = z.object({
+  path: NOTICE_TARGET_FIELD,
+  record: NOTICE_TARGET_FIELD,
+  thread: NOTICE_TARGET_FIELD,
+  message: NOTICE_TARGET_FIELD,
+  share: NOTICE_TARGET_FIELD,
+  automation: NOTICE_TARGET_FIELD,
+  run: NOTICE_TARGET_FIELD,
+});
 export const NoticeRow = z.object({
   store: NoticeStoreName,
-  noticeId: z.string().min(1).max(NOTICE_ID_MAX_CHARS),
+  noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
   kind: z.string().min(1).max(64),
+  // A local row names this computer's workspace. An account row names the
+  // workspace, or the share the person reads it through when it is not theirs.
   workspaceId: z.string().min(1).max(1_024).nullable(),
   recipientShareId: z.string().min(1).max(128).nullable(),
   senderKind: z.enum(["person", "agent", "automation"]).nullable(),
-  senderLabel: z.string().min(1).max(40).nullable(),
-  title: z.string().min(1).max(NOTICE_TITLE_MAX_CHARS * 2),
-  body: z.string().max(NOTICE_BODY_MAX_CHARS * 2),
-  target: z.object({
-    path: NOTICE_TARGET_FIELD,
-    record: NOTICE_TARGET_FIELD,
-    thread: NOTICE_TARGET_FIELD,
-    message: NOTICE_TARGET_FIELD,
-    share: NOTICE_TARGET_FIELD,
-    automation: NOTICE_TARGET_FIELD,
-    run: NOTICE_TARGET_FIELD,
-  }),
+  senderLabel: codePoints(1, NOTICE_SENDER_LABEL_MAX_CHARS).nullable(),
+  title: codePoints(1, NOTICE_TITLE_MAX_CHARS),
+  body: codePoints(0, NOTICE_BODY_MAX_CHARS),
+  // Null once the person can no longer open what the notice pointed at.
+  target: NoticeTargetShape.nullable(),
   createdAtMs: z.number().int().nonnegative(),
   readAtMs: z.number().int().nonnegative().nullable(),
 });
 export type NoticeRow = z.infer<typeof NoticeRow>;
 export const NoticeRef = z.object({
   store: NoticeStoreName,
-  noticeId: z.string().min(1).max(NOTICE_ID_MAX_CHARS),
+  noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
 export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
