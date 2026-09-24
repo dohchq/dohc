@@ -63,7 +63,9 @@ const MIRRORED_STYLES = [
 // Whether the caret is on the title's last visual line, where ArrowDown
 // moves on to the body. A textarea gives no geometry for its text, so a
 // hidden copy with the same width and font lays it out again: the text after
-// the caret fits on one line only when the caret is on the last one.
+// the caret stays on one line only when the caret is on the last one.
+// Mixed-direction text splits one line into several boxes, so this compares
+// where the boxes sit, not how many there are.
 function caretOnLastLine(field: HTMLTextAreaElement): boolean {
   const rest = field.value.slice(field.selectionEnd);
   if (rest === "") return true;
@@ -85,7 +87,9 @@ function caretOnLastLine(field: HTMLTextAreaElement): boolean {
   document.body.append(mirror);
   try {
     // A DOM without layout reports no boxes; that counts as one line.
-    return after.getClientRects().length <= 1;
+    const boxes = [...after.getClientRects()];
+    const top = Math.min(...boxes.map((box) => box.top));
+    return boxes.every((box) => box.top < top + box.height / 2);
   } finally {
     mirror.remove();
   }

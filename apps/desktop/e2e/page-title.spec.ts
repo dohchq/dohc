@@ -79,3 +79,44 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Mixed-direction text lays one line out as several boxes. The last line is
+// still the last line.
+test("ArrowDown leaves a mixed-direction title from its last line, and only there", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const short = "Hello שלום world";
+  const long = "Hello שלום world, a much longer title with עברית in the middle that wraps in a narrow pane";
+
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "short.md", contents: `---\ntitle: ${short}\n---\n\nBody text.\n` },
+      { path: "long.md", contents: `---\ntitle: ${long}\n---\n\nBody text.\n` },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(900, 700));
+    const title = page.getByTestId("page-title");
+
+    // A wrapped mixed-direction title keeps ArrowDown on its first line.
+    await explorerRow(page, "long.md").click();
+    await expect(title).toHaveValue(long, { timeout: 20_000 });
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await title.click();
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("ArrowDown");
+    expect(await caret(title)).toMatchObject({ focused: true });
+
+    // A one-line mixed-direction title hands ArrowDown to the body from its start.
+    await explorerRow(page, "short.md").click();
+    await expect(title).toHaveValue(short, { timeout: 20_000 });
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await title.click();
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByTestId("markdown-editor")).toBeFocused();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
