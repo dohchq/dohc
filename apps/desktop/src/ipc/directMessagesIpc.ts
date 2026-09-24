@@ -175,8 +175,9 @@ export function registerDirectMessagesIpcHandlers<
             }
           : null;
         const store = linkedChatStoreFor(workspace);
-        // Relay work this pass attempted and could not finish. The renderer
-        // holds its polls on a failed result instead of trying again at once.
+        // The request listing or the shared-channel pass failed as a whole.
+        // The renderer holds its polls on a failed result instead of trying
+        // again at once. One failing share does not count.
         let failed = false;
         const { pending, declined } =
           await classifyDmRequestsWithFallback({
@@ -249,12 +250,14 @@ export function registerDirectMessagesIpcHandlers<
             // refresh Chats, and run this handler again. The renderer's own
             // polls ask for a pull instead, which fetches members' replies to
             // the DMs and Groups this workspace owns without recording a
-            // change. The cloud engine owns its work after this request
-            // queues it. Do not extend the renderer operation into that
-            // durable process.
+            // change. That log does not depend on the listing or the joined
+            // rows, so their failures do not skip it; the engine backs off
+            // on its own failures. The cloud engine owns its work after this
+            // request queues it. Do not extend the renderer operation into
+            // that durable process.
             if (outcome.changed) {
               activity.queueCloudSync(workspace.workspaceId);
-            } else if (input.poll && !failed) {
+            } else if (input.poll) {
               activity.queueCloudPull(workspace.workspaceId);
             }
           } catch (error) {

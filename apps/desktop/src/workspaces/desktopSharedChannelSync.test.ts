@@ -131,20 +131,32 @@ describe("desktop shared-channel pass composition", () => {
     expect(h.project).toHaveBeenCalledExactlyOnceWith("workspace");
   });
 
-  it("keeps applied pages when a later page or the work after the rows fails", async () => {
+  it("keeps applied pages when a later page or the work after the rows fails, and reports neither as a failed pass", async () => {
     const h = harness([joined("one")]);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     h.pull.mockImplementationOnce(async (input) => {
       input.onApplied?.();
       throw new Error("ECONNRESET");
     });
-    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: true });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: false });
     h.pull.mockResolvedValueOnce({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
     h.project.mockRejectedValueOnce(new Error("projection failed"));
-    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: true });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: false });
     expect(h.notify).toHaveBeenCalledTimes(2);
     // Nothing new after the failure: the applied pages were reported already.
     await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, changed: false, failed: false });
+    errorSpy.mockRestore();
+  });
+
+  it("reports a failed pass only when it stops before its rows finish", async () => {
+    const h = harness([joined("one"), joined("two")]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // One failing share leaves the other fresh and holds nothing.
+    h.pull.mockRejectedValueOnce(new Error("relay answered 500"));
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: false, failed: false });
+    expect(h.pull).toHaveBeenCalledTimes(2);
+    h.relayForRegistered.mockImplementationOnce(() => { throw new Error("engine unavailable"); });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 2, changed: false, failed: true });
     errorSpy.mockRestore();
   });
 

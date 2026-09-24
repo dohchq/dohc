@@ -1482,8 +1482,9 @@ describe("chat IPC contract", () => {
         dms: [],
         pending: [request],
         declined: [{ shareId: "share-2", granterEmail: null }],
+        failed: false,
       }),
-    ).toMatchObject({ pending: [request] });
+    ).toMatchObject({ pending: [request], failed: false });
     expect(
       AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" }),
     ).toEqual({ workspaceId: "workspace-a", shareId: "share-1" });

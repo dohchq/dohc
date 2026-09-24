@@ -290,16 +290,19 @@ describe("registered direct message boundaries", () => {
     expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
   });
 
-  it("reports a failed pass, a failed relay listing, and a thrown sync, and pulls for none of them", async () => {
+  it("reports a failed pass, a failed relay listing, and a thrown sync, and a failed listing or pass still pulls for a poll", async () => {
     const h = await harness();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 1, changed: false, failed: true }; });
     await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
-    h.sync.mockRejectedValueOnce(new Error("relay down"));
-    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
     h.relayJson.mockRejectedValueOnce(new Error("relay down"));
     await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true, pending: [], declined: [] });
-    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
+    // The owner's relay log does not depend on the listing or the joined
+    // rows, and the engine backs off on its own failures.
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
+    h.sync.mockRejectedValueOnce(new Error("relay down"));
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
     expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });

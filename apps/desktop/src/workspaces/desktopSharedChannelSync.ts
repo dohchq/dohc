@@ -30,7 +30,9 @@ export interface SharedChannelPassOutcome {
   // True when a pull applied new ops, including pages applied before a
   // later failure.
   changed: boolean;
-  // True when the pass, or a row in it, did not complete.
+  // True when the pass stopped before its rows finished. A failed row does
+  // not count, because one failing share must not hold the others, and
+  // neither does work after the rows, such as bookmark projection.
   failed: boolean;
 }
 
@@ -342,11 +344,15 @@ export function createDesktopSharedChannelSync<
         await projectPendingChatBookmarksAfterPull(workspaceId);
         assertRequestCurrent();
       }
-      return { unrefreshed, changed: result.changed, failed: result.failedRows > 0 };
+      return { unrefreshed, changed: result.changed, failed: false };
     } catch (error) {
       if (operation) assertRequestCurrent();
       console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
-      return { unrefreshed: liveRows, changed: progress?.changed ?? false, failed: true };
+      return {
+        unrefreshed: liveRows,
+        changed: progress?.changed ?? false,
+        failed: progress === null,
+      };
     }
   }
 

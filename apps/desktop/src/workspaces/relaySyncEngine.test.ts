@@ -581,6 +581,58 @@ describe("relaySyncEngine", () => {
     errorSpy.mockRestore();
   });
 
+  it("queuePull pulls within one debounce interval of each poll while local writes keep restarting the debounce", async () => {
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queueSync();
+    for (let poll = 1; poll <= 3; poll += 1) {
+      sync.queuePull();
+      // A write every 60 ms keeps the 100 ms debounce from ever firing.
+      for (let write = 0; write < 5; write += 1) {
+        sync.queueSync();
+        await vi.advanceTimersByTimeAsync(60);
+      }
+      expect(cap.runRelaySync).toHaveBeenCalledTimes(poll);
+    }
+    // The writes stop, and the debounced pass pushes the rest.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    expect(sync.snapshot().pendingChangeCount).toBe(0);
+    await sync.stop();
+  });
+
+  it("queuePull announces its pass only when it applied ops or changed what the snapshot shows", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    // A write mid-pass announced `syncing`, so the end is announced too.
+    onChange.mockClear();
+    let release!: () => void;
+    pullMock.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return pullResult();
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    sync.queueSync();
+    expect(onChange).toHaveBeenCalledOnce();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncing).toBe(false);
+    await sync.stop();
+  });
+
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {
     pushMock.mockImplementation(async () => {
       throw new RelayUnauthorizedError();
