@@ -401,13 +401,20 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
   });
 
-  it("makes the roster unknown when the mark cannot be saved", async () => {
+  it("refuses the pull when the mark cannot be saved, and names the write", async () => {
     seed();
-    const { rosters: r } = rosters(async () => failing, store.setShareRoster, () => {
-      throw new Error("disk full");
+    let fail = true;
+    const { rosters: r } = rosters(async () => failing, store.setShareRoster, (id) => {
+      if (fail) throw new Error("disk full");
+      store.markShareRosterPulled(id);
     });
+    expect(() => r.pullStarting(WORKSPACE)).toThrow(
+      "dohc did not pull because it could not save the share roster's pull mark to the workspace registry: disk full",
+    );
+    // No pull ran, so nothing reached this computer past the cached roster.
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    fail = false;
     r.pullStarting(WORKSPACE)();
-    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
     expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
   });
 
@@ -448,10 +455,10 @@ describe("keeping the roster current", () => {
       store.setShareRoster(id, listing, pulledAfter);
     });
     await r.forRun(WORKSPACE);
-    r.pullStarting(WORKSPACE)();
+    expect(() => r.pullStarting(WORKSPACE), "a pull ran with its mark unsaved").toThrow("disk full");
     fail = false;
-    await r.forRun(WORKSPACE);
-    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
+    r.pullStarting(WORKSPACE)();
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ grants: [ana], pulledAfter: true });
   });
 
   it("makes the roster unknown when the relay answered part of a listing and then stopped", async () => {

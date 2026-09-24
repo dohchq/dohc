@@ -251,6 +251,31 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  it("sends no pull request when the pull-start hook refuses, and still pushes", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      pullStarting: () => {
+        throw new Error("could not save the pull mark");
+      },
+      operations: mockOperations(),
+    });
+
+    await expect(sync.start()).rejects.toThrow("could not save the pull mark");
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(pullMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("relay sync failed"),
+      expect.objectContaining({ message: "could not save the pull mark" }),
+    );
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
   it("tells post-pull work when a pass succeeds after a failed one", async () => {
     pullMock.mockRejectedValueOnce(new Error("relay unavailable"));
     const afterSuccessfulPull = vi.fn(async (_pass: { recovered: boolean }) => undefined);

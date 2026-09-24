@@ -281,9 +281,6 @@ interface RosterState {
   // many are still running.
   pullStarts: number;
   pullsRunning: number;
-  // A pull started and dohc could not record it. The roster is unknown until
-  // a listing answers.
-  markFailed: boolean;
   // Set while listings get no answer, and cleared only when one answers.
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
@@ -303,7 +300,8 @@ interface RosterState {
  * pull can bring an automation from someone whose grant the cached roster
  * does not show, so after one the roster is unknown until a listing answers.
  * The registry records the pull before its request is sent, so neither a
- * crash nor a lost response can hide it. The pull does not say who wrote what
+ * crash nor a lost response can hide it. When the registry cannot record it,
+ * the pull does not run. The pull does not say who wrote what
  * it brought, so a person's own changes from another computer count too.
  */
 export function createShareRosters(dependencies: {
@@ -324,7 +322,7 @@ export function createShareRosters(dependencies: {
     let state = states.get(workspaceId);
     if (!state) {
       state = {
-        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0, markFailed: false,
+        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0,
         noAnswer: null, unsaved: null, running: null, again: false,
       };
       states.set(workspaceId, state);
@@ -343,28 +341,24 @@ export function createShareRosters(dependencies: {
   }
 
   // Record, before its request is sent, that a pull follows the latest
-  // listing.
+  // listing. Throws when the registry cannot be written.
   function markPulled(workspaceId: string, state: RosterState): void {
     if (state.unsaved) {
       state.unsaved.pulledAfter = true;
-      save(workspaceId, state);
+      dependencies.saveRoster(workspaceId, state.unsaved.listing, true);
+      state.unsaved = null;
       return;
     }
     const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
     if (!stored || stored.pulledAfter) return;
-    try {
-      dependencies.markRosterPulled(workspaceId);
-    } catch (error) {
-      state.markFailed = true;
-      dependencies.logError(workspaceId, error);
-    }
+    dependencies.markRosterPulled(workspaceId);
   }
 
   // The latest listing got no answer, and the roster it would fall back to
   // may be missing an editor.
   function stale(workspaceId: string, state: RosterState): boolean {
     if (state.noAnswer === null) return false;
-    if (state.noAnswer.partial || state.markFailed) return true;
+    if (state.noAnswer.partial) return true;
     if (state.unsaved) return state.unsaved.pulledAfter;
     return dependencies.findWorkspace(workspaceId)?.shareRoster?.pulledAfter === true;
   }
@@ -389,7 +383,6 @@ export function createShareRosters(dependencies: {
       return;
     }
     state.noAnswer = null;
-    state.markFailed = false;
     state.unsaved = { listing: answer.listing, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
   }
@@ -478,13 +471,22 @@ export function createShareRosters(dependencies: {
 
     /**
      * A pull from the relay is about to start. Records it durably before it
-     * returns, and returns the function to call when the pull ends.
+     * returns, and returns the function to call when the pull ends. Throws
+     * when the registry cannot record it, so the pull does not run.
      */
     pullStarting(workspaceId: string): () => void {
       const state = stateFor(workspaceId);
+      try {
+        markPulled(workspaceId, state);
+      } catch (error) {
+        throw new Error(
+          `dohc did not pull because it could not save the share roster's pull mark to the workspace registry: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
       state.pullStarts += 1;
       state.pullsRunning += 1;
-      markPulled(workspaceId, state);
       let ended = false;
       return () => {
         if (ended) return;
