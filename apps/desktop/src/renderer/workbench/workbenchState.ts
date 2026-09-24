@@ -130,6 +130,22 @@ export function keepActiveViewShown(
 }
 
 /**
+ * Moves the selection only when the rail change removed the selected entry
+ * itself: the person hid the selected view or unpinned the selected app.
+ * Hiding another view, reordering, or pinning leaves it alone, and so does a
+ * change while a view the rail never showed is open.
+ */
+export function keepActiveViewAfterRailChange(
+  state: WorkbenchState,
+  previousRail: readonly ActivityViewId[],
+  rail: readonly ActivityViewId[],
+): WorkbenchState {
+  return previousRail.includes(state.activeView) && !rail.includes(state.activeView)
+    ? keepActiveViewShown(state, rail)
+    : state;
+}
+
+/**
  * Opens or closes the side panel. Opening shows the selected view when the
  * rail shows it, and otherwise the first view on the rail; with an empty
  * rail nothing opens.

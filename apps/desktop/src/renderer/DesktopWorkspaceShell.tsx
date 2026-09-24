@@ -232,6 +232,7 @@ import {
   parsePluginWebAppTabPath,
   appViewId,
   clearPluginView,
+  keepActiveViewAfterRailChange,
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
@@ -1180,15 +1181,23 @@ export function DesktopWorkspaceShell(props: {
   const railOrderRef = useRef(railOrder);
   railOrderRef.current = railOrder;
   // When the person hides the selected view or unpins the selected app, the
-  // selection moves to a view on the rail. Only a change to the rail does
-  // this: a link or command that opens a hidden view keeps it open. Until
-  // the settings arrive the selection stands, so a restart keeps the view
-  // that was open.
+  // selection moves to a view on the rail. Any other change to the rail,
+  // such as hiding another view, reordering, or pinning, leaves it alone, and
+  // so does a link or command that opens a hidden view. When the settings
+  // first arrive, a selection the rail does not show moves once; before that
+  // it stands, so a restart keeps the view that was open.
   const railKey = railOrder.join("\0");
   const settingsLoaded = props.userSettings !== null;
+  const previousRailRef = useRef<readonly ActivityViewId[] | null>(null);
   useEffect(() => {
     if (!settingsLoaded) return;
-    mutateWb((state) => keepActiveViewShown(state, railOrderRef.current));
+    const previous = previousRailRef.current;
+    const rail = railOrderRef.current;
+    previousRailRef.current = rail;
+    mutateWb((state) =>
+      previous === null
+        ? keepActiveViewShown(state, rail)
+        : keepActiveViewAfterRailChange(state, previous, rail));
   }, [mutateWb, railKey, settingsLoaded]);
   // Toggling the side panel open shows a view on the rail, never a hidden one.
   const toggleSidePanel = useCallback(

@@ -112,6 +112,8 @@ type PreviewHold<T> = {
   state: "starting" | "ready" | "failed";
   // A newer start replaced this one before it finished.
   replaced: boolean;
+  // Stops this start once no surface holds it.
+  cancel: AbortController;
 };
 
 // What a surface that did not ask for a new start is told: the preview it now
@@ -136,7 +138,10 @@ export function createSitePreviewLifecycle<
   notifyReplaced?: (senderId: number, replacement: SitePreviewReplacement<T>) => void;
 }) {
   const startLanes = new Map<string, Promise<void>>();
+  // Each app's current hold, and the starts still preparing to take over
+  // from it.
   const holds = new Map<string, PreviewHold<T>>();
+  const preparing = new Map<string, Set<PreviewHold<T>>>();
   // The last preview each app's start produced, replaced or not, so a failed
   // restart can tell surfaces what still runs.
   const lastStarted = new Map<string, HeldPreview<T>>();
@@ -390,6 +395,11 @@ export function createSitePreviewLifecycle<
     prepare: (isCurrent: () => boolean) => Promise<
       (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
     >;
+    // Stops the start when it aborts.
+    cancelled?: AbortSignal;
+    // Runs once preparation passed, before the start replaces anything.
+    // Answering false stops the start.
+    onPrepared?: () => boolean;
   }): Promise<StartedPreview<T>> {
     if (retired) throw new Error(START_CANCELLED_MESSAGE);
     const pending = beginPending(
@@ -398,6 +408,8 @@ export function createSitePreviewLifecycle<
       startInput.siteRoot,
     );
     const key = pending.siteKey;
+    if (startInput.cancelled?.aborted) pending.controller.abort();
+    startInput.cancelled?.addEventListener("abort", () => pending.controller.abort(), { once: true });
     const isCurrent = () =>
       !retired && !pending.controller.signal.aborted && startInput.isCurrent();
     const requireCurrent = (): void => {
@@ -408,6 +420,9 @@ export function createSitePreviewLifecycle<
       requireCurrent();
       const execute = await startInput.prepare(isCurrent);
       requireCurrent();
+      if (startInput.onPrepared && !startInput.onPrepared()) {
+        throw new Error(START_CANCELLED_MESSAGE);
+      }
       supersedeOlderStarts(pending);
       pending.phase = "queued";
       return await runInKeyedLane(startLanes, key, async () => {
@@ -467,9 +482,12 @@ export function createSitePreviewLifecycle<
   /**
    * Shows the app's preview in one more surface. A surface that asks for the
    * mode already running, or starting, shares it. A different mode, or a
-   * restart the person asked for, starts the app's preview again, and every
-   * other surface showing the app is told what it shows now. A start lasts as
-   * long as any surface holding it does, whichever window asked first.
+   * restart the person asked for, starts the app's preview again. That start
+   * takes over once it passes preparation: from then on every surface showing
+   * the app follows it, and a start it replaced answers that it was replaced.
+   * A start that fails preparation changes nothing for the other surfaces. A
+   * start lasts as long as any surface holding it does, whichever window
+   * asked first.
    */
   function acquire(acquireInput: {
     holderId: string;
@@ -488,29 +506,32 @@ export function createSitePreviewLifecycle<
       senderId: acquireInput.senderId,
       isCurrent: acquireInput.isCurrent,
     };
-    const held = holds.get(key);
+    const current = holds.get(key);
     const running = activePreviews.get(key)?.state === "running";
-    if (
-      held?.mode === acquireInput.mode &&
-      (held.state === "starting" ||
-        (held.state === "ready" && !acquireInput.restart && running))
-    ) {
-      held.holders.set(acquireInput.holderId, holder);
-      held.answered.add(acquireInput.holderId);
-      return held.answer;
+    const joinable =
+      [...(preparing.get(key) ?? [])].reverse().find((hold) => hold.mode === acquireInput.mode) ??
+      (current?.mode === acquireInput.mode &&
+      (current.state === "starting" ||
+        (current.state === "ready" && !acquireInput.restart && running))
+        ? current
+        : undefined);
+    if (joinable) {
+      joinable.holders.set(acquireInput.holderId, holder);
+      joinable.answered.add(acquireInput.holderId);
+      return joinable.answer;
     }
-    // Every surface that showed the app follows the new start. A start still
-    // running for them answers that it was replaced, not that it failed.
-    if (held?.state === "starting") held.replaced = true;
-    const holders = new Map(held?.holders);
-    holders.set(acquireInput.holderId, holder);
+
     const generation = ++lastGeneration;
+    const holders = new Map([[acquireInput.holderId, holder]]);
+    const cancel = new AbortController();
     const started = start({
       senderId: null,
       workspaceId: acquireInput.workspaceId,
       siteRoot: acquireInput.siteRoot,
       isCurrent: () => [...holders.values()].some((each) => each.isCurrent()),
+      cancelled: cancel.signal,
       prepare: acquireInput.prepare,
+      onPrepared: () => takeOver(key, hold),
     });
     const hold: PreviewHold<T> = {
       workspaceId: acquireInput.workspaceId,
@@ -519,11 +540,12 @@ export function createSitePreviewLifecycle<
       mode: acquireInput.mode,
       holders,
       answered: new Set([acquireInput.holderId]),
+      cancel,
       answer: started.then(
-        (started): HeldPreview<T> | ReplacedStart => {
-          const preview = { ...started, generation };
-          lastStarted.set(key, preview);
-          return hold.replaced ? { replaced: true } : preview;
+        (preview): HeldPreview<T> | ReplacedStart => {
+          const held = { ...preview, generation };
+          lastStarted.set(key, held);
+          return hold.replaced ? { replaced: true } : held;
         },
         (error: unknown): ReplacedStart => {
           if (hold.replaced) return { replaced: true };
@@ -533,13 +555,17 @@ export function createSitePreviewLifecycle<
       state: "starting",
       replaced: false,
     };
-    holds.set(key, hold);
+    const waiting = preparing.get(key) ?? new Set<PreviewHold<T>>();
+    waiting.add(hold);
+    preparing.set(key, waiting);
     hold.answer.then(
       (answer) => {
+        stopPreparing(key, hold);
         hold.state = "ready";
         if (!("replaced" in answer)) tellOthers(key, hold, answer);
       },
       () => {
+        stopPreparing(key, hold);
         hold.state = "failed";
         // Tell the others what still runs: the start may have stopped the
         // old preview, or failed before it could.
@@ -553,6 +579,36 @@ export function createSitePreviewLifecycle<
       },
     );
     return hold.answer;
+  }
+
+  function stopPreparing(key: string, hold: PreviewHold<T>): void {
+    const waiting = preparing.get(key);
+    waiting?.delete(hold);
+    if (waiting?.size === 0) preparing.delete(key);
+  }
+
+  /**
+   * A start passed preparation and takes over the app's preview: the older
+   * starts give way, and their surfaces follow it. Answers false when a newer
+   * start already took over, so this one stops as replaced.
+   */
+  function takeOver(key: string, hold: PreviewHold<T>): boolean {
+    stopPreparing(key, hold);
+    const current = holds.get(key);
+    if (current && current.generation > hold.generation) {
+      hold.replaced = true;
+      return false;
+    }
+    for (const older of [current, ...(preparing.get(key) ?? [])]) {
+      if (!older || older.generation > hold.generation) continue;
+      for (const [holderId, holder] of older.holders) {
+        if (!hold.holders.has(holderId)) hold.holders.set(holderId, holder);
+      }
+      if (older.state === "starting") older.replaced = true;
+      if (older !== current) stopPreparing(key, older);
+    }
+    holds.set(key, hold);
+    return true;
   }
 
   // Tells the surfaces that did not ask for this generation what they show
@@ -575,6 +631,30 @@ export function createSitePreviewLifecycle<
     }
   }
 
+  // Takes one surface, or every surface of a window, out of an app's holds. A
+  // start no surface holds any more stops; a preview no surface shows stops.
+  // Starts that other surfaces hold go on.
+  function letGo(key: string, matches: (holder: [string, PreviewHolder]) => boolean): boolean {
+    for (const hold of [...(preparing.get(key) ?? [])]) {
+      for (const entry of hold.holders) if (matches(entry)) hold.holders.delete(entry[0]);
+      if (hold.holders.size > 0) continue;
+      hold.cancel.abort();
+      stopPreparing(key, hold);
+    }
+    const current = holds.get(key);
+    if (!current) return false;
+    let removed = false;
+    for (const entry of current.holders) {
+      if (!matches(entry)) continue;
+      current.holders.delete(entry[0]);
+      removed = true;
+    }
+    if (!removed || current.holders.size > 0) return false;
+    current.cancel.abort();
+    holds.delete(key);
+    return true;
+  }
+
   /**
    * One surface stops showing the app's preview. The preview stops when no
    * surface shows it any more.
@@ -586,21 +666,35 @@ export function createSitePreviewLifecycle<
     siteRoot: string;
   }): Promise<void> {
     const key = previewKey(releaseInput.workspaceId, releaseInput.siteRoot);
-    const held = holds.get(key);
-    if (held) {
-      // Another surface still shows it, or this surface already let go.
-      if (!held.holders.delete(releaseInput.holderId) || held.holders.size > 0) return;
-      holds.delete(key);
-    }
-    // With no surface holding it, what is left is stopped: this also retries
-    // a stop that failed.
-    await stop(releaseInput);
+    const hadHold = holds.has(key);
+    const emptied = letGo(key, ([holderId]) => holderId === releaseInput.holderId);
+    // Another surface still shows it, or this surface already let go.
+    if (hadHold && !emptied) return;
+    // With no surface holding it, what runs is stopped: this also retries a
+    // stop that failed. A start another surface is preparing goes on.
+    assertActiveWorkspaceForSite(
+      releaseInput.getActiveWorkspaceId(),
+      releaseInput.workspaceId,
+      "app preview stop request",
+      "stop the preview again",
+    );
+    await runInKeyedLane(startLanes, key, async () => {
+      assertActiveWorkspaceForSite(
+        releaseInput.getActiveWorkspaceId(),
+        releaseInput.workspaceId,
+        "app preview stop request",
+        "stop the preview again",
+      );
+      await stopCurrent(key);
+    });
   }
 
   function dropHolds(workspaceId?: string): void {
-    for (const [key, held] of holds) {
-      if (workspaceId === undefined || key.startsWith(previewKey(workspaceId, ""))) {
-        holds.delete(key);
+    for (const map of [holds, preparing]) {
+      for (const key of [...map.keys()]) {
+        if (workspaceId === undefined || key.startsWith(previewKey(workspaceId, ""))) {
+          map.delete(key);
+        }
       }
     }
   }
@@ -653,13 +747,8 @@ export function createSitePreviewLifecycle<
   // a preview, or a start, only it showed stops.
   function cancelSender(senderId: number): void {
     abortPending(pendingBySender.get(senderId) ?? []);
-    for (const [key, held] of holds) {
-      for (const [holderId, holder] of held.holders) {
-        if (holder.senderId === senderId) held.holders.delete(holderId);
-      }
-      if (held.holders.size > 0) continue;
-      holds.delete(key);
-      abortPending(pendingBySite.get(key) ?? []);
+    for (const key of new Set([...holds.keys(), ...preparing.keys()])) {
+      if (!letGo(key, ([, holder]) => holder.senderId === senderId)) continue;
       void runInKeyedLane(startLanes, key, () => stopCurrent(key)).catch((error) => {
         console.warn("[desktop] failed to stop an app preview no window shows", error);
       });

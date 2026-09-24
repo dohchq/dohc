@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { Profiler } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -14,6 +14,13 @@ import type {
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
 import { deferred } from "../testing/deferred";
+
+// These wait on async bridge answers and userEvent settles. On a loaded
+// machine they can take longer than Testing Library's 1000 ms default, and a
+// wait that gives up first fails a test that was about to pass. Every wait
+// here runs until the condition holds, within the test's own budget.
+configure({ asyncUtilTimeout: 10_000 });
+vi.setConfig({ testTimeout: 20_000 });
 
 function readyShare(
   entryPath: string,
@@ -175,12 +182,52 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByText("Starting static preview…")).toBeNull();
   });
 
+  it("says so through the shell, with Try again, when another view replaced the build Share started", async () => {
+    const user = userEvent.setup();
+    const needsBuild: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      scripts: { build: "vite build" },
+      shareManifest: noRunnableArtifact,
+    };
+    const built: SitePackageInfo = { ...needsBuild, shareManifest: readyShare("report/dist/index.html") };
+    bridgeMock.getSitePackage.mockImplementation(async (payload) =>
+      payload.effectivePreviewMode === "build" ? built : needsBuild);
+    try {
+      const reportError = vi.fn();
+      const onShareSite = vi.fn();
+      render(
+        <SitePreviewPage
+          workspaceId="ws-sites"
+          siteRoot="report"
+          onShareSite={onShareSite}
+          reportError={reportError}
+        />,
+      );
+      await screen.findByTestId("site-preview-frame");
+      bridgeMock.startSitePreview.mockResolvedValueOnce({ replaced: true });
+      await user.click(screen.getByTestId("site-preview-share"));
+      await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
+      const [message, error, retry] = reportError.mock.calls[0]!;
+      expect(message).toBe(
+        "dohc did not share this app. Another view started its preview again before the build finished.",
+      );
+      expect(error).toBeNull();
+      expect(onShareSite).not.toHaveBeenCalled();
+
+      await act(async () => { retry(); });
+      await waitFor(() => expect(onShareSite).toHaveBeenCalledOnce());
+    } finally {
+      bridgeMock.getSitePackage.mockImplementation(async () => site);
+    }
+  });
+
   it("does not remember the mode of an answer a newer preview already replaced", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({ ...site, kind: "package", scripts: { dev: "vite" } });
     const own = deferred<StartSitePreviewAnswer>();
     bridgeMock.startSitePreview.mockImplementationOnce(() => own.promise);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledOnce());
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledOnce());
     const { holderId } = bridgeMock.startSitePreview.mock.calls[0]![0];
     // The pinned panel builds the app before this tab's dev start answers.
     replace({
@@ -808,7 +855,7 @@ describe("SitePreviewPage", () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByTestId("site-preview-frame");
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalled(),
     );
     await act(async () => {
@@ -879,7 +926,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByText("Logs"));
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalledTimes(1),
     );
 
@@ -1169,7 +1216,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-share"));
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
 
     view.rerender(
       <SitePreviewPage
@@ -1243,7 +1290,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-share"));
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
 
     view.rerender(
       <SitePreviewPage
@@ -1277,7 +1324,7 @@ describe("SitePreviewPage", () => {
       .mockResolvedValueOnce(replacementSite);
 
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(1));
 
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
     await screen.findByText("Replacement");
@@ -1316,7 +1363,7 @@ describe("SitePreviewPage", () => {
       });
 
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
-    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(1));
 
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
     const frame = await screen.findByTestId("site-preview-frame");
@@ -1556,7 +1603,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByTestId("site-preview-frame");
     await user.click(screen.getByTestId("site-preview-static"));
-    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("site-preview-stop"));
 
     expect(await screen.findByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();

@@ -1113,7 +1113,9 @@ describe("an app preview shown by more than one surface", () => {
     let gate: Promise<void> = Promise.resolve();
     let failNext = false;
     let failNextPrepare = false;
+    const firstPrepare = deferred();
     const prepare = vi.fn(async (_isCurrent: () => boolean) => {
+      firstPrepare.resolve();
       if (failNextPrepare) {
         failNextPrepare = false;
         throw new Error("no build script");
@@ -1172,6 +1174,8 @@ describe("an app preview shown by more than one surface", () => {
       hold: (value: Promise<void>) => { gate = value; },
       failNextStart: () => { failNext = true; },
       failNextPrepare: () => { failNextPrepare = true; },
+      // Settles once the first start reached preparation.
+      prepared: () => firstPrepare.promise,
     };
   }
 
@@ -1266,7 +1270,7 @@ describe("an app preview shown by more than one surface", () => {
     const release = deferred();
     s.hold(release.promise);
     const tab = s.answer("tab", { mode: "dev", senderId: 1 });
-    await vi.waitFor(() => expect(s.prepare).toHaveBeenCalledOnce());
+    await s.prepared();
     const pin = s.show("pin", { mode: "build", restart: true, senderId: 2 });
     release.resolve();
     await expect(tab).resolves.toEqual({ replaced: true });
@@ -1284,17 +1288,42 @@ describe("an app preview shown by more than one surface", () => {
     }
   });
 
-  it("tells the others what still runs when a restart fails before stopping it", async () => {
+  it("changes nothing for the others when a restart fails preparation", async () => {
     const s = surfaces();
     const shown = await s.show("tab", { senderId: 1 });
     await s.show("pin", { senderId: 2 });
     s.failNextPrepare();
     await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("no build script");
     expect(s.handles[0]!.stop).not.toHaveBeenCalled();
-    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
-      holderId: "tab",
-      preview: expect.objectContaining({ url: shown.url }),
-    }));
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    // Both surfaces still hold the preview that runs.
+    await s.hide("tab");
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    await s.hide("pin");
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+  });
+
+  it("lets an older start finish normally when the newer one fails preparation first", async () => {
+    const s = surfaces();
+    const release = deferred();
+    s.hold(release.promise);
+    const tab = s.answer("tab", { mode: "dev", senderId: 1 });
+    await s.prepared();
+    // The tab's start is on its way when the pinned panel asks for a build
+    // that cannot be prepared.
+    s.failNextPrepare();
+    await expect(s.show("pin", { mode: "build", senderId: 2 })).rejects.toThrow("no build script");
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    release.resolve();
+    const shown = await tab;
+    if ("replaced" in shown) throw new Error("The tab's start was counted as replaced.");
+    expect(shown.url).toBe(s.handles[0]!.url);
+    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+    expect(s.notifyReplaced).not.toHaveBeenCalled();
+    // The tab is the one surface holding it, so letting go stops it.
+    await s.hide("tab");
+    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
 
   it("gives preparation a lifetime check that holds while any surface holding the start does", async () => {
@@ -1305,7 +1334,7 @@ describe("an app preview shown by more than one surface", () => {
     asked.catch(() => undefined);
     const joined = s.show("pin", { senderId: 2 });
     joined.catch(() => undefined);
-    await vi.waitFor(() => expect(s.prepare).toHaveBeenCalledOnce());
+    await s.prepared();
     const isCurrent = s.prepare.mock.calls[0]![0];
     expect(isCurrent()).toBe(true);
     s.close(1);

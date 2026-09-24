@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, configure, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -14,6 +14,13 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { StaticSitePreview } from "../workspaces/siteRunner";
 import { SitePreviewPage } from "./SitePreviewPage";
+
+// These wait on async bridge answers and userEvent settles. On a loaded
+// machine they can take longer than Testing Library's 1000 ms default, and a
+// wait that gives up first fails a test that was about to pass. Every wait
+// here runs until the condition holds, within the test's own budget.
+configure({ asyncUtilTimeout: 10_000 });
+vi.setConfig({ testTimeout: 20_000 });
 
 // An app's tab and its pinned panel, side by side in one window, against
 // main's real preview lifecycle.

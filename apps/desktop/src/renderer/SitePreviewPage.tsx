@@ -26,6 +26,9 @@ import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppPublication } from "./OwnerAppPublication";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
+// Shown through the shell's error hook, with Try again.
+const SHARE_BUILD_REPLACED_MESSAGE =
+  "dohc did not share this app. Another view started its preview again before the build finished.";
 const NO_SHARE_OUTPUT_MESSAGE =
   "This app has no static entry file or build output to share.";
 
@@ -392,7 +395,7 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       if ("replaced" in result) {
         replaced = true;
-        return null;
+        return "replaced" as const;
       }
       // A newer start another surface made is already on screen, and its
       // mode is the one to open next time.
@@ -456,7 +459,14 @@ export function SitePreviewPage(props: {
           return;
         }
         const built = await start("build", true);
-        if (!built || !isCurrent()) return;
+        if (!isCurrent()) return;
+        if (built === "replaced") {
+          props.reportError?.(SHARE_BUILD_REPLACED_MESSAGE, null, () => {
+            void prepareShareRef.current();
+          });
+          return;
+        }
+        if (!built) return;
         // This branch just built specifically to get a shareable
         // artifact — "build" is the mode that artifact was produced for.
         const refreshedAfterBuild = await bridge().getSitePackage({
@@ -488,7 +498,9 @@ export function SitePreviewPage(props: {
         setActionError(error instanceof Error ? error.message : "Could not prepare this app for sharing.");
       }
     }
-  }, [preview, props.onShareSite, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  }, [preview, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  const prepareShareRef = useRef(prepareShare);
+  prepareShareRef.current = prepareShare;
 
   const refreshPreviewLogs = useCallback(async () => {
     if (

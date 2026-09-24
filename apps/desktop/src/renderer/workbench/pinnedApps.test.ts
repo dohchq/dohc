@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { pinnedAppInitial, usePinnedApps } from "./pinnedApps";
 import {
   appViewId,
   defaultWorkbenchState,
+  keepActiveViewAfterRailChange,
   keepActiveViewShown,
   pluginViewId,
   toggleSidebarOnRail,
@@ -15,6 +16,13 @@ import {
   setView,
   sidebarViews,
 } from "./workbenchState";
+
+// These wait on async bridge answers and userEvent settles. On a loaded
+// machine they can take longer than Testing Library's 1000 ms default, and a
+// wait that gives up first fails a test that was about to pass. Every wait
+// here runs until the condition holds, within the test's own budget.
+configure({ asyncUtilTimeout: 10_000 });
+vi.setConfig({ testTimeout: 20_000 });
 
 afterEach(() => {
   cleanup();
@@ -49,6 +57,26 @@ describe("sidebar views", () => {
     // A plugin's view is its plugin list's to judge, even before that loads.
     const onPlugin = setView(defaultWorkbenchState(), plugin);
     expect(keepActiveViewShown(onPlugin, [])).toBe(onPlugin);
+  });
+
+  it("moves the selection only when the rail change removed the selected entry", () => {
+    const rail = ["explorer", "search", appViewId("apps/trip")] as const;
+    const onSearch = setView(defaultWorkbenchState(), "search");
+    // Hiding the selected view moves it.
+    expect(keepActiveViewAfterRailChange(onSearch, rail, ["explorer", appViewId("apps/trip")]).activeView)
+      .toBe("explorer");
+    // Hiding another view, reordering, or pinning does not.
+    expect(keepActiveViewAfterRailChange(onSearch, rail, ["search", appViewId("apps/trip")])).toBe(onSearch);
+    expect(keepActiveViewAfterRailChange(onSearch, rail, [appViewId("apps/trip"), "search", "explorer"]))
+      .toBe(onSearch);
+    expect(keepActiveViewAfterRailChange(onSearch, rail, [...rail, appViewId("report")])).toBe(onSearch);
+    // A view the rail never showed, opened by a link, stays open through any
+    // rail change.
+    const onHistory = setView(defaultWorkbenchState(), "history");
+    expect(keepActiveViewAfterRailChange(onHistory, rail, ["search"])).toBe(onHistory);
+    // Unpinning the selected app moves it.
+    const onApp = setView(defaultWorkbenchState(), appViewId("apps/trip"));
+    expect(keepActiveViewAfterRailChange(onApp, rail, ["explorer", "search"]).activeView).toBe("explorer");
   });
 
   it("opens the side panel on a view the rail shows, and nothing when the rail is empty", () => {

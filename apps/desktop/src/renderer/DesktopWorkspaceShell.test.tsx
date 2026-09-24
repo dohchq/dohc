@@ -16949,15 +16949,22 @@ describe("apps pinned to the sidebar", () => {
     const panel = await screen.findByTestId("side-panel");
     expect(within(panel).getByText("History")).toBeTruthy();
 
-    // Another settings change leaves the hidden view open.
+    // Another settings change, or hiding another view, leaves it open.
     view.rerender(shellWith(withSidebar(["history"], 1)));
     await act(async () => { await Promise.resolve(); });
     expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
-
-    // Hiding one more view changes the rail, so the selection moves to it.
     view.rerender(shellWith(withSidebar(["history", "explorer"])));
+    await act(async () => { await Promise.resolve(); });
+    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
+
+    // Hiding the selected view is what moves the selection, to the first
+    // view on the rail.
+    await user.click(screen.getByTestId("activity-search"));
     await waitFor(() =>
       expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
+    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
   });
 
   it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
