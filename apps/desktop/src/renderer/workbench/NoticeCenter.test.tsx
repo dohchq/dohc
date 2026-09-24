@@ -75,6 +75,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
       {...(props.automationFailures ? { automationFailures: props.automationFailures } : {})}
+      {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
+      {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
     />
   );
 }
@@ -136,6 +138,23 @@ describe("automation failure notices", () => {
     const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
     expect(stopped.textContent).toContain('"nudge" did not run. Open Projects/Tasks/automations.yaml to shorten the chain.');
     expect(document.body.textContent).not.toContain("plugin's source");
+  });
+
+  it("asks once to allow a step that reaches more only because an editor left", async () => {
+    const hold = {
+      automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
+      step: 0, seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+    };
+    const onAllowAutomationHold = vi.fn();
+    renderNotices({ automationHolds: [hold], onAllowAutomationHold });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#spend-0");
+    expect(notice.textContent).toContain('Automation "Spend" is waiting');
+    expect(notice.textContent).toContain(
+      "A step in Trip can now change Budget. It stopped before because bob@dohc.test could not. Allow it to run?",
+    );
+    await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
+    expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
   });
 });
 

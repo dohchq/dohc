@@ -30,6 +30,7 @@ import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automat
 import {
   runCollectionAutomation,
   runsForClaim,
+  UNREADABLE_RUN_ERROR,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
@@ -43,6 +44,10 @@ import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./re
 // The engine's `automation.claimed` event is only the wake-up: the claim
 // table is the transport, so a claim made while this computer was away
 // drains on the next open.
+//
+// Every claim the drain takes ends one of three ways: it runs and settles,
+// it settles failed, or it waits and goes back to the engine at the end of
+// the drain.
 //
 // It shares the engine with the plugin executor until plugins are removed.
 // Each drains only its own namespace.
@@ -77,6 +82,12 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   listAutomationClaims(input: { automationId: string }): Promise<{ claims: AutomationClaimSummary[] }>;
+  /**
+   * Hands a running claim this computer holds back to pending, without
+   * counting an attempt. The engine adds `automations.release` with engine
+   * claims round 2; until then a waiting claim stays running and waits here.
+   */
+  releaseAutomationClaim?(input: { claimId: string }): Promise<unknown>;
 }
 
 export interface CollectionAutomationsOptions {
@@ -96,6 +107,8 @@ export interface CollectionAutomationsOptions {
   store: AutomationRunStore;
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
   onFailuresChanged(): void;
+  /** A step started or stopped waiting for a current editor: the hold notices re-read. */
+  onHoldsChanged(): void;
   onError(context: string, error: unknown): void;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
@@ -130,13 +143,28 @@ export type CollectionAutomationsFile =
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
   | { status: "read"; contentHash: string | null; automations: CollectionAutomationSummary[] };
 
+/** A step that waits for a current editor to allow it, for its notice. */
+export interface CollectionAutomationHold {
+  automationId: string;
+  automationName: string;
+  definitionHash: string;
+  step: number;
+  seq: number;
+  /** The Collection the automation belongs to, and the one the step reaches. */
+  collection: string;
+  target: string;
+  action: "change" | "find";
+  /** The editor whose reach stopped the step before. */
+  stoppedFor: string | null;
+}
+
 export interface CollectionAutomationRun {
   claimId: string;
   state: AutomationClaimSummary["state"];
   error: string | null;
   createdAtMs: number;
   updatedAtMs: number;
-  /** The record changes this computer saved for the run, oldest first. */
+  /** What the run's effects did on this computer, oldest first. */
   writes: RunWrite[];
   /** The run began under another version of the automation. */
   definitionChanged: boolean;
@@ -144,10 +172,11 @@ export interface CollectionAutomationRun {
 
 export type CollectionAutomationRetry =
   | { status: "queued" }
-  // The automation changed since the run began and changed records. Running
-  // it again starts from the beginning and can repeat those changes, so the
-  // person must choose that.
-  | { status: "definition-changed" };
+  // The automation changed since the run began. Running it again starts
+  // from the beginning and can repeat what it already did, so the person
+  // must choose that.
+  | { status: "definition-changed" }
+  | { status: "refused"; reason: string };
 
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -164,6 +193,8 @@ function collectionNamed(path: string): ReachCollection {
   return { path, name: path.split("/").at(-1) ?? path };
 }
 
+type OwnedAutomation = { automationId: string; collectionPath: string; automation: Automation };
+
 export class CollectionAutomations {
   /** Every Collection the engine lists, and those a watcher batch added. */
   private collections = new Set<string>();
@@ -173,17 +204,25 @@ export class CollectionAutomations {
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
   private readonly verdicts = new Map<string, StoredReachVerdict>();
+  /** Orders verdicts and confirmations; it only rises. */
   private verdictSeq = 0;
-  /** Claims taken but not settled: waiting for the roster, a hold, the evaluator, or the engine. */
-  private readonly deferred = new Map<string, AutomationClaim>();
-  /** Consecutive timed-out runs per automation. */
-  private readonly timeouts = new Map<string, number>();
+  /**
+   * Claims that wait while this computer holds them, because the engine
+   * cannot take a claim back yet. The next drain tries them first.
+   */
+  private readonly waiting = new Map<string, AutomationClaim>();
+  /** Claims a Try again is changing; they wait until it is done. */
+  private readonly retrying = new Set<string>();
+  /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
+  private timeouts = new Map<string, number>();
   /** Serializes index loads and subscription reconciles. */
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
   private verdictChain: Promise<unknown> = Promise.resolve();
   private opened: Promise<void> | null = null;
   private state: "closed" | "open" | "paused" | "disposed" = "closed";
+  /** Rises at each pause and close, so an open that began before one stops. */
+  private generation = 0;
   /** Whether the workspace had opened its automations when the engine restart began. */
   private reopenAfterRestart = false;
   private draining: Promise<void> | null = null;
@@ -203,22 +242,30 @@ export class CollectionAutomations {
    */
   open(): Promise<void> {
     if (this.state === "disposed" || this.state === "paused") return Promise.resolve();
+    const generation = this.generation;
+    const current = () => generation === this.generation;
     this.opened ??= this.enqueue(async () => {
-      this.subscribed = new Map((await this.options.store.readSubscriptions()).map((entry) => [entry.automationId, entry]));
-      if (this.verdicts.size === 0) {
-        for (const verdict of await this.options.store.readReachVerdicts()) {
-          this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step), verdict);
-          this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
-        }
+      const subscriptions = await this.options.store.readSubscriptions();
+      const verdicts = await this.options.store.readReachVerdicts();
+      const timeouts = await this.options.store.readTimeouts();
+      if (!current()) return;
+      this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
+      this.timeouts = timeouts;
+      for (const verdict of verdicts) {
+        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step), verdict);
+        this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
       }
       await this.loadIndex();
+      if (!current()) return;
       this.state = "open";
       await this.reconcile(true);
     }).then(
-      () => this.rosterChanged(),
+      () => {
+        if (current()) this.rosterChanged();
+      },
       (error: unknown) => {
         // A later open tries again.
-        this.opened = null;
+        if (current()) this.opened = null;
         this.options.onError("open Collection automations", error);
       },
     );
@@ -282,11 +329,13 @@ export class CollectionAutomations {
       .finally(() => this.notifyClaimed());
   }
 
-  /** The engine is about to restart: stop runs and forget claims it will recover. */
+  /** The engine is about to restart: stop runs. The engine recovers the claims they held. */
   pauseForEngineRestart(): void {
     if (this.state === "disposed" || this.state === "paused") return;
+    this.generation += 1;
     this.reopenAfterRestart = this.opened !== null;
     this.stopRuns();
+    this.waiting.clear();
     this.state = "paused";
   }
 
@@ -298,12 +347,20 @@ export class CollectionAutomations {
     if (this.reopenAfterRestart) void this.open();
   }
 
-  /** Workspace close. Subscriptions stay, so changes made at the next open claim at once. */
+  /**
+   * Workspace close. Claims waiting here go back to the engine, and
+   * subscriptions stay, so changes made at the next open claim at once.
+   */
   async dispose(): Promise<void> {
     if (this.state === "disposed") return;
+    this.generation += 1;
     this.stopRuns();
+    await Promise.allSettled([this.draining]);
+    const waiting = [...this.waiting.values()];
+    this.waiting.clear();
+    await this.release(waiting);
     this.state = "disposed";
-    await Promise.allSettled([this.chain, this.verdictChain, this.draining]);
+    await Promise.allSettled([this.chain, this.verdictChain]);
   }
 
   /** The automations in one Collection's file, with why each can or cannot run. */
@@ -348,6 +405,25 @@ export class CollectionAutomations {
     return { status: "read", contentHash: indexed.contentHash, automations };
   }
 
+  /** Every step that waits for a current editor to allow it, one per step. */
+  holds(): CollectionAutomationHold[] {
+    const holds: CollectionAutomationHold[] = [];
+    for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+      const hash = definitionHash(automation);
+      const collection = collectionNamed(collectionPath);
+      reachStepsOf(automation, collection, collectionNamed).forEach((reach, step) => {
+        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
+        if (stored?.verdict !== "held" || !("collection" in reach)) return;
+        holds.push({
+          automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
+          collection: collection.name, target: reach.collection.name,
+          action: reach.kind === "find-records" ? "find" : "change", stoppedFor: stored.stoppedFor,
+        });
+      });
+    }
+    return holds;
+  }
+
   /**
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
@@ -361,6 +437,7 @@ export class CollectionAutomations {
       return true;
     });
     if (!confirmed) return "changed";
+    this.options.onHoldsChanged();
     this.notifyClaimed();
     return "confirmed";
   }
@@ -369,22 +446,24 @@ export class CollectionAutomations {
   async runs(automationId: string, limit = 20): Promise<CollectionAutomationRun[]> {
     const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
     if (listed === null) throw new Error("The workspace engine is not running.");
-    const stored = await this.options.store.list(automationId, 200);
     const parsed = parseCollectionAutomationId(automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
     const hash = automation ? definitionHash(automation) : null;
-    return listed.claims.slice(0, limit).map((claim) => {
-      const runs = stored.filter((run) => run.claimId === claim.claimId && !run.superseded);
-      return {
+    const runs: CollectionAutomationRun[] = [];
+    // Only the runs shown are read.
+    for (const claim of listed.claims.slice(0, limit)) {
+      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs.filter((run) => !run.superseded);
+      runs.push({
         claimId: claim.claimId,
         state: claim.state,
         error: claim.error ?? null,
         createdAtMs: claim.createdAtMs,
         updatedAtMs: claim.updatedAtMs,
-        writes: runs.flatMap((run) => run.done.flatMap((step) => step.writes)),
-        definitionChanged: hash !== null && runs.some((run) => run.definitionHash !== hash),
-      };
-    });
+        writes: stored.flatMap((run) => run.applied.flatMap((effect) => effect.writes)),
+        definitionChanged: hash !== null && stored.some((run) => run.definitionHash !== hash),
+      });
+    }
+    return runs;
   }
 
   /**
@@ -398,20 +477,30 @@ export class CollectionAutomations {
     await this.ready();
     const parsed = parseCollectionAutomationId(input.automationId);
     const automation = parsed ? this.definitionFor(parsed) : null;
-    if (automation) {
-      const claim = { automationId: input.automationId, claimId: input.claimId };
-      const { current, changedSince } = await runsForClaim(this.options.store, claim, automation);
-      if (current === null && changedSince !== null) {
-        if (!input.startOver) return { status: "definition-changed" };
+    if (automation === null) return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
+    if (!automation.enabled) {
+      return { status: "refused", reason: `"${automation.name}" is switched off. Switch it on, then try again.` };
+    }
+    const unsupported = unsupportedReason(automation);
+    if (unsupported !== null) return { status: "refused", reason: unsupported };
+    const runs = await runsForClaim(this.options.store, input, automation);
+    if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
+    const startsOver = runs.current === null && runs.changedSince !== null;
+    if (startsOver && !input.startOver) return { status: "definition-changed" };
+    this.retrying.add(input.claimId);
+    try {
+      const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
+      if (retried === null) throw new Error("The workspace engine is not running.");
+      if (startsOver) {
         const hash = definitionHash(automation);
-        for (const run of await this.options.store.runsOf(input.automationId, input.claimId)) {
+        for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
           if (run.definitionHash === hash || run.superseded) continue;
           await this.options.store.save({ ...run, superseded: true, updatedAtMs: this.nowMs() });
         }
       }
+    } finally {
+      this.retrying.delete(input.claimId);
     }
-    const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
-    if (retried === null) throw new Error("The workspace engine is not running.");
     this.notifyClaimed();
     this.options.onFailuresChanged();
     return { status: "queued" };
@@ -439,7 +528,6 @@ export class CollectionAutomations {
   private stopRuns(): void {
     this.runAbort.abort();
     this.runAbort = new AbortController();
-    this.deferred.clear();
     if (this.busyTimer) clearTimeout(this.busyTimer);
     this.busyTimer = null;
   }
@@ -477,8 +565,8 @@ export class CollectionAutomations {
   }
 
   /** Every automation dohc can run, whether or not it is switched on. */
-  private everyAutomation(): Array<{ automationId: string; collectionPath: string; automation: Automation }> {
-    const automations: Array<{ automationId: string; collectionPath: string; automation: Automation }> = [];
+  private everyAutomation(): OwnedAutomation[] {
+    const automations: OwnedAutomation[] = [];
     for (const [collectionPath, indexed] of this.files) {
       if (indexed.file.status !== "read") continue;
       for (const entry of indexed.file.entries) {
@@ -522,14 +610,13 @@ export class CollectionAutomations {
 
   /**
    * Records each step's verdict under the roster. Returns whether any step
-   * of these automations is held.
+   * of these automations is held. A step that starts to wait raises its
+   * notice once.
    */
-  private recordVerdicts(
-    roster: Exclude<ReachRoster, { kind: "unknown" }>,
-    automations: ReadonlyArray<{ automationId: string; collectionPath: string; automation: Automation }>,
-  ): Promise<boolean> {
-    return this.updateVerdicts(() => {
+  private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations: readonly OwnedAutomation[]): Promise<boolean> {
+    const { held, newlyHeld } = await this.updateVerdicts(() => {
       let held = false;
+      let newlyHeld = false;
       for (const { automationId, collectionPath, automation } of automations) {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
@@ -540,11 +627,14 @@ export class CollectionAutomations {
           const next = nextReachVerdict(previous, reach);
           if (next.verdict === "held") held = true;
           if (previous?.verdict === next.verdict && previous.stoppedFor === next.stoppedFor) return;
+          if (next.verdict === "held") newlyHeld = true;
           this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
         });
       }
-      return held;
+      return { held, newlyHeld };
     });
+    if (newlyHeld) this.options.onHoldsChanged();
+    return held;
   }
 
   /**
@@ -577,27 +667,65 @@ export class CollectionAutomations {
 
   private async drain(): Promise<void> {
     const stop = this.runAbort.signal;
+    const waiting: AutomationClaim[] = [];
     try {
-      // Claims taken earlier and waiting go first, oldest first: claimNext
-      // never serves a claim it already handed out.
-      for (const claim of [...this.deferred.values()]) {
+      // Claims that waited here go first: the engine does not serve them again.
+      for (const claim of [...this.waiting.values()]) {
         if (stop.aborted) return;
-        if ((await this.execute(claim)) === "settled") this.deferred.delete(claim.claimId);
+        this.waiting.delete(claim.claimId);
+        if ((await this.execute(claim)) === "wait") waiting.push(claim);
       }
       while (!stop.aborted) {
         const claim = await this.withLiveEngine((engine) =>
           engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }),
         );
-        if (claim === null || stop.aborted) return;
-        if ((await this.execute(claim)) === "defer") this.deferred.set(claim.claimId, claim);
+        if (claim === null) return;
+        // From here this drain owns the claim: it runs, settles, or waits.
+        if (stop.aborted || (await this.execute(claim)) === "wait") waiting.push(claim);
       }
     } catch (error) {
       this.options.onError("drain Collection automation claims", error);
+    } finally {
+      await this.release(waiting);
     }
   }
 
-  private async execute(claim: AutomationClaim): Promise<"settled" | "defer"> {
+  /**
+   * Hands waiting claims back to the engine once the drain is done with
+   * them, so the next drain can reach claims behind them.
+   */
+  private async release(claims: readonly AutomationClaim[]): Promise<void> {
+    for (const claim of claims) {
+      let released = false;
+      try {
+        released = (await this.options.withEngine(async (engine) => {
+          if (!engine.releaseAutomationClaim) return false;
+          await engine.releaseAutomationClaim({ claimId: claim.claimId });
+          return true;
+        })) === true;
+      } catch (error) {
+        this.options.onError(`release automation claim "${claim.claimId}"`, error);
+      }
+      // Until the engine can take a claim back, it waits here, running.
+      if (!released && this.state !== "disposed" && this.state !== "paused") this.waiting.set(claim.claimId, claim);
+    }
+  }
+
+  /** Runs one claim this drain holds. Anything that stops it before its run makes it wait. */
+  private async execute(claim: AutomationClaim): Promise<"settled" | "wait"> {
+    try {
+      return await this.executeHeld(claim);
+    } catch (error) {
+      this.options.onError(`run automation claim "${claim.claimId}"`, error);
+      return "wait";
+    }
+  }
+
+  private async executeHeld(claim: AutomationClaim): Promise<"settled" | "wait"> {
+    if (this.retrying.has(claim.claimId)) return "wait";
     const id = parseCollectionAutomationId(claim.automationId);
+    // The definition is read before the roster: a pull that lands while the
+    // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
     if (
       id === null || automation === null || !automation.enabled || unsupportedReason(automation) !== null ||
@@ -615,39 +743,54 @@ export class CollectionAutomations {
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.
     const roster = await this.options.roster();
-    if (roster.kind === "unknown") return "defer";
+    if (roster.kind === "unknown") return "wait";
     const held = await this.recordVerdicts(roster, [{ automationId: claim.automationId, collectionPath: id.collectionPath, automation }]);
     // A step that reach allows only because an editor left waits for a
     // current editor to confirm it.
-    if (held) return "defer";
+    if (held) return "wait";
     const outcome = await this.runWithDeadline(claim, automation, id.collectionPath, roster);
     if (outcome === null) return "settled";
     switch (outcome.kind) {
-      case "defer":
+      case "wait":
         if (outcome.reason === "busy") this.scheduleBusyRetry();
-        return "defer";
+        return "wait";
       case "done":
       case "skipped":
-        this.timeouts.delete(claim.automationId);
-        await this.settle(claim, { state: "done" });
-        await this.options.store.prune(claim.automationId).catch((error: unknown) =>
-          this.options.onError(`prune runs of "${claim.automationId}"`, error));
+        await this.countTimeout(claim.automationId, false);
+        if (await this.settle(claim, { state: "done" })) await this.markSettled(claim, automation);
         return "settled";
       case "failed": {
         let error = outcome.error;
-        if (outcome.timedOut) {
-          const count = (this.timeouts.get(claim.automationId) ?? 0) + 1;
-          this.timeouts.set(claim.automationId, count);
-          if (count >= TIMEOUTS_BEFORE_SWITCH_OFF) {
-            this.timeouts.delete(claim.automationId);
-            error = `${error} ${await this.switchOff(id.collectionPath, automation)}`;
-          }
-        } else {
-          this.timeouts.delete(claim.automationId);
+        if (await this.countTimeout(claim.automationId, outcome.timedOut)) {
+          error = `${error} ${await this.switchOff(id.collectionPath, automation)}`;
         }
         await this.settle(claim, { state: "failed", error });
         return "settled";
       }
+    }
+  }
+
+  /** Counts a run that timed out, or clears the count. True when the automation must switch off. */
+  private async countTimeout(automationId: string, timedOut: boolean): Promise<boolean> {
+    const count = timedOut ? (this.timeouts.get(automationId) ?? 0) + 1 : 0;
+    if (count === (this.timeouts.get(automationId) ?? 0)) return false;
+    const switchOff = count >= TIMEOUTS_BEFORE_SWITCH_OFF;
+    if (count === 0 || switchOff) this.timeouts.delete(automationId);
+    else this.timeouts.set(automationId, count);
+    await this.options.store.saveTimeouts(this.timeouts);
+    return switchOff;
+  }
+
+  /** The engine has the claim as done, so its saved run can leave run history in time. */
+  private async markSettled(claim: AutomationClaim, automation: Automation): Promise<void> {
+    try {
+      const runs = await runsForClaim(this.options.store, claim, automation);
+      if (!runs.unreadable && runs.current && !runs.current.settled) {
+        await this.options.store.save({ ...runs.current, settled: true });
+      }
+      await this.options.store.prune(claim.automationId);
+    } catch (error) {
+      this.options.onError(`record automation claim "${claim.claimId}" as done`, error);
     }
   }
 
@@ -722,8 +865,9 @@ export class CollectionAutomations {
 
   /**
    * Writes `enabled: false` for an automation whose runs keep timing out,
-   * so it cannot hold the workspace's drain. Returns the sentence the
-   * failure notice adds.
+   * so it cannot hold the workspace's drain. The index takes the change at
+   * once, so a claim already waiting does not run it again. Returns the
+   * sentence the failure notice adds.
    */
   private async switchOff(collectionPath: string, automation: Automation): Promise<string> {
     const path = `${collectionPath}/${AUTOMATIONS_FILE_NAME}`;
@@ -732,13 +876,16 @@ export class CollectionAutomations {
       const read = await this.options.readText(path);
       const parsed = read && !read.truncated ? parseAutomationsFile(read.text) : null;
       if (read && !read.truncated && parsed?.status === "read") {
-        const entries = parsed.entries.map((entry): AutomationEntry =>
+        const off = (entries: readonly AutomationEntry[]) => entries.map((entry): AutomationEntry =>
           entry.status === "valid" && entry.automation.id === automation.id
             ? { status: "valid", automation: { ...entry.automation, enabled: false } }
-            : entry,
-        );
-        const written = writeAutomationsFile(entries);
+            : entry);
+        const written = writeAutomationsFile(off(parsed.entries));
         if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash)).status === "written") {
+          const indexed = this.files.get(collectionPath);
+          if (indexed?.file.status === "read") {
+            this.files.set(collectionPath, { ...indexed, file: { status: "read", entries: off(indexed.file.entries) } });
+          }
           return `dohc switched off ${name} after ${TIMEOUTS_BEFORE_SWITCH_OFF} runs in a row took too long. Fix it, then switch it on again.`;
         }
       }
@@ -756,12 +903,14 @@ export class CollectionAutomations {
     }
   }
 
+  /** True when the engine took the settle. */
   private async settle(
     claim: AutomationClaim,
     input: { state: "done" } | { state: "failed"; error: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let settled: unknown;
     try {
-      await this.withLiveEngine((engine) =>
+      settled = await this.withLiveEngine((engine) =>
         engine.settleAutomationClaim(
           input.state === "failed"
             ? { claimId: claim.claimId, state: "failed", error: errorText(input.error) }
@@ -772,8 +921,9 @@ export class CollectionAutomations {
       // A refused settle (the engine's recovery took the claim, or the engine
       // restarted) must not stop the drain; the claim table holds the truth.
       this.options.onError(`settle automation claim "${claim.claimId}"`, error);
-      return;
+      return false;
     }
     if (input.state === "failed") this.options.onFailuresChanged();
+    return settled !== null;
   }
 }

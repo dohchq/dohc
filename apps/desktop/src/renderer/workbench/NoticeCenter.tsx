@@ -13,6 +13,7 @@ import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import type { AutomationHoldNotice } from "../shell/useAutomationHolds";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -278,6 +279,10 @@ export function NoticeCenter(props: {
     automationId: string,
     generation: number,
   ) => void;
+  // Automation steps that reach more now only because an editor left. Each
+  // waits for someone who can edit the Collection to allow it.
+  automationHolds?: readonly AutomationHoldNotice[];
+  onAllowAutomationHold?: (hold: AutomationHoldNotice) => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -519,6 +524,21 @@ export function NoticeCenter(props: {
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
+    for (const hold of props.automationHolds ?? []) {
+      const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
+      next.push({
+        id: `automation-hold-${hold.automationId}-${hold.step}`,
+        tone: "warning",
+        title: `Automation "${hold.automationName}" is waiting`,
+        body: hold.stoppedFor
+          ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
+          : `A step in ${hold.collection} can now ${reach}, which it could not before. Allow it to run?`,
+        Icon: AlertTriangle,
+        ...(props.onAllowAutomationHold
+          ? { action: { label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) } }
+          : {}),
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
@@ -739,6 +759,8 @@ export function NoticeCenter(props: {
     agentNotifications,
     props.agentActive,
     props.automationFailures,
+    props.automationHolds,
+    props.onAllowAutomationHold,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,

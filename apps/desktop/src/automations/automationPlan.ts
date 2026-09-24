@@ -37,6 +37,9 @@ type AutomationValue = Extract<AutomationStep, { kind: "set" }>["values"][number
 export const COLLECTION_AUTOMATION_PREFIX = "collection:";
 const MAX_FINDS = 5;
 export const MAX_FOUND_RECORDS = 50;
+// The field changes one run may plan. Every one is saved before and after it
+// lands, so a run stays small enough to resume and to undo.
+export const MAX_RUN_FIELD_WRITES = 200;
 // The trigger record before its change, which a starts-matching condition
 // is also checked against.
 const BEFORE_BINDING = "__dohc_before";
@@ -493,8 +496,11 @@ export interface PlannedField {
   after: JsonValue;
 }
 
-/** A record a step changes: one that exists, or the one an earlier step adds. */
-export type PlannedTarget = { recordId: string; path: string } | { addedBy: number };
+/**
+ * A record a step changes: one that exists, found again by its id before the
+ * write, or the one an earlier step adds.
+ */
+export type PlannedTarget = { recordId: string; collectionPath: string; path: string } | { addedBy: number };
 
 export type PlannedEffect =
   | { kind: "set"; target: PlannedTarget; fields: PlannedField[] }
@@ -576,6 +582,26 @@ export function planRun(
   const bindings = bindingsOf(orderSteps(automation.do));
   const valueOf = (ordinal: number, field: string, value: AutomationValue): JsonValue =>
     isFormula(value) ? (answers.get(`value:${ordinal}:${field}`) ?? null) : value.value;
+  // Each field's value once the effects planned so far have landed, by
+  // record id, so a later step on the same field expects what the earlier
+  // one wrote. A record the run adds starts with no fields.
+  const landed = new Map<string, Map<string, JsonValue>>();
+  const addedIds = new Map<number, string>();
+  let writes = 0;
+  const fieldsFor = (
+    recordId: string,
+    initial: JsonObject,
+    values: ReadonlyArray<{ field: string; after: JsonValue }>,
+  ): PlannedField[] => {
+    const current = landed.get(recordId) ?? new Map<string, JsonValue>();
+    landed.set(recordId, current);
+    writes += values.length;
+    return values.map(({ field, after }) => {
+      const before = current.has(field) ? current.get(field)! : (initial[field] ?? null);
+      current.set(field, after);
+      return { field, before, after };
+    });
+  };
   const walk = (steps: readonly OrderedStep[]): string | null => {
     for (const entry of steps) {
       const { ordinal, step } = entry;
@@ -586,6 +612,9 @@ export function planRun(
       }
       if (step.kind === "add-record") {
         const recordId = derivedRecordId(stepKey(key.claimId, key.hash, ordinal));
+        addedIds.set(ordinal, recordId);
+        const values = step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }));
+        fieldsFor(recordId, {}, values);
         planned.push({
           ordinal,
           effects: [{
@@ -594,14 +623,14 @@ export function planRun(
             recordId,
             // Each run's record gets its own name, the same on every attempt.
             name: `${automation.id}-${recordId.slice(4, 12)}`,
-            fields: step.values.map(({ field, value }) => ({ field, value: valueOf(ordinal, field, value) })),
+            fields: values.map(({ field, after }) => ({ field, value: after })),
           }],
         });
       } else if (step.kind === "set") {
         const bound = step.records === null ? null : bindings.get(step.records) ?? null;
         if (bound?.kind === "find") {
           const records = found.get(bound.ordinal) ?? [];
-          const lists = new Map<string, JsonValue>();
+          const lists = new Map<string, JsonValue[]>();
           for (const { field, value } of step.values) {
             if (!isFormula(value)) continue;
             const list = answers.get(`values:${ordinal}:${field}`);
@@ -610,25 +639,27 @@ export function planRun(
             }
             lists.set(field, list);
           }
+          const collectionPath = bound.collection ?? claim.collectionPath;
           planned.push({
             ordinal,
             effects: records.map((target, index) => ({
               kind: "set",
-              target: { recordId: target.id, path: target.path },
-              fields: step.values.map(({ field, value }) => ({
+              target: { recordId: target.id, collectionPath, path: target.path },
+              fields: fieldsFor(target.id, target.values, step.values.map(({ field, value }) => ({
                 field,
-                before: target.values[field] ?? null,
-                after: isFormula(value) ? ((lists.get(field) as JsonValue[])[index] ?? null) : value.value,
-              })),
+                after: isFormula(value) ? (lists.get(field)![index] ?? null) : value.value,
+              }))),
             })),
           });
         } else if (bound?.kind === "add") {
+          const recordId = addedIds.get(bound.ordinal);
+          if (recordId === undefined) return `Step ${ordinal + 1} changes a record that no earlier step added.`;
           planned.push({
             ordinal,
             effects: [{
               kind: "set",
               target: { addedBy: bound.ordinal },
-              fields: step.values.map(({ field, value }) => ({ field, before: null, after: valueOf(ordinal, field, value) })),
+              fields: fieldsFor(recordId, {}, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
             }],
           });
         } else {
@@ -637,15 +668,14 @@ export function planRun(
             ordinal,
             effects: [{
               kind: "set",
-              target: { recordId: record.id, path: record.path },
-              fields: step.values.map(({ field, value }) => ({
-                field,
-                before: record.values[field] ?? null,
-                after: valueOf(ordinal, field, value),
-              })),
+              target: { recordId: record.id, collectionPath: claim.collectionPath, path: record.path },
+              fields: fieldsFor(record.id, record.values, step.values.map(({ field, value }) => ({ field, after: valueOf(ordinal, field, value) }))),
             }],
           });
         }
+      }
+      if (writes > MAX_RUN_FIELD_WRITES) {
+        return `This run would change more than ${MAX_RUN_FIELD_WRITES} fields. Narrow its Find steps, or split it into smaller automations.`;
       }
     }
     return null;

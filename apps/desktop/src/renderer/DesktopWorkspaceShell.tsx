@@ -66,6 +66,7 @@ import {
 import { useAgentSetup } from "./shell/useAgentSetup";
 import type { DesktopUserSettings } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
+import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -3848,6 +3849,11 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
+  const { automationHolds, allowAutomationHold } = useAutomationHolds(
+    workspaceId,
+    workspaceIsReady,
+    reportShellError,
+  );
 
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewDamaged) return;
@@ -4755,6 +4761,8 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              automationHolds={automationHolds}
+              onAllowAutomationHold={allowAutomationHold}
             />
           }
         />

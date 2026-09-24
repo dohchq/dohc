@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -14,7 +14,7 @@ import { localIsoTime } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, type CollectionAutomationEngine } from "./collectionAutomations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR } from "./collectionAutomationRun";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
@@ -39,6 +39,8 @@ async function world(options: {
   evaluator?: AutomationFormulaEvaluator;
   deadline?: (abort: () => void) => () => void;
   withRecordWrites?: (signal: AbortSignal, events: string[]) => Promise<void>;
+  /** The engine can take a waiting claim back, as engine claims round 2 adds. */
+  release?: boolean;
 }) {
   const root = await createTestScratch("dohc-collection-automations-");
   const collections = options.collections ?? ["Tasks"];
@@ -61,7 +63,12 @@ async function world(options: {
   const waiters = new Set<() => void>();
   const events: string[] = [];
   let idleDrains = 0;
-  const failures = { authoredWrite: 0 };
+  // Each count fails that many of the next calls.
+  const failures = { authoredWrite: 0, openSession: 0 };
+  // Fails the one record session opened this many calls from now.
+  let opens = 0;
+  let failOpenAt: number | null = null;
+  let holdsChanged = 0;
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
   const until = (condition: () => boolean) => new Promise<void>((resolve) => {
     const check = () => { if (condition()) { waiters.delete(check); resolve(); } };
@@ -128,10 +135,25 @@ async function world(options: {
       return claim;
     },
     listAutomationClaims: async ({ automationId }) => ({ claims: [...claims.values()].filter((claim) => claim.automationId === automationId).reverse() }),
+    ...(options.release ? {
+      releaseAutomationClaim: async ({ claimId }: { claimId: string }) => {
+        const claim = claims.get(claimId)!;
+        claim.state = "pending"; claim.attempts -= 1;
+        pending.push(claim);
+        events.push(`released ${claimId}`);
+        wake();
+        return claim;
+      },
+    } : {}),
   };
 
   const capture: CollectionRecordEditContext["capture"] = {
     async openYDocSession({ path }) {
+      opens += 1;
+      if (failures.openSession > 0 || opens === failOpenAt) {
+        failures.openSession = Math.max(0, failures.openSession - 1);
+        throw new Error("The record is open in a live session elsewhere.");
+      }
       const record = [...records.values()].find((candidate) => candidate.path === path);
       if (!record) throw new Error(`No record at ${path}.`);
       return {
@@ -186,7 +208,8 @@ async function world(options: {
   };
   const failuresChanged: string[] = [];
   const errors: Array<{ context: string; error: unknown }> = [];
-  const executor = new CollectionAutomations({
+  // A new executor over the same engine, files, and saved runs, as after a restart.
+  const makeExecutor = () => new CollectionAutomations({
     withEngine: async (work) => await work(engine),
     withRecordWrites: async (signal, work) => {
       await options.withRecordWrites?.(signal, events);
@@ -220,9 +243,11 @@ async function world(options: {
     evaluator: options.evaluator ?? evaluator,
     store,
     onFailuresChanged: () => { failuresChanged.push("changed"); wake(); },
+    onHoldsChanged: () => { holdsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); },
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
   });
+  const executor = makeExecutor();
 
   let claimCount = 0;
   const claim = (automationId: string, record: FakeRecord, change: Partial<AutomationClaim["change"]> = {}) => {
@@ -247,7 +272,9 @@ async function world(options: {
   };
 
   return {
-    root, executor, engine, records, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
+    root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
+    holdsChanged: () => holdsChanged,
+    moveRecord: (record: FakeRecord, name: string) => { record.path = `${record.collection}/${name}.md`; },
     addRecord, claim, settledClaim, until, writeAutomations, baseStore,
     requeue: (claim: AutomationClaim) => { pending.push(claim); },
     fieldsOf,
@@ -255,6 +282,7 @@ async function world(options: {
     setRoster: (next: ReachRoster) => { roster = next; },
     beforeNextRoster: (hook: () => Promise<void>) => { beforeRoster = hook; },
     failSaveAt: (index: number) => { failSaveAt = saves + index; },
+    failOpenAt: (index: number) => { failOpenAt = opens + index; },
   };
 }
 
@@ -509,6 +537,10 @@ describe("Collection automations", () => {
     expect(listed).toMatchObject({
       automations: [{ reach: { kind: "checked", steps: [{ verdict: "held", stoppedFor: "bob@dohc.test" }] } }],
     });
+    // One notice asks a current editor, however often the verdict is read.
+    await w.executor.automationsIn("Trip");
+    expect(w.holdsChanged()).toBe(1);
+    expect(w.executor.holds()).toMatchObject([{ automationName: "Spend", collection: "Trip", target: "Budget", action: "change", stoppedFor: "bob@dohc.test" }]);
     const trip = w.addRecord("Trip", "day-one", { Status: "Done" });
     const claim = w.claim("collection:Trip#spend", trip);
     const drained = w.idleDrains();
@@ -606,5 +638,177 @@ describe("Collection automations", () => {
     expect(claim).toMatchObject({ state: "failed", error: DEADLINE_ERROR });
     expect(w.events).toEqual(["write stopped", "settled failed"]);
     expect(w.fieldsOf(task)).toEqual({ Status: "Done" });
+  });
+
+  it("resumes a chain of writes to one field from the step that did not land", async () => {
+    const w = await world({ automations: { Tasks: "  - id: chain\n    name: Chain\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Count: 2}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 0 });
+    // The first write lands; the second cannot open the record.
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#chain", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    expect(w.fieldsOf(task).Count).toBe(1);
+
+    await w.executor.retry({ automationId: "collection:Tasks#chain", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Count).toBe(2);
+    const [run] = await w.executor.runs("collection:Tasks#chain");
+    expect(run!.writes.filter((write) => write.kind === "field").map((write) => write.kind === "field" && [write.before, write.after]))
+      .toEqual([[0, 1], [1, 2]]);
+  });
+
+  const ITEMS = "  - id: tick\n    name: Tick\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {Count: '=record.Count + 1'}\n        records: items\n";
+
+  it("resumes a step over 50 records at the record where it stopped, so each record changes once", async () => {
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: ITEMS } });
+    const items = Array.from({ length: 50 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: index }));
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failOpenAt(26);
+    const claim = w.claim("collection:Tasks#tick", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    expect(items.filter((item, index) => w.fieldsOf(item).Count === index + 1)).toHaveLength(25);
+
+    await w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(items.map((_, index) => index + 1));
+  });
+
+  it("asks before running an edited automation over a step that stopped part way through 50 records", async () => {
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: ITEMS } });
+    const items = Array.from({ length: 50 }, (_, index) => w.addRecord("Items", `item-${index}`, { Count: 0 }));
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failOpenAt(26);
+    const claim = w.claim("collection:Tasks#tick", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    await w.writeAutomations("Tasks", ITEMS.replace("record.Count + 1", "record.Count + 10"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+
+    await expect(w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "definition-changed" });
+    expect(claim.state).toBe("failed");
+    await w.executor.retry({ automationId: "collection:Tasks#tick", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done");
+    // The person chose to run the new version from the start.
+    expect(items.map((item) => w.fieldsOf(item).Count)).toEqual(items.map((_, index) => index < 25 ? 11 : 10));
+  });
+
+  it("refuses a run that would change more fields than it can save, before writing anything", async () => {
+    const wide = "  - id: wide\n    name: Wide\n    when: {field-changed: Status}\n    do:\n      - find: 'true'\n        collection: Items\n        as: items\n      - set: {A: 1, B: 1, C: 1, D: 1, E: 1}\n        records: items\n";
+    const w = await world({ collections: ["Tasks", "Items"], automations: { Tasks: wide } });
+    Array.from({ length: 50 }, (_, index) => w.addRecord("Items", `item-${index}`, {}));
+    const claim = w.claim("collection:Tasks#wide", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.error).toBe("This run would change more than 200 fields. Narrow its Find steps, or split it into smaller automations.");
+    expect(w.journaled).toEqual([]);
+  });
+
+  it("finds a record by its id again before writing, and records a record that left as skipped", async () => {
+    const w = await world({ automations: { Tasks: "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: seen}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failures.openSession = 1;
+    const claim = w.claim("collection:Tasks#note", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    // Someone renames the record before Try again.
+    w.moveRecord(task, "renamed");
+    await w.executor.retry({ automationId: "collection:Tasks#note", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Note).toBe("seen");
+    expect(w.journaled.at(-1)!.path).toBe("Tasks/renamed.md");
+
+    const gone = w.addRecord("Tasks", "two", { Status: "Done" });
+    w.failures.openSession = 1;
+    const second = w.claim("collection:Tasks#note", gone);
+    w.executor.notifyClaimed();
+    await w.settledClaim(second);
+    w.records.delete(gone.id);
+    await w.executor.retry({ automationId: "collection:Tasks#note", claimId: second.claimId, startOver: false });
+    await w.until(() => second.state === "done");
+    const [run] = await w.executor.runs("collection:Tasks#note");
+    expect(run!.writes).toEqual([{ kind: "skipped", recordId: gone.id, path: gone.path, reason: "The record is no longer in the Collection." }]);
+  });
+
+  it("keeps a field someone changed while the run waited, and does not count it as the automation's write", async () => {
+    const w = await world({ automations: { Tasks: "  - id: two\n    name: Two\n    when: {field-changed: Status}\n    do: [{set: {Count: 1}}, {set: {Note: done}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#two", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    task.doc.getMap("frontmatter").set("Note", "theirs");
+    await w.executor.retry({ automationId: "collection:Tasks#two", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 1, Note: "theirs" });
+    const [run] = await w.executor.runs("collection:Tasks#two");
+    expect(run!.writes).toContainEqual({ kind: "kept", recordId: task.id, path: task.path, field: "Note", planned: "done", current: "theirs" });
+    expect(run!.writes.some((write) => write.kind === "field" && write.field === "Note")).toBe(false);
+  });
+
+  it("hands a waiting claim back to the engine at the end of the drain, and holds nothing at close", async () => {
+    const w = await world({ release: true, automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    const claim = w.claim("collection:Tasks#seen", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+    expect(claim).toMatchObject({ state: "pending", attempts: 0 });
+    await w.executor.dispose();
+    expect(claim.state).toBe("pending");
+  });
+
+  it("refuses Try again for an automation that is switched off", async () => {
+    const off = "  - id: off\n    name: Off\n    enabled: false\n    when: {field-changed: Status}\n    do: [{set: {X: 1}}]\n";
+    const w = await world({ automations: { Tasks: off } });
+    await w.executor.open();
+    await expect(w.executor.retry({ automationId: "collection:Tasks#off", claimId: "atc_any", startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: '"Off" is switched off. Switch it on, then try again.' });
+  });
+
+  it("fails closed when a run's saved progress cannot be read, instead of starting over", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim(TASKS, task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const folder = join(w.root, ".dohc", "automations", "runs");
+    for (const automation of await readdir(folder)) {
+      for (const file of await readdir(join(folder, automation))) await writeFile(join(folder, automation, file), "{ torn");
+    }
+    await expect(w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: UNREADABLE_RUN_ERROR });
+    // A crash requeue does not start it over either.
+    claim.state = "pending";
+    w.requeue(claim);
+    w.executor.notifyClaimed();
+    await w.until(() => claim.state === "failed" && claim.error === UNREADABLE_RUN_ERROR);
+    expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+  it("keeps counting timeouts across a restart", async () => {
+    const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
+      formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
+    const w = await world({
+      automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })),
+    });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const first = w.claim("collection:Tasks#slow", task);
+    await w.executor.open();
+    await w.settledClaim(first);
+    await w.executor.dispose();
+
+    const restarted = w.makeExecutor();
+    const later = [w.claim("collection:Tasks#slow", task), w.claim("collection:Tasks#slow", task)];
+    await restarted.open();
+    for (const claim of later) await w.settledClaim(claim);
+    expect(later[0]!.error).not.toContain("switched off");
+    expect(later[1]!.error).toContain('dohc switched off "Slow" after 3 runs in a row took too long.');
   });
 });

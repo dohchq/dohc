@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type {
+  CollectionAutomationHold,
   CollectionAutomationRetry,
   CollectionAutomationRun,
   CollectionAutomationsFile,
@@ -5207,6 +5208,11 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
 export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
 
+// Steps waiting for a current editor to allow them, one notice each.
+export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
+export type ListAutomationHoldsResult = { holds: CollectionAutomationHold[] };
+
 // Replaces the file's automations with these, over the content the panel
 // read (null when the file did not exist).
 export const WriteCollectionAutomationsPayload = z.object({
@@ -6491,6 +6497,7 @@ export interface DohcDesktopBridge
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
+  listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
@@ -6672,6 +6679,10 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // A step started or stopped waiting for a current editor: re-list holds.
+  onAutomationHoldsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;
