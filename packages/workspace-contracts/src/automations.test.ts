@@ -1194,6 +1194,14 @@ describe("dataset entries", () => {
     expect(diagnosticsOf(withStep(`{set: {X: 1}, operation: ${longest}}`, `{record-added: null, table: ${longest}}`))).toEqual([]);
   });
 
+  it("refuses to save an operation or a table past the reference bound", () => {
+    const tooLong = "o".repeat(MAX_REFERENCE_LENGTH + 1);
+    expect(refusal([valid({ when: { kind: "record-added", table: tooLong } })]))
+      .toEqual([{ code: "too-long", path: "/automations/0/when/table" }]);
+    expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: tooLong }] })]))
+      .toEqual([{ code: "too-long", path: "/automations/0/do/0/operation" }]);
+  });
+
   it.each(DATASET_CASES)("turns off one automation for $name", ({ item, expected }) => {
     expect(diagnosticsOf(item)).toEqual(expected);
   });
