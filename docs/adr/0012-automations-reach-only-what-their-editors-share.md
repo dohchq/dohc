@@ -17,3 +17,4 @@ ADR 0008 still decides where an automation runs: on the computer where the trigg
 - The owner's computer holds more than any collaborator can reach. Its executor checks every step's target against the common reach of the automation's editors. A collaborator's computer holds only what was shared with them.
 - Sharing a Collection can narrow what its automations reach. Steps outside the new reach stop with a notice, and so do personal steps once another person gains Edit on the Collection. The share dialog warns before this happens.
 - A missed schedule is skipped, and the owner gets a notice asking whether to run it.
+- Removing an editor can widen what an automation reaches, and a step that person wrote could then do what they never could by hand. So when a step's verdict changes from stopped to allowed while its definition stays the same, the step waits until a current editor confirms it. Removing someone never switches on what they wrote.

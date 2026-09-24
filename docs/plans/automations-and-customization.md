@@ -88,6 +88,7 @@ Formulas are simple JavaScript expressions, such as `record.Status == "Done"` or
 - A personal step uses one person's own reach, such as waking that person's agent. It shows that person, and only that person can change it. At launch, personal steps are allowed only in Collections that only their person can edit.
 - The owner's computer holds more than a collaborator can reach, so its executor checks each step's target against the editors' common reach. It reads the editors from a local copy of the owner's grants, refreshed from the relay. A workspace with no server connection has never been shared, so its owner is its only editor and its automations run offline. For a shared workspace, when that copy is missing, damaged, or may be stale, the check fails closed: the run waits until the copy is current.
 - Sharing a Collection can narrow its automations' reach. The share dialog warns first, and steps that fall outside the new reach stop with a notice.
+- Removing an editor can widen its reach. A step that was stopped and would now run waits until a current editor confirms it, so removing someone never switches on what they wrote.
 - Deleting an automation removes it from the file, with Undo on the toast, and the file's history can restore it later. When someone switches off an automation you last changed, you get a notice.
 
 ### Where an automation runs (ADR 0008)
