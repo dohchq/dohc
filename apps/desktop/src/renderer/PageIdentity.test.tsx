@@ -70,9 +70,9 @@ describe("PageIdentity", () => {
 
       await user.clear(screen.getByTestId("page-title"));
 
-      // Dropping the last frontmatter key strips the block, leaving the body
-      // exactly as parseFrontmatter split it (its leading newline included).
-      expect(screen.getByTestId("current-body").textContent).toBe("\n# Body\n");
+      // Dropping the last frontmatter key strips the block and the blank
+      // line that separated it from the body.
+      expect(screen.getByTestId("current-body").textContent).toBe("# Body\n");
     });
 
     it("sets an icon from the picker grid and orders it after the title", async () => {

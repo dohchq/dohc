@@ -413,6 +413,11 @@ describe('public Markdown schema', () => {
     refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
     refused(encode('Text', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
   })
+  it('refuses frontmatter text longer than a live document', () => {
+    refused(encode('---\ntitle: A\n---\n\nText', doc => {
+      doc.getMap('meta').set('dohcFrontmatterSource', `---\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`)
+    }))
+  })
   it('accepts frontmatter text that a later frontmatter edit left behind', () => {
     const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
       doc.getMap('frontmatter').set('title', 'B')
@@ -605,6 +610,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     '.': './src/index.ts',
     './body-fragment': './src/body-fragment.ts',
     './browser-editor': './src/browser-editor.ts',
+    './frontmatter': './src/frontmatter.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
     './restore-proof': './src/liveRestoreProof.ts',

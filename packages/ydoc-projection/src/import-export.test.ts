@@ -279,11 +279,14 @@ describe('Y.Doc markdown import/export', () => {
     }
   })
 
-  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
+  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ name, markdown, expected }) => {
     const doc = markdownToYDoc(markdown)
     expect(getDohcYDocFrontmatter(doc))
       .toEqual(expected === null ? {} : decodeFixtureIntegers(expected))
-    if (expected === null) {
+    // A refused block stays visible as body text. The body writer escapes
+    // `&` and fences indented lines, so only plain duplicate-key lines are
+    // compared verbatim.
+    if (expected === null && name.startsWith('duplicate-')) {
       const output = yDocToMarkdown(doc)
       for (const line of markdown.split('\n').slice(1, -1)) {
         expect(output).toContain(line)
@@ -400,13 +403,57 @@ describe('Y.Doc markdown import/export', () => {
       expect(yDocToMarkdown(doc)).toBe(written)
       const frontmatter = doc.getMap('frontmatter')
       frontmatter.set('title', 'Porto')
-      frontmatter.delete('zero')
       frontmatter.set('status', 'booked')
       expect(yDocToMarkdown(doc)).toBe([
         '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
-        'tags:', '- a', 'status: booked', '---', '', 'Body',
+        'zero: -0', 'tags:', '- a', 'status: booked', '---', '', 'Body',
+      ].join('\n'))
+      frontmatter.set('rating', 5)
+      frontmatter.delete('zero')
+      frontmatter.delete('tags')
+      expect(yDocToMarkdown(doc)).toBe([
+        '---', '# Trip', 'title: Porto', 'score: .nan', 'id: 99999999999999999999',
+        'rating: 5', 'status: booked', '---', '', 'Body',
       ].join('\n'))
     } finally { doc.destroy() }
+    // One key removed and one added is a rename: the new key keeps the place.
+    const renamed = markdownToYDoc(written)
+    try {
+      renamed.getMap('frontmatter').delete('score')
+      renamed.getMap('frontmatter').set('rating', 5)
+      expect(yDocToMarkdown(renamed)).toBe(written.replace('score: .nan', 'rating: 5'))
+    } finally { renamed.destroy() }
+  })
+
+  // A collaborator can write any frontmatter source. One too deep, too large,
+  // or too costly to expand is ignored, and the projection writes canonical
+  // frontmatter.
+  it.each([
+    ['deep block', `---\ntitle:\n${'- '.repeat(500_000)}Plan\n---\n\n`],
+    ['deep flow', `---\ntitle: ${'['.repeat(500_000)}Plan${']'.repeat(500_000)}\n---\n\n`],
+    ['alias ladder', `---\n${Array.from({ length: 6 }, (_, level) => `l${level}: &l${level} [${
+      Array(10).fill(level === 0 ? 'x' : `*l${level - 1}`).join(', ')
+    }]`).join('\n')}\ntitle: Plan\n---\n\n`],
+    ['oversized', `---\ntitle: Plan\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`],
+  ])('ignores a hostile frontmatter source: %s', (_name, source) => {
+    const doc = markdownToYDoc('---\ntitle: Plan\n---\n\nBody')
+    try {
+      doc.getMap('meta').set('dohcFrontmatterSource', source)
+      expect(yDocToMarkdown(doc)).toBe('---\ntitle: Plan\n---\n\nBody')
+    } finally { doc.destroy() }
+  })
+
+  it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {
+    const empty = markdownToYDoc('---\n---\n\nBody')
+    const removed = markdownToYDoc('---\nz: 1\ntitle: Plan\n---\n\nBody')
+    try {
+      expect(yDocToMarkdown(empty)).toBe('---\n---\n\nBody')
+      empty.getMap('frontmatter').set('title', 'Plan')
+      expect(yDocToMarkdown(empty)).toBe('---\ntitle: Plan\n---\n\nBody')
+      removed.getMap('frontmatter').delete('z')
+      removed.getMap('frontmatter').delete('title')
+      expect(yDocToMarkdown(removed)).toBe('Body')
+    } finally { empty.destroy(); removed.destroy() }
   })
 
   it.each([

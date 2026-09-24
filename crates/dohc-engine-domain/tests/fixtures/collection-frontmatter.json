@@ -182,42 +182,453 @@
     {
       "name": "non-finite-floats-keep-their-text",
       "markdown": "---\nnan: .nan\nnamed: .NaN\ninf: .inf\nneg: -.Inf\nplus: +.inf\n---",
-      "expected": {"nan": ".nan", "named": ".NaN", "inf": ".inf", "neg": "-.Inf", "plus": "+.inf"}
+      "expected": {
+        "inf": ".inf",
+        "named": ".NaN",
+        "nan": ".nan",
+        "neg": "-.Inf",
+        "plus": "+.inf"
+      }
     },
     {
       "name": "integers-outside-int64-keep-their-text",
       "markdown": "---\nbig: 9223372036854775808\nsmall: -9223372036854775809\nhuge: 99999999999999999999\nmax: 9223372036854775807\n---",
-      "expected": {"big": "9223372036854775808", "small": "-9223372036854775809", "huge": "99999999999999999999", "max": {"$dohcInt64": "9223372036854775807"}}
+      "expected": {
+        "big": "9223372036854775808",
+        "huge": "99999999999999999999",
+        "max": {
+          "$dohcInt64": "9223372036854775807"
+        },
+        "small": "-9223372036854775809"
+      }
     },
     {
       "name": "negative-zero-integer-is-zero",
-      "markdown": "---\nzero: -0\nfloat: -0.0\n---",
-      "expected": {"zero": 0, "float": -0.0}
+      "markdown": "---\nzero: -0\n---",
+      "expected": {
+        "zero": 0
+      }
     },
     {
       "name": "explicit-core-tags-resolve-like-plain-scalars",
-      "markdown": "---\ntagged: !!int 7\noctal: !!int 0o7\nbinary: !!int 0b101\nsigned: !!int -0x1F\nquoted: !!int \"12\"\nfloat: !!float 1\ntext: !!str 7\n---",
-      "expected": {"tagged": 7, "octal": 7, "binary": 5, "signed": -31, "quoted": 12, "float": 1.0, "text": "7"}
+      "markdown": "---\ntagged: !!int 7\noctal: !!int 0o7\nbinary: !!int 0b101\nsigned: !!int -0x1F\nquoted: !!int \"12\"\nfloat: !!float 1.5\ntext: !!str 7\n---",
+      "expected": {
+        "binary": 5,
+        "float": 1.5,
+        "octal": 7,
+        "quoted": 12,
+        "signed": -31,
+        "tagged": 7,
+        "text": "7"
+      }
+    },
+    {
+      "name": "verbatim-core-tags-resolve-like-shorthand-tags",
+      "markdown": "---\nint: !<tag:yaml.org,2002:int> 7\ntext: !<tag:yaml.org,2002:str> 7\nlist: !<tag:yaml.org,2002:seq> [a]\n---",
+      "expected": {
+        "int": 7,
+        "list": [
+          "a"
+        ],
+        "text": "7"
+      }
     },
     {
       "name": "explicit-tags-that-cannot-resolve-keep-their-text",
       "markdown": "---\nflag: !!bool yes\ncount: !!int many\nnothing: !!null nope\n---",
-      "expected": {"flag": "yes", "count": "many", "nothing": "nope"}
+      "expected": {
+        "count": "many",
+        "flag": "yes",
+        "nothing": "nope"
+      }
     },
     {
       "name": "binary-and-signed-radix-integers-stay-text",
       "markdown": "---\nbin: 0b1010_1010\nplain: 0b101\nsigned: -0x1F\nhex: 0x_1F\nseparated: 0x1_F\n---",
-      "expected": {"bin": "0b1010_1010", "plain": "0b101", "signed": "-0x1F", "hex": "0x_1F", "separated": 31}
+      "expected": {
+        "bin": "0b1010_1010",
+        "hex": "0x_1F",
+        "plain": "0b101",
+        "separated": 31,
+        "signed": "-0x1F"
+      }
     },
     {
       "name": "custom-tagged-scalars-keep-their-text",
       "markdown": "---\ncount: !custom 7\nflag: !custom true\n---",
-      "expected": {"count": "7", "flag": "true"}
+      "expected": {
+        "count": "7",
+        "flag": "true"
+      }
     },
     {
       "name": "kept-block-scalar-keeps-its-last-blank-line",
       "markdown": "---\nb: |+\n  keeps\n\n---",
-      "expected": {"b": "keeps\n\n"}
+      "expected": {
+        "b": "keeps\n\n"
+      }
+    },
+    {
+      "name": "number-keys-read-as-javascript-spells-them",
+      "markdown": "---\n1e21: a\n1e-7: b\n-0.0: c\n1.0: d\n1.5: e\n.nan: f\n---",
+      "expected": {
+        "0": "c",
+        "1": "d",
+        ".nan": "f",
+        "1.5": "e",
+        "1e+21": "a",
+        "1e-7": "b"
+      }
+    },
+    {
+      "name": "alias-keys-and-values-expand",
+      "markdown": "---\nlist: &list [1, 2]\ncopy: *list\nname: &name key\n*name : value\n---",
+      "expected": {
+        "copy": [
+          1,
+          2
+        ],
+        "key": "value",
+        "list": [
+          1,
+          2
+        ],
+        "name": "key"
+      }
+    },
+    {
+      "name": "quoted-value-continued-past-its-sequence-reads",
+      "markdown": "---\na:\n- \"x\n y\"\n---",
+      "expected": {
+        "a": [
+          "x y"
+        ]
+      }
+    },
+    {
+      "name": "quoted-value-continued-at-its-sequence-column-is-rejected",
+      "markdown": "---\na:\n- \"x\ny\"\n---",
+      "expected": null
+    },
+    {
+      "name": "quoted-value-continued-at-its-mapping-column-is-rejected",
+      "markdown": "---\na:\n  b: \"x\n  y\"\n---",
+      "expected": null
+    },
+    {
+      "name": "collection-key-is-rejected",
+      "markdown": "---\n? [a, b]\n: 1\n---",
+      "expected": null
+    },
+    {
+      "name": "nested-collection-key-is-rejected",
+      "markdown": "---\nouter:\n  ? {a: 1}\n  : 1\n---",
+      "expected": null
+    },
+    {
+      "name": "collection-key-under-a-custom-tag-is-rejected",
+      "markdown": "---\nx: !custom\n  ? [a]\n  : 1\n---",
+      "expected": null
+    },
+    {
+      "name": "alias-to-an-unknown-anchor-is-rejected",
+      "markdown": "---\na: *x\n---",
+      "expected": null
+    },
+    {
+      "name": "alias-inside-its-own-anchor-is-rejected",
+      "markdown": "---\na: &x [*x]\n---",
+      "expected": null
+    },
+    {
+      "name": "second-document-is-rejected",
+      "markdown": "---\na: 1\n...\nb: 2\n---",
+      "expected": null
+    },
+    {
+      "name": "flow-nesting-past-the-depth-limit-is-rejected",
+      "markdown": "---\nvalue: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n---",
+      "expected": null
+    },
+    {
+      "name": "block-nesting-past-the-depth-limit-is-rejected",
+      "markdown": "---\nvalue:\n  -\n    -\n      -\n        -\n          -\n            -\n              -\n                -\n                  -\n                    -\n                      -\n                        -\n                          -\n                            -\n                              -\n                                -\n                                  -\n                                    -\n                                      -\n                                        -\n                                          -\n                                            -\n                                              -\n                                                -\n                                                  -\n                                                    -\n                                                      -\n                                                        -\n                                                          -\n                                                            -\n                                                              -\n                                                                -\n                                                                  -\n                                                                    -\n                                                                      -\n                                                                        -\n                                                                          -\n                                                                            -\n                                                                              -\n                                                                                -\n                                                                                  -\n                                                                                    -\n                                                                                      -\n                                                                                        -\n                                                                                          -\n                                                                                            -\n                                                                                              -\n                                                                                                -\n                                                                                                  -\n                                                                                                    -\n                                                                                                      -\n                                                                                                        -\n                                                                                                          -\n                                                                                                            -\n                                                                                                              -\n                                                                                                                -\n                                                                                                                  -\n                                                                                                                    -\n                                                                                                                      -\n                                                                                                                        -\n                                                                                                                          -\n                                                                                                                            -\n                                                                                                                              -\n                                                                                                                                -\n                                                                                                                                  -\n                                                                                                                                    -\n                                                                                                                                      -\n                                                                                                                                        -\n                                                                                                                                          -\n                                                                                                                                            -\n                                                                                                                                              -\n                                                                                                                                                -\n                                                                                                                                                  -\n                                                                                                                                                    -\n                                                                                                                                                      -\n                                                                                                                                                        -\n                                                                                                                                                          -\n                                                                                                                                                            -\n                                                                                                                                                              -\n                                                                                                                                                                -\n                                                                                                                                                                  -\n                                                                                                                                                                    -\n                                                                                                                                                                      -\n                                                                                                                                                                        -\n                                                                                                                                                                          -\n                                                                                                                                                                            -\n                                                                                                                                                                              -\n                                                                                                                                                                                -\n                                                                                                                                                                                  -\n                                                                                                                                                                                    -\n                                                                                                                                                                                      -\n                                                                                                                                                                                        -\n                                                                                                                                                                                          -\n                                                                                                                                                                                            -\n                                                                                                                                                                                              -\n                                                                                                                                                                                                -\n                                                                                                                                                                                                  -\n                                                                                                                                                                                                    -\n                                                                                                                                                                                                      -\n                                                                                                                                                                                                        -\n                                                                                                                                                                                                          -\n                                                                                                                                                                                                            -\n                                                                                                                                                                                                              -\n                                                                                                                                                                                                                -\n                                                                                                                                                                                                                  -\n                                                                                                                                                                                                                    -\n                                                                                                                                                                                                                      -\n                                                                                                                                                                                                                        -\n                                                                                                                                                                                                                          -\n                                                                                                                                                                                                                            -\n                                                                                                                                                                                                                              -\n                                                                                                                                                                                                                                -\n                                                                                                                                                                                                                                  -\n                                                                                                                                                                                                                                    -\n                                                                                                                                                                                                                                      -\n                                                                                                                                                                                                                                        -\n                                                                                                                                                                                                                                          -\n                                                                                                                                                                                                                                            -\n                                                                                                                                                                                                                                              -\n                                                                                                                                                                                                                                                -\n                                                                                                                                                                                                                                                  -\n                                                                                                                                                                                                                                                    -\n                                                                                                                                                                                                                                                      -\n                                                                                                                                                                                                                                                        -\n                                                                                                                                                                                                                                                          -\n                                                                                                                                                                                                                                                            -\n                                                                                                                                                                                                                                                              -\n                                                                                                                                                                                                                                                                -\n                                                                                                                                                                                                                                                                  -\n                                                                                                                                                                                                                                                                    - x\n---",
+      "expected": null
+    },
+    {
+      "name": "aliases-at-the-alias-limit-read",
+      "markdown": "---\nx: &x 1\nlist: [*x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x]\n---",
+      "expected": {
+        "list": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "x": 1
+      }
+    },
+    {
+      "name": "aliases-past-the-alias-limit-are-rejected",
+      "markdown": "---\nx: &x 1\nlist: [*x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x, *x]\n---",
+      "expected": null
+    },
+    {
+      "name": "alias-ladder-past-the-node-budget-is-rejected",
+      "markdown": "---\nl0: &l0 [x, x, x, x, x, x, x, x, x, x]\nl1: &l1 [*l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0]\nl2: &l2 [*l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1]\nl3: &l3 [*l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2]\nl4: &l4 [*l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3]\nl5: &l5 [*l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4]\n---",
+      "expected": null
     },
     {
       "name": "duplicate-floating-point-key-is-rejected",

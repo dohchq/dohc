@@ -1318,6 +1318,7 @@ impl<'input> LoadableYamlNode<'input> for DuplicateYamlNode {
     }
 }
 
+/// A scalar key as text; `None` for a key that is a collection.
 fn duplicate_yaml_key_text(value: &DuplicateYamlNode) -> Option<String> {
     match &value.data {
         YamlDataOwned::Representation(text, style, tag) => Some(frontmatter_key_text(
@@ -1394,11 +1395,8 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
         return None;
     }
     let yaml_source = &markdown[yaml_start..yaml_end];
-    let documents = DuplicateYamlNode::load_from_str(yaml_source).ok()?;
-    if documents.len() != 1 {
-        return None;
-    }
-    let document = documents.first()?;
+    let document = load_frontmatter_yaml(yaml_source)?.document?;
+    let document = &document;
     if duplicate_yaml_value_has_duplicate_mapping_key(document) {
         return None;
     }
@@ -1436,7 +1434,7 @@ enum ResolvedScalar {
 fn frontmatter_scalar(text: &str, style: ScalarStyle, tag: Option<&Tag>) -> FrontmatterScalar {
     let resolved = match tag {
         Some(tag) if !yaml_tag_is_supported(tag) => ResolvedScalar::NotResolved,
-        Some(tag) => match tag.suffix.as_str() {
+        Some(tag) => match core_tag_suffix(tag).unwrap_or_default() {
             "null" => resolve_yaml_null(text),
             "bool" => resolve_yaml_bool(text),
             "int" => resolve_yaml_int(text, true),
@@ -1479,12 +1477,24 @@ fn resolve_plain_yaml_scalar(text: &str) -> ResolvedScalar {
     ResolvedScalar::NotResolved
 }
 
+/// The suffix of a core schema tag, written `!!int` or `!<tag:yaml.org,2002:int>`.
+fn core_tag_suffix(tag: &Tag) -> Option<&str> {
+    if tag.is_yaml_core_schema() {
+        Some(&tag.suffix)
+    } else if tag.handle.is_empty() {
+        tag.suffix.strip_prefix("tag:yaml.org,2002:")
+    } else {
+        None
+    }
+}
+
 fn yaml_tag_is_supported(tag: &Tag) -> bool {
-    tag.is_yaml_core_schema()
-        && matches!(
-            tag.suffix.as_str(),
+    core_tag_suffix(tag).is_some_and(|suffix| {
+        matches!(
+            suffix,
             "str" | "seq" | "map" | "null" | "bool" | "int" | "float"
         )
+    })
 }
 
 fn resolve_yaml_null(text: &str) -> ResolvedScalar {
@@ -1588,11 +1598,16 @@ fn resolve_yaml_float(text: &str) -> ResolvedScalar {
     }
 }
 
+/// A mapping key as text, spelled the way JavaScript's `String` spells it.
 fn frontmatter_key_text(value: Value) -> String {
     match value {
         Value::String(text) => text,
         Value::Number(number) => number.as_i64().map_or_else(
-            || number.as_f64().unwrap_or_default().to_string(),
+            || {
+                ryu_js::Buffer::new()
+                    .format(number.as_f64().unwrap_or_default())
+                    .to_owned()
+            },
             |integer| integer.to_string(),
         ),
         other => other.to_string(),
@@ -1645,35 +1660,231 @@ fn frontmatter_node_has_unsupported_tag(node: &DuplicateYamlNode) -> bool {
     }
 }
 
-/// Load YAML with every scalar left unresolved, so [`frontmatter_scalar`]
-/// reads it instead of saphyr's own schema.
-fn load_unresolved_yaml(source: &str) -> Option<Vec<DuplicateYamlNode>> {
-    let mut loader = saphyr::YamlLoader::<DuplicateYamlNode>::default();
-    loader.early_parse(false);
-    saphyr_parser::Parser::new_from_str(source)
-        .load(&mut loader, true)
-        .ok()?;
-    Some(loader.into_documents())
+/// Collection nesting a frontmatter block may reach, the root mapping
+/// included: the root and the 129 levels (0 to 128) a public value may hold.
+/// The desktop's loader applies the same limits.
+const MAX_FRONTMATTER_DEPTH: usize = 130;
+/// Value nodes a frontmatter block may hold once aliases are expanded.
+const MAX_FRONTMATTER_NODES: usize = 262_144;
+const MAX_FRONTMATTER_ALIASES: usize = 256;
+
+struct LoadedFrontmatterYaml {
+    document: Option<DuplicateYamlNode>,
+    /// Byte offset of the line each top-level key starts on, in document
+    /// order. `None` unless the root is a block mapping with one key per line.
+    root_key_lines: Option<Vec<usize>>,
 }
 
-struct ParsedMarkdownFrontmatter<'a> {
-    value: Value,
-    body: &'a str,
+struct LoadFrame {
+    mapping: bool,
+    key_next: bool,
+    flow: bool,
+    column: usize,
+    line: usize,
+    anchor: usize,
+    nodes_before: usize,
+    height: usize,
+}
+
+/// Load frontmatter YAML with every scalar left unresolved, so
+/// [`frontmatter_scalar`] reads it instead of saphyr's own schema. The load
+/// walks parser events itself, because saphyr's loader recurses once per
+/// nesting level and copies each alias, and refuses YAML past the depth,
+/// node, and alias budgets before it builds anything that large. It also
+/// refuses what the desktop's js-yaml loader refuses: a key that is a
+/// collection, an alias to an unknown or unfinished anchor, and a quoted,
+/// plain, or flow value continued at or left of its block's indentation.
+fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
+    use saphyr_parser::{Event, SpannedEventReceiver};
+
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(index, _)| index + 1))
+        .collect();
+    // Continuation lines of a multi-line value must be indented past the
+    // column of the block collection that holds it.
+    let indented_past = |first_line: usize, last_line: usize, column: usize| {
+        (first_line + 1..=last_line).all(|line| {
+            let start = line_starts.get(line - 1).copied().unwrap_or(source.len());
+            let end = line_starts.get(line).copied().unwrap_or(source.len());
+            let text = source[start..end].trim_end_matches(['\r', '\n']);
+            text.trim().is_empty() || text.len() - text.trim_start_matches(' ').len() > column
+        })
+    };
+    // saphyr starts a block sequence at its first entry's content; the
+    // sequence's column is the dash before it.
+    let dash_column = |line: usize, column: usize| {
+        let start = line_starts.get(line - 1).copied().unwrap_or(source.len());
+        let before: Vec<char> = source[start..].chars().take(column).collect();
+        before
+            .iter()
+            .rposition(|character| *character != ' ')
+            .filter(|at| before[*at] == '-')
+            .unwrap_or(column)
+    };
+    let mut loader = saphyr::YamlLoader::<DuplicateYamlNode>::default();
+    loader.early_parse(false);
+    let mut frames: Vec<LoadFrame> = Vec::new();
+    let mut anchors: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut nodes = 0usize;
+    let mut aliases = 0usize;
+    let mut root_key_lines = Some(Vec::new());
+    for event in saphyr_parser::Parser::new_from_str(source) {
+        let (event, span) = event.ok()?;
+        let is_node = matches!(
+            event,
+            Event::Scalar(..)
+                | Event::SequenceStart(..)
+                | Event::MappingStart(..)
+                | Event::Alias(_)
+        );
+        let is_key = is_node
+            && frames
+                .last()
+                .is_some_and(|frame| frame.mapping && frame.key_next);
+        if is_node
+            && let Some(frame) = frames.last_mut()
+            && frame.mapping
+        {
+            frame.key_next = !frame.key_next;
+        }
+        if is_key && frames.len() == 1 {
+            let line = line_starts.get(span.start.line() - 1).copied()?;
+            if frames[0].flow
+                || root_key_lines
+                    .as_ref()
+                    .and_then(|lines: &Vec<usize>| lines.last())
+                    .is_some_and(|last| *last >= line)
+            {
+                root_key_lines = None;
+            }
+            if let Some(lines) = root_key_lines.as_mut() {
+                lines.push(line);
+            }
+        }
+        let block_column = frames
+            .last()
+            .filter(|frame| !frame.flow)
+            .map(|frame| frame.column);
+        match &event {
+            Event::Scalar(_, style, anchor, _) => {
+                if !is_key {
+                    nodes += 1;
+                }
+                if matches!(
+                    style,
+                    ScalarStyle::Plain | ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
+                ) && let Some(column) = block_column
+                    && !indented_past(span.start.line(), span.end.line(), column)
+                {
+                    return None;
+                }
+                if *anchor > 0 {
+                    anchors.insert(*anchor, (1, 0));
+                }
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                if is_key {
+                    return None;
+                }
+                let mapping = matches!(event, Event::MappingStart(..));
+                let flow = span.start.index() != span.end.index();
+                frames.push(LoadFrame {
+                    mapping,
+                    key_next: true,
+                    flow,
+                    column: if mapping || flow {
+                        span.start.col()
+                    } else {
+                        dash_column(span.start.line(), span.start.col())
+                    },
+                    line: span.start.line(),
+                    anchor: *anchor,
+                    nodes_before: nodes,
+                    height: 0,
+                });
+                nodes += 1;
+                if frames.len() > MAX_FRONTMATTER_DEPTH {
+                    return None;
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => {
+                let frame = frames.pop()?;
+                if frame.flow
+                    && let Some(parent) = frames.last()
+                    && !parent.flow
+                    && !indented_past(frame.line, span.end.line(), parent.column)
+                {
+                    return None;
+                }
+                let height = frame.height + 1;
+                if let Some(parent) = frames.last_mut() {
+                    parent.height = parent.height.max(height);
+                }
+                if frame.anchor > 0 {
+                    anchors.insert(frame.anchor, (nodes - frame.nodes_before, height));
+                }
+            }
+            Event::Alias(anchor) => {
+                aliases += 1;
+                let (size, height) = anchors.get(anchor).copied()?;
+                if aliases > MAX_FRONTMATTER_ALIASES || (is_key && height > 0) {
+                    return None;
+                }
+                if !is_key {
+                    nodes += size;
+                    if frames.len() + height > MAX_FRONTMATTER_DEPTH {
+                        return None;
+                    }
+                    if let Some(parent) = frames.last_mut() {
+                        parent.height = parent.height.max(height);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if nodes > MAX_FRONTMATTER_NODES {
+            return None;
+        }
+        loader.on_event(event, span);
+    }
+    let mut documents = loader.into_documents();
+    if documents.len() > 1 {
+        return None;
+    }
+    Some(LoadedFrontmatterYaml {
+        document: documents.pop(),
+        root_key_lines,
+    })
+}
+
+/// A Markdown document's frontmatter block as both loaders read it.
+pub struct MarkdownFrontmatterBlock<'a> {
+    pub value: serde_json::Map<String, Value>,
+    /// Everything up to and including the opening delimiter line.
+    pub open: &'a str,
+    /// The lines between the delimiters, each with its line break.
+    pub yaml: &'a str,
+    /// The closing delimiter line and everything after it.
+    pub closing: &'a str,
+    pub body: &'a str,
+    /// Each top-level key with the byte offset in `yaml` of the line it
+    /// starts on, in document order. `None` unless the root is a block
+    /// mapping with one key per line.
+    pub entries: Option<Vec<(String, usize)>>,
     non_finite_fields: HashSet<String>,
     unsupported_tag_fields: HashSet<String>,
 }
 
-fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatter<'_>> {
+/// The document's frontmatter block. `Ok(None)` when the document has none;
+/// `Err(())` when its block does not read as a mapping.
+fn frontmatter_block(markdown: &str) -> Result<Option<MarkdownFrontmatterBlock<'_>>, ()> {
     let mut lines = markdown.split_inclusive('\n');
-    let first = lines.next()?;
-    if !first.ends_with('\n') || !is_frontmatter_delimiter(first) {
-        return Some(ParsedMarkdownFrontmatter {
-            value: Value::Object(serde_json::Map::new()),
-            body: markdown,
-            non_finite_fields: HashSet::new(),
-            unsupported_tag_fields: HashSet::new(),
-        });
-    }
+    let Some(first) = lines
+        .next()
+        .filter(|line| line.ends_with('\n') && is_frontmatter_delimiter(line))
+    else {
+        return Ok(None);
+    };
     let yaml_start = first.len();
     let mut yaml_end = yaml_start;
     let mut body_start = None;
@@ -1684,47 +1895,81 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
         }
         yaml_end += line.len();
     }
-    let body_start = body_start?;
-    let yaml_source = &markdown[yaml_start..yaml_end];
-    let body = &markdown[body_start..];
-    let yaml_is_empty = yaml_source.lines().all(|line| {
+    let body_start = body_start.ok_or(())?;
+    let yaml = &markdown[yaml_start..yaml_end];
+    let mut block = MarkdownFrontmatterBlock {
+        value: serde_json::Map::new(),
+        open: &markdown[..yaml_start],
+        yaml,
+        closing: &markdown[yaml_end..],
+        body: &markdown[body_start..],
+        entries: Some(Vec::new()),
+        non_finite_fields: HashSet::new(),
+        unsupported_tag_fields: HashSet::new(),
+    };
+    let yaml_is_empty = yaml.lines().all(|line| {
         let content = line.trim_start_matches([' ', '\t', '\r']);
         content.is_empty() || content.starts_with('#')
     });
     if yaml_is_empty {
-        return Some(ParsedMarkdownFrontmatter {
-            value: Value::Object(serde_json::Map::new()),
-            body,
-            non_finite_fields: HashSet::new(),
-            unsupported_tag_fields: HashSet::new(),
-        });
+        return Ok(Some(block));
     }
-    let documents = load_unresolved_yaml(yaml_source)?;
-    let [document] = documents.as_slice() else {
-        return None;
-    };
-    if duplicate_yaml_value_has_duplicate_mapping_key(document) {
-        return None;
+    let loaded = load_frontmatter_yaml(yaml).ok_or(())?;
+    let document = loaded.document.ok_or(())?;
+    if duplicate_yaml_value_has_duplicate_mapping_key(&document) {
+        return Err(());
     }
-    let mapping = duplicate_yaml_mapping(document)?;
-    let mut non_finite_fields = HashSet::new();
-    let mut unsupported_tag_fields = HashSet::new();
+    let mapping = duplicate_yaml_mapping(&document).ok_or(())?;
+    let mut keys = Vec::with_capacity(mapping.len());
     for (key, value) in mapping {
-        let Some(key) = duplicate_yaml_key_text(key) else {
-            continue;
-        };
+        let key = duplicate_yaml_key_text(key).ok_or(())?;
         if frontmatter_node_is_non_finite(value) {
-            non_finite_fields.insert(key.clone());
+            block.non_finite_fields.insert(key.clone());
         }
         if frontmatter_node_has_unsupported_tag(value) {
-            unsupported_tag_fields.insert(key);
+            block.unsupported_tag_fields.insert(key.clone());
         }
+        keys.push(key);
     }
-    Some(ParsedMarkdownFrontmatter {
-        value: frontmatter_node_json(document),
-        body,
-        non_finite_fields,
-        unsupported_tag_fields,
+    block.entries = loaded
+        .root_key_lines
+        .filter(|lines| lines.len() == keys.len())
+        .map(|lines| keys.into_iter().zip(lines).collect());
+    let Value::Object(value) = frontmatter_node_json(&document) else {
+        return Err(());
+    };
+    block.value = value;
+    Ok(Some(block))
+}
+
+/// The document's frontmatter block, or `None` when it has none or the block
+/// does not read as a mapping.
+#[must_use]
+pub fn markdown_frontmatter_block(markdown: &str) -> Option<MarkdownFrontmatterBlock<'_>> {
+    frontmatter_block(markdown).ok().flatten()
+}
+
+struct ParsedMarkdownFrontmatter<'a> {
+    value: Value,
+    body: &'a str,
+    non_finite_fields: HashSet<String>,
+    unsupported_tag_fields: HashSet<String>,
+}
+
+fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatter<'_>> {
+    Some(match frontmatter_block(markdown).ok()? {
+        None => ParsedMarkdownFrontmatter {
+            value: Value::Object(serde_json::Map::new()),
+            body: markdown,
+            non_finite_fields: HashSet::new(),
+            unsupported_tag_fields: HashSet::new(),
+        },
+        Some(block) => ParsedMarkdownFrontmatter {
+            value: Value::Object(block.value),
+            body: block.body,
+            non_finite_fields: block.non_finite_fields,
+            unsupported_tag_fields: block.unsupported_tag_fields,
+        },
     })
 }
 
@@ -5773,6 +6018,42 @@ mod tests {
             compare_record_to_cursor(&second, &cursor, &sort).expect("valid cursor"),
             Ordering::Greater
         );
+    }
+
+    /// The shared fixture cannot hold JSON nested past serde_json's own
+    /// limit, so the depth boundary is pinned here and in the desktop's
+    /// import-export tests.
+    #[test]
+    fn frontmatter_reads_up_to_the_depth_limit_and_refuses_deeper_or_hostile_yaml() {
+        let flow = |depth: usize| {
+            format!(
+                "---\nvalue: {}x{}\n---\n",
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        let mut serializer = serde_json::Serializer::new(Vec::new());
+        let read = parse_markdown_frontmatter(&flow(super::MAX_FRONTMATTER_DEPTH - 1))
+            .expect("nesting at the limit reads")
+            .value;
+        // Compare through serialization: `Value` equality recurses per level.
+        serde::Serialize::serialize(&read["value"], &mut serializer).unwrap();
+        assert_eq!(
+            String::from_utf8(serializer.into_inner()).unwrap(),
+            format!(
+                "{}\"x\"{}",
+                "[".repeat(super::MAX_FRONTMATTER_DEPTH - 1),
+                "]".repeat(super::MAX_FRONTMATTER_DEPTH - 1)
+            )
+        );
+        for markdown in [
+            flow(super::MAX_FRONTMATTER_DEPTH),
+            format!("---\ntitle:\n{}x\n---\n", "- ".repeat(500_000)),
+            flow(500_000),
+        ] {
+            assert!(super::markdown_frontmatter_json(&markdown).is_none());
+            assert_eq!(markdown_record_id(&markdown), None);
+        }
     }
 
     #[test]

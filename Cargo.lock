@@ -351,6 +351,7 @@ dependencies = [
  "dohc-engine-testkit",
  "getrandom 0.4.3",
  "rusqlite",
+ "ryu-js",
  "saphyr",
  "saphyr-parser",
  "serde",

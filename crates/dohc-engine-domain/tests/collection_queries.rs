@@ -1259,31 +1259,28 @@ fn json_frontmatter_record_keeps_a_valid_flow_mapping_when_adopted() {
 
 #[test]
 fn record_adoption_refuses_an_insertion_outside_the_root_mapping() {
+    let markdown = "---\n  name: Sam\n---\n";
+    assert!(markdown_frontmatter_json_with_provenance(markdown).is_some());
+    assert_eq!(
+        collection_record_markdown_with_id(markdown, PERSON_ID),
+        None
+    );
+}
+
+// A mapping key the desktop cannot read makes the block unreadable on both
+// sides, so no id can be minted or reminted inside it.
+#[test]
+fn frontmatter_with_a_collection_key_is_not_a_record() {
     for markdown in [
-        "---\n{a: 1}: value\nother: 2\n---\n",
-        "---\n  name: Sam\n---\n",
+        "---\n{a: 1}: value\nother: 2\n---\n".to_owned(),
+        format!("---\n{{\"id\":\"{PERSON_ID}\",a: 1}}: value\nid: {PERSON_ID}\n---\n"),
     ] {
-        assert!(markdown_frontmatter_json_with_provenance(markdown).is_some());
+        assert!(markdown_frontmatter_json_with_provenance(&markdown).is_none());
         assert_eq!(
-            collection_record_markdown_with_id(markdown, PERSON_ID),
+            collection_record_markdown_with_id(&markdown, SECOND_PERSON_ID),
             None
         );
     }
-}
-
-#[test]
-fn copied_record_cannot_remint_an_id_inside_a_mapping_key() {
-    let markdown = format!("---\n{{\"id\":\"{PERSON_ID}\",a: 1}}: value\nid: {PERSON_ID}\n---\n");
-    assert_eq!(
-        markdown_frontmatter_json_with_provenance(&markdown)
-            .unwrap()
-            .0["id"],
-        PERSON_ID
-    );
-    assert_eq!(
-        collection_record_markdown_with_id(&markdown, SECOND_PERSON_ID),
-        None
-    );
 }
 
 #[test]

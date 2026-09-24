@@ -37,6 +37,7 @@ import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { frontmatterBlockFor } from "@dohc/ydoc-projection/frontmatter";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -734,12 +735,15 @@ export function MarkdownView(props: {
     const editorBody = wysiwygRef.current?.getMarkdown();
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
-    const liveMeta = engine.doc
-      ? (Object.fromEntries(
-          engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-        ) as Record<string, unknown>)
-      : parseFrontmatter(latestDraft.current).meta;
-    return applyFrontmatter(body, orderFrontmatter(liveMeta));
+    if (!engine.doc) {
+      return applyFrontmatter(body, orderFrontmatter(parseFrontmatter(latestDraft.current).meta));
+    }
+    const liveMeta = Object.fromEntries(
+      engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
+    ) as Record<string, unknown>;
+    // The frontmatter text the settle keeps, so a copy matches the file.
+    const source = engine.doc.getMap("meta").get("dohcFrontmatterSource");
+    return `${frontmatterBlockFor(orderFrontmatter(liveMeta), source, body, "\n")}${body}`;
   };
 
   const hasSetAsideEdit =

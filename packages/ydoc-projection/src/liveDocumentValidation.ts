@@ -674,7 +674,8 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
   }
   if (Object.hasOwn(snapshot, 'dohcFrontmatterSource') && (
     typeof snapshot.dohcFrontmatterSource !== 'string'
-    || exceedsUtf8Bytes(snapshot.dohcFrontmatterSource, 10 * 1024 * 1024)
+    // Frontmatter text is never longer than the document it leads.
+    || exceedsLiveMarkdownLimit(snapshot.dohcFrontmatterSource)
   )) refuse('invalid-schema')
   const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
   if (sourceFields !== 0) {

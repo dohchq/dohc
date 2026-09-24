@@ -16,19 +16,6 @@ import {
   TableRow,
 } from '@tiptap/extension-table'
 import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskList } from '@tiptap/extension-list'
-import * as yaml from 'js-yaml'
-import {
-  boolCoreTag,
-  CORE_SCHEMA,
-  defineMappingTag,
-  defineScalarTag,
-  defineSequenceTag,
-  floatCoreTag,
-  intCoreTag,
-  NOT_RESOLVED,
-  nullCoreTag,
-  type ScalarTagDefinition,
-} from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -42,117 +29,25 @@ import {
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import {
+  frontmatterBlockFor,
+  isFrontmatterMap,
+  normalizeFrontmatterValue,
+  orderFrontmatter,
+  parseFrontmatter,
+} from './frontmatter.js'
 
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
-const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_SCHEMA_VERSION = 1
 const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
 const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
-const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
-const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
-const MIN_YDOC_INTEGER = -(1n << 63n)
-const MAX_YDOC_INTEGER = (1n << 63n) - 1n
-
-function hasValidIntegerSeparators(source: string): boolean {
-  for (
-    let index = source.indexOf('_');
-    index !== -1;
-    index = source.indexOf('_', index + 1)
-  ) {
-    const previous = source[index - 1]
-    const next = source[index + 1]
-    if (
-      previous === undefined
-      || next === undefined
-      || !/[\dA-Fa-f]/u.test(previous)
-      || !/[\dA-Fa-f]/u.test(next)
-    ) {
-      return false
-    }
-  }
-  return true
-}
-
-// A scalar the frontmatter value model cannot hold keeps its text: a
-// non-finite float, an integer outside int64, or a value its explicit tag
-// cannot resolve. The engine's loader applies the same rules
-// (crates/dohc-engine-domain/src/collections.rs), and the settle keeps the
-// person's text for any key whose value did not change.
-const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
-  implicit: true,
-  implicitFirstChars: ['-', '+', ...'0123456789'],
-  resolve: (source, isExplicit, tagName) => {
-    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED
-    const normalizedSource = source.replaceAll('_', '')
-    if (
-      intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED
-    ) {
-      return NOT_RESOLVED
-    }
-    let magnitude = normalizedSource
-    let sign = 1n
-    if (magnitude[0] === '-' || magnitude[0] === '+') {
-      if (magnitude[0] === '-') sign = -1n
-      magnitude = magnitude.slice(1)
-    }
-    const integer = sign * BigInt(magnitude)
-    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) return source
-    if (integer >= -MAX_SAFE_INTEGER && integer <= MAX_SAFE_INTEGER) {
-      return Number(integer)
-    }
-    return integer
-  },
-  identify: value =>
-    typeof value === 'bigint'
-    || (typeof value === 'number'
-      && Number.isSafeInteger(value)
-      && !Object.is(value, -0)),
-  represent: value => value.toString(),
-})
-const losslessFloatTag = defineScalarTag('tag:yaml.org,2002:float', {
-  implicit: true,
-  implicitFirstChars: floatCoreTag.implicitFirstChars,
-  resolve: (source, isExplicit, tagName) => {
-    const value = floatCoreTag.resolve(source, isExplicit, tagName)
-    return value === NOT_RESOLVED || Number.isFinite(value) ? value : source
-  },
-  identify: value =>
-    typeof value === 'number'
-    && (!Number.isSafeInteger(value) || Object.is(value, -0)),
-  represent: value => {
-    const represented = floatCoreTag.represent(value)
-    return Number.isInteger(value) && !represented.includes('.')
-      ? `${represented}.0`
-      : represented
-  },
-})
-// An explicit core tag its value does not satisfy, such as `!!bool yes`,
-// keeps the text instead of failing the whole frontmatter.
-function keepingTextWhenExplicit(
-  tag: ScalarTagDefinition,
-): ScalarTagDefinition {
-  return {
-    ...tag,
-    resolve: (source, isExplicit, tagName) => {
-      const value = tag.resolve(source, isExplicit, tagName)
-      return value === NOT_RESOLVED && isExplicit ? source : value
-    },
-  }
-}
-const losslessFrontmatterSchema = CORE_SCHEMA.withTags(
-  keepingTextWhenExplicit(nullCoreTag),
-  keepingTextWhenExplicit(boolCoreTag),
-  keepingTextWhenExplicit(losslessIntegerTag),
-  keepingTextWhenExplicit(losslessFloatTag),
-)
-
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.
   // The importer represents those tags as text, so normalize them before the
@@ -599,26 +494,12 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
   )
 
-  const source = internalMeta.get(FRONTMATTER_SOURCE_META_KEY)
-  const kept = typeof source === 'string'
-    ? keptFrontmatter(source, frontmatter)
-    : undefined
-  if (kept !== undefined) {
-    // A closing delimiter at the end of the file needs a line break before
-    // the body a person adds under it.
-    const separator = body !== '' && !kept.endsWith('\n')
-      ? restoreLineEndings('\n\n')
-      : ''
-    return `${kept}${separator}${restoreLineEndings(body)}`
-  }
-
-  if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
-
-  const yamlFrontmatter = frontmatterYaml(frontmatter)
-
-  return restoreLineEndings(
-    `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`,
-  )
+  return `${frontmatterBlockFor(
+    frontmatter,
+    internalMeta.get(FRONTMATTER_SOURCE_META_KEY),
+    body,
+    usesCrlf ? '\r\n' : '\n',
+  )}${restoreLineEndings(body)}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
@@ -1286,207 +1167,6 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function parseFrontmatter(src: string, usesCrlf: boolean): {
-  meta: Record<string, unknown>
-  body: string
-  frontmatterSource?: string
-} {
-  const match = FM_RE.exec(src)
-  if (!match) return { meta: {}, body: src }
-
-  const [, raw, rest] = match
-  let meta: Record<string, unknown> = {}
-  if (!isEmptyFrontmatter(raw ?? '')) {
-    try {
-      // The YAML is every line between the delimiters, each with its line
-      // break, so a kept block scalar at the end keeps its last blank line.
-      const parsed = loadFrontmatterYaml(`${raw ?? ''}\n`)
-      if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
-      meta = parsed
-    } catch {
-      return { meta: {}, body: src }
-    }
-  }
-  const body = rest ?? ''
-  const separator = /^(?:\r?\n)*/u.exec(body)?.[0] ?? ''
-  const source = `${src.slice(0, src.length - body.length)}${separator}`
-  const canonical = Object.keys(meta).length === 0
-    ? ''
-    : `---\n${frontmatterYaml(meta)}---\n\n`
-  return {
-    meta,
-    body: body.slice(separator.length),
-    ...(source === (usesCrlf ? canonical.replaceAll('\n', '\r\n') : canonical)
-      ? {}
-      : { frontmatterSource: source }),
-  }
-}
-
-/**
- * The frontmatter a person wrote, kept through a settle. A key whose value
- * did not change keeps its lines and the comments above them. A changed key
- * gets its canonical entry in place, a removed key loses its lines, and a new
- * key is added after the others. Undefined when the result would not read
- * back as `current`, so the caller writes canonical frontmatter instead.
- */
-function keptFrontmatter(
-  source: string,
-  current: Record<string, unknown>,
-): string | undefined {
-  const match = FM_RE.exec(source)
-  if (!match) return undefined
-  const open = source.slice(0, source.indexOf('\n') + 1)
-  const [, raw = '', rest = ''] = match
-  const close = source.slice(open.length + raw.length, source.length - rest.length)
-  const eol = close.startsWith('\r\n') ? '\r\n' : '\n'
-  const yaml = `${raw}${eol}`
-  const closing = `${close.slice(eol.length)}${rest}`
-  const lineEnding = open.endsWith('\r\n') ? '\r\n' : '\n'
-  const canonical = (values: Record<string, unknown>): string => {
-    const text = frontmatterYaml(values)
-    return lineEnding === '\n' ? text : text.replaceAll('\n', lineEnding)
-  }
-  const entries = frontmatterEntries(yaml)
-  let kept = yaml
-  if (entries !== undefined) {
-    kept = entries.head
-    const seen = new Set<string>()
-    for (const entry of entries.entries) {
-      seen.add(entry.key)
-      if (!Object.hasOwn(current, entry.key)) continue
-      kept += entry.lead
-      kept += frontmatterYaml({ [entry.key]: entry.value })
-        === frontmatterYaml({ [entry.key]: current[entry.key] })
-        ? entry.text
-        : canonical({ [entry.key]: current[entry.key] })
-    }
-    const added = Object.fromEntries(
-      Object.entries(current).filter(([key]) => !seen.has(key)),
-    )
-    if (Object.keys(added).length > 0) kept += canonical(added)
-    kept += entries.tail
-  }
-  if (kept === '') return undefined
-  const candidate = `${open}${kept}${closing}`
-  const parsed = parseFrontmatter(candidate, false)
-  return parsed.body === ''
-    && frontmatterYaml(parsed.meta) === frontmatterYaml(current)
-    ? candidate
-    : undefined
-}
-
-type FrontmatterEntry = { key: string; value: unknown; lead: string; text: string }
-
-/**
- * Split frontmatter YAML into its top-level entries. A column-0 comment or
- * blank line belongs to the entry below it. Undefined when an entry does not
- * read as one key on its own, for example through an alias to another entry.
- */
-function frontmatterEntries(
-  yaml: string,
-): { head: string; entries: FrontmatterEntry[]; tail: string } | undefined {
-  const lines = yaml.match(/[^\n]*\n/gu) ?? []
-  const blocks: { lead: string; text: string }[] = []
-  let pending = ''
-  for (const line of lines) {
-    const content = line.replace(/\r?\n$/u, '')
-    if (content.trim() === '' || content.startsWith('#')) {
-      pending += line
-    } else if (/^[ \t]|^[-:](?:[ \t]|$)/u.test(content)) {
-      const last = blocks.at(-1)
-      if (last === undefined) return undefined
-      last.text += `${pending}${line}`
-      pending = ''
-    } else {
-      blocks.push({ lead: pending, text: line })
-      pending = ''
-    }
-  }
-  const head = blocks[0]?.lead ?? ''
-  if (blocks[0]) blocks[0].lead = ''
-  const entries: FrontmatterEntry[] = []
-  const keys = new Set<string>()
-  for (const block of blocks) {
-    let value: unknown
-    try {
-      value = loadFrontmatterYaml(block.text)
-    } catch {
-      return undefined
-    }
-    if (!isFrontmatterMap(value)) return undefined
-    const [key, ...others] = Object.keys(value)
-    if (key === undefined || others.length > 0 || keys.has(key)) return undefined
-    keys.add(key)
-    entries.push({ key, value: value[key], ...block })
-  }
-  return { head, entries, tail: pending }
-}
-
-// Any other tag keeps its node: a scalar its text, a collection its items.
-const frontmatterLoadSchema = losslessFrontmatterSchema.withTags(
-  defineScalarTag('', {
-    matchByTagPrefix: true,
-    resolve: source => source,
-  }),
-  defineSequenceTag('', {
-    matchByTagPrefix: true,
-    create: () => [] as unknown[],
-    addItem: (values, value) => {
-      values.push(value)
-    },
-  }),
-  defineMappingTag('', {
-    matchByTagPrefix: true,
-    create: () => nullPrototypeRecord(),
-    addPair: (mapping, key, value) => {
-      const normalizedKey = String(key)
-      mapping[normalizedKey] = value
-      return ''
-    },
-    has: (mapping, key) => Object.hasOwn(mapping, String(key)),
-    keys: mapping => Object.keys(mapping),
-    get: (mapping, key) => mapping[String(key)],
-  }),
-)
-
-function loadFrontmatterYaml(raw: string): unknown {
-  // Public values allow depth 128; YAML also counts the root mapping,
-  // terminal value, and one speculative compact-node parse.
-  return normalizeFrontmatterValue(
-    yaml.load(raw, { schema: frontmatterLoadSchema, maxDepth: 131 }),
-  )
-}
-
-function nullPrototypeRecord(): Record<string, unknown> {
-  return Object.create(null) as Record<string, unknown>
-}
-
-function normalizeFrontmatterValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue)
-  if (!isFrontmatterMap(value)) return value
-
-  const normalized = nullPrototypeRecord()
-  for (const key of Object.keys(value).sort()) {
-    normalized[key] = normalizeFrontmatterValue(value[key])
-  }
-  return normalized
-}
-
-function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false
-  }
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function isEmptyFrontmatter(raw: string): boolean {
-  return raw.split(/\r?\n/).every((line) => {
-    const trimmed = line.trim()
-    return !trimmed || trimmed.startsWith('#')
-  })
-}
-
 function writeMap(
   map: Y.Map<unknown>,
   values: Record<string, unknown>,
@@ -1586,28 +1266,4 @@ function mapToObject(
       yFrontmatterValueToPlain(child),
     ] as const).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
   )
-}
-
-function orderFrontmatter(
-  frontmatter: Record<string, unknown>,
-): Record<string, unknown> {
-  const ordered = nullPrototypeRecord()
-
-  for (const key of FRONTMATTER_PRIORITY_KEYS) {
-    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]
-  }
-
-  for (const key of Object.keys(frontmatter).sort()) {
-    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key]
-  }
-
-  return ordered
-}
-
-function frontmatterYaml(frontmatter: Record<string, unknown>): string {
-  return yaml.dump(orderFrontmatter(frontmatter), {
-    schema: losslessFrontmatterSchema,
-    lineWidth: -1,
-    sortKeys: false,
-  })
 }

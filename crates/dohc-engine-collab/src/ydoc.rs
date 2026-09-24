@@ -555,6 +555,13 @@ impl Ydoc {
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
             return Err(invalid());
         }
+        if matches!(
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
+            Some(Out::Any(Any::String(source)))
+                if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+        ) {
+            return Err(invalid());
+        }
         let source_fields = [
             MARKDOWN_SOURCE_META_KEY,
             MARKDOWN_SOURCE_SHA_META_KEY,
@@ -914,7 +921,7 @@ impl Ydoc {
             .collect::<ProjectionResult<_>>()?;
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
-            if let Some(kept) = frontmatter_yaml::kept(&source, &entries)? {
+            if let Some(kept) = frontmatter_yaml::kept(&source, &entries) {
                 let mut preserved = ProjectionBuffer::new();
                 preserved.push_str(&kept)?;
                 // A closing delimiter at the end of the file needs a line
@@ -1020,7 +1027,10 @@ impl Ydoc {
                 let meta = self.doc.get_or_insert_map(ROOT_META);
                 let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
-                let source = frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?;
+                let source = match prefix {
+                    Some(prefix) => frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?,
+                    None => None,
+                };
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
@@ -1310,7 +1320,12 @@ impl Ydoc {
     /// survives once a later edit makes the bytes stale.
     fn keep_frontmatter_source_of(&self, markdown: &str) -> Result<(), CollabError> {
         let (frontmatter, prefix, _) = split_markdown_frontmatter(markdown);
-        let source = frontmatter_yaml::source(prefix, &frontmatter, markdown.contains("\r\n"))?;
+        let source = match prefix {
+            Some(prefix) => {
+                frontmatter_yaml::source(prefix, &frontmatter, markdown.contains("\r\n"))?
+            }
+            None => None,
+        };
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
         match source {
@@ -1405,21 +1420,28 @@ enum MdBlock {
 }
 
 /// Split a leading `---` YAML frontmatter block, with the blank lines after
-/// it, off the chosen markdown. Values use the collection indexer's YAML
-/// parser so a richdoc seed and its index agree on scalar, sequence, and
-/// mapping types.
-fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str, &str) {
-    match dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown) {
-        Some((Value::Object(frontmatter), mut body)) => {
+/// it, off the chosen markdown. The prefix is `None` when the document has no
+/// readable block. Values use the collection indexer's YAML parser so a
+/// richdoc seed and its index agree on scalar, sequence, and mapping types.
+fn split_markdown_frontmatter(
+    markdown: &str,
+) -> (serde_json::Map<String, Value>, Option<&str>, &str) {
+    match dohc_engine_domain::collections::markdown_frontmatter_block(markdown) {
+        Some(block) => {
+            let mut body = block.body;
             while let Some(rest) = body
                 .strip_prefix("\r\n")
                 .or_else(|| body.strip_prefix('\n'))
             {
                 body = rest;
             }
-            (frontmatter, &markdown[..markdown.len() - body.len()], body)
+            (
+                block.value,
+                Some(&markdown[..markdown.len() - body.len()]),
+                body,
+            )
         }
-        _ => (serde_json::Map::new(), "", markdown),
+        None => (serde_json::Map::new(), None, markdown),
     }
 }
 
@@ -6238,6 +6260,93 @@ fn main() {}
         );
         let txn = doc.doc.transact();
         assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
+    }
+
+    /// A collaborator can write any frontmatter source. One too deep, too
+    /// large, or too costly to expand is ignored, and the settle still writes
+    /// canonical frontmatter.
+    #[test]
+    fn hostile_frontmatter_sources_settle_as_canonical_frontmatter() {
+        let ladder = (0..6)
+            .map(|level| {
+                let item = if level == 0 {
+                    "x".to_owned()
+                } else {
+                    format!("*l{}", level - 1)
+                };
+                format!("l{level}: &l{level} [{}]\n", vec![item; 10].join(", "))
+            })
+            .collect::<String>();
+        let oversized = format!(
+            "---\ntitle: Plan\npadding: '{}'\n---\n\n",
+            "x".repeat(crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+        );
+        for source in [
+            format!("---\ntitle:\n{}Plan\n---\n\n", "- ".repeat(500_000)),
+            format!(
+                "---\ntitle:\n{}Plan{}\n---\n\n",
+                "[".repeat(500_000),
+                "]".repeat(500_000)
+            ),
+            format!("---\n{ladder}title: Plan\n---\n\n"),
+            oversized,
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\ntitle: Plan\n---\n\nBody")
+                .unwrap();
+            let meta = doc.doc.get_or_insert_map(ROOT_META);
+            meta.insert(
+                &mut doc.doc.transact_mut(),
+                FRONTMATTER_SOURCE_META_KEY,
+                source.as_str(),
+            );
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                "---\ntitle: Plan\n---\n\nBody"
+            );
+            if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                assert!(doc
+                    .validate_public_baseline(&doc.encode_full_state())
+                    .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn empty_frontmatter_blocks_stay_until_a_key_arrives() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody")
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody");
+        doc.frontmatter_set("title", "Plan");
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\ntitle: Plan\n---\n\nBody"
+        );
+
+        let removed = Ydoc::wire();
+        removed
+            .rewrite_content_to_markdown(
+                ContentKind::Richdoc,
+                "---\nz: 1\ntitle: Plan\n---\n\nBody",
+            )
+            .unwrap();
+        let frontmatter = removed.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = removed.doc.transact_mut();
+            frontmatter.remove(&mut txn, "z");
+            frontmatter.remove(&mut txn, "title");
+        }
+        assert_eq!(removed.project_richdoc().unwrap(), "Body");
+    }
+
+    #[test]
+    fn documents_without_frontmatter_keep_no_frontmatter_source() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "\n\n# Title\n")
+            .unwrap();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        assert!(!meta.contains_key(&doc.doc.transact(), FRONTMATTER_SOURCE_META_KEY));
     }
 
     #[test]

@@ -32,9 +32,18 @@ type Sample = {
   name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>
   // Typed at the end of the body, keys removed, and a replacement frontmatter source.
   typed?: string; remove?: string[]; source?: string
+  // The settle must keep the frontmatter block exactly as written.
+  keeps?: boolean
 }
+// The frontmatter block as written, read with a pattern and not a YAML loader,
+// so a fault both loaders share cannot rewrite the expectation.
+const WRITTEN_BLOCK = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/
 // Frontmatter a person wrote, which a settle must keep as written: comments,
 // order, spacing, and values the engine's JSON model cannot hold.
+const KEEP_BLOCK_SCALAR = '---\n# note\nb: |+\n  keeps\n\nc: 1\n---\n\nBody\n'
+const ALIAS_LADDER = Array.from({ length: 6 }, (_, level) => `l${level}: &l${level} [${
+  Array(10).fill(level === 0 ? 'x' : `*l${level - 1}`).join(', ')
+}]`).join('\n')
 const WRITTEN_FRONTMATTER = [
   '---', '# Trip plan', 'title:   Lisbon', 'score: .nan', 'id: 99999999999999999999', 'zero: -0',
   'octal: !!int 0o7', 'hex: 0x_1F', 'bin: 0b1010_1010', 'flag: !!bool yes', 'count: !custom 7',
@@ -54,8 +63,18 @@ const settleSamples: Sample[] = [
     'flow-mapping': '---\n{a: 1, b: .nan}\n---\n\nBody\n',
     'delimiter-at-end': '---\ntitle: Plan\n--- ',
     'crlf-delimiter-at-end': '---\r\ntitle: Plan\r\n---',
+    'keep-block-scalar': KEEP_BLOCK_SCALAR,
+    'empty-block': '---\n---\n\nBody\n',
+    'verbatim-tag': '---\nint: !<tag:yaml.org,2002:int> 7\n---\n\nBody\n',
+    'number-keys': '---\n1e21: a\n1e-7: b\n-0.0: c\n1.0: d\n---\n\nBody\n',
+    aliases: '---\nlist: &list [1, 2]\ncopy: *list\nname: &name key\n*name : value\n---\n\nBody\n',
     written: WRITTEN_FRONTMATTER,
-  }).map(([name, markdown]) => ({ name: `settle-typed-${name}`, markdown, typed: ', typed' })),
+  }).map(([name, markdown]) => ({ name: `settle-typed-${name}`, markdown, typed: ', typed', keeps: true })),
+  // Blocks both loaders refuse stay body text.
+  ...Object.entries({
+    'quoted-continued-at-sequence-column': '---\na:\n- "x\ny"\n---\n\nBody\n',
+    'collection-key': '---\n? [a, b]\n: 1\n---\n\nBody\n',
+  }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed' })),
   { name: 'settle-key-changed', markdown: WRITTEN_FRONTMATTER, values: { title: 'Porto' } },
   { name: 'settle-key-removed', markdown: WRITTEN_FRONTMATTER, remove: ['score'] },
   { name: 'settle-key-added', markdown: WRITTEN_FRONTMATTER, values: { status: 'booked', icon: '🧳' } },
@@ -64,6 +83,15 @@ const settleSamples: Sample[] = [
   { name: 'settle-flow-mapping-changed', markdown: '---\n{a: 1, b: .nan}\n---\n\nBody\n', values: { a: 2 } },
   { name: 'settle-forged-source-body', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom high\n---\n\ninjected body\n' },
   { name: 'settle-forged-source-value', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom foreign\n---\n\n' },
+  { name: 'settle-forged-source-deep', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\ntitle:\n${'- '.repeat(200)}Plan\n---\n\n` },
+  { name: 'settle-forged-source-alias-ladder', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${ALIAS_LADDER}\ntitle: Plan\n---\n\n` },
+  { name: 'settle-key-after-keep-block-scalar-changed', markdown: KEEP_BLOCK_SCALAR, values: { c: 2 } },
+  // Removing the key under a kept blank line would change the block
+  // scalar's value, so the settle writes canonical frontmatter.
+  { name: 'settle-key-after-keep-block-scalar-removed', markdown: KEEP_BLOCK_SCALAR, remove: ['c'] },
+  { name: 'settle-key-renamed', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon' } },
+  { name: 'settle-empty-block-key-added', markdown: '---\n---\n\nBody\n', values: { title: 'Plan' } },
+  { name: 'settle-last-key-removed', markdown: '---\nz: 1\ntitle: Plan\n---\n\nBody\n', remove: ['z', 'title'] },
 ]
 const samples: Sample[] = [
   { name: 'empty', markdown: '' },
@@ -90,7 +118,7 @@ const samples: Sample[] = [
   ...numericSamples,
   ...frontmatterFixtures.vectors.map(vector => ({ name: `public-frontmatter-${vector.name}`, markdown: vector.markdown })),
 ]
-type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean }
+type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string }
 const validate = createLiveMarkdownRegistrationValidator({
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000,
@@ -123,7 +151,10 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
       const decoded = new Y.Doc()
       try {
         Y.applyUpdate(decoded, bytes)
-        return { name: sample.name, bytes: [...bytes], markdown: yDocToMarkdown(decoded), registrationAccepted: admitted(bytes) }
+        return {
+          name: sample.name, bytes: [...bytes], markdown: yDocToMarkdown(decoded), registrationAccepted: admitted(bytes),
+          ...(sample.keeps ? { keptFrontmatter: WRITTEN_BLOCK.exec(sample.markdown)![0] } : {}),
+        }
       } finally { decoded.destroy() }
     } finally { doc.destroy() }
   })
@@ -162,6 +193,7 @@ describe('shared bootstrap projections', () => {
     try {
       Y.applyUpdate(doc, bytes)
       expect(yDocToMarkdown(doc)).toBe(vector.markdown)
+      if (vector.keptFrontmatter !== undefined) expect(vector.markdown.startsWith(vector.keptFrontmatter)).toBe(true)
       if (vector.name === 'negative-zero') expect(Object.is(doc.getMap('frontmatter').get('value'), -0)).toBe(true)
       expect(admitted(bytes)).toBe(vector.registrationAccepted)
       if (!vector.name.endsWith('changed') && !/^(public-frontmatter-|scalar-|key-|nested-|number-)/.test(vector.name)) expect(vector.registrationAccepted).toBe(true)

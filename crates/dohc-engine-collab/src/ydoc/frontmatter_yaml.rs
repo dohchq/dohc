@@ -2,7 +2,7 @@
 //! Scalar style rules adapted from nodeca/js-yaml commit
 //! 6740445e7bf0ec701f14226e1dfa7ef50f7068cc. See js-yaml-LICENSE.txt.
 use super::*;
-use dohc_engine_domain::collections::is_frontmatter_delimiter;
+use dohc_engine_domain::collections::markdown_frontmatter_block;
 
 pub(super) fn compare_keys(left: &str, right: &str, root: bool) -> std::cmp::Ordering {
     let index = |key: &str| {
@@ -278,97 +278,111 @@ pub(super) fn source(
     Ok((prefix != canonical).then(|| prefix.to_owned()))
 }
 
-/// The frontmatter a person wrote, kept through a settle. A key whose value
-/// did not change keeps its lines and the comments above them. A changed key
-/// gets its canonical entry in place, a removed key loses its lines, and a new
-/// key is added after the others. `None` when the result would not read back
-/// as `current`, so the caller writes canonical frontmatter instead. The
-/// desktop keeps frontmatter the same way (`keptFrontmatter` in
-/// packages/ydoc-projection/src/import-export.ts).
-pub(super) fn kept(
-    source: &str,
-    current: &BTreeMap<String, Value>,
-) -> ProjectionResult<Option<String>> {
-    checked_projection_len(0, source.len())?;
-    let mut lines = source.split_inclusive('\n');
-    let Some(open) = lines
-        .next()
-        .filter(|line| line.ends_with('\n') && is_frontmatter_delimiter(line))
-    else {
-        return Ok(None);
+/// The frontmatter a person wrote, kept through a settle. While it still
+/// reads as `current`, the text comes back unchanged. Otherwise a key whose
+/// value did not change keeps its lines and the comments above them, a
+/// changed key gets its canonical entry in place, a removed key loses its
+/// lines, and a new key is added after the others. When one key is removed
+/// and one added, the new key takes the removed key's place. `None` when the source is
+/// too large or unreadable, when no key or comment is left, or when the
+/// result would not read back as `current`; the caller then writes canonical
+/// frontmatter. The desktop keeps frontmatter the same way (`keptFrontmatter`
+/// in packages/ydoc-projection/src/frontmatter.ts).
+pub(super) fn kept(source: &str, current: &BTreeMap<String, Value>) -> Option<String> {
+    if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+        return None;
+    }
+    let same = |key: &str, left: &Value, right: &Value| {
+        matches!(
+            (project_frontmatter(key, left), project_frontmatter(key, right)),
+            (Ok(left), Ok(right)) if left == right
+        )
     };
-    let mut yaml_end = open.len();
-    let mut closed = false;
-    for line in lines {
-        if is_frontmatter_delimiter(line) {
-            closed = true;
-            break;
-        }
-        yaml_end += line.len();
+    let reads_as_current = |value: &serde_json::Map<String, Value>| {
+        value.len() == current.len()
+            && current
+                .iter()
+                .all(|(key, right)| value.get(key).is_some_and(|left| same(key, left, right)))
+    };
+    let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
+    if reads_as_current(&block.value) {
+        return Some(source.to_owned());
     }
-    if !closed {
-        return Ok(None);
-    }
-    let yaml = &source[open.len()..yaml_end];
-    let closing = &source[yaml_end..];
-    let line_ending = if open.ends_with("\r\n") { "\r\n" } else { "\n" };
-    let canonical = |key: &str, value: &Value| -> ProjectionResult<String> {
-        let entry = project_frontmatter(key, value)?;
-        Ok(if line_ending == "\n" {
-            entry
+    let entries = block.entries.as_ref()?;
+    let yaml = block.yaml;
+    let canonical = |key: &str, value: &Value| {
+        let entry = project_frontmatter(key, value).ok()?;
+        Some(if block.open.ends_with("\r\n") {
+            entry.replace('\n', "\r\n")
         } else {
-            entry.replace('\n', line_ending)
+            entry
         })
     };
-    let mut kept = String::new();
-    if let Some(split) = entries(yaml) {
-        kept.push_str(split.head);
-        for entry in &split.entries {
-            let Some(value) = current.get(&entry.key) else {
-                continue;
-            };
-            kept.push_str(entry.lead);
-            if project_frontmatter(&entry.key, &entry.value)?
-                == project_frontmatter(&entry.key, value)?
+    let mut added: Vec<_> = current
+        .iter()
+        .filter(|(key, _)| !block.value.contains_key(*key))
+        .collect();
+    added.sort_by(|(left, _), (right, _)| compare_keys(left, right, true));
+    let mut removed = entries.iter().filter(|(key, _)| !current.contains_key(key));
+    // One key removed and one added is a rename: the new key keeps the place.
+    let renamed = match (removed.next(), removed.next(), added.as_slice()) {
+        (Some((from, _)), None, [(to, value)]) => Some((from, canonical(to, value)?)),
+        _ => None,
+    };
+    let mut kept = String::from(&yaml[..entries.first().map_or(yaml.len(), |(_, start)| *start)]);
+    let mut lead = "";
+    for (index, (key, start)) in entries.iter().enumerate() {
+        let end = entries.get(index + 1).map_or(yaml.len(), |(_, next)| *next);
+        // Blank lines and column-0 comments at the end of an entry belong to
+        // the entry below it.
+        let region = &yaml[*start..end];
+        let (text, trivia) = region.split_at(trailing_trivia_start(region));
+        if let Some((_, entry)) = renamed.as_ref().filter(|(from, _)| *from == key) {
+            kept.push_str(lead);
+            kept.push_str(entry);
+        } else if let Some(value) = current.get(key) {
+            kept.push_str(lead);
+            if block
+                .value
+                .get(key)
+                .is_some_and(|left| same(key, left, value))
             {
-                kept.push_str(entry.text);
+                kept.push_str(text);
             } else {
-                kept.push_str(&canonical(&entry.key, value)?);
+                kept.push_str(&canonical(key, value)?);
             }
-            checked_projection_len(0, kept.len())?;
         }
-        let mut added: Vec<_> = current
-            .iter()
-            .filter(|(key, _)| !split.entries.iter().any(|entry| &entry.key == *key))
-            .collect();
-        added.sort_by(|(left, _), (right, _)| compare_keys(left, right, true));
+        lead = trivia;
+    }
+    if renamed.is_none() {
         for (key, value) in added {
             kept.push_str(&canonical(key, value)?);
-            checked_projection_len(0, kept.len())?;
         }
-        kept.push_str(split.tail);
-    } else {
-        kept.push_str(yaml);
     }
+    kept.push_str(lead);
     if kept.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let candidate = ensure_projection_string(format!("{open}{kept}{closing}"))?;
-    let equivalent =
-        dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&candidate)
-            .is_some_and(|(parsed, body)| {
-                only_line_breaks(body) && parsed.as_object().is_some_and(|parsed| {
-                    parsed.len() == current.len() && current.iter().all(|(key, value)| {
-                        parsed.get(key).is_some_and(|parsed| {
-                            matches!(
-                                (project_frontmatter(key, parsed), project_frontmatter(key, value)),
-                                (Ok(left), Ok(right)) if left == right
-                            )
-                        })
-                    })
-                })
-            });
-    Ok(equivalent.then_some(candidate))
+    let candidate = format!("{}{kept}{}", block.open, block.closing);
+    if candidate.len() > MAX_PROJECTION_BYTES {
+        return None;
+    }
+    let reread = markdown_frontmatter_block(&candidate)?;
+    (only_line_breaks(reread.body) && reads_as_current(&reread.value)).then_some(candidate)
+}
+
+/// Where the trailing blank lines and column-0 comments of an entry start.
+fn trailing_trivia_start(region: &str) -> usize {
+    let mut start = region.len();
+    while start > 0 {
+        let line_start = region[..start - 1].rfind('\n').map_or(0, |index| index + 1);
+        let line = region[line_start..start].trim_end_matches(['\r', '\n']);
+        if line_start == 0 || !(line.trim().is_empty() || line.starts_with('#')) {
+            break;
+        }
+        start = line_start;
+    }
+    start
 }
 
 fn only_line_breaks(mut text: &str) -> bool {
@@ -379,79 +393,6 @@ fn only_line_breaks(mut text: &str) -> bool {
         text = rest;
     }
     text.is_empty()
-}
-
-struct Entry<'a> {
-    key: String,
-    value: Value,
-    lead: &'a str,
-    text: &'a str,
-}
-
-struct Entries<'a> {
-    head: &'a str,
-    entries: Vec<Entry<'a>>,
-    tail: &'a str,
-}
-
-/// Split frontmatter YAML into its top-level entries. A column-0 comment or
-/// blank line belongs to the entry below it. `None` when an entry does not
-/// read as one key on its own, for example through an alias to another entry.
-fn entries(yaml: &str) -> Option<Entries<'_>> {
-    // (lead start, text start, text end) byte offsets of each entry.
-    let mut blocks: Vec<(usize, usize, usize)> = Vec::new();
-    let mut offset = 0;
-    for line in yaml.split_inclusive('\n') {
-        let start = offset;
-        offset += line.len();
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        let content = content.strip_suffix('\r').unwrap_or(content);
-        if content
-            .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
-            .is_empty()
-            || content.starts_with('#')
-        {
-            continue;
-        }
-        let continuation = content.starts_with([' ', '\t'])
-            || (content.starts_with(['-', ':'])
-                && matches!(content.as_bytes().get(1), None | Some(b' ' | b'\t')));
-        if continuation {
-            blocks.last_mut()?.2 = offset;
-        } else {
-            let lead = blocks.last().map_or(0, |block| block.2);
-            blocks.push((lead, start, offset));
-        }
-    }
-    let head = blocks.first().map_or("", |block| &yaml[..block.1]);
-    let tail = &yaml[blocks.last().map_or(0, |block| block.2)..];
-    let mut entries: Vec<Entry<'_>> = Vec::with_capacity(blocks.len());
-    for (index, (lead, start, end)) in blocks.into_iter().enumerate() {
-        let text = &yaml[start..end];
-        let Some(Value::Object(map)) = dohc_engine_domain::collections::markdown_frontmatter_json(
-            &format!("---\n{text}---\n"),
-        ) else {
-            return None;
-        };
-        let mut map = map.into_iter();
-        let (Some((key, value)), None) = (map.next(), map.next()) else {
-            return None;
-        };
-        if entries.iter().any(|entry| entry.key == key) {
-            return None;
-        }
-        entries.push(Entry {
-            key,
-            value,
-            lead: if index == 0 { "" } else { &yaml[lead..start] },
-            text,
-        });
-    }
-    Some(Entries {
-        head,
-        entries,
-        tail,
-    })
 }
 
 #[cfg(test)]
