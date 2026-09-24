@@ -2577,6 +2577,10 @@ mod tests {
                 "v2-automation-record-lifecycle",
                 "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
             ),
+            (
+                "v2-chat-automation-author",
+                "d5589dd027faf792b65857b27897731a0da25379df7b421c2c8749985ac1e947",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
