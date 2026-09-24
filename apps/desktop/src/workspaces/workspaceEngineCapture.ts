@@ -43,6 +43,7 @@ import {
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
+  isYDocClaimPromotion,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
@@ -801,14 +802,6 @@ function announceOnce(announce: (() => void) | undefined): () => void {
     announced = true;
     announce?.();
   };
-}
-
-function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
-  // Promotion claims the SHA-256 of this lineage's full-state base.
-  // Shared client clocks prove ancestry only: two peers can clone a base and
-  // then fork. The exact base hash proves that this unclaimed document is the
-  // lineage that received the claim.
-  return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
 function sha256Utf8(text: string): string {
@@ -1984,7 +1977,10 @@ export function createWorkspaceEngineCapture(
         const promotedSameLineage =
           canonicalLineageClaimId === null &&
           replacementClaimId !== null &&
-          isExactYDocClaimPromotion(doc, replacementClaimId);
+          isYDocClaimPromotion(doc, {
+            lineageClaimId: replacementClaimId,
+            state: Y.encodeStateAsUpdate(replacement.doc),
+          });
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
           canonicalDoc = replacement.doc;

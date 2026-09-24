@@ -806,6 +806,125 @@ it("keeps a locally promoted lineage after later updates change its full state",
   await capture.stop();
 });
 
+// Turning sync on claims the lineage from what the engine has recorded. An
+// edit the old generation could not record is then ahead of that claim, and
+// it must be replayed into the claimed lineage, not set aside.
+it("keeps typing the old generation could not record when sync claims the lineage", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-claim-typing-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "claim-typing" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const base = new Y.Doc();
+  base.getText("plainText").insert(0, "recorded");
+  const baseUpdate = Y.encodeStateAsUpdate(base);
+  const claimId = createHash("sha256").update(baseUpdate).digest("hex");
+  const claimedRecords: Uint8Array[] = [];
+  const claimedDocs: Y.Doc[] = [];
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, baseUpdate);
+    if (!unclaimed) claimedDocs.push(doc);
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageClaimId: unclaimed ? null : claimId,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        if (unclaimed) {
+          // Enabling sync closed this binding and claimed the lineage.
+          currentClient = claimedClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        Y.applyUpdate(doc, update);
+        claimedRecords.push(update);
+      },
+      async settleNow() {
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: "claimed-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "claim-typing",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const stableDoc = session.doc;
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  const before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert("recorded".length, " typed");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  await expect(session.settleNow()).resolves.toMatchObject({
+    content: "recorded typed",
+  });
+  expect(replacements).toEqual([]);
+  expect(session.doc).toBe(stableDoc);
+  expect(session.lineageClaimId).toBe(claimId);
+  expect(claimedRecords).toHaveLength(1);
+  expect(claimedDocs.map((doc) => doc.getText("plainText").toString())).toEqual([
+    "recorded typed",
+  ]);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
 it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-fork-");
   const loopback = new VersionedLoopbackEngine();

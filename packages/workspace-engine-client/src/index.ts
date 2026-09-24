@@ -26,6 +26,7 @@ export {
   YdocOwnerDraftPendingError,
   YdocLiveAdapter,
   YdocOpenTimedOutError,
+  isYDocClaimPromotion,
   type EngineTransport,
 } from "./ydoc/ydocLiveAdapter";
 export {

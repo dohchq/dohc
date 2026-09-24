@@ -866,20 +866,16 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
   }
 });
 
-type OpenDocumentSyncWindow = {
-  dohcDesktop: Pick<
-    DohcDesktopBridge,
-    "cloudEnableSync" | "onEngineYDocLineageReplacement"
-  >;
-  lineageReplacements: number;
+type EnableSyncWindow = {
+  dohcDesktop: Pick<DohcDesktopBridge, "cloudEnableSync">;
+  enableSync: Promise<string>;
 };
 
-// Turning sync on claims the open document's lineage, so main hands the editor
-// a replacement document while the person is still typing. The handoff once
-// read `process`, which the sandboxed renderer does not have, and left the
-// editor read-only until the document was reopened.
-test("typing continues while enabling sync replaces the open document", async () => {
-  test.setTimeout(240_000);
+// Turning sync on claims the open document's history for the relay while the
+// person keeps typing. Every word must reach the document and the disk. None
+// may be set aside, and the editor must not stay on Saving.
+test("every word typed while sync turns on reaches the document and the disk", async () => {
+  test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const workspaceId = "enable-open-doc-e2e";
   const path = "notes/plan.md";
@@ -923,80 +919,68 @@ test("typing continues while enabling sync replaces the open document", async ()
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
 
-    const enabled = await page.evaluate(async (id) => {
-      const target = window as unknown as OpenDocumentSyncWindow;
-      target.lineageReplacements = 0;
-      target.dohcDesktop.onEngineYDocLineageReplacement(() => {
-        target.lineageReplacements += 1;
-      });
-      return await target.dohcDesktop.cloudEnableSync({ workspaceId: id }).then(
+    await page.evaluate((id) => {
+      const target = window as unknown as EnableSyncWindow;
+      target.enableSync = target.dohcDesktop.cloudEnableSync({ workspaceId: id }).then(
         () => "ok",
         (error: unknown) => String(error),
       );
     }, workspaceId);
+
+    // Type through the whole enable call and a few words past it, so words
+    // land before, during, and after the claim.
+    const enableSettled = () =>
+      page.evaluate(() =>
+        Promise.race([
+          (window as unknown as EnableSyncWindow).enableSync,
+          Promise.resolve(null),
+        ]),
+      );
+    const words: string[] = [];
+    const deadline = Date.now() + 120_000;
+    let enabled: string | null = null;
+    let wordsAfterEnable = 0;
+    while (wordsAfterEnable < 5) {
+      if (Date.now() > deadline) throw new Error("enabling sync never finished");
+      const word = `w${words.length}`;
+      words.push(word);
+      await page.keyboard.type(` ${word}`, { delay: 20 });
+      enabled ??= await enableSettled();
+      if (enabled !== null) wordsAfterEnable += 1;
+    }
     expect(enabled).toBe("ok");
 
-    // The first edit after enabling sync is what makes main hand over the
-    // replacement, so that edit is still unsaved when the handoff runs. A
-    // replacement that arrived before it would test nothing, so refuse that.
-    const replacements = () =>
-      page.evaluate(
-        () => (window as unknown as OpenDocumentSyncWindow).lineageReplacements,
-      );
-    expect(await replacements(), "the replacement arrived before any typing").toBe(0);
-    // One input event, so the marker is one update that cannot be split
-    // across the handoff.
-    await page.keyboard.insertText(" pending-marker");
-    await expect.poll(replacements, { timeout: 90_000 }).toBeGreaterThan(0);
-
-    // The marker was unsaved when the document was replaced. It must be on
-    // disk or in a stored set-aside draft, and the notice must offer it.
-    const setAsideDrafts = () =>
-      page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts") ?? "");
-    await expect
-      .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
-        timeout: 30_000,
-      })
-      .toContain("pending-marker");
-    const setAside = !(await readPlan()).includes("pending-marker");
-    if (setAside) {
-      await expect(page.getByTestId("orphaned-draft-notice")).toBeVisible();
-    }
-
-    await expect(editor).toHaveAttribute("contenteditable", "true", {
-      timeout: 30_000,
-    });
-    await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
-    await page.keyboard.type(" After the handoff.");
-    await expect.poll(readPlan, { timeout: 30_000 }).toContain("After the handoff.");
-    await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(
+    const typed = `Before sync. ${words.join(" ")}`;
+    await expect(editor).toContainText(typed);
+    await expect.poll(readPlan, { timeout: 60_000 }).toContain(typed);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",
-      "read-only",
+      "saved",
+      { timeout: 30_000 },
     );
+    await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
+    expect(
+      await page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts")),
+    ).toBeNull();
     expect(
       desktop.logs
-        .filter((entry) => /lineage handoff failed/.test(entry.text))
-        .map((entry) => entry.text),
+        .filter((entry) =>
+          /lineage changed|quarantined|lineage handoff failed/.test(entry.text),
+        )
+        .map((entry) => entry.text.slice(0, 300)),
     ).toEqual([]);
 
-    // A set-aside draft outlives the app. Restart on the same profile: the
-    // stored row must load and the notice center must still offer it.
-    if (setAside) {
-      await desktop.close();
-      desktop = await launchDesktopApp({ workspace: temp });
-      const restarted = desktop.page;
-      await openWorkspaceFromFirstRun(restarted, temp);
-      expect(
-        await restarted.evaluate(
-          () => localStorage.getItem("dohc-set-aside-drafts") ?? "",
-        ),
-      ).toContain("pending-marker");
-      await restarted.getByTestId("notice-center-toggle").click();
-      await expect(restarted.getByTestId("notice-set-aside-edits")).toContainText(
-        "1 set-aside edit is waiting",
-      );
-    }
+    // The words live in the claimed lineage, not only in the file. After a
+    // restart the document opens from the engine with every word.
+    await desktop.close();
+    desktop = await launchDesktopApp({ workspace: temp });
+    const restarted = desktop.page;
+    await openWorkspaceFromFirstRun(restarted, temp);
+    const notes = explorerRow(restarted, "notes");
+    await expect(notes).toBeVisible();
+    if ((await notes.getAttribute("aria-expanded")) !== "true") await notes.click();
+    await explorerRow(restarted, path).click();
+    await expect(restarted.getByTestId("markdown-editor")).toContainText(typed);
   } finally {
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
