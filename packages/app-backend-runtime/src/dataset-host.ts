@@ -84,6 +84,11 @@ export interface DatasetHostOptions<Context> {
   accountCheckpointStage?(context: Context, allocation: Readonly<CheckpointStageAllocation>): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
+  /**
+   * Signed retained bytes of automation claims and History rows, in the ledger's
+   * transaction. It takes no context: the executor settles claims outside any request.
+   */
+  accountAutomations?(allocation: DatasetScope & { bytes: number }): void;
   /** Called after a commit that made automation claims. A hint: the executor also drains at open. */
   wakeAutomations?(scope: DatasetScope): void;
   recovery?: {
@@ -150,7 +155,7 @@ function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
-  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources]) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources, options.accountAutomations]) {
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
@@ -158,7 +163,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
   // The journal's own database, so each commit's claims are part of it.
-  const automations = createDatasetAutomationClaims({ db, transaction, wake: options.wakeAutomations });
+  const automations = createDatasetAutomationClaims({ db, transaction, wake: options.wakeAutomations,
+    account(key, bytes) { if (options.accountAutomations) synchronous(() => options.accountAutomations!({ ...key, bytes })); } });
   transaction(() => db.exec(`
     CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoint_approval ON dohc_dataset_checkpoint_history(workspace_id,dataset_id,json_extract(cursor_json,'$.approvedRevisionHash'));
     CREATE TABLE IF NOT EXISTS dohc_dataset_catalog (

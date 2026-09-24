@@ -7,14 +7,18 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { createDatasetJournal, type DatasetScope, type JournalDb } from "./journal.ts";
+import { decodeChangeset } from "./dataset-change-facts.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost } from "./dataset-host.ts";
 import {
   createDatasetAutomationClaims,
+  DATASET_AUTOMATION_ATTRIBUTED_REVISIONS,
   DATASET_AUTOMATION_CHAIN_STOPPED,
   DATASET_AUTOMATION_CLAIM_LIMIT,
   DATASET_AUTOMATION_CLAIMS_PER_COMMIT,
+  DATASET_AUTOMATION_HISTORY,
   DATASET_AUTOMATION_RECLAIM_EXHAUSTED,
+  DATASET_AUTOMATION_RECORD_ID_TOO_LONG,
   type DatasetActor,
   type DatasetAutomationClaim,
   type DatasetAutomationClaims,
@@ -43,6 +47,11 @@ function transactions(db: DatabaseSync) {
     db.exec("BEGIN IMMEDIATE");
     try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
   };
+}
+// Everything the ledger retains for the dataset, as it charged it.
+function retained(db: DatabaseSync): number {
+  return ["claims", "revisions"].reduce((sum, table) =>
+    sum + Number(db.prepare(`SELECT coalesce(sum(storage_bytes),0) AS bytes FROM dohc_dataset_automation_${table}`).get()!.bytes), 0);
 }
 
 // The journal and ledger alone. A commit's changeset comes from a session
@@ -77,8 +86,9 @@ function ledger() {
   const statements: string[] = [];
   const counted: JournalDb = { exec: sql => db.exec(sql), prepare: sql => { statements.push(sql); return db.prepare(sql); } };
   const wakes: Array<{ scope: DatasetScope; inTransaction: boolean }> = [];
-  let clock = 1_000;
+  let clock = 1_000, charged = 0;
   const open = () => createDatasetAutomationClaims({ db: counted, transaction, nowMs: () => clock,
+    account(key, bytes) { expect(key).toEqual(scope); expect(db.isTransaction).toBe(true); charged += bytes; },
     wake: woken => wakes.push({ scope: woken, inTransaction: db.isTransaction }) });
   let claims = open();
   const journal = createDatasetJournal({ db, transaction });
@@ -92,32 +102,35 @@ function ledger() {
       payloadSha256: digest(key), resultJson: "{}", changeset, changesetSha256: digest(changeset), attachedFileIds: [], authorize,
       recordCommit: committed => { recorded.push(committed.cursor.revision); return claims.recordCommit({ ...committed, columns, approved: ledgerRevision, actor }); } });
     if (result.kind === "committed") cursor = result.event.cursor;
-    return result;
+    return { ...result, changeset };
   }
-  return { db, statements, wakes, recorded, commit, get claims() { return claims; }, reopen() { claims = open(); }, tick(ms: number) { clock += ms; } };
+  return { db, statements, wakes, recorded, commit, get claims() { return claims; }, get charged() { return charged; }, get cursor() { return cursor; },
+    reopen() { claims = open(); }, tick(ms: number) { clock += ms; } };
 }
 
-it("claims each changed record once per subscribed automation, by table, change kind, and field", async () => {
+it("claims each changed record once per subscribed automation, by table, change kind, and watched field", async () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#status", ["changed"], [STATUS]));
   f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added", "removed"]));
   f.claims.subscribe(scope, subscription("collection:tags#new", ["added"], null, TAGS));
   f.commit("INSERT INTO tasks VALUES('a','Open','first'),('b','Open','second')");
-  f.commit("UPDATE tasks SET status='Done' WHERE id='a'");
+  f.commit("UPDATE tasks SET status='Done',notes='seen' WHERE id='a'");
   f.commit("UPDATE tasks SET notes='edited' WHERE id='a'");
   f.commit("DELETE FROM tasks WHERE id='b'");
   expect(f.recorded).toEqual([1, 2, 3, 4]);
   // Claims start in commit order; within a commit, in the changeset's order.
   const started = drain(f.claims);
   expect(started.map(claim => claim.revision)).toEqual([1, 1, 2, 4]);
-  expect(started.map(claim => `${claim.revision} ${claim.fact.kind} ${claim.fact.recordId} ${claim.automationId}`).sort()).toEqual([
+  expect(started.map(claim => `${claim.revision} ${claim.fact!.kind} ${claim.fact!.recordId} ${claim.automationId}`).sort()).toEqual([
     "1 added a collection:tasks#arrivals",
     "1 added b collection:tasks#arrivals",
     "2 changed a collection:tasks#status",
     "4 removed b collection:tasks#arrivals",
   ]);
+  // A claim carries only the fields its automation watches.
   expect(started[2]).toMatchObject({ state: "running", attempts: 1, run: 1, depth: 0, actor: { kind: "owner" }, hostEpoch: "host-1",
     fact: { tableId: TASKS, fields: [{ fieldId: STATUS, previous: "Open", next: "Done" }] } });
+  expect(started[0]!.fact!.fields.map(field => field.fieldId)).toEqual([id(3), STATUS, NOTES]);
   expect(new Set(started.map(claim => claim.claimId)).size).toBe(started.length);
   expect(f.claims.next(scope.workspaceId)).toBeNull();
   // Each wake comes after its commit, and only a commit that claimed wakes.
@@ -154,6 +167,34 @@ it("stops at the claim limit, with one failed claim that says so", () => {
     .toEqual([{ automation_id: "collection:tasks#a", state: "failed", attempts: 0, error: DATASET_AUTOMATION_CLAIM_LIMIT }]);
 });
 
+it("commits a change it cannot read, with one failed claim per automation that says why, wherever the refusal falls", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.claims.subscribe(scope, subscription("collection:tasks#b", ["added"]));
+  f.claims.subscribe(scope, subscription("collection:tags#new", ["added"], null, TAGS));
+  // More matching records than the limit come before a value no field type holds.
+  const rows = Array.from({ length: 150 }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`);
+  const committed = f.commit(`INSERT INTO tasks VALUES${rows.join(",")}; INSERT INTO tags VALUES(1,randomblob(4));`);
+  expect(committed.kind).toBe("committed");
+  const decoded = [...decodeChangeset(committed.changeset)];
+  expect(decoded.findIndex(row => row.table === "tags")).toBeGreaterThan(DATASET_AUTOMATION_CLAIMS_PER_COMMIT / 2);
+  expect(f.claims.next(scope.workspaceId)).toBeNull();
+  const failed = f.db.prepare("SELECT claim_id,automation_id,state,attempts,fact,error FROM dohc_dataset_automation_claims ORDER BY automation_id").all();
+  expect(failed.map(row => [row.automation_id, row.state, row.attempts, row.fact, row.error])).toEqual(["collection:tags#new", "collection:tasks#a", "collection:tasks#b"]
+    .map(automationId => [automationId, "failed", 0, null, "Name holds bytes, which no field type can hold."]));
+  expect(() => f.claims.retry({ workspaceId: scope.workspaceId, claimId: String(failed[0]!.claim_id) })).toThrow("cannot run again");
+});
+
+it("names a record whose id is too long in one failed claim, never a cut id", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added"]));
+  f.commit(`INSERT INTO tasks VALUES('${"k".repeat(100_000)}','Open','')`);
+  expect(f.claims.next(scope.workspaceId)).toBeNull();
+  const row = f.db.prepare("SELECT state,attempts,fact,error,length(record_id) AS key,storage_bytes FROM dohc_dataset_automation_claims").get()!;
+  expect(row).toMatchObject({ state: "failed", attempts: 0, fact: null, error: DATASET_AUTOMATION_RECORD_ID_TOO_LONG, key: 64 });
+  expect(Number(row.storage_bytes)).toBeLessThan(4096);
+});
+
 it("never claims an automation's own commit, records it for History, and stops the chain at depth 4", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
@@ -172,6 +213,41 @@ it("never claims an automation's own commit, records it for History, and stops t
   ]);
 });
 
+it("charges what it keeps, and keeps each automation's newest settled claims and newest failure", () => {
+  const f = ledger();
+  f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
+  f.commit("INSERT INTO tasks VALUES('first','Open','')", { kind: "automation", automationId: "collection:tasks#x", depth: 4 });
+  const count = DATASET_AUTOMATION_HISTORY + 2;
+  f.commit(`INSERT INTO tasks VALUES${Array.from({ length: count }, (_, index) => `('${String(index).padStart(3, "0")}','Open','')`).join(",")}`);
+  expect(f.charged).toBe(retained(f.db));
+  const started = drain(f.claims);
+  expect(started).toHaveLength(count);
+  f.claims.settle(started[0]!, { state: "failed", error: `The step failed. ${"é".repeat(2000)}` });
+  for (const claim of started.slice(1)) f.claims.settle(claim, { state: "done" });
+  // The chain stop and the oldest done claim leave; the newest failure stays with the newest 100.
+  const kept = f.db.prepare("SELECT claim_id,state,error FROM dohc_dataset_automation_claims ORDER BY rowid").all();
+  expect(kept).toHaveLength(DATASET_AUTOMATION_HISTORY + 1);
+  expect(kept[0]).toMatchObject({ claim_id: started[0]!.claimId, state: "failed" });
+  expect(Buffer.byteLength(String(kept[0]!.error))).toBeLessThanOrEqual(1024);
+  expect(String(kept[0]!.error)).toMatch(/^The step failed\. é+$/);
+  expect(kept.slice(1).map(row => row.claim_id)).toEqual(started.slice(2).map(claim => claim.claimId));
+  expect(f.charged).toBe(retained(f.db));
+});
+
+it("keeps History's automation names for the newest revisions, and refunds older ones", () => {
+  const f = ledger();
+  const actor = { kind: "automation" as const, automationId: "collection:tasks#a", depth: 1 };
+  const last = DATASET_AUTOMATION_ATTRIBUTED_REVISIONS + 2;
+  f.db.exec("BEGIN IMMEDIATE");
+  for (let revision = 1; revision <= last; revision++) {
+    f.claims.recordCommit({ cursor: { ...f.cursor, revision }, changeset: new Uint8Array(), columns: {}, approved: ledgerRevision, actor });
+  }
+  f.db.exec("COMMIT");
+  expect(f.db.prepare("SELECT count(*) AS count,min(revision) AS oldest FROM dohc_dataset_automation_revisions").get())
+    .toEqual({ count: DATASET_AUTOMATION_ATTRIBUTED_REVISIONS, oldest: last - DATASET_AUTOMATION_ATTRIBUTED_REVISIONS + 1 });
+  expect(f.charged).toBe(retained(f.db));
+});
+
 it("requeues a claim a dead process left running, and fails it once it died at the attempt cap", () => {
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
@@ -185,6 +261,7 @@ it("requeues a claim a dead process left running, and fails it once it died at t
   expect(f.claims.next(scope.workspaceId)).toBeNull();
   expect(f.db.prepare("SELECT state,error FROM dohc_dataset_automation_claims").get()).toEqual({ state: "failed", error: DATASET_AUTOMATION_RECLAIM_EXHAUSTED });
   expect(f.claims.retry(second)).toMatchObject({ state: "pending", run: 2, error: null });
+  expect(f.charged).toBe(retained(f.db));
 });
 
 it("raises the run on Try again and keeps the claim's facts", () => {
@@ -208,7 +285,7 @@ it("carries small values whole and names fields whose values are too large", () 
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#arrivals", ["added"]));
   f.commit(`INSERT INTO tasks VALUES('a','Open','${"x".repeat(10_000)}')`);
-  expect(f.claims.next(scope.workspaceId)!.fact.fields).toEqual([
+  expect(f.claims.next(scope.workspaceId)!.fact!.fields).toEqual([
     { fieldId: id(3), previous: null, next: "a" },
     { fieldId: STATUS, previous: null, next: "Open" },
     { fieldId: NOTES, previous: null, next: null, truncated: true },
@@ -231,7 +308,6 @@ it("keeps subscriptions current, and forgets a deleted dataset", () => {
 
 // The whole host, with a real worker: the actor comes from the context, and
 // only a new commit claims.
-const hostSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
 const hostSource = `globalThis.operations={
   create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?)',[ctx.requestId,input.value]);return {id:ctx.requestId};},
   read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');}
@@ -248,19 +324,24 @@ const hostDefinition: DatasetDefinition = {
     { operationId: READ, name: "read", label: "Read", tableId: ITEMS, kind: "read", access: "owner", readOnly: true, fieldIds: [id(13), id(14)] },
   ],
 };
-const hostRevision = describeDatasetRevision({ definition: hostDefinition, revision: 1, schemaSql: hostSchema, operationSource: hostSource });
 type Context = "owner" | "visitor" | { automationId: string; depth: number; visitor?: true };
 
-async function host() {
+const hostSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
+async function host(operationSource = hostSource) {
+  const revision = describeDatasetRevision({ definition: hostDefinition, revision: 1, schemaSql: hostSchema, operationSource });
   const directory = mkdtempSync(join(tmpdir(), "dohc-automation-host-"));
   const db = new DatabaseSync(join(directory, "host.sqlite")); db.exec("PRAGMA journal_mode=WAL;");
   const transaction = transactions(db);
   const journal = createDatasetJournal({ db, transaction });
   let supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
-  const wakes: DatasetScope[] = [];
+  const wakes: DatasetScope[] = [], storage = { bytes: 0, limit: Number.POSITIVE_INFINITY };
   cleanups.push(async () => { await supervisor.close(); db.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   const visitor = { kind: "link" as const, principalId: "visitor", grantId: "public-link" };
   const create = () => createDatasetHost<Context>({ db, transaction, journal, supervisor, wakeAutomations: woken => wakes.push(woken),
+    accountAutomations(allocation) {
+      if (storage.bytes + allocation.bytes > storage.limit) throw new Error("Collection storage is full.");
+      storage.bytes += allocation.bytes;
+    },
     resolveAuthority(context, request) {
       if (context === "owner") return { caller: { kind: "owner", userId: "owner" }, principalKey: "owner" };
       if (context === "visitor") return { caller: visitor, principalKey: "visitor", ...(request.access.kind === "app" ? { appId: request.access.appId } : {}) };
@@ -268,18 +349,18 @@ async function host() {
         automation: { automationId: context.automationId, depth: context.depth } };
     } });
   let current = create();
-  await current.activate("owner", { workspaceId: scope.workspaceId, revision: hostRevision, schemaSql: hostSchema, operationSource: hostSource });
+  await current.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: hostSchema, operationSource });
   const invoke = (context: Context, operationId: string, idempotencyKey: string, appId?: string) => current.invoke(context, { ...scope, revision: 1,
-    revisionSha256: hostRevision.revisionSha256, operationId, input: operationId === CREATE ? { value: idempotencyKey } : {}, idempotencyKey,
+    revisionSha256: revision.revisionSha256, operationId, input: operationId === CREATE ? { value: idempotencyKey } : {}, idempotencyKey,
     ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
-  return { wakes, invoke, get host() { return current; }, get claims() { return current.automationClaims; },
+  return { db, wakes, storage, invoke, revision, get host() { return current; }, get claims() { return current.automationClaims; },
     async restart() { await supervisor.close(); supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") }); current = create(); } };
 }
 
 it("claims a host commit once, as the actor its context names, and never on a replay or recovery", async () => {
   const f = await host();
   f.claims.subscribe(scope, subscription("collection:signups#welcome", ["added"], null, ITEMS));
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: { kind: "dataset", datasetId: scope.datasetId, revision: 1, revisionSha256: hostRevision.revisionSha256, operationIds: [CREATE] } });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: { kind: "dataset", datasetId: scope.datasetId, revision: 1, revisionSha256: f.revision.revisionSha256, operationIds: [CREATE] } });
   expect(await f.invoke("visitor", CREATE, "signup-1", "form")).toMatchObject({ replayed: false });
   expect(await f.invoke("visitor", CREATE, "signup-1", "form")).toMatchObject({ replayed: true });
   // A new worker replays the journal to recover; that claims nothing.
@@ -288,6 +369,30 @@ it("claims a host commit once, as the actor its context names, and never on a re
   await f.invoke("owner", CREATE, "owner-1");
   expect(drain(f.claims).map(claim => [claim.revision, claim.actor])).toEqual([[1, { kind: "link", appId: "form" }], [2, { kind: "owner" }]]);
   expect(f.wakes).toEqual([scope, scope]);
+  expect(f.storage.bytes).toBe(retained(f.db));
+});
+
+it("claims a write whose operation spells its table in another case", async () => {
+  // A changeset names a table as its schema declares it, and the schema must declare the approved name.
+  const f = await host(hostSource.replace("INSERT INTO items", "INSERT INTO ITEMS"));
+  f.claims.subscribe(scope, subscription("collection:signups#welcome", ["added"], null, ITEMS));
+  await f.invoke("owner", CREATE, "first");
+  await f.invoke("owner", CREATE, "second");
+  expect(drain(f.claims).map(claim => claim.fact!.fields[1])).toEqual([
+    { fieldId: id(14), previous: null, next: "first" }, { fieldId: id(14), previous: null, next: "second" },
+  ]);
+});
+
+it("rolls a commit back when its claims cannot be kept, and the next write still lands", async () => {
+  const f = await host();
+  f.claims.subscribe(scope, subscription("collection:signups#welcome", ["added"], null, ITEMS));
+  f.storage.limit = 0;
+  await expect(f.invoke("owner", CREATE, "refused")).rejects.toThrow("Collection storage is full.");
+  expect(f.db.prepare("SELECT count(*) AS count FROM dohc_dataset_events").get()).toEqual({ count: 0 });
+  f.storage.limit = Number.POSITIVE_INFINITY;
+  await f.invoke("owner", CREATE, "kept");
+  expect(await f.invoke("owner", READ, "read-1")).toMatchObject({ result: [{ value: "kept" }] });
+  expect(drain(f.claims).map(claim => [claim.revision, claim.fact!.fields[1]!.next])).toEqual([[1, "kept"]]);
 });
 
 it("takes an automation's identity from its context, and grants it no owner administration", async () => {
@@ -301,4 +406,5 @@ it("takes an automation's identity from its context, and grants it no owner admi
   await expect(f.invoke({ automationId: "collection:signups#a", depth: 1, visitor: true }, CREATE, "step-2")).rejects.toThrow("not permitted");
   await expect(f.invoke({ automationId: "collection:signups#a", depth: 5 }, CREATE, "step-3")).rejects.toThrow("not permitted");
   expect(() => f.host.lifecycle({ automationId: "collection:signups#a", depth: 1 }, scope)).toThrow("not permitted");
+  expect(f.storage.bytes).toBe(retained(f.db));
 });
