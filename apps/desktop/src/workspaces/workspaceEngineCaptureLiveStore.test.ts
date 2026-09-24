@@ -1495,6 +1495,35 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
+  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
+    "keeps a named recipient's authorship returned by %s",
+    async (method) => {
+      const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const;
+      const namedMoment = { ...moment, author };
+      const client = clientFor(async (request) => ({
+        id: request.id,
+        result:
+          method === VERSIONED_METHOD.momentsGet
+            ? namedMoment
+            : {
+                moments: [namedMoment],
+                nextBeforeMomentOrder: null,
+                latestMomentOrder: 1,
+              },
+      }));
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const read =
+        method === VERSIONED_METHOD.momentsGet
+          ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
+          : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
+      expect(read?.author).toEqual(author);
+    },
+  );
+
   it("hydrates a delete preimage from the atomic mutation result", async () => {
     const requests: Request[] = [];
     const client = clientFor(async (request) => {

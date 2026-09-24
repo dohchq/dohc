@@ -3398,6 +3398,118 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_recipient_automations_write_shows_its_author_in_history() {
+    const GRANT: &str = "grant-trip-edit";
+    const PATH: &str = "trip/automations.yaml";
+    const MOMENT: &str = "00000000-0000-4000-8000-000000000012";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("seed owner store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "name: Trip\n";
+    seed_text(&mut store, "trip/collection.yaml", schema, 2);
+    write_file(scratch.path(), "trip/collection.yaml", schema.as_bytes());
+    let text = "version: 1\nautomations: []\n";
+    write_file(scratch.path(), PATH, text.as_bytes());
+    let sha = hex_sha256(text.as_bytes());
+    store
+        .write_with(&NoFaults, |conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                rusqlite::params![sha, text.len() as i64, text],
+            )
+            .expect("hydrate automations blob");
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .expect("hydrate automations blob");
+    let author =
+        json!({ "kind": "named", "userId": "ana", "grantId": GRANT, "grantGeneration": 3 });
+    let envelope = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: format!("relay:collection-file:{GRANT}"),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "moment.append".to_owned(),
+        recorded_at_ms: 20,
+        payload: json!({
+            "momentId": MOMENT,
+            "versionId": "main",
+            "objectId": "00000000-0000-4000-8000-000000000013",
+            "path": PATH,
+            "recordedAtMs": 20,
+            "operation": "write",
+            "beforePresent": "null",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha,
+            "payloadAfterPath": PATH,
+            "payloadAfterContentKind": "text",
+            "payloadAfterByteLength": text.len(),
+            "metadata": { "origin": "sync" },
+            "author": author,
+        }),
+    };
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply named automations write");
+    assert!(
+        matches!(applied.primary, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let moment = call(
+        &transport,
+        &handle,
+        2,
+        "moments.get",
+        json!({ "momentId": MOMENT }),
+    )
+    .await;
+    assert_eq!(moment["author"], author);
+    let page = call(
+        &transport,
+        &handle,
+        3,
+        "moments.list",
+        json!({ "versionId": "main", "limit": 10 }),
+    )
+    .await;
+    let listed = page["moments"]
+        .as_array()
+        .expect("moments")
+        .iter()
+        .find(|row| row["momentId"] == MOMENT)
+        .expect("named moment in History");
+    assert_eq!(listed["author"], author);
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     use dohc_engine_runtime::{CancellationToken, WorkspaceSupervisor};
 
