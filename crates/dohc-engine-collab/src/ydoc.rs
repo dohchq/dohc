@@ -499,6 +499,9 @@ impl Ydoc {
     /// The desktop seeds a file as its importer reads it, and the engine
     /// records source over documents its fold rebuilt, so either reading can
     /// be the one that reproduces the canonical state. Neither drops content.
+    /// Both keep text a Markdown reader interprets, so a source is also
+    /// dropped when it spells an escape, a character reference, or HTML
+    /// differently from the projection: a reader would see other content.
     pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
         let reference = self.markdown_source_reference()?;
         if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
@@ -507,6 +510,9 @@ impl Ydoc {
         let source = self.markdown_source(&reference)?;
         if source == canonical_projection {
             return Some(source);
+        }
+        if markup_spellings(&source) != markup_spellings(canonical_projection) {
+            return None;
         }
         [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
@@ -1472,6 +1478,60 @@ enum MarkdownReading {
     Source,
 }
 
+/// How often a Markdown body spells what a reader interprets and the engine's
+/// Markdown reader keeps as text: a backslash escape, a numeric character
+/// reference, a named one other than the projector's own `&amp;`, `&lt;` and
+/// `&gt;`, and a `<` that can open HTML or an autolink. The projector writes
+/// these only for syntax the document holds, and encodes a literal `&`, `<`
+/// or `>`, so equal counts in a source and its projection mean the engine's
+/// reading did not turn syntax into text.
+fn markup_spellings(markdown: &str) -> [usize; 4] {
+    let body = dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+        .map_or(markdown, |(_, body)| body);
+    let bytes = body.as_bytes();
+    let mut counts = [0; 4];
+    let mut index = 0;
+    while index < bytes.len() {
+        let next = bytes.get(index + 1).copied();
+        match bytes[index] {
+            b'\\' if next.is_some_and(|byte| byte.is_ascii_punctuation()) => {
+                counts[0] += 1;
+                index += 1;
+            }
+            b'&' => {
+                let rest = &bytes[index + 1..];
+                let (numeric, name) = match rest.strip_prefix(b"#") {
+                    Some(digits) => match digits.first() {
+                        Some(b'x' | b'X') => (true, &digits[1..]),
+                        _ => (true, digits),
+                    },
+                    None => (false, rest),
+                };
+                let length = name
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphanumeric())
+                    .count();
+                if length > 0 && name.get(length) == Some(&b';') {
+                    if numeric {
+                        counts[1] += 1;
+                    } else if !matches!(&name[..length], b"amp" | b"lt" | b"gt") {
+                        counts[2] += 1;
+                    }
+                }
+            }
+            b'<' if next.is_some_and(|byte| {
+                byte.is_ascii_alphabetic() || matches!(byte, b'/' | b'!' | b'?')
+            }) =>
+            {
+                counts[3] += 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    counts
+}
+
 /// Split a leading `---` YAML frontmatter block off the chosen markdown.
 /// Values use the collection indexer's YAML parser so a richdoc seed and its
 /// index agree on scalar, sequence, and mapping types.
@@ -1594,11 +1654,11 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
             continue;
         }
         // A marker change starts a new bullet list. A numbered list keeps
-        // its first number and ignores later numbers and delimiters, as the
-        // importer does.
+        // its first number and continues while each number counts up by one
+        // or repeats the first, whatever the delimiter.
+        let blank_lines = if source { usize::MAX } else { 0 };
         if let Some((marker, item)) = parse_bullet_item(line) {
             let mut items = vec![item.to_string()];
-            let blank_lines = usize::from(source);
             while let Some((at, (_, next))) =
                 next_list_item(&lines, index + 1, blank_lines, |line| {
                     parse_bullet_item(line).filter(|(next_marker, _)| {
@@ -1615,11 +1675,16 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
         }
         if let Some((start, item)) = parse_ordered_item(line) {
             let mut items = vec![item];
-            let blank_lines = if source { usize::MAX } else { 0 };
-            while let Some((at, (_, next))) =
-                next_list_item(&lines, index + 1, blank_lines, parse_ordered_item)
+            let mut previous = start;
+            while let Some((at, (ordinal, next))) =
+                next_list_item(&lines, index + 1, blank_lines, |line| {
+                    parse_ordered_item(line).filter(|(ordinal, _)| {
+                        *ordinal == start || Some(*ordinal) == previous.checked_add(1)
+                    })
+                })
             {
                 items.push(next);
+                previous = ordinal;
                 index = at;
             }
             blocks.push(MdBlock::OrderedList { start, items });
@@ -1797,19 +1862,28 @@ fn table_starts(lines: &[&str]) -> bool {
 }
 
 /// A GFM table with the number of lines it took: a header row, a delimiter
-/// row with as many cells, then each following line that holds a pipe. A
-/// short row gains empty cells, and empty cells past the header are dropped.
-/// A row whose cells past the header hold text ends the table instead of
-/// losing that text, as the desktop importer does.
+/// row with as many cells, then each following line up to a blank line or
+/// the start of another block, as marked reads it. A line without a pipe is
+/// a one-cell row. A short row gains empty cells, and empty cells past the
+/// header are dropped. A row whose cells past the header hold text ends the
+/// table instead of losing that text, as the desktop importer does.
 fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBlock, usize)> {
-    let header = parse_table_row(lines.first()?)?;
+    let first = lines.first()?;
+    if starts_other_block(first) {
+        return None;
+    }
+    let header = parse_table_row(first)?;
     let alignments = parse_table_delimiter(lines.get(1)?)?;
     if alignments.len() != header.len() {
         return None;
     }
     let mut rows = vec![header];
     let mut consumed = 2;
-    while let Some(mut row) = lines.get(consumed).and_then(|line| parse_table_row(line)) {
+    while let Some(mut row) = lines.get(consumed).and_then(|line| {
+        (!trim_js(line).is_empty() && !starts_other_block(line)).then(|| {
+            parse_table_row(line).unwrap_or_else(|| vec![decode_html_entities_once(trim_js(line))])
+        })
+    }) {
         if row[alignments.len().min(row.len())..]
             .iter()
             .any(|cell| !cell.is_empty())
@@ -1832,6 +1906,42 @@ fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBloc
         },
         consumed,
     ))
+}
+
+/// Whether marked reads this line as the start of a block that ends a table
+/// or keeps one from starting: a thematic break, an ATX heading, a quote,
+/// indented code, a fence, a list item, or HTML.
+fn starts_other_block(line: &str) -> bool {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent >= 4 {
+        return true;
+    }
+    let rest = &line[indent..];
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    let heading = (1..=6).contains(&hashes)
+        && rest[hashes..]
+            .chars()
+            .next()
+            .is_none_or(|next| next == ' ' || next == '\t');
+    let rule = rest.chars().next().is_some_and(|marker| {
+        matches!(marker, '-' | '*' | '_')
+            && rest.chars().filter(|c| *c == marker).count() >= 3
+            && rest.chars().all(|c| c == marker || c == ' ' || c == '\t')
+    });
+    let bullet = rest.len() > 1
+        && matches!(rest.as_bytes()[0], b'-' | b'*' | b'+')
+        && matches!(rest.as_bytes()[1], b' ' | b'\t');
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let ordered = (1..=9).contains(&digits)
+        && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+        && matches!(rest.as_bytes().get(digits + 1), Some(b' ' | b'\t'));
+    rest.starts_with(['\t', '>', '<'])
+        || rest.starts_with("```")
+        || rest.starts_with("~~~")
+        || heading
+        || rule
+        || bullet
+        || ordered
 }
 
 fn parse_heading(line: &str) -> Option<(i64, String)> {
@@ -1867,9 +1977,12 @@ fn parse_task_item(line: &str) -> Option<(bool, String)> {
     Some((checked, rest[4..].to_string()))
 }
 
-/// A numbered item: digits, then `.` or `)` and one space.
+/// A numbered item: one to nine digits, then `.` or `)` and one space.
 fn parse_ordered_item(line: &str) -> Option<(i64, String)> {
     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 9 {
+        return None;
+    }
     let rest = line[digits..]
         .strip_prefix(". ")
         .or_else(|| line[digits..].strip_prefix(") "))?;
@@ -6197,6 +6310,20 @@ mod projection_tests {
             ),
             ("- one\n- two", "* one\n* two\n* hidden\n"),
             ("1. one\n2. two", "1) one\n\n1) two, hidden\n"),
+            // A number that neither counts up nor repeats the first.
+            ("1. one\n2. two", "1. one\n7. two\n"),
+            // Each source below spells, as syntax, text the document holds:
+            // a heading in a list item, an HTML comment that ends a table
+            // and hides a row, a link reference definition, raw HTML, and a
+            // character reference.
+            ("- # Title", "- # Title\n"),
+            (
+                "| a |\n|---|\n| <!-- x |\n| secret |\n| --> |",
+                "| a |\n|---|\n<!-- x |\nsecret |\n--> |\n",
+            ),
+            ("[x]: https://example.com", "[x]: https://example.com\n"),
+            ("Hello <b>hidden</b> world", "Hello <b>hidden</b> world\n"),
+            ("a &copy; b", "a &copy; b\n"),
         ] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown_as(
@@ -6218,6 +6345,58 @@ mod projection_tests {
                 "{forged:?}"
             );
             assert_eq!(doc.project_richdoc().unwrap(), canonical, "{forged:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_with_plain_ampersands_and_angle_brackets_is_preserved() {
+        let source = "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .expect("richdoc rewrite");
+        let canonical = witness_source(&doc, source);
+        assert_ne!(canonical, source);
+        assert_eq!(
+            doc.preserved_markdown_source(&canonical).as_deref(),
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn a_table_ends_where_marked_starts_another_block() {
+        let blocks = |body: &str| parse_markdown_blocks(body, MarkdownReading::Source);
+        let table = |rows: &[&[&str]]| MdBlock::Table {
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+                .collect(),
+            alignments: vec![None],
+            row_heights: BTreeMap::new(),
+        };
+        assert_eq!(
+            blocks("| a |\n|---|\nplain\n# h"),
+            [
+                table(&[&["a"], &["plain"]]),
+                MdBlock::Heading {
+                    level: 1,
+                    text: "h".into()
+                }
+            ]
+        );
+        for next in ["> q", "- x", "1. x", "***", "```", "    code", "<div> |"] {
+            assert_eq!(
+                blocks(&format!("| a |\n|---|\n{next}"))[0],
+                table(&[&["a"]]),
+                "{next:?}"
+            );
+        }
+        for header in ["    a | b", "> a | b", "- a | b", "<b> | c"] {
+            assert!(
+                !blocks(&format!("{header}\n--- | ---"))
+                    .iter()
+                    .any(|block| matches!(block, MdBlock::Table { .. })),
+                "{header:?}"
+            );
         }
     }
 

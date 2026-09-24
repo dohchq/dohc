@@ -66,6 +66,9 @@ const LEXICAL: Record<string, string> = {
   "loose-list": "- one\n\n- two\n",
   "compact-table": "Left | Right\n--- | ---\na | b\n",
   "table-after-paragraph": "Scores:\n\n| Name | Score |\n|---|--:|\n| Ada | 3 |\n",
+  "table-row-without-pipes": "| Name |\n|---|\nAda\n",
+  "table-then-heading": "| Name |\n|---|\n| Ada |\n# Next\n",
+  "plain-ampersands": "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
 };
 
 it("the lexical source fixtures come from the real captured Markdown seeder", async () => {
