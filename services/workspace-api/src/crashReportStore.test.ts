@@ -70,4 +70,14 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
     expect(await store.deleteExpired()).toBe(1);
     expect((await client.query("select id from crash_reports")).rows).toEqual([{ id: "recent" }]);
   });
+
+  it("deletes more expired reports than one batch holds", async () => {
+    const store = createPostgresCrashReportStore(client, undefined, 2);
+    for (const id of ["a", "b", "c", "d", "e", "recent"]) {
+      await store.insert({ id, appVersion: null, body: "dohc crash report" });
+    }
+    await client.query("update crash_reports set received_at = now() - interval '91 days' where id <> 'recent'");
+    expect(await store.deleteExpired()).toBe(5);
+    expect((await client.query("select id from crash_reports")).rows).toEqual([{ id: "recent" }]);
+  });
 });

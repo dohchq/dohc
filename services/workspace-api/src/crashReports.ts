@@ -17,6 +17,8 @@ export const CRASH_REPORTS_PER_HOUR = 1_000;
 // practice: a real report is a few KiB.
 export const CRASH_REPORTS_STORED_MAX = 50_000;
 export const CRASH_REPORT_RETENTION_DAYS = 90;
+// At most about 47 MiB of reports per delete statement.
+const CRASH_REPORT_DELETE_BATCH = 500;
 const HOUR_MS = 60 * 60 * 1000;
 
 export interface StoredCrashReport {
@@ -42,6 +44,7 @@ export interface CrashReportQuery {
 export function createPostgresCrashReportStore(
   pool: CrashReportQuery,
   storedMax = CRASH_REPORTS_STORED_MAX,
+  deleteBatch = CRASH_REPORT_DELETE_BATCH,
 ): CrashReportStore {
   return {
     async insert(report) {
@@ -55,12 +58,22 @@ export function createPostgresCrashReportStore(
       );
       return result.rowCount === 1;
     },
+    // In batches, so each statement stays within the pool's statement
+    // timeout even after a long outage, and every batch that ends is kept.
     async deleteExpired() {
-      const result = await pool.query(
-        "delete from crash_reports where received_at < now() - make_interval(days => $1)",
-        [CRASH_REPORT_RETENTION_DAYS],
-      );
-      return result.rowCount ?? 0;
+      let total = 0;
+      for (;;) {
+        const result = await pool.query(
+          `delete from crash_reports where id in (
+             select id from crash_reports
+             where received_at < now() - make_interval(days => $1)
+             limit $2)`,
+          [CRASH_REPORT_RETENTION_DAYS, deleteBatch],
+        );
+        const deleted = result.rowCount ?? 0;
+        if (deleted === 0) return total;
+        total += deleted;
+      }
     },
   };
 }
@@ -104,6 +117,18 @@ export function createCrashReportIntake(deps: {
     return String(Math.max(1, Math.ceil(((oldest?.atMs ?? now) + HOUR_MS - now) / 1000)));
   }
 
+  function limited(client: string): CrashReportAnswer | null {
+    const now = nowMs();
+    prune(now);
+    if ((perClient.get(client) ?? 0) >= CRASH_REPORTS_PER_CLIENT_PER_HOUR) {
+      return refuse(429, "too many crash reports from this address", { "retry-after": retryAfter(now, client) });
+    }
+    if (accepted.length >= CRASH_REPORTS_PER_HOUR) {
+      return refuse(429, "this server is taking no more crash reports this hour", { "retry-after": retryAfter(now, null) });
+    }
+    return null;
+  }
+
   return async (request) => {
     // The desktop posts from its main process, which sends no Origin. A
     // browser always does, so a web page cannot make its visitors post.
@@ -111,10 +136,14 @@ export function createCrashReportIntake(deps: {
     if (!isPlainText(request.headers.get("content-type"))) {
       return refuse(415, "send the report as text/plain; charset=utf-8");
     }
+    // A limited client is refused before its body is read.
+    const client = clientKey(request.headers.get("x-dohc-auth-client-ip"));
+    const early = limited(client);
+    if (early) return early;
     const declared = Number(request.headers.get("content-length") ?? "0");
-    if (declared > CRASH_REPORT_MAX_BYTES) return refuse(413, "the report is too large");
+    if (declared > CRASH_REPORT_MAX_BYTES) return tooLarge();
     const bytes = await readAtMost(request, CRASH_REPORT_MAX_BYTES);
-    if (bytes === "too-large") return refuse(413, "the report is too large");
+    if (bytes === "too-large") return tooLarge();
     let body: string;
     try {
       body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
@@ -127,17 +156,11 @@ export function createCrashReportIntake(deps: {
       return refuse(400, "the report is not a dohc crash report");
     }
 
-    const now = nowMs();
-    prune(now);
-    const client = clientKey(request.headers.get("x-dohc-auth-client-ip"));
-    if ((perClient.get(client) ?? 0) >= CRASH_REPORTS_PER_CLIENT_PER_HOUR) {
-      return refuse(429, "too many crash reports from this address", { "retry-after": retryAfter(now, client) });
-    }
-    if (accepted.length >= CRASH_REPORTS_PER_HOUR) {
-      return refuse(429, "this server is taking no more crash reports this hour", { "retry-after": retryAfter(now, null) });
-    }
-    // Counted before the write, so concurrent requests cannot pass the limit.
-    accepted.push({ atMs: now, client });
+    // Checked again with the count, in one step, because other requests can
+    // be counted while this body is read.
+    const late = limited(client);
+    if (late) return late;
+    accepted.push({ atMs: nowMs(), client });
     perClient.set(client, (perClient.get(client) ?? 0) + 1);
 
     const id = randomUUID();
@@ -149,6 +172,13 @@ export function createCrashReportIntake(deps: {
 
 function refuse(status: number, error: string, headers?: Record<string, string>): CrashReportAnswer {
   return { status, body: { ok: false, error }, ...(headers ? { headers } : {}) };
+}
+
+// The rest of the body stays unread. Node sends this answer, then closes
+// the connection instead of reading on. Cancelling the body would reset the
+// connection before the client saw the answer.
+function tooLarge(): CrashReportAnswer {
+  return refuse(413, "the report is too large", { connection: "close" });
 }
 
 function isPlainText(value: string | null): boolean {
@@ -168,7 +198,7 @@ async function readAtMost(request: Request, maxBytes: number): Promise<Uint8Arra
     if (done) break;
     total += value.byteLength;
     if (total > maxBytes) {
-      await reader.cancel();
+      reader.releaseLock();
       return "too-large";
     }
     chunks.push(value);
@@ -187,8 +217,9 @@ function appVersion(body: string): string | null {
 }
 
 /**
- * The key a client's reports count against: an IPv4 address, or the /64 an
- * IPv6 address belongs to, since one host commonly holds a whole /64.
+ * The key a client's reports count against: an IPv4 address, or the /48 an
+ * IPv6 address belongs to. One home connection is commonly given a /56 or
+ * more, which holds 256 /64s.
  */
 export function clientKey(address: string | null): string {
   if (!address) return "unknown";
@@ -199,5 +230,5 @@ export function clientKey(address: string | null): string {
   const groups = tail === undefined
     ? left
     : [...left, ...Array<string>(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
-  return `${groups.slice(0, 4).map((group) => group.padStart(4, "0")).join(":")}::/64`;
+  return `${groups.slice(0, 3).map((group) => group.padStart(4, "0")).join(":")}::/48`;
 }

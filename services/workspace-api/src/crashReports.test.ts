@@ -1,3 +1,6 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { toNodeHandler } from "better-auth/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CRASH_REPORT_MAX_BYTES,
@@ -6,6 +9,7 @@ import {
   CRASH_REPORTS_PER_HOUR,
   clientKey,
   createCrashReportIntake,
+  createPostgresCrashReportStore,
   type CrashReportStore,
   type StoredCrashReport,
 } from "./crashReports";
@@ -113,15 +117,76 @@ describe("crash report intake", () => {
     expect(refused.body).toEqual({ ok: false, error: "this server is taking no more crash reports this hour" });
   });
 
-  it("counts one IPv6 /64 as one address", async () => {
+  it("counts one IPv6 /48 as one address", async () => {
     const { store } = memoryStore();
     const intake = createCrashReportIntake({ store });
     for (let index = 0; index < CRASH_REPORTS_PER_CLIENT_PER_HOUR; index += 1) {
-      const address = `2001:db8:1:2::${(index + 1).toString(16)}`;
+      const address = `2001:db8:1:${(index + 1).toString(16)}::1`;
       expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": address }))).status).toBe(201);
     }
-    expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": "2001:db8:1:2:ffff::9" }))).status).toBe(429);
-    expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": "2001:db8:1:3::1" }))).status).toBe(201);
+    expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": "2001:db8:1:ffff::9" }))).status).toBe(429);
+    expect((await intake(post(REPORT, { "x-dohc-auth-client-ip": "2001:db8:2::1" }))).status).toBe(201);
+  });
+
+  it("refuses a limited address before reading its body", async () => {
+    const { store } = memoryStore();
+    const intake = createCrashReportIntake({ store });
+    for (let index = 0; index < CRASH_REPORTS_PER_CLIENT_PER_HOUR; index += 1) {
+      expect((await intake(post(REPORT))).status).toBe(201);
+    }
+    let pulled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled = true;
+        controller.enqueue(new TextEncoder().encode(REPORT));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const request = new Request(`https://api.example.test${CRASH_REPORT_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8", "x-dohc-auth-client-ip": "203.0.113.7" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    expect((await intake(request)).status).toBe(429);
+    expect(pulled).toBe(false);
+  });
+
+  it("answers an oversized upload with 413 and closes the connection, instead of resetting it", async () => {
+    const { rows, store } = memoryStore();
+    const intake = createCrashReportIntake({ store });
+    const handler = toNodeHandler(async (request: Request) => {
+      const answer = await intake(request);
+      return Response.json(answer.body, { status: answer.status, headers: answer.headers ?? {} });
+    });
+    const server = createServer((request, response) => {
+      request.headers["x-dohc-auth-client-ip"] = "203.0.113.9";
+      void handler(request, response);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const chunk = new TextEncoder().encode(`${REPORT}\n${"x".repeat(16 * 1024)}`);
+      let sent = 0;
+      // Sent in chunks with no length, so only reading finds the size.
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent >= 2 * CRASH_REPORT_MAX_BYTES) return controller.close();
+          sent += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}${CRASH_REPORT_PATH}`, {
+        method: "POST", body, duplex: "half",
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      } as RequestInit);
+      expect(response.status).toBe(413);
+      expect(response.headers.get("connection")).toBe("close");
+      expect(rows).toEqual([]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("answers 503 when storage is full", async () => {
@@ -131,12 +196,27 @@ describe("crash report intake", () => {
   });
 });
 
+describe("expired crash reports", () => {
+  it("deletes in batches until none are left", async () => {
+    const counts = [500, 500, 3, 0];
+    const queries: unknown[][] = [];
+    const store = createPostgresCrashReportStore({
+      query: async (_sql, values) => {
+        queries.push(values);
+        return { rowCount: counts.shift() ?? 0 };
+      },
+    });
+    expect(await store.deleteExpired()).toBe(1_003);
+    expect(queries).toEqual(Array(4).fill([90, 500]));
+  });
+});
+
 describe("crash report client key", () => {
-  it("keeps an IPv4 address and groups IPv6 by /64", () => {
+  it("keeps an IPv4 address and groups IPv6 by /48", () => {
     expect(clientKey("203.0.113.7")).toBe("203.0.113.7");
-    expect(clientKey("2001:db8::1")).toBe("2001:0db8:0000:0000::/64");
-    expect(clientKey("2001:db8:1:2:3:4:5:6")).toBe("2001:0db8:0001:0002::/64");
-    expect(clientKey("::1")).toBe("0000:0000:0000:0000::/64");
+    expect(clientKey("2001:db8::1")).toBe("2001:0db8:0000::/48");
+    expect(clientKey("2001:db8:1:2:3:4:5:6")).toBe("2001:0db8:0001::/48");
+    expect(clientKey("::1")).toBe("0000:0000:0000::/48");
     expect(clientKey(null)).toBe("unknown");
   });
 });
