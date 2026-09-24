@@ -126,8 +126,8 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
   // Frames received from the daemon, counting up. The wedge detector reads it
   // to tell a queued probe from a silent daemon.
   inboundActivity?(): number;
-  // Requests of one method still waiting for an answer.
-  outstandingRequests?(method: string): number;
+  // Requests still waiting for an answer that `match` selects.
+  outstandingRequests?(match: (request: Request) => boolean): number;
   waitForExit?(): Promise<void>;
 }
 
@@ -319,6 +319,17 @@ export class EngineDaemonLifecycle {
   // failure path may report the same error again, or lose the race to the
   // exit it caused; either way the reason is reported once.
   private readonly reportedFailures = new WeakSet<Error>();
+  private readonly condemnedClients = new WeakSet<EngineDaemonClient>();
+  // Requests a CLI read sends. They wait for the engine's open lock like any
+  // open, but they never hold it for long, so they are not what a stuck
+  // attach waits behind.
+  private readonly readRequests = new WeakSet<Request>();
+  // The desktop's own opens and closes, and the startup smoke's, hold the
+  // engine's one open lock for as long as they run: an open through capture
+  // adoption, a close through capture drain and shutdown.
+  private readonly holdsOpenLock = (request: Request) =>
+    (request.method === "workspace.open" || request.method === "workspace.close") &&
+    !this.readRequests.has(request);
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -445,10 +456,11 @@ export class EngineDaemonLifecycle {
     const remaining = () =>
       Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
     // An attach open takes the engine's one open lock and mints a handle. The
-    // desktop's own open holds that lock through a large adoption, so a slow
-    // attach is evidence against the engine only when it had nearly the whole
-    // budget and no other open is outstanding. In the stuck case the lock
-    // holder is an open this client already abandoned at its deadline.
+    // desktop's own opens and closes hold that lock for as long as they run,
+    // so a slow attach is evidence against the engine only when it had nearly
+    // the whole budget and none of them is outstanding. In the stuck case the
+    // lock holder is an open this client already abandoned at its deadline.
+    // Other reads never count, so reads that time out together still act.
     const openCapMs = remaining();
     const opened = resultObject(
       await this.sendLifecycleRequest(
@@ -467,7 +479,8 @@ export class EngineDaemonLifecycle {
           capMs: openCapMs,
           condemnOnCap: () =>
             openCapMs >= budgetMs * 0.9 &&
-            (client.outstandingRequests?.("workspace.open") ?? Infinity) <= 1,
+            (client.outstandingRequests?.(this.holdsOpenLock) ?? Infinity) === 0,
+          read: true,
         },
       ),
       "workspace.open",
@@ -493,7 +506,7 @@ export class EngineDaemonLifecycle {
             workspace,
             params,
           },
-          { capMs: remaining(), condemnOnCap: () => false },
+          { capMs: remaining(), condemnOnCap: () => false, read: true },
         )
       ).result;
     } finally {
@@ -511,7 +524,7 @@ export class EngineDaemonLifecycle {
             workspace,
             params: {},
           },
-          { capMs: Math.max(remaining(), 1_000), condemnOnCap: () => false },
+          { capMs: Math.max(remaining(), 1_000), condemnOnCap: () => false, read: true },
         );
       } catch (error) {
         console.debug(
@@ -639,12 +652,11 @@ export class EngineDaemonLifecycle {
 
   // At the cap, `condemnOnCap` decides whether the request proves the engine
   // stuck (kill it for replacement) or only ran out of a caller's budget
-  // (cancel it and leave the engine alone). Silence condemns either way. It
-  // runs as the cap fires, before this client drops its own expired request.
+  // (cancel it and leave the engine alone). Silence condemns either way.
   private async sendLifecycleRequest(
     client: EngineDaemonClient,
     request: Request,
-    bound: { capMs: number; condemnOnCap: () => boolean },
+    bound: { capMs: number; condemnOnCap: () => boolean; read?: boolean },
   ): Promise<Response> {
     const { method } = request;
     const timeoutMs = bound.capMs;
@@ -652,6 +664,7 @@ export class EngineDaemonLifecycle {
       ...request,
       deadlineMs: request.deadlineMs ?? timeoutMs,
     };
+    if (bound.read) this.readRequests.add(boundedRequest);
     const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
@@ -1186,6 +1199,9 @@ export class EngineDaemonLifecycle {
   }
 
   private condemn(client: EngineDaemonClient, error: Error): void {
+    // Requests that fail together condemn one engine once.
+    if (this.condemnedClients.has(client)) return;
+    this.condemnedClients.add(client);
     killForReplacement(client);
     // stop() closes every client itself; a request it ends is not a failure.
     if (!this.stopping) this.reportFailure(error, false);

@@ -81,21 +81,19 @@ class FakeClient implements EngineDaemonClient {
         : { id: request.id, result: null },
   ) {}
 
-  private readonly outstanding = new Map<string, number>();
+  private readonly outstanding = new Set<Request>();
 
-  outstandingRequests(method: string): number {
-    return this.outstanding.get(method) ?? 0;
+  outstandingRequests(match: (request: Request) => boolean): number {
+    return [...this.outstanding].filter(match).length;
   }
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
-    const count = (delta: number) =>
-      this.outstanding.set(request.method, this.outstandingRequests(request.method) + delta);
-    count(1);
+    this.outstanding.add(request);
     try {
       return await this.respond(request);
     } finally {
-      count(-1);
+      this.outstanding.delete(request);
     }
   }
 
@@ -2262,6 +2260,84 @@ describe("Rust engine daemon lifecycle", () => {
       ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
       expect(client.closed).toBe(false);
       expect(failures).toEqual([]);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("leaves the engine alone when an attach waits behind the desktop's own slow close", async () => {
+    const failures: Error[] = [];
+    let draining = false;
+    const client = new FakeClient((request) =>
+      // The desktop's close holds the open lock through capture drain.
+      draining && (request.method === "workspace.close" || request.method === "workspace.open")
+        ? new Promise<Response>(() => {})
+        : healthyPing(request),
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      workspaceReadTimeoutMs: 100,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async () => client,
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      draining = true;
+      void client.sendRequest({ id: 901, method: "workspace.close", workspace: "ws-big", params: {} });
+      await expect(
+        lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+      ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
+      expect(client.closed).toBe(false);
+      expect(failures).toEqual([]);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("replaces a stuck engine once when reads of two workspaces time out together", async () => {
+    const failures: Error[] = [];
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
+    let stuck = false;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      initialBackoffMs: 0,
+      workspaceReadTimeoutMs: 100,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const client: FakeClient = new FakeClient((request) =>
+          // Behind an open the desktop already abandoned, which still holds
+          // the engine's open lock. Probes answer.
+          stuck && client === clients[0] && request.method === "workspace.open"
+            ? new Promise<Response>(() => {})
+            : healthyPing(request),
+        );
+        client.closeUnresponsive = () => {
+          FakeClient.prototype.closeUnresponsive.call(client);
+          queueMicrotask(() => exits[clients.indexOf(client)]?.(null, "SIGKILL"));
+        };
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(clients[0]!);
+      stuck = true;
+      const read = (root: string) =>
+        lifecycle.requestWorkspace(root, root, "search.queryChatMessagesGranular", { query: "needle", limit: 1 });
+      const results = await Promise.allSettled([read("C:\\one"), read("C:\\two")]);
+      expect(results.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+      expect(clients[0]!.closeCause).toBe("transport-error");
+      await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
+      expect(clients).toHaveLength(2);
+      expect(failures.filter(({ message }) => message.includes("timed out"))).toHaveLength(1);
     } finally {
       await lifecycle.stop();
     }
