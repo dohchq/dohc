@@ -1190,7 +1190,9 @@ export class VersionedLiveAdapter {
   /**
    * Hands back a running claim the executor cannot run yet. It is pending
    * again with its attempts as they were before `claimNext` served it, and
-   * the same run. A claim that is not running is refused.
+   * the same run. A claim that is not running is refused. The engine
+   * announces nothing, so the executor drains again when what held the
+   * claim clears.
    */
   async releaseAutomationClaim(
     input: AutomationReleaseParams,

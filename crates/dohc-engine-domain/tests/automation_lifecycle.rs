@@ -655,36 +655,69 @@ fn a_record_merged_from_a_branch_is_added_once() {
     assert_eq!(bound, 1, "main did bind the merged record");
 }
 
-/// A folder that becomes a Collection around its files adds none of them;
-/// a file created in it afterwards is added.
+/// A folder that becomes a Collection around its files adds none of them,
+/// whether its schema is created or renamed in from a sibling file; a file
+/// created in it afterwards is added.
 #[test]
 fn a_collection_made_around_existing_files_adds_none_of_them() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let mut store = open_store(&scratch);
-    subscribe(&mut store, LIFECYCLE, 5);
-    write(
-        &mut store,
-        "tasks/alpha.md",
-        &record(ALPHA, "open"),
-        "alpha-created",
-        8,
-    );
-    seed_collection(&mut store);
-    assert!(
-        reconcile(&mut store, 20).is_empty(),
-        "alpha was in the folder before it was a Collection"
-    );
-    write(
-        &mut store,
-        "tasks/beta.md",
-        &record(BETA, "open"),
-        "beta-created",
-        30,
-    );
-    assert_eq!(
-        claimed(&reconcile(&mut store, 31)),
-        vec![(AutomationChangeKind::Added, BETA)]
-    );
+    for renamed_in in [false, true] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = open_store(&scratch);
+        subscribe(&mut store, LIFECYCLE, 5);
+        if renamed_in {
+            write(
+                &mut store,
+                "tasks/schema.tmp",
+                "fields:\n  status:\n    type: text\n",
+                "schema-draft",
+                6,
+            );
+        }
+        write(
+            &mut store,
+            "tasks/alpha.md",
+            &record(ALPHA, "open"),
+            "alpha-created",
+            8,
+        );
+        if renamed_in {
+            VersionedTextStore::new(&mut store)
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: WS.to_owned(),
+                        version_id: MAIN.to_owned(),
+                        from_path: "tasks/schema.tmp".to_owned(),
+                        to_path: "tasks/collection.yaml".to_owned(),
+                        moment_id: "schema-renamed".to_owned(),
+                        request_id: None,
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .expect("rename the schema into place");
+        } else {
+            seed_collection(&mut store);
+        }
+        assert!(
+            reconcile(&mut store, 20).is_empty(),
+            "alpha was in the folder before it was a Collection (renamed in: {renamed_in})"
+        );
+        write(
+            &mut store,
+            "tasks/beta.md",
+            &record(BETA, "open"),
+            "beta-created",
+            30,
+        );
+        assert_eq!(
+            claimed(&reconcile(&mut store, 31)),
+            vec![(AutomationChangeKind::Added, BETA)]
+        );
+    }
 }
 
 /// A bound record's `id` belongs to the engine, but a record whose
@@ -765,65 +798,65 @@ fn a_refused_import_leaves_the_moment_local() {
     );
 }
 
-/// Writing a new record's first fields is part of adding it. An automation
-/// that wants added records hears of the creation once, from reconcile; one
-/// that wants only changed records still hears the first values.
+/// A record bound with only its `id` is added with no values. Its first
+/// field write is a change that every automation hears, including one that
+/// also wants added records, so none misses the first values.
 #[test]
-fn a_new_records_first_fields_claim_only_where_added_is_not_wanted() {
+fn a_record_added_with_only_its_id_claims_its_first_values_as_a_change() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
-    subscribe_automation(
+    for (automation_id, kinds) in [
+        (
+            "collection:tasks#both",
+            vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+        ),
+        (
+            "collection:tasks#changed",
+            vec![AutomationChangeKind::Changed],
+        ),
+    ] {
+        subscribe_automation(
+            &mut store,
+            WS,
+            &AutomationSubscription {
+                automation_id: automation_id.to_owned(),
+                prefix: "tasks".to_owned(),
+                kinds,
+                fields: None,
+            },
+            5,
+            &NoFaults,
+        )
+        .expect("subscribe");
+    }
+    seed_collection(&mut store);
+    write(
         &mut store,
-        WS,
-        &AutomationSubscription {
-            automation_id: "collection:tasks#both".to_owned(),
-            prefix: "tasks".to_owned(),
-            kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
-            fields: None,
-        },
-        5,
-        &NoFaults,
-    )
-    .expect("subscribe both");
-    subscribe_automation(
-        &mut store,
-        WS,
-        &AutomationSubscription {
-            automation_id: "collection:tasks#changed".to_owned(),
-            prefix: "tasks".to_owned(),
-            kinds: vec![AutomationChangeKind::Changed],
-            fields: None,
-        },
-        5,
-        &NoFaults,
-    )
-    .expect("subscribe changed");
-    let facts = |created: bool, history_id: i64| dohc_engine_domain::CollectionRecordApplyFacts {
-        collection_path: "tasks".to_owned(),
-        record_id: ALPHA.to_owned(),
-        created,
-        author_origin_id: None,
-        attribution: None,
-        source: Some(("origin-a".to_owned(), history_id)),
-        recorded_at_ms: 10 + history_id,
-        fields: vec![dohc_engine_domain::CollectionFieldChangeFact {
-            field_name: "status".to_owned(),
-            previous_json: None,
-            next_json: Some("\"open\"".to_owned()),
-            history_id,
-        }],
-    };
+        "tasks/alpha.md",
+        &format!("---\nid: {ALPHA}\n---\n\nBody"),
+        "alpha-created",
+        11,
+    );
+    let added = reconcile(&mut store, 20);
+    assert_eq!(claimed(&added), vec![(AutomationChangeKind::Added, ALPHA)]);
+    assert_eq!(added[0].automation_id, "collection:tasks#both");
+
     let claims = store
         .write_with(&NoFaults, |tx| {
-            let mut claims =
-                dohc_engine_domain::claim_automation_triggers_in_tx(tx, WS, &facts(true, 1), 20)?;
-            claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(
+            let facts = dohc_engine_domain::index_collection_record_text_in_tx(
                 tx,
                 WS,
-                &facts(false, 2),
-                21,
-            )?);
-            Ok::<_, dohc_engine_domain::DomainError>(claims)
+                MAIN,
+                "object:tasks/alpha.md",
+                "tasks/alpha.md",
+                &record(ALPHA, "open"),
+                None,
+                None,
+                30,
+            )?
+            .expect("the first values are a change");
+            assert!(facts.created, "the record's first field write");
+            dohc_engine_domain::claim_automation_triggers_in_tx(tx, WS, &facts, 30)
         })
         .expect("claim");
     let TxnOutcome::Committed(claims) = claims else {
@@ -832,13 +865,11 @@ fn a_new_records_first_fields_claim_only_where_added_is_not_wanted() {
     assert_eq!(
         claims
             .iter()
-            .map(|claim| claim.automation_id.as_str())
+            .map(|claim| (claim.automation_id.as_str(), claim.change.kind))
             .collect::<Vec<_>>(),
         vec![
-            "collection:tasks#changed",
-            "collection:tasks#both",
-            "collection:tasks#changed",
-        ],
-        "the creation claims once per automation; a later edit claims for both"
+            ("collection:tasks#both", AutomationChangeKind::Changed),
+            ("collection:tasks#changed", AutomationChangeKind::Changed),
+        ]
     );
 }

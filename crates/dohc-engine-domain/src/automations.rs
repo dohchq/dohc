@@ -806,19 +806,11 @@ pub fn claim_automation_triggers_in_tx(
             AutomationTrigger::History { history_id }
         }
     };
+    // A record's first field write is a change like any other. Reconcile
+    // binds a record, indexes the fields it has, and claims it added in one
+    // transaction, so an added claim with values leaves no first write
+    // behind: a first write follows a record added with only its id.
     let subscriptions = subscriptions_wanting(conn, workspace_id, AutomationChangeKind::Changed)?;
-    // Writing a new record's first fields is part of adding it. An
-    // automation that wants added records hears of the record from the
-    // reconcile that binds it, not twice.
-    let wanting_added: HashSet<String> = if facts.created {
-        subscriptions_wanting(conn, workspace_id, AutomationChangeKind::Added)?
-            .into_iter()
-            .filter(|subscription| prefix_contains(&subscription.prefix, &facts.collection_path))
-            .map(|subscription| subscription.automation_id)
-            .collect()
-    } else {
-        HashSet::new()
-    };
     let mut claiming: Vec<&str> = Vec::new();
     for subscription in &subscriptions {
         let automation_id = subscription.automation_id.as_str();
@@ -827,7 +819,6 @@ pub fn claim_automation_triggers_in_tx(
         if claiming.last() == Some(&automation_id)
             || !prefix_contains(&subscription.prefix, &facts.collection_path)
             || facts.author_origin_id.as_deref() == Some(automation_id)
-            || wanting_added.contains(automation_id)
             || !wants_changed_fields(subscription.field_names_json.as_deref(), &facts.fields)?
         {
             continue;
@@ -990,7 +981,8 @@ fn leaving_moment(
 }
 
 /// When `collection_path` last became a Collection in this version: the
-/// moment that created its schema file there. A file that entered the folder
+/// moment its schema file arrived at the schema path, created there or
+/// renamed to it (from the same folder too). A file that entered the folder
 /// before it cannot have been added to the Collection. `None` when the
 /// schema predates the version (a fork copies files, not their moments), as
 /// every file that entered before the fork does.
@@ -1000,28 +992,30 @@ fn collection_since(
     version_id: &str,
     collection_path: &str,
 ) -> Result<Option<i64>, DomainError> {
-    let schema_object: Option<String> = conn
+    let schema: Option<(String, String)> = conn
         .query_row(
-            "SELECT s.object_id FROM collections c JOIN snapshots s \
+            "SELECT s.object_id, c.schema_path FROM collections c JOIN snapshots s \
                ON s.workspace_id = c.workspace_id AND s.version_id = c.version_id \
               AND s.path = c.schema_path \
              WHERE c.workspace_id = ?1 AND c.version_id = ?2 AND c.collection_path = ?3",
             params![workspace_id, version_id, collection_path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let Some(schema_object) = schema_object else {
+    let Some((schema_object, schema_path)) = schema else {
         return Ok(None);
     };
-    Ok(entering_moment(
-        conn,
-        workspace_id,
-        version_id,
-        &schema_object,
-        collection_path,
-    )?
-    .map(|moment| moment.moment_order))
+    let arrived = walk_object_moments(conn, workspace_id, version_id, &schema_object, |moment| {
+        let arrived = moment.path == schema_path
+            && match moment.operation.as_str() {
+                "write" => moment.before_present != 2,
+                "rename" => moment.before_path.as_deref() != Some(schema_path.as_str()),
+                _ => false,
+            };
+        arrived.then_some(true)
+    })?;
+    Ok(arrived.map(|moment| moment.moment_order))
 }
 
 /// Whether a moment is a merge's: the merge replayed a change another

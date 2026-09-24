@@ -545,8 +545,9 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     assert_eq!(rerun["change"], second["change"]);
 
     // An executor that cannot run the claim yet hands it back: pending with
-    // the attempts it had before this serve, the same run, and announced so
-    // a drain serves it again. Only a running claim can be released.
+    // the attempts it had before this serve and the same run. It announces
+    // nothing, so a held claim is not served straight back. Only a running
+    // claim can be released.
     while notices.try_recv().is_ok() {}
     let released = call(
         &transport,
@@ -564,9 +565,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         ),
         (json!("pending"), json!(1), json!(2))
     );
-    let notice = notices.try_recv().expect("the release announces the claim");
-    assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
-    assert_eq!(notice.payload["claimId"], rerun["claimId"]);
+    assert!(notices.try_recv().is_err(), "a release announces nothing");
     let error = call_error(
         &transport,
         &handle,

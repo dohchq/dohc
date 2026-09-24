@@ -321,8 +321,9 @@ impl EngineService {
     }
 
     /// An executor hands back a running claim it cannot run yet. The claim
-    /// is pending again without an attempt counted, and announces itself
-    /// post-commit like a new one, so a drain picks it up again.
+    /// is pending again without an attempt counted. It announces nothing:
+    /// the executor released it on purpose and drains again once what held
+    /// it clears, so a wake here would only serve it straight back.
     pub(super) async fn automations_release(
         &self,
         ctx: &RequestContext,
@@ -344,11 +345,6 @@ impl EngineService {
             ),
         )
         .await?;
-        emit_automation_claimed(
-            &self.events,
-            &open.workspace_id,
-            std::slice::from_ref(&claim),
-        );
         Ok(automation_claim_json(&claim))
     }
 

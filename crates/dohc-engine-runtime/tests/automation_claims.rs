@@ -570,12 +570,14 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
 
-/// A record an automation creates in a document session settles into a
-/// moment that names the automation. Reconcile then adds the record for
-/// every other automation, at the writer's chain depth, and never for the
-/// writer; a creation at the depth cap stops the chain.
+/// A record created in a document session is its creator's change: the
+/// settle that creates its file names the author of the lineage's first
+/// update, which compaction cannot fold away, whoever edited it after.
+/// Reconcile then adds the record for every automation but an automation
+/// that created it, at the creator's chain depth; a creation at the depth
+/// cap stops the chain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_change() {
+async fn a_record_created_in_a_document_session_is_added_as_its_creators_change() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     {
@@ -605,7 +607,7 @@ async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_ch
             .expect("seed collection schema");
     }
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 10).expect("open actor").actor;
+    let mut handle = supervisor.open(&db, 10).expect("open actor").actor;
     for automation_id in [AUTOMATION, "collection:tasks#other"] {
         handle
             .automation_subscribe(
@@ -618,33 +620,72 @@ async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_ch
             .await
             .expect("subscribe");
     }
+    let automation = |depth| {
+        Some(ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("user:ice".to_owned()),
+            depth,
+        })
+    };
 
     let cap = dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP;
-    for (name, record_id, depth) in [
-        ("beta", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
-        ("gamma", "rec_cccccccccccccccccccccccccc", cap),
+    // (name, record, creator's depth or a person, editor's depth or a
+    // person or nobody, compact before settling, who claims, at what depth)
+    struct Case {
+        name: &'static str,
+        record_id: &'static str,
+        creator: Option<u32>,
+        editor: Option<Option<u32>>,
+        compact: bool,
+        claimers: &'static [&'static str],
+        depth: u32,
+    }
+    for case in [
+        Case {
+            name: "beta",
+            record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            creator: Some(1),
+            editor: Some(None),
+            compact: true,
+            claimers: &["collection:tasks#other"],
+            depth: 1,
+        },
+        Case {
+            name: "gamma",
+            record_id: "rec_cccccccccccccccccccccccccc",
+            creator: Some(cap),
+            editor: None,
+            compact: false,
+            claimers: &["collection:tasks#other"],
+            depth: cap,
+        },
+        Case {
+            name: "delta",
+            record_id: "rec_dddddddddddddddddddddddddd",
+            creator: None,
+            editor: Some(Some(1)),
+            compact: false,
+            claimers: &["collection:tasks#other", AUTOMATION],
+            depth: 0,
+        },
     ] {
-        let path = format!("tasks/{name}.md");
-        let key = DocKey::new(WS, "main", format!("{name}-object")).expect("key");
+        let path = format!("tasks/{}.md", case.name);
+        let key = DocKey::new(WS, "main", format!("{}-object", case.name)).expect("key");
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(
             ContentKind::Richdoc,
-            &format!("---\nid: {record_id}\nstatus: open\n---\n\nMade by an automation"),
+            &format!("---\nid: {}\nstatus: open\n---\n\nBody", case.record_id),
         )
         .expect("record document");
-        handle
+        let created = handle
             .ydoc_record_update(
                 key.clone(),
                 path.clone(),
                 ContentKind::Richdoc,
                 Regime::LocalOnly,
                 doc.encode_full_state(),
-                Some(AUTOMATION.to_owned()),
-                Some(ChangeAttribution {
-                    actor_kind: ChangeActorKind::Automation,
-                    on_behalf_of: Some("user:ice".to_owned()),
-                    depth,
-                }),
+                case.creator.map(|_| AUTOMATION.to_owned()),
+                case.creator.and_then(automation),
                 None,
                 true,
                 None,
@@ -655,7 +696,47 @@ async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_ch
                 None,
             )
             .await
-            .expect("the automation creates the record");
+            .expect("create the record");
+        if let Some(editor) = case.editor {
+            handle
+                .ydoc_record_update(
+                    key.clone(),
+                    path.clone(),
+                    ContentKind::Richdoc,
+                    Regime::LocalOnly,
+                    doc.frontmatter_set("status", "doing"),
+                    editor.map(|_| AUTOMATION.to_owned()),
+                    editor.and_then(automation),
+                    created.lineage_claim_id.clone(),
+                    false,
+                    None,
+                    None,
+                    101,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("edit the record");
+        }
+        if case.compact {
+            supervisor.close(&db).expect("close actor");
+            let mut store = EngineStore::open(&db, 9_131).expect("open store");
+            dohc_engine_collab::maybe_compact(&mut store, &key, 0, &NoFaults, 105)
+                .expect("compact");
+            let updates: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_updates WHERE object_id = ?1",
+                        [&key.object_id],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("count updates");
+            assert_eq!(updates, 0, "compaction folded every update");
+            drop(store);
+            handle = supervisor.open(&db, 11).expect("reopen actor").actor;
+        }
         handle
             .ydoc_settle(
                 scratch.path().to_path_buf(),
@@ -664,7 +745,7 @@ async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_ch
                 ContentKind::Richdoc,
                 None,
                 None,
-                format!("{name}-session"),
+                format!("{}-session", case.name),
                 Arc::new(()),
                 110,
                 Arc::new(NoFaults),
@@ -690,17 +771,24 @@ async fn a_record_an_automation_creates_in_a_document_session_is_added_as_its_ch
         assert_eq!(
             claims
                 .iter()
-                .map(|claim| (claim.automation_id.as_str(), claim.record_id.as_str()))
+                .map(|claim| claim.automation_id.as_str())
                 .collect::<Vec<_>>(),
-            vec![("collection:tasks#other", record_id)],
-            "the writing automation does not claim its own record"
+            case.claimers,
+            "{}: an automation does not claim a record it created",
+            case.name
         );
-        let claim = &claims[0];
-        assert_eq!(claim.change.kind, AutomationChangeKind::Added);
-        assert_eq!(claim.change.author_origin_id.as_deref(), Some(AUTOMATION));
-        assert_eq!(claim.change.actor_kind, Some(ChangeActorKind::Automation));
-        assert_eq!(claim.depth, depth);
-        assert_eq!(claim.chain_stopped(), depth == cap);
+        for claim in &claims {
+            assert_eq!(claim.record_id, case.record_id);
+            assert_eq!(claim.change.kind, AutomationChangeKind::Added);
+            assert_eq!(
+                claim.change.author_origin_id.as_deref(),
+                case.creator.map(|_| AUTOMATION),
+                "{}: the creator is the author",
+                case.name
+            );
+            assert_eq!(claim.depth, case.depth, "{}", case.name);
+            assert_eq!(claim.chain_stopped(), case.depth == cap);
+        }
     }
     supervisor.close(&db).expect("close actor");
 }

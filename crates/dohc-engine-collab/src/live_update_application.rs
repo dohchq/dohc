@@ -816,7 +816,7 @@ pub fn apply_committed(
             // from, at depth 0.
             let mut automation_claims = Vec::new();
             if let Some(mut facts) = append.record_facts {
-                match own_draft_attribution(tx, &event.metadata.accepted.receipt.update_digest)? {
+                match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
                         facts.attribution = attribution;
@@ -890,11 +890,13 @@ pub fn apply_committed(
 }
 
 /// The actor and attribution this engine recorded for a native update it
-/// drafted with these bytes, when the accepted frame is its own draft.
+/// drafted, when the accepted frame is that draft: the relay accepted the
+/// draft's own delivery, with the same bytes, for the same document.
 #[allow(clippy::type_complexity)]
 fn own_draft_attribution(
     tx: &Transaction<'_>,
-    update_digest: &str,
+    key: &DocKey,
+    receipt: &LiveUpdateReceipt,
 ) -> Result<
     Option<(
         Option<String>,
@@ -904,9 +906,18 @@ fn own_draft_attribution(
 > {
     let source: Option<String> = tx
         .query_row(
-            "SELECT native_source_json FROM owner_ydoc_outbox_entries \
-             WHERE update_digest = ?1 AND native_source_json IS NOT NULL LIMIT 1",
-            params![update_digest],
+            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e \
+             JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
+             WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
+               AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
+               AND e.native_source_json IS NOT NULL",
+            params![
+                receipt.delivery_id,
+                receipt.update_digest,
+                key.workspace_id,
+                key.version_id,
+                key.object_id
+            ],
             |row| row.get(0),
         )
         .optional()
@@ -2766,5 +2777,82 @@ mod tests {
         let body_only = event("body-only", 3, source.plaintext_insert(0, "body"));
         ack(apply(&mut store, &mut cache, &handle, body_only));
         assert_eq!(claims(&store).len(), 2, "a body-only frame claims nothing");
+
+        // This engine's own drafts, which an automation wrote at depth 2.
+        let own_draft = |store: &mut EngineStore, key: &str, update: &[u8]| {
+            let appended = crate::owner_outbox::append(
+                store,
+                "workspace-1",
+                crate::owner_outbox::OwnerOutboxAppendInput {
+                    binding: binding(),
+                    base_update: Ydoc::wire().encode_full_state(),
+                    append_key: key.into(),
+                    update: update.to_vec(),
+                    limits: crate::owner_outbox::OwnerOutboxLimits {
+                        max_pending_bytes: 100_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+            let source = crate::owner_outbox::OwnerOutboxNativeSource {
+                binding: binding(),
+                adoption_id: "adoption-1".into(),
+                native_sequence: 1,
+                update_digest: appended.update_digest.clone(),
+                origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                    actor_origin_id: Some("collection:notes#stamp".into()),
+                    actor_kind: Some("automation".into()),
+                    on_behalf_of: Some("local".into()),
+                    chain_depth: Some(2),
+                    recorded_at_ms: 1,
+                },
+            };
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1 \
+                         WHERE delivery_id = ?2",
+                        params![
+                            serde_json::to_string(&source).unwrap(),
+                            appended.delivery_id
+                        ],
+                    )
+                    .unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            appended.delivery_id
+        };
+        let newest = |store: &EngineStore| -> (Option<String>, i64) {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT author_origin_id, depth FROM automation_claims \
+                         ORDER BY created_at_ms DESC, claim_id DESC LIMIT 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap()
+        };
+        let stamped = source.frontmatter_set("status", "stamped");
+        let delivery = own_draft(&mut store, "own-stamp", &stamped);
+        let mut accepted = event(&delivery, 4, stamped);
+        accepted.metadata.accepted.received_at_ms = 30;
+        ack(apply(&mut store, &mut cache, &handle, accepted));
+        assert_eq!(
+            newest(&store),
+            (Some("collection:notes#stamp".to_owned()), 2),
+            "the host's own draft keeps its automation author and depth"
+        );
+        // The same bytes under another delivery are not that draft.
+        let restamped = source.frontmatter_set("status", "restamped");
+        own_draft(&mut store, "own-restamp", &restamped);
+        let mut elsewhere = event("elsewhere", 5, restamped);
+        elsewhere.metadata.accepted.received_at_ms = 40;
+        ack(apply(&mut store, &mut cache, &handle, elsewhere));
+        assert_eq!(newest(&store), (Some("owner-1".to_owned()), 0));
     }
 }
