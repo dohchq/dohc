@@ -43,10 +43,10 @@ beforeAll(() => {
 // Load the real Mermaid and KaTeX packages before the bounded assertion starts.
 // The assertion still exercises Mermaid's real lazy flowchart render and
 // KaTeX output; this keeps cold module evaluation outside the test's bound.
-// A cold import beside other work passed 30 s.
+// Beside other work the cold import passed 60 s and the render passed 30 s.
 beforeAll(async () => {
   await Promise.all([import("mermaid"), import("katex")]);
-}, 60_000);
+}, 120_000);
 
 afterAll(() => {
   vi.restoreAllMocks();
@@ -83,5 +83,5 @@ describe("renderMermaidDiagram with math", () => {
     expect(rendered.textContent).not.toContain(
       "MathML is unsupported in this environment.",
     );
-  });
+  }, 60_000);
 });

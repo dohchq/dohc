@@ -1216,9 +1216,10 @@ describe("startSiteDevServer", () => {
   });
 });
 
-// On Windows buildSite snapshots descendants with PowerShell, and a trivial
-// build still passed 30 s beside other work. These tests allow 60 s, well
-// past their 20 s build timeout.
+// On Windows buildSite snapshots descendants with PowerShell. Beside other
+// work a trivial build passed 30 s, and a build that exits at once still hit a
+// 20 s build timeout. These builds get 45 s inside a 60 s test.
+const BUILD_TIMEOUT_MS = 45_000;
 const BUILD_TEST_TIMEOUT_MS = 60_000;
 
 describe("buildSite", () => {
@@ -1232,7 +1233,7 @@ describe("buildSite", () => {
         "-e",
         "const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.writeFileSync('dist/index.html','built'); console.log('built ok')",
       ],
-      timeoutMs: 20_000,
+      timeoutMs: BUILD_TIMEOUT_MS,
     });
     expect(result.ok).toBe(true);
     expect(result.outputPath).toBe(join(root, "site", "dist"));
@@ -1342,7 +1343,7 @@ describe("buildSite", () => {
       siteRoot: "site",
       command: process.execPath,
       args: ["-e", "console.error('broken build'); process.exit(3)"],
-      timeoutMs: 20_000,
+      timeoutMs: BUILD_TIMEOUT_MS,
     });
     expect(result.ok).toBe(false);
     expect(result.outputPath).toBeNull();
