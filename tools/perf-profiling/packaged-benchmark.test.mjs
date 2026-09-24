@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,19 +12,13 @@ import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInp
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 
-function readinessPage(t) {
+// A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
+function fakePage(t, html) {
   const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
   const { JSDOM } = require('jsdom');
-  const dom = new JSDOM(`<div data-testid="workspace-shell" data-ready="true">
-    <button data-testid="workspace-switcher">workspace-0</button>
-    <div data-testid="workspace-workbench">
-      <section data-editor-group-id="primary" data-active="true">
-        <div role="tab" aria-selected="true" data-testid="tab-small.md">small.md</div>
-        <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
-      </section>
-    </div>
-  </div>`, { pretendToBeVisual: true, runScripts: 'outside-only' });
+  const dom = new JSDOM(html, { pretendToBeVisual: true, runScripts: 'outside-only' });
   t.after(() => dom.window.close());
   const w = dom.window;
   let now = 10, id = 0;
@@ -46,8 +40,25 @@ function readinessPage(t) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback(now);
   };
-  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
-  return { document: w.document, observe, step, frame, frames, timers };
+  const run = (observer, options) => w.eval(`(${observer.toString()})`)(options);
+  const keydown = (target, key) => target.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true }));
+  return { window: w, document: w.document, run, step, frame, frames, timers, keydown, now: () => now };
+}
+// MutationObserver callbacks are microtasks; settle them before driving the fake clock.
+const mutations = () => new Promise(resolve => setImmediate(resolve));
+
+function readinessPage(t) {
+  const p = fakePage(t, `<div data-testid="workspace-shell" data-ready="true">
+    <button data-testid="workspace-switcher">workspace-0</button>
+    <div data-testid="workspace-workbench">
+      <section data-editor-group-id="primary" data-active="true">
+        <div role="tab" aria-selected="true" data-testid="tab-small.md">small.md</div>
+        <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
+      </section>
+    </div>
+  </div>`);
+  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => p.run(observeStartupReadiness, { ...target, timeoutMs: 1000 });
+  return { ...p, observe };
 }
 
 test('startup observer records an already-ready document without inferring earlier readiness', async t => {
@@ -192,6 +203,167 @@ test('startup observer propagates the editing refusal', async t => {
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
+const paletteHtml = '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
+test('surface observer sees a keydown-triggered palette on the next frame and paints one frame later', async t => {
+  const p = fakePage(t, '<main></main>');
+  const pending = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'p', target: '[data-testid="quick-open"] input', focused: '[data-testid="quick-open"] input', countSelector: '[role="option"]', timeoutMs: 1000 });
+  p.frame();
+  p.keydown(p.document.body, 'Control');
+  p.document.body.insertAdjacentHTML('beforeend', paletteHtml);
+  p.document.querySelector('input').focus();
+  await mutations(); p.frame();
+  assert.equal(p.frames.size, 1, 'only the frame loop is pending: a surface present before the trigger is not a match');
+  p.keydown(p.document.body, 'p');
+  p.frame();
+  assert.equal(p.frames.size, 2, 'the frame loop matched without a mutation and started the one-frame wait');
+  p.frame();
+  const observed = await pending;
+  assert.equal(observed.triggerMs, 42);
+  assert.equal(observed.triggerTrusted, false);
+  // Matched inside frame N's callback, which paints it; the next callback comes after that paint.
+  assert.deepEqual([observed.matchedMs, observed.matchedIn, observed.paintedMs], [58, 'frame', 74]);
+  assert.deepEqual([observed.count, observed.matchedCount, observed.firstText, observed.entranceAnimating, observed.fullTimedOut], [2, 1, 'a.md', false, false]);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('surface observer waits for the typed value, a focused input, and an in-order first row', async t => {
+  const p = fakePage(t, paletteHtml);
+  const input = p.document.querySelector('input');
+  input.focus();
+  const typed = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'x', target: 'input', value: 'x', focused: 'input', firstTextMatches: 'AM', countSelector: '[role="option"]', timeoutMs: 1000 });
+  p.keydown(input, 'x');
+  p.frame();
+  assert.equal(p.frames.size, 1, 'the keystroke has not reached the input value yet');
+  input.value = 'x';
+  input.blur();
+  p.frame();
+  assert.equal(p.frames.size, 1, 'focus left the input');
+  input.focus();
+  assert.equal(p.frames.size, 2, 'the focus change matched and started the one-frame wait');
+  p.frame();
+  const observed = await typed;
+  assert.deepEqual([observed.matchedIn, observed.paintedMs - observed.matchedMs], ['focus', 16]);
+  assert.deepEqual([observed.text, observed.firstText, observed.count], ['', 'a.md', 2]);
+  const mismatch = p.run(observeSurface, { target: 'input', firstTextMatches: 'zz', countSelector: '[role="option"]', timeoutMs: 120 });
+  const rejected = assert.rejects(mismatch, /did not render within 120ms/);
+  p.step(); p.step(); p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('surface observer carries a first and a full milestone from one trigger and flags a full milestone that misses the deadline', async t => {
+  const p = fakePage(t, '<button>Open</button><ol></ol>');
+  const pending = p.run(observeSurface, { trigger: 'click', target: 'ol li', fullCount: 3, countSelector: 'ol li', timeoutMs: 1000 });
+  p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>1</li>');
+  await mutations();
+  p.frame(); p.frame();
+  assert.equal(p.frames.size, 1, 'the first milestone painted and only the frame loop remains');
+  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>2</li><li>3</li>');
+  await mutations();
+  p.frame(); p.frame();
+  const observed = await pending;
+  // Both milestones matched between frames through mutations; each ends at the next frame callback.
+  assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 26, 42, 58]);
+  assert.deepEqual([observed.matchedIn, observed.fullMatchedIn, observed.count, observed.fullTimedOut], ['mutation', 'mutation', 3, false]);
+  const partial = p.run(observeSurface, { target: 'ol li', fullCount: 10, timeoutMs: 100 });
+  p.frame(); p.frame();
+  p.step(); p.step();
+  const timedOut = await partial;
+  assert.equal(timedOut.fullTimedOut, true);
+  assert.equal(timedOut.fullPaintedMs, null);
+  // The rows were already present, so the installation check matched; it is not a frame callback.
+  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ['install', 16]);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('surface observer rejects unknown triggers and a surface that never renders', async t => {
+  const p = fakePage(t, '<main></main>');
+  await assert.rejects(p.run(observeSurface, { trigger: 'hover', target: 'main' }), /Unknown trigger/);
+  const missing = p.run(observeSurface, { target: '[data-testid="absent"]', timeoutMs: 120 });
+  const rejected = assert.rejects(missing, /did not render within 120ms/);
+  p.step(); p.step(); p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+const searchHtml = '<div data-testid="search-view" data-state="idle" data-search-id=""><input data-testid="search-input"><ul></ul></div>';
+test('search observer times Enter to the first result row and to the complete state', async t => {
+  const p = fakePage(t, searchHtml);
+  const view = p.document.querySelector('[data-testid="search-view"]');
+  const input = p.document.querySelector('input');
+  const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
+  p.frame();
+  p.keydown(p.document.body, 'Enter');
+  p.keydown(input, 'Enter');
+  view.dataset.searchId = 's1'; view.dataset.state = 'searching';
+  view.querySelector('ul').innerHTML = '<li data-testid="search-result-row">hit</li>';
+  await mutations(); p.frame();
+  view.dataset.state = 'complete';
+  view.insertAdjacentHTML('beforeend', '<span data-testid="search-summary">1 result in 1 file</span>');
+  await mutations(); p.frame(); p.frame();
+  const observed = await pending;
+  assert.equal(observed.submitMs, 26);
+  assert.equal(observed.submitTrusted, false);
+  assert.equal(observed.debounceFiredBeforeSubmit, false);
+  assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 42, 42, 58]);
+  assert.deepEqual([observed.firstResultMatchedIn, observed.settledMatchedIn], ['mutation', 'mutation']);
+  assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
+  assert.deepEqual([[...observed.statesSeen], observed.sawUpdating], [['searching', 'complete'], false]);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('search observer flags a debounce that ran before Enter, records updating, and keeps a missing first result missing', async t => {
+  const p = fakePage(t, searchHtml);
+  const view = p.document.querySelector('[data-testid="search-view"]');
+  const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
+  view.dataset.searchId = 'typed'; view.dataset.state = 'complete';
+  await mutations();
+  p.keydown(p.document.querySelector('input'), 'Enter');
+  view.dataset.searchId = 's2'; view.dataset.state = 'updating';
+  await mutations();
+  view.dataset.state = 'complete';
+  view.insertAdjacentHTML('beforeend', '<div data-testid="search-empty-state">No results found</div>');
+  await mutations(); p.frame(); p.frame();
+  const observed = await pending;
+  assert.equal(observed.debounceFiredBeforeSubmit, true);
+  assert.equal(observed.firstResultMs, null);
+  assert.deepEqual([observed.emptyState, observed.rowsRendered, [...observed.statesSeen], observed.sawUpdating], [true, 0, ['updating', 'complete'], true]);
+  const closed = fakePage(t, '<main></main>');
+  await assert.rejects(closed.run(observeSearchSubmit, {}), /Search view is not open/);
+});
+test('seeded post is found by its title and yields the engine thread id the DOM carries, not the CLI handle', t => {
+  const post = (id, title) => `<div data-testid="chats-post-card" data-thread-id="${id}"><div data-testid="chats-thread" data-thread-id="${id}"><span data-testid="chats-post-title"> ${title} </span></div></div>`;
+  const p = fakePage(t, `<div data-testid="chats-channel-view">${post('thread-f7a6fc48-3eb4', 'Other post')}${post('thread-0c1d2e3f-4a5b', 'Long history')}</div>`);
+  assert.equal(p.run(seededPostThreadId, { title: 'Long history' }), 'thread-0c1d2e3f-4a5b');
+  assert.throws(() => p.run(seededPostThreadId, { title: 'th_0c1d2e3f-4a5b' }), /found 0/);
+  p.document.querySelector('[data-testid="chats-channel-view"]').insertAdjacentHTML('beforeend', post('thread-dup', 'Long history'));
+  assert.throws(() => p.run(seededPostThreadId, { title: 'Long history' }), /found 2/);
+});
+test('collection fixture writes the schema first and deterministic pre-minted record ids', () => {
+  const files = collectionFixtureFiles(3);
+  assert.deepEqual(files.map(f => f.path), ['records/collection.yaml', 'records/record-000001.md', 'records/record-000002.md', 'records/record-000003.md']);
+  assert.match(files[0].content, /^name: Records\nfields:\n {2}Name:\n {4}type: text\n/);
+  const ids = files.slice(1).map(f => f.content.match(/^id: (\S+)$/m)[1]);
+  for (const id of ids) assert.match(id, /^rec_[a-z2-7]{26}$/);
+  assert.equal(new Set(ids).size, 3);
+  assert.deepEqual(collectionFixtureFiles(3), files);
+  assert.match(files[1].content, /^Due: "2026-\d{2}-\d{2}"$/m);
+  assert.equal(recordId('records/1'), ids[0]);
+});
+test('process kinds come from the launched pid, engine name, and Chromium type flags', () => {
+  const processes = [
+    { pid: 1, name: 'dohc.exe', commandLine: '"C:\\dohc.exe" --user-data-dir=x', workingSetBytes: 100, privateBytes: 10 },
+    { pid: 2, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer --lang=en', workingSetBytes: 200, privateBytes: 20 },
+    { pid: 3, name: 'dohc.exe', commandLine: 'dohc.exe --type=renderer', workingSetBytes: 300, privateBytes: 30 },
+    { pid: 4, name: 'dohc.exe', commandLine: 'dohc.exe --type=gpu-process', workingSetBytes: 40, privateBytes: 4 },
+    { pid: 5, name: 'dohc.exe', commandLine: 'dohc.exe --type=utility --utility-sub-type=network.mojom.NetworkService', workingSetBytes: 50, privateBytes: 5 },
+    { pid: 6, name: 'dohc-workspace-engine.exe', commandLine: null, workingSetBytes: 60, privateBytes: 6 },
+    { pid: 7, name: 'dohc.exe', commandLine: 'dohc.exe --type=crashpad-handler', workingSetBytes: 7, privateBytes: 1 },
+    { pid: 8, name: 'pwsh.exe', commandLine: 'pwsh -File sampler.ps1', workingSetBytes: 8, privateBytes: 1 },
+  ];
+  assert.deepEqual(processes.map(p => classifyProcess(p, 1)), ['main', 'renderer', 'renderer', 'gpu', 'utility', 'engine', 'crashpad', 'other']);
+  const aggregate = aggregateByKind({ completedAtMs: 5, processes }, 1);
+  assert.equal(aggregate.processCount, 8);
+  assert.deepEqual(aggregate.kinds.renderer, { count: 2, workingSetBytes: 500, privateBytes: 50 });
+  assert.deepEqual(aggregate.kinds.main, { count: 1, workingSetBytes: 100, privateBytes: 10 });
+});
+
 const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
 test('packaged rehearsals opt out of OS registration with their own profile', () => {
   const profile = resolve('rehearsal/profile');
@@ -222,9 +394,23 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
     ['--files', '1'], ['--switches', '-1'], ['--idle-seconds', 'Infinity'], ['--runs', '2', '--runs', '3'],
     ['--label', 'candidate'], ['--profile-main', 'yes'], ['--profile-renderer', '1'], ['--scenario', 'typo'],
     ['--package-dir', 'other'], ['--engine-commit', 'HEAD'], ['--profile-main', 'true'],
-    ['--profile-renderer', 'true', '--scenario', 'startup'],
+    ['--profile-renderer', 'true', '--scenario', 'startup'], ['--profile-renderer', 'true', '--scenario', 'go-to'],
+    ['--soak-minutes', '5'], ['--chat-messages', '5'], ['--records', '5'], ['--scenario', 'soak', '--soak-minutes', '0'],
+    ['--scenario', 'chat-history', '--chat-messages', '1'], ['--scenario', 'soak', '--records', '5'],
+    ['--scenario', 'go-to'], ['--scenario', 'search', '--files', '4242'],
   ]) assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
   assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
+  assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
+});
+test('surface scenarios parse with their own sizes and defaults', () => {
+  for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
+    const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
+    assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
+  }
+  assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
+  assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
+  assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
+  assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);
 });
 
 test('evidence directory is exclusive even for concurrent starts', async t => {
@@ -379,6 +565,36 @@ test('launch before CDP cleans up the owned process and its child, preserving an
     await closeOwnedPackage(unrelated, 100).catch(() => {});
   }
 });
+// The seed script's process ownership comes from scripts/verification/process.mjs, whose job and
+// process-group behavior scripts/verification/process-group.test.mjs covers. This checks the
+// script's own contract against a stand-in launcher.
+test('chat seed script posts once, replies for the rest, reports the CLI thread id, and fails on a CLI error', async t => {
+  // Canonical, so a symlinked temp directory (macOS /var is /private/var) matches the child's cwd.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-seed-cli-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls = join(root, 'calls.jsonl');
+  const launcher = join(root, 'fake-dohc.mjs');
+  await writeFile(launcher, `import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, cwd: process.cwd(), stateDir: process.env.DOHC_STATE_DIR }) + '\\n');
+if (args[0] === '--json') console.log(JSON.stringify({ schemaVersion: 1, threadId: 'th_seeded', messageId: 'msg_0', title: args[5] }));
+else if (args[3] === 'Message 3') { console.error('pipe closed'); process.exit(2); }
+else console.log('replied th_seeded msg_' + args[3].slice(8));
+`);
+  const seedScript = resolve('tools/perf-profiling/seed-chat-cli.mjs');
+  const seeded = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '3'], { cwd: root, env: { ...process.env, DOHC_STATE_DIR: 'state-dir' }, encoding: 'utf8', timeout: 60000 });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const result = JSON.parse(seeded.stdout.trim().split(/\r?\n/).at(-1));
+  assert.deepEqual([result.channel, result.title, result.cliThreadId, result.messages], ['general', 'Long history', 'th_seeded', 3]);
+  assert.ok(Number.isFinite(result.seedingObservedMs));
+  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(recorded.map(call => call.args), [['--json', 'chat', 'post', 'general', '--title', 'Long history', 'Message 0'], ['chat', 'reply', 'th_seeded', 'Message 1'], ['chat', 'reply', 'th_seeded', 'Message 2']]);
+  assert.ok(recorded.every(call => call.stateDir === 'state-dir' && resolve(call.cwd) === resolve(root)), 'the workspace cwd and profile reach every CLI call');
+  const failed = spawnSync(process.execPath, [seedScript, launcher, 'Long history', '5'], { cwd: root, env: process.env, encoding: 'utf8', timeout: 60000 });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /pipe closed/);
+  assert.match(spawnSync(process.execPath, [seedScript, launcher, 'Long history', '1'], { encoding: 'utf8', timeout: 60000 }).stderr, /usage/);
+});
 test('CDP shutdown timeout still stops its owned process', async () => {
   const instance = await ownedNode(`console.log('ready');setInterval(()=>{},1000);`);
   instance.browser = { newBrowserCDPSession: () => new Promise(() => {}) };
@@ -439,4 +655,42 @@ test('summary keeps absent timing samples missing and labels diagnostic measurem
   assert.deepEqual(summary.startupEvidence[0].rendererReadiness, rendererReadiness);
   assert.equal(summary.freshEditableObservedMs.p50, 50);
   assert.deepEqual(summary.limits, ['16ms floor']);
+  assert.deepEqual([summary.goTo, summary.commandPalette, summary.search, summary.chatHistory, summary.collection, summary.soak], [null, null, null, null, null, null]);
+});
+
+test('summary reports each surface scenario from its own runs and keeps unobserved samples missing', async () => {
+  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount, observed: { entranceAnimating: true, matchedIn: 'frame' } });
+  const sample = (cycle, renderer, main) => ({ cycle, completedAtMs: 1000 + cycle * 60000, processCount: 5, kinds: { renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 }, main: { count: 1, workingSetBytes: main, privateBytes: main / 2 } } });
+  const summary = await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [
+    { index: 1, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
+      commandPalette: { cold: open(90, 12), warm: open(25, 12) },
+      search: [{ query: 'fixture', open: { clickToPaintedMs: 70 }, submitToFirstResultMs: 200, submitToSettledMs: 1500, debounceFiredBeforeSubmit: true, sawUpdating: true, summary: '50 results in 50 files', limitHit: false, rowsRendered: 40 },
+        { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, sawUpdating: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
+      chatHistory: { seed: { messages: 200, seedingObservedMs: 90000 }, channelOpen: { clickToPostsPaintedMs: 150 }, threadOpen: { clickToFirstCommentPaintedMs: 400, clickToAllCommentsPaintedMs: null, commentRowsRendered: 120 } },
+      collection: { records: 500, indexedWaitObservedMs: 800, clickToRowsPaintedMs: 210, rowsRendered: 24, loadedRecords: 100 },
+      soak: { minutes: 2, searchQuery: 'Performance', elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
+    { index: 2, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
+      chatHistory: { seed: { messages: 200, seedingObservedMs: 80000 }, channelOpen: { clickToPostsPaintedMs: 130 }, threadOpen: { clickToFirstCommentPaintedMs: 380, clickToAllCommentsPaintedMs: 900, commentRowsRendered: 199 } } },
+  ] });
+  assert.deepEqual(summary.goTo.query, ['fixture-004242']);
+  assert.deepEqual(summary.goTo.coldOpenToEditableInputPaintedMs, { count: 2, p50: 100, p95: 120, max: 120 });
+  assert.equal(summary.goTo.warmOpenToEditableInputPaintedMs.max, 40);
+  assert.equal(summary.goTo.keystrokeToFirstMatchPaintedMs.count, 3);
+  assert.deepEqual(summary.goTo.lastKeystrokeToFirstMatchPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
+  assert.deepEqual([summary.goTo.finalOptionCounts, summary.goTo.finalFirstOptions, summary.goTo.entranceAnimating, summary.goTo.openMatchedIn], [[1], ['fixture-004242.txt'], [true], ['frame']]);
+  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12], entranceAnimating: [true], openMatchedIn: ['frame'] });
+  assert.equal(summary.search.fixture.openToInputPaintedMs.p50, 70);
+  assert.deepEqual([summary.search.fixture.debounceFiredBeforeSubmitCount, summary.search.fixture.sawUpdatingCount], [1, 1]);
+  assert.deepEqual(summary.search.fixture.limitHit, [false]);
+  assert.deepEqual(summary.search['fixture 4242.'].submitToFirstResultPaintedMs, { count: 0, p50: null, p95: null, max: null });
+  assert.equal(summary.search['fixture 4242.'].openToInputPaintedMs.count, 0);
+  assert.deepEqual(summary.chatHistory.messages, [200]);
+  assert.deepEqual(summary.chatHistory.channelOpenToPostsPaintedMs, { count: 2, p50: 130, p95: 150, max: 150 });
+  assert.equal(summary.chatHistory.threadOpenToAllCommentsPaintedMs.count, 1);
+  assert.equal(summary.chatHistory.allCommentsUnobservedCount, 1);
+  assert.deepEqual(summary.chatHistory.commentRowsRendered, [120, 199]);
+  assert.deepEqual(summary.collection, { records: [500], indexedWaitObservedMs: { count: 1, p50: 800, p95: 800, max: 800 }, openToRowsPaintedMs: { count: 1, p50: 210, p95: 210, max: 210 }, rowsRendered: [24], loadedRecords: [100] });
+  assert.equal(summary.soak.length, 1);
+  assert.deepEqual(summary.soak[0].kinds.renderer, { processCounts: [1], workingSetBytes: { first: 400, last: 440, max: 450, delta: 40 }, privateBytes: { first: 200, last: 220, max: 225, delta: 20 } });
+  assert.deepEqual([summary.soak[0].cycles, summary.soak[0].elapsedMs, summary.soak[0].cycleDurationMs.max, summary.soak[0].searchQuery], [2, 120000, 55000, 'Performance']);
 });

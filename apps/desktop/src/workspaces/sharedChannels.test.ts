@@ -582,6 +582,31 @@ describe("syncJoinedSharedChannels", () => {
     errorSpy.mockRestore();
   });
 
+  it("keeps the pages a failed pull applied, and an empty retry reports no change", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const push = vi.fn(async () => ({ pushed: 0 }));
+    const pull = vi.fn<(input: { onApplied: () => void }) => Promise<ReturnType<typeof pullResult>>>(
+      async (input) => {
+        // The engine committed the first page before the second failed.
+        input.onApplied();
+        throw new Error("ECONNRESET");
+      },
+    );
+    const pass = () => syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver([joined()]),
+      passRows: 1,
+      pull,
+      push,
+    });
+    await expect(pass()).resolves.toMatchObject({ changed: true, failedRows: 1, uncovered: 0 });
+    pull.mockImplementation(async () => pullResult(0));
+    await expect(pass()).resolves.toMatchObject({ changed: false, failedRows: 0, uncovered: 0 });
+    errorSpy.mockRestore();
+  });
+
   it("skips shares already marked ended", async () => {
     const push = vi.fn(async () => ({ pushed: 0 }));
     const pull = vi.fn(async () => pullResult(0));

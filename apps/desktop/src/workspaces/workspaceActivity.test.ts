@@ -253,6 +253,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queuePull: () => {},
       snapshot: () => ({
         syncing: false,
         lastSyncedAtMs: null,
@@ -293,6 +294,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queuePull: () => {},
       snapshot: () => ({
         syncing: false,
         lastSyncedAtMs: null,
@@ -341,7 +343,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineBuilds += 1;
         return {
           start: async () => undefined,
-          queueSync: () => undefined,
+          queueSync: () => undefined, queuePull: () => undefined,
           snapshot: () => ({
             syncing: false,
             lastSyncedAtMs: null,
@@ -396,7 +398,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         },
         engineFor: () => ({
           start: async () => undefined,
-          queueSync: () => undefined,
+          queueSync: () => undefined, queuePull: () => undefined,
           snapshot: () => ({
             syncing: false,
             lastSyncedAtMs: null,
@@ -562,7 +564,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       }),
       engineFor: () => ({
         start: async () => undefined,
-        queueSync: () => undefined,
+        queueSync: () => undefined, queuePull: () => undefined,
         snapshot: () => ({
           syncing: false,
           lastSyncedAtMs: null,

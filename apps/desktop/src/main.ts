@@ -873,6 +873,13 @@ function relayShareErrorCopy(
       return "That path can't be shared.";
     case "not_found":
       return "That share isn't available anymore.";
+    // One relay code for every chat refusal, and the desktop refuses the
+    // general group, the agent lane, and direct-message-as-group before it
+    // asks the relay. What remains is a group the relay has not synced yet.
+    case "invalid_channel":
+      return "This can't be shared yet. Wait for it to sync, then try again.";
+    case "ambiguous_selector":
+      return "A group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
       return data?.error ?? `Sharing failed (${status}).`;
   }
@@ -1564,6 +1571,7 @@ const desktopChatBookmarks = createDesktopChatBookmarks({
 const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChatBookmarks;
 
 const {
+  runWorkspaceSharedChannelPass,
   syncWorkspaceSharedChannels,
   syncRendererWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
@@ -1733,9 +1741,10 @@ function engineForWorkspace(
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
-      await withWorkspaceAttachmentAsync(workspace, () =>
-        syncWorkspaceSharedChannels(workspace.workspaceId),
+      const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
+        runWorkspaceSharedChannelPass(workspace.workspaceId),
       );
+      return outcome.changed;
     },
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
@@ -1869,6 +1878,12 @@ const activity = {
     desktopEngine.retryOwnerDelivery(workspaceId);
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.queueCloudSync(lease.state.activity),
+    );
+  },
+  queueCloudPull: (workspaceId: string): void => {
+    if (!findWorkspace(workspaceId)) return;
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.queueCloudPull(lease.state.activity),
     );
   },
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>

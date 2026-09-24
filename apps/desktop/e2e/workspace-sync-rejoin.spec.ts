@@ -25,6 +25,7 @@ import {
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openHistoryView,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
@@ -860,6 +861,143 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
+    await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+type OpenDocumentSyncWindow = {
+  dohcDesktop: Pick<
+    DohcDesktopBridge,
+    "cloudEnableSync" | "onEngineYDocLineageReplacement"
+  >;
+  lineageReplacements: number;
+};
+
+// Turning sync on claims the open document's lineage, so main hands the editor
+// a replacement document while the person is still typing. The handoff once
+// read `process`, which the sandboxed renderer does not have, and left the
+// editor read-only until the document was reopened.
+test("typing continues while enabling sync replaces the open document", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "enable-open-doc-e2e";
+  const path = "notes/plan.md";
+  const readPlan = () =>
+    readFile(join(temp.rootPath, path), "utf8").catch(() => "");
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path, contents: "# Plan\n\nLocal draft.\n" },
+    ]);
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      userId: "e2e-user",
+    });
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: {
+        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+        DOHC_TEST_SYNC_BACKOFF_MS: "250",
+      },
+    });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await explorerRow(page, "notes").click();
+    await explorerRow(page, path).click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Before sync.");
+    await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
+
+    const enabled = await page.evaluate(async (id) => {
+      const target = window as unknown as OpenDocumentSyncWindow;
+      target.lineageReplacements = 0;
+      target.dohcDesktop.onEngineYDocLineageReplacement(() => {
+        target.lineageReplacements += 1;
+      });
+      return await target.dohcDesktop.cloudEnableSync({ workspaceId: id }).then(
+        () => "ok",
+        (error: unknown) => String(error),
+      );
+    }, workspaceId);
+    expect(enabled).toBe("ok");
+
+    // The first edit after enabling sync is what makes main hand over the
+    // replacement, so that edit is still unsaved when the handoff runs. A
+    // replacement that arrived before it would test nothing, so refuse that.
+    const replacements = () =>
+      page.evaluate(
+        () => (window as unknown as OpenDocumentSyncWindow).lineageReplacements,
+      );
+    expect(await replacements(), "the replacement arrived before any typing").toBe(0);
+    // One input event, so the marker is one update that cannot be split
+    // across the handoff.
+    await page.keyboard.insertText(" pending-marker");
+    await expect.poll(replacements, { timeout: 90_000 }).toBeGreaterThan(0);
+
+    // The marker was unsaved when the document was replaced. It must be on
+    // disk or in a stored set-aside draft, and the notice must offer it.
+    const setAsideDrafts = () =>
+      page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts") ?? "");
+    await expect
+      .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
+        timeout: 30_000,
+      })
+      .toContain("pending-marker");
+    const setAside = !(await readPlan()).includes("pending-marker");
+    if (setAside) {
+      await expect(page.getByTestId("orphaned-draft-notice")).toBeVisible();
+    }
+
+    await expect(editor).toHaveAttribute("contenteditable", "true", {
+      timeout: 30_000,
+    });
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(" After the handoff.");
+    await expect.poll(readPlan, { timeout: 30_000 }).toContain("After the handoff.");
+    await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(
+      "data-state",
+      "read-only",
+    );
+    expect(
+      desktop.logs
+        .filter((entry) => /lineage handoff failed/.test(entry.text))
+        .map((entry) => entry.text),
+    ).toEqual([]);
+
+    // A set-aside draft outlives the app. Restart on the same profile: the
+    // stored row must load and the notice center must still offer it.
+    if (setAside) {
+      await desktop.close();
+      desktop = await launchDesktopApp({ workspace: temp });
+      const restarted = desktop.page;
+      await openWorkspaceFromFirstRun(restarted, temp);
+      expect(
+        await restarted.evaluate(
+          () => localStorage.getItem("dohc-set-aside-drafts") ?? "",
+        ),
+      ).toContain("pending-marker");
+      await restarted.getByTestId("notice-center-toggle").click();
+      await expect(restarted.getByTestId("notice-set-aside-edits")).toContainText(
+        "1 set-aside edit is waiting",
+      );
+    }
+  } finally {
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
   }

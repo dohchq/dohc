@@ -53,6 +53,7 @@ function armProjectionGate(): () => void {
 function refusingBridge(initialUpdate: Uint8Array) {
   let openedSessionId: string | null = null;
   return {
+    platform: "linux" as const,
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
       return {

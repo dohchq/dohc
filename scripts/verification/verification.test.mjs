@@ -843,6 +843,8 @@ test("Postgres startup rejection cleans its created container and preserves star
       calls.push({ args, options });
       if (args[0] === "run") {
         assert.equal(args[args.indexOf("--health-cmd") + 1], "pg_isready -h 127.0.0.1 -U dohc -d dohc");
+        assert.equal(args[args.indexOf("--health-start-period") + 1], "90s");
+        assert.equal(args[args.indexOf("--health-start-interval") + 1], "1s");
         ownedName = args[args.indexOf("--name") + 1];
         containers.add(ownedName);
         throw startupError;
