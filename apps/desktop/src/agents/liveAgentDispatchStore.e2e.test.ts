@@ -2,12 +2,12 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
-import {
-  EngineDaemonLifecycle,
-  type EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
@@ -20,7 +20,7 @@ describe("live agent dispatch store real daemon", () => {
       const root = await createTestScratch("dohc-live-dispatch-e2e-");
       const workspaceId = `workspace-live-e2e-${process.pid}`;
 
-      const lifecycle = new EngineDaemonLifecycle({
+      const lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
       });
       let sessions: EngineWorkspaceSessions | null = null;

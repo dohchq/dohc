@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  EngineDaemonLifecycle,
-  type EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { mountRootFor } from "./shareMounts";
 import {
   createShareMountDirectoryThroughOwnerForTest,
@@ -35,7 +35,7 @@ describe("share mounts real daemon", () => {
       const siblingRoot = mountRootFor(host, "sam");
       const hostSentinel = join(host, "host-keep.md");
       const siblingSentinel = join(siblingRoot, "sibling-keep.md");
-      const lifecycle = new EngineDaemonLifecycle({
+      const lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
         maxRestarts: 0,
       });

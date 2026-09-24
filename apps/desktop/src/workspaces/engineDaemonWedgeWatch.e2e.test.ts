@@ -6,6 +6,7 @@ import {
 import type { Request } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonLifecycle } from "../testing/realDaemonWorkspaceSessions";
 
 // The lifecycle unit suite drives a fake client. A fake cannot prove that the
 // real daemon serves engine.ping, nor that the real client reports its answer
@@ -65,13 +66,15 @@ describe("engine.ping against a real daemon", () => {
     async () => {
       const probes: Array<{ request: Request; answered: boolean }> = [];
       const failures: Error[] = [];
-      const lifecycle = new EngineDaemonLifecycle({
+      const pingIntervalMs = 100;
+      // One unanswered probe kills at this configuration, and the bound is
+      // 20x the interval: a real daemon that needed that long to answer a
+      // probe touching nothing would itself be the news.
+      const pingExpiryMs = 2_000;
+      const lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
-        pingIntervalMs: 100,
-        // One unanswered probe kills at this configuration, and the bound is
-        // 20x the interval: a real daemon that needed that long to answer a
-        // probe touching nothing would itself be the news.
-        pingExpiryMs: 2_000,
+        pingIntervalMs,
+        pingExpiryMs,
         maxPingExpiries: 1,
         launch: async (options): Promise<EngineDaemonClient> => {
           const client = await createEngineClient(options);
@@ -103,13 +106,17 @@ describe("engine.ping against a real daemon", () => {
       lifecycles.push(lifecycle);
 
       await lifecycle.start();
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
 
       // Not vacuous: probes really went out over the real transport and the
       // real daemon really answered them. Counting the answered ones rather
       // than asserting on every probe leaves the newest one free to be in
-      // flight at this instant.
-      expect(probes.filter(({ answered }) => answered).length).toBeGreaterThanOrEqual(3);
+      // flight at this instant. Within three interval-plus-expiry windows,
+      // three probes were answered or one expired and killed the daemon.
+      await expect
+        .poll(() => probes.filter(({ answered }) => answered).length, {
+          timeout: 3 * (pingIntervalMs + pingExpiryMs),
+        })
+        .toBeGreaterThanOrEqual(3);
       // And none of them carried a wire deadline, which is what keeps the
       // client's own timer out of the silence measurement.
       expect(

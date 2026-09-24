@@ -6,7 +6,10 @@ import type { Request } from "@dohc/workspace-engine-client";
 import type { EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
-import { createRealDaemonWorkspaceSessions } from "./realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "./realDaemonWorkspaceSessions";
 
 describe("real daemon workspace sessions", () => {
   it("gives every workspace open the shared real-daemon test deadline", async () => {
@@ -37,7 +40,7 @@ describe("real daemon workspace sessions", () => {
 
       expect(requests[0]).toMatchObject({
         method: "workspace.open",
-        deadlineMs: 10_000,
+        deadlineMs: 20_000,
       });
     } finally {
       await sessions.closeAll();
@@ -81,17 +84,46 @@ describe("real daemon workspace sessions", () => {
     }
   });
 
+  it("gives the startup smoke the shared real-daemon test deadline", async () => {
+    const requests: Request[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        return { id: request.id, result: {} };
+      },
+    };
+    const lifecycle = createRealDaemonLifecycle({
+      command: "engine",
+      fileExists: () => true,
+      launch: async () => client,
+    });
+
+    try {
+      await lifecycle.start();
+      await expect
+        .poll(() => requests.find(({ method }) => method === "workspace.open"))
+        .toMatchObject({ deadlineMs: 20_000 });
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("keeps real-daemon suites on the shared session factory", () => {
     const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
-    const lifecycleConstructor = ["new", "EngineDaemonLifecycle("].join(" ");
     const sessionConstructor = ["new", "EngineWorkspaceSessions("].join(" ");
     const offenders = testSources(desktopRoot)
       .filter(({ path, source }) => {
         const normalized = path.replaceAll("\\", "/");
         return (
-          normalized.startsWith("e2e/") ||
-          normalized.endsWith(".e2e.test.ts") ||
-          source.includes(lifecycleConstructor)
+          normalized !== FACTORY_PATH &&
+          (normalized.startsWith("e2e/") ||
+            normalized.endsWith(".e2e.test.ts") ||
+            source.includes(LIFECYCLE_CONSTRUCTOR) ||
+            source.includes("createRealDaemonLifecycle("))
         );
       })
       .filter(({ source }) => source.includes(sessionConstructor))
@@ -100,7 +132,22 @@ describe("real daemon workspace sessions", () => {
 
     expect(offenders).toEqual([]);
   });
+
+  it("starts real-daemon suites on the shared lifecycle factory", () => {
+    const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const offenders = testSources(desktopRoot)
+      .map(({ path, source }) => ({ path: path.replaceAll("\\", "/"), source }))
+      .filter(({ path, source }) => path !== FACTORY_PATH && source.includes(LIFECYCLE_CONSTRUCTOR))
+      .map(({ path }) => path)
+      .sort();
+
+    // Its first test stalls the host past the product's own request deadline.
+    expect(offenders).toEqual(["src/workspaces/engineDaemonWedgeWatch.e2e.test.ts"]);
+  });
 });
+
+const FACTORY_PATH = "src/testing/realDaemonWorkspaceSessions.ts";
+const LIFECYCLE_CONSTRUCTOR = ["new", "EngineDaemonLifecycle("].join(" ");
 
 function testSources(root: string): Array<{ path: string; source: string }> {
   const sources: Array<{ path: string; source: string }> = [];
