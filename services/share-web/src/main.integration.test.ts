@@ -26,7 +26,9 @@ const WITHIN_SHUTDOWN_GRACE_MS = 100;
 // Waits for a response or exit that must happen, not for a deadline: a loaded
 // gate host can take seconds to pass bytes between these processes.
 const CHILD_RESPONSE_WAIT_MS = 10_000;
-const FORCED_SHUTDOWN_TIMEOUT_MS = CHILD_RESPONSE_WAIT_MS;
+// Stays below share-web's default 10 s grace, so a forced exit inside it shows
+// the 250 ms test grace applied.
+const FORCED_SHUTDOWN_TIMEOUT_MS = 5_000;
 // Outlasts any wait, so an exit within CHILD_RESPONSE_WAIT_MS shows shutdown
 // did not wait out its grace period.
 const QUIET_SHUTDOWN_GRACE_PERIOD_MS = 60_000;

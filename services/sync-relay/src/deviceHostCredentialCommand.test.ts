@@ -5,14 +5,21 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { parseDeviceHostCredential } from "./deviceHostCredential.js";
 
 // On Windows each command starts Windows PowerShell for ACL checks. Tests took
 // 16-25 s on a busy host; beside 32 CPU burners one command overran a 30 s run
-// bound. Each run gets 60 s and each test 120 s.
-vi.setConfig({ testTimeout: 120_000 });
+// bound.
+// Each run gets up to 60 s, cut to what is left of its test's
+// 120 s, so a stalled run fails as itself.
+const TEST_TIMEOUT_MS = 120_000;
+const RUN_TIMEOUT_MS = 60_000;
+vi.setConfig({ testTimeout: TEST_TIMEOUT_MS });
+let testDeadline = 0;
+beforeEach(() => { testDeadline = Date.now() + TEST_TIMEOUT_MS - 5_000; });
+const runTimeout = () => Math.max(1, Math.min(RUN_TIMEOUT_MS, testDeadline - Date.now()));
 
 const exec = promisify(execFile);
 let root: string, command: string;
@@ -42,7 +49,7 @@ async function run(args: string[], umask?: number, platform?: "darwin", preload?
     const invocation = umask === undefined && platform === undefined ? [command, ...args] : ["--input-type=module", "--eval",
       `if (${umask !== undefined}) process.umask(${umask}); if (${platform !== undefined}) Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} }); process.argv = [process.execPath, ${JSON.stringify(command)}, ...${JSON.stringify(args)}]; await import(${JSON.stringify(pathToFileURL(command).href)});`];
     if (preload) invocation.unshift("--import", pathToFileURL(preload).href);
-    const result = await exec(process.execPath, invocation, { windowsHide: true, timeout: 60_000, env: { ...process.env, NODE_OPTIONS: "" } });
+    const result = await exec(process.execPath, invocation, { windowsHide: true, timeout: runTimeout(), env: { ...process.env, NODE_OPTIONS: "" } });
     return { code: 0, ...result };
   } catch (error) {
     const result = error as Error & { code: number; stdout: string; stderr: string };

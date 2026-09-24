@@ -57,7 +57,8 @@ test.skipIf(process.platform !== "win32")("failed close stops Windows launcher d
   // taskkill /F starts termination and returns; a loaded host can finish it later.
   await vi.waitFor(() => expect(() => process.kill(descendantPid, 0)).toThrow());
   descendantPids.splice(descendantPids.indexOf(descendantPid), 1);
-});
+  // Forced cleanup may take 20 s (taskkill, then exit) before the 10 s wait.
+}, 60_000);
 
 test("a completed close waits for process exit without reporting a failure", async () => {
   const child = await liveProcess();

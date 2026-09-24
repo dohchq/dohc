@@ -53,6 +53,13 @@ if (typeof document !== "undefined") {
 
 // vi.waitFor has the same fixed 1 s default and no setting for it, so every
 // desktop suite gets the same 10 s here. An explicit timeout still wins.
+// Under fake timers each check advances the fake clock by the interval, so a
+// longer wait would move fake time further; those waits keep vitest's default.
 const waitFor = vi.waitFor;
 vi.waitFor = (callback, options) =>
-  waitFor(callback, typeof options === "number" ? options : { timeout: 10_000, ...options });
+  waitFor(
+    callback,
+    typeof options === "number" || vi.isFakeTimers()
+      ? options
+      : { timeout: 10_000, ...options },
+  );

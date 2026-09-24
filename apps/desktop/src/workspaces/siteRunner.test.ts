@@ -42,8 +42,8 @@ afterEach(async () => {
 // process.kill(pid, 0) can still succeed for a short window right after
 // the signal on a loaded machine. Poll for the actual death instead of
 // asserting it happened immediately.
-async function waitForProcessDeath(pid: number): Promise<boolean> {
-  const deadline = Date.now() + 10_000;
+async function waitForProcessDeath(pid: number, deadlineMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
@@ -1269,7 +1269,7 @@ describe("buildSite", () => {
       expect(descendantPid).toBeGreaterThan(0);
 
       try {
-        expect(await waitForProcessDeath(descendantPid)).toBe(true);
+        expect(await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS)).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -1285,8 +1285,15 @@ describe("buildSite", () => {
   // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
   // real attempts to observe the descendant Start-Process just created,
   // instead of racing the wrapper's own spawn with a single shot.
+  //
+  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild awaits the
+  // taskkill subprocess before buildSite returns, so the descendant is gone by
+  // then. Under combined desktop and mcp load it was absent on the first check
+  // in every measured run (N=29, max 1 ms). The short bound keeps the claim
+  // that buildSite returns only after taskkill finished.
   const CAPTURE_INTERVAL_MS = 100;
   const WRAPPER_LIFETIME_MS = 2_000;
+  const PROCESS_DEATH_TIMEOUT_MS = 500;
   // This test needs a successful wrapper exit before it can inspect descendant
   // cleanup. A shorter build timeout changed the scenario under machine load.
   // Keep buildSite's production timeout as the deadlock guard, and give Vitest

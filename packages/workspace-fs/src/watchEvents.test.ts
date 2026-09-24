@@ -245,10 +245,17 @@ describe("watchWorkspaceEvents", () => {
       await mkdir(join(root, ".dohc", "history"), { recursive: true });
       await writeFile(join(root, ".dohc", "history", "1.json"), "{}");
       await writeFile(join(root, "notes.md"), "hi");
-      // notes.md, written after the .dohc/ writes, is the barrier: the user file
-      // is reported and nothing under .dohc/ ever is (no feedback loop).
-      await vi.waitFor(() => expect(batches.flat()).toContain("notes.md"), { timeout: 10_000 });
+      // The barrier takes the same path as the .dohc writes, a new directory
+      // with a nested file, and is written after them. A broken ignore rule
+      // would report .dohc/history/1.json no later than notes/history/1.md.
+      await mkdir(join(root, "notes", "history"), { recursive: true });
+      await writeFile(join(root, "notes", "history", "1.md"), "{}");
+      await vi.waitFor(
+        () => expect(batches.flat()).toEqual(expect.arrayContaining(["notes.md", "notes/history/1.md"])),
+        { timeout: 10_000 },
+      );
       watcher.stop();
+      // The user files are reported and nothing under .dohc/ ever is (no feedback loop).
       expect(batches.flat().some((p) => p.includes(".dohc"))).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -308,19 +315,32 @@ describe("settle max-window cap", () => {
     const root = await mkWatchRoot();
     try {
       const batches: string[][] = [];
+      const settleMs = 200;
       const watcher = watchWorkspaceEvents(
-        { rootDir: root, settleMs: 200, maxWindowMs: 600 },
+        { rootDir: root, settleMs, maxWindowMs: 600 },
         (paths) => batches.push(paths),
       );
       await watcher.ready;
       // Write faster than settleMs until a batch arrives: the trailing
-      // debounce alone would never flush, the deadline must. A loaded gate
-      // host can delay the first flush well past maxWindowMs.
+      // debounce alone would never flush, the deadline must. A loaded host can
+      // stall a write gap to settleMs, which lets the debounce flush instead and
+      // proves nothing about the cap, so such a batch is dropped and the writes
+      // start a new window.
       const deadline = Date.now() + 10_000;
-      while (batches.length === 0) {
-        expect(Date.now(), "no batch flushed under continuous writes").toBeLessThan(deadline);
+      let lastWrite: number | undefined;
+      let widestGap = 0;
+      for (;;) {
+        expect(Date.now(), "no batch flushed while writes stayed under settleMs apart").toBeLessThan(deadline);
         await writeFile(join(root, "busy.md"), `tick ${Date.now()}`);
+        const wrote = performance.now();
+        if (lastWrite !== undefined) widestGap = Math.max(widestGap, wrote - lastWrite);
+        lastWrite = wrote;
         await new Promise((r) => setTimeout(r, 90));
+        if (batches.length === 0) continue;
+        if (Math.max(widestGap, performance.now() - lastWrite) < settleMs) break;
+        batches.length = 0;
+        lastWrite = undefined;
+        widestGap = 0;
       }
       expect(batches[0]).toContain("busy.md");
       watcher.stop();

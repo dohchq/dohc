@@ -37,4 +37,15 @@ describe("apps/desktop vitest setup", () => {
       expect.poll(elapsed).toBeGreaterThan(1_100),
     ]);
   });
+
+  it("keeps vitest's default for vi.waitFor under fake timers, where each check advances the clock", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      await expect(vi.waitFor(() => expect(false).toBe(true))).rejects.toThrow();
+      expect(Date.now() - start).toBeLessThanOrEqual(1_100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

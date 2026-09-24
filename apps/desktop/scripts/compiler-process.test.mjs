@@ -59,7 +59,8 @@ for(const [stream,reason] of [['stdout','output'],['stderr','stderr']])test(`bou
   const {runtime}=await fixture(t,`process.${stream}.write(Buffer.alloc(32768));setInterval(()=>{},1000)`);let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};
   await assert.rejects(runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds}),{reason});assert.equal(alive(owner),false);
 });
-for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned descendants after their direct parent exits`,windows,async t=>{
+// Timeout mode waits out the full 20 s deadline after a loaded start, so these get 60 s.
+for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned descendants after their direct parent exits`,{...windows,timeout:60000},async t=>{
   const {directory,runtime}=await fixture(t,`import {spawn}from'node:child_process';import{writeFileSync}from'node:fs';const marker=process.argv[2];const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())}));${mode==='normal-exit'?'process.exit(0)':'setInterval(()=>{},1000)'}});`);
   const marker=join(directory,'ready.json');runtime.workerArgs=[marker];let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
   const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal});
@@ -91,17 +92,18 @@ test('abrupt caller death closes its job and descendants',windows,async t=>{
   await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:16000});
   for(const pid of [owner.pid,ids.worker,ids.descendant])assert.equal(alive(pid),false);
 });
-// The owner's 10 s deadline must outlast a loaded start of the worker. Startup,
-// that deadline and the exit wait all nest inside 60 s.
-test('owner deadline still kills the build while the caller event loop is blocked',{...windows,timeout:60000},async t=>{
+// The owner's deadline is the same 20 s as every other compile here, so a loaded
+// start of the worker still writes its marker first. The 20 s marker wait, the
+// 40 s exit wait and startup nest inside 90 s.
+test('owner deadline still kills the build while the caller event loop is blocked',{...windows,timeout:90000},async t=>{
   const {directory,runtime}=await fixture(t,`import{writeFileSync}from'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
   const marker=join(directory,'ready.json'),ownerMarker=join(directory,'owner.json'),callerPath=join(directory,'blocked-caller.mjs');
   const supervisor=new URL('../src/workspaces/compilerProcessSupervisor.ts',import.meta.url).href;
-  await writeFile(callerPath,`import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({...runtime,workerArgs:[marker]})};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify({...bounds,timeoutMs:10000})}});`);
+  await writeFile(callerPath,`import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({...runtime,workerArgs:[marker]})};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify(bounds)}});`);
   const caller=spawn(process.execPath,[callerPath],{windowsHide:true,stdio:'ignore'});t.after(()=>caller.kill());const closed=once(caller,'close');
   const worker=await waitForFile(marker),owner=await waitForFile(ownerMarker);
-  const waitScript=`foreach($processId in @(${owner.pid},${worker.pid})){try{$p=[Diagnostics.Process]::GetProcessById($processId);if(-not $p.WaitForExit(12000)){exit 2}}catch [ArgumentException]{}};exit 0`;
-  await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:18000});
+  const waitScript=`foreach($processId in @(${owner.pid},${worker.pid})){try{$p=[Diagnostics.Process]::GetProcessById($processId);if(-not $p.WaitForExit(25000)){exit 2}}catch [ArgumentException]{}};exit 0`;
+  await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:40000});
   assert.equal(alive(owner.pid),false);assert.equal(alive(worker.pid),false);assert.equal(alive(caller.pid),true);caller.kill();await closed;
 });
 // Six real compiles, each under its own 20 s deadline. Beside other work, all

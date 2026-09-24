@@ -1566,24 +1566,27 @@ describe("PluginHost", () => {
     // The deadline runs on a clock that stands still until the plugin is
     // ready. A real 1 s race failed beside other work because the plugin
     // process took longer to start, not because the deadline misfired.
+    // No waitFor here: it advances fake timers on every check.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const root = await workspaceRoot();
       const harness = createProcessHarness();
       const statuses: PluginRuntimeStatus[] = [];
+      let settle!: (status: PluginRuntimeStatus) => void;
+      const settled = new Promise<PluginRuntimeStatus>((resolve) => { settle = resolve; });
       const host = trackHost({
         stateDir: await stateDir(),
         workspaceRoot: root,
         spawnTransport: harness.spawnTransport,
         routeSdkRequest: defaultRouter,
-        onStatusChange: (_pluginId, status) => statuses.push(status),
+        onStatusChange: (_pluginId, status) => {
+          statuses.push(status);
+          if (status === "ready" || status === "failed" || status === "crashed") settle(status);
+        },
         activationTimeoutMs: 1_000,
       });
       await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-      await waitFor(
-        () => host.getStatus("hello-plugin") === "ready",
-        "Healthy plugin did not become ready.",
-      );
+      expect(await settled).toBe("ready");
       await vi.advanceTimersByTimeAsync(1_000);
       expect(host.getStatus("hello-plugin")).toBe("ready");
       expect(statuses).not.toContain("failed");
