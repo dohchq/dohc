@@ -5,6 +5,7 @@ import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-rea
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
+import type { ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
@@ -73,7 +74,8 @@ export function OpenSharedView(props: {
   // first-run, where there is no workspace to mount into yet.
   mountInto?: {
     workspaceId: string;
-    onMounted: (label: string) => void;
+    // The pinned access, null when the pin could not be read.
+    onMounted: (label: string, access: ShareAccess | null) => void;
   };
 } & ConnectionNoticeHost) {
   const [gate, setGate] = useState<Gate>(
@@ -183,7 +185,10 @@ export function OpenSharedView(props: {
         });
         if (!actionRequests.isCurrent(actionRequest)) return;
         props.onOpened?.();
-        props.mountInto.onMounted(result.mount.label);
+        const pinned = result.workspace.shareMounts?.find(
+          (mount) => mount.shareId === result.mount.shareId,
+        );
+        props.mountInto.onMounted(result.mount.label, pinned?.access ?? null);
       } else {
         const result = await bridge().openSharedView({
           shareCode,

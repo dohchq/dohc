@@ -49,6 +49,7 @@ import type {
   ListAutomationFailuresResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
+  MountShareResult,
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
@@ -630,7 +631,8 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pickWorkspaceRoot: vi.fn(async () => null),
-    mountShare: vi.fn(async () => {
+    // Typed to the contract so a test that adds a share can answer it.
+    mountShare: vi.fn(async (): Promise<MountShareResult> => {
       throw new Error("not used in shell tests");
     }),
     openSharedView: vi.fn(async () => {
@@ -986,6 +988,52 @@ describe("workspace share handoff placement", () => {
     expect(bridge.mountShare).not.toHaveBeenCalled();
     expect(bridge.openSharedView).not.toHaveBeenCalled();
   });
+});
+
+describe("adding a share to this workspace", () => {
+  // The folder under shared-with-me is read-only at every level, so the
+  // message names the level only where it has somewhere else to go.
+  it.each([
+    [
+      "edit",
+      "Added sam to shared-with-me. Its files are read-only in this workspace. To use your Edit access, open the share again and choose Open separately.",
+    ],
+    [
+      "view",
+      "Added sam to shared-with-me. Its files are read-only and stay up to date.",
+    ],
+  ] as const)(
+    "announces an added %s share in a toast and a Notices row, not a bar",
+    async (access, message) => {
+      const user = userEvent.setup();
+      const bridge = makeBridge(Promise.resolve(null));
+      bridge.mountShare.mockResolvedValue({
+        workspace: {
+          ...WORKSPACE,
+          shareMounts: [
+            { shareId: "share-1", label: "sam", granterEmail: "sam@dohc.test", access },
+          ],
+        },
+        mount: { shareId: "share-1", label: "sam", status: "updated", changedPaths: 1 },
+      });
+      renderShell(bridge);
+
+      await user.click(await screen.findByTestId("workspace-switcher"));
+      await user.click(screen.getByTestId("workspace-switcher-open-share"));
+      await user.type(
+        await screen.findByTestId("open-share-code"),
+        "dohc-share:share-1:https://relay.dohc.test",
+      );
+      await user.click(screen.getByTestId("open-share-start"));
+
+      expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(
+        message,
+      );
+      expect(screen.queryByTestId("shell-notice")).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect((await screen.findByTestId("notice-center")).textContent).toContain(message);
+    },
+  );
 });
 
 describe("workspace manager route", () => {

@@ -974,10 +974,10 @@ test("mount side: add a share into a workspace and open it beside local files", 
     await page.getByTestId("open-share-code").fill(shareCode);
     await page.getByTestId("open-share-start").click();
 
-    // The mount lands: notice, tree rows under shared-with-me/e2e-granter,
+    // The mount lands: a toast, tree rows under shared-with-me/e2e-granter,
     // the private file never crosses, and the host file is untouched.
-    await expect(page.getByTestId("shell-notice")).toContainText(
-      "Added e2e-granter to shared-with-me",
+    await expect(page.getByTestId("workspace-shell-notice")).toContainText(
+      "Added e2e-granter to shared-with-me. Its files are read-only and stay up to date.",
     );
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
     await expect(explorerRow(page, "shared-with-me/e2e-granter/private")).toHaveCount(0);
@@ -986,6 +986,136 @@ test("mount side: add a share into a workspace and open it beside local files", 
     // The mounted file opens read-only with the granter's content.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+test("mount side: an Edit share added to a workspace is read-only there and says how to edit it", async () => {
+  test.setTimeout(300_000);
+  const temp = await createTempWorkspace();
+  const hostWorkspaceId = "share-mount-edit-host-e2e";
+  const granterWorkspaceId = "share-mount-edit-granter-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId: granterWorkspaceId,
+    });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId: granterWorkspaceId,
+    });
+    await granter.writeTextFiles([
+      { path: "docs/brief.md", text: "# Brief\n\nThe lighthouse memo.\n" },
+    ]);
+    const create = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${granterWorkspaceId}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "edit" }),
+      },
+    );
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+    const shareCode = `dohc-share:${shareId}:${relay.baseUrl}`;
+
+    await seedWorkspaceManifest(temp, hostWorkspaceId);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/mine.md", contents: "# Mine\n\nHost workspace file.\n" },
+    ]);
+    await seedWorkspaceRegistry(temp, [
+      { workspaceId: hostWorkspaceId, rootPath: temp.rootPath },
+    ]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    // A pasted code carries no access, so the dialog defaults to adding
+    // the share to this workspace, as it does for View.
+    await page.getByTestId("workspace-switcher").click();
+    await page.getByTestId("workspace-switcher-open-share").click();
+    await expect(page.getByTestId("open-share-mode-mount")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await page.getByTestId("open-share-code").fill(shareCode);
+    await page.getByTestId("open-share-start").click();
+    // The message arrives as a toast, not a bar across the workbench, and
+    // says where Edit works.
+    await expect(page.getByTestId("workspace-shell-notice")).toContainText(
+      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, open the share again and choose Open separately.",
+    );
+    await expect(page.getByTestId("shell-notice")).toHaveCount(0);
+    await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
+
+    // Read-only is true: the file does not open for editing, and main refuses
+    // both a write and a send from the host workspace.
+    await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
+    await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+    await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    const refused = await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText" | "submitShareChanges"
+        >;
+      }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const relativePath = "shared-with-me/e2e-granter/docs/brief.md";
+      const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+      let write = "written";
+      try {
+        const read = await api.readWorkspaceText({ workspaceId, relativePath });
+        if (read.truncated) throw new Error("the mounted file read back truncated");
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath,
+          text: "# Brief\n\nEdited in the mount.\n",
+          expectedContentHash: read.contentHash,
+        });
+      } catch (error) {
+        write = message(error);
+      }
+      let submit = "submitted";
+      try {
+        await api.submitShareChanges({ workspaceId });
+      } catch (error) {
+        submit = message(error);
+      }
+      return { write, submit };
+    });
+    expect(refused.write).toContain("reserved");
+    expect(refused.submit).toContain("This workspace is not a shared view.");
+
+    // The instruction works: the same share, opened separately, offers
+    // Send changes.
+    await page.getByTestId("workspace-switcher").click();
+    await page.getByTestId("workspace-switcher-open-share").click();
+    await page.getByTestId("open-share-mode-separate").click();
+    await page.getByTestId("open-share-code").fill(shareCode);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("shared-view-banner")).toContainText(
+      "Markdown edits save to the live host.",
+    );
+    await expect(page.getByTestId("share-changes-send")).toBeVisible();
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

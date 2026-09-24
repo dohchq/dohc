@@ -56,7 +56,13 @@ beforeEach(() => {
   );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
   bridgeMock.mountShare.mockResolvedValue({
-    workspace: { ...SHARED_VIEW, shareView: undefined },
+    workspace: {
+      ...SHARED_VIEW,
+      shareView: undefined,
+      shareMounts: [
+        { shareId: "share-1", label: "granter", granterEmail: "granter@dohc.test", access: "edit" },
+      ],
+    },
     mount: { shareId: "share-1", label: "granter", status: "updated", changedPaths: 3 },
   });
 });
@@ -262,7 +268,7 @@ describe("OpenSharedView", () => {
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onOpened).toHaveBeenCalledOnce();
-    expect(onMounted).toHaveBeenCalledWith("granter");
+    expect(onMounted).toHaveBeenCalledWith("granter", "edit");
   });
 
   it("opens the pasted share code into a read-only view and hands over the workspace", async () => {
@@ -320,7 +326,7 @@ describe("OpenSharedView", () => {
         shareCode: "dohc-share:share-1:http://localhost:1788",
       }),
     );
-    await waitFor(() => expect(onMounted).toHaveBeenCalledWith("granter"));
+    await waitFor(() => expect(onMounted).toHaveBeenCalledWith("granter", "edit"));
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
