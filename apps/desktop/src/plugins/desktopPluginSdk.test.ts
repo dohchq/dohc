@@ -14,7 +14,7 @@ import type { RegisteredPlugin } from "./pluginPanelRegistration";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
-import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { OwnedWorkspaceDatabaseReader } from "../workspaces/ownedWorkspaceFileReader";
 import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -298,7 +298,9 @@ describe("desktop plugin SDK runtime ownership", () => {
       expect(f.dependencies.collectionEditContextFor).not.toHaveBeenCalled();
       await f.invoke("collections.setFields", { path: "tasks/one.md", fields: { status: "done" }, author: { depth: 99 }, idempotencyKey: "forged" }, { automationClaimId: "claim" });
       await mkdir(join(f.workspace.rootPath, "tasks"));
-      await expect(f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" })).resolves.toEqual({ path: "tasks/new.md", recordId: derivedRecordId("claim/1") });
+      const created = await f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" });
+      expect(created).toEqual({ path: "tasks/new.md", recordId: expect.stringMatching(/^rec_[a-z2-7]{26}$/) });
+      await expect(readFile(join(f.workspace.rootPath, "tasks", "new.md"), "utf8")).resolves.toBe(`---\nid: ${(created as { recordId: string }).recordId}\n---\n`);
       expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin/triage",
         attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}` })));
       expect(f.documents.map(doc => doc.getMap("frontmatter").toJSON())).toEqual([{ status: "done" }, { title: "Created" }]);

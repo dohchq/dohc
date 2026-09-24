@@ -6,7 +6,6 @@ import {
   sdkWorkspacePath,
   type WorkspaceSdkHostContext,
 } from "../workspaces/workspaceSdkHost";
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
 import { isPluginChildProcessMethod } from "./pluginChildProcessBroker";
 import {
   hasControlCharacter,
@@ -35,9 +34,6 @@ export interface PluginAutomationRunAuthority {
    * Writes this run has issued so far. Each write's idempotency key is the
    * claim id, the attempt, and this ordinal, so a handler that writes twice
    * does not reuse a key, and a re-run never reuses an earlier attempt's.
-   * A record the run creates takes an id derived from the claim id and this
-   * ordinal, so a re-run that replays the same sequence finds the record
-   * an earlier attempt created instead of adding another.
    */
   writes: number;
 }
@@ -279,7 +275,8 @@ export async function invokePluginSdkHost(
     // write made inside an automation run takes the run's own authority: the
     // automation as author on behalf of the owner, at the chain depth main
     // derived from the claim, keyed by the claim id, attempt, and write
-    // ordinal, and creating the record the claim id and ordinal name.
+    // ordinal. A plugin handler has no stable step identity, so its creates
+    // take new random record ids.
     case "collections.setFields":
     case "collections.createRecord": {
       const run = context.automationRun;
@@ -288,21 +285,18 @@ export async function invokePluginSdkHost(
           "This write's automation run is no longer active, so it was not applied.",
         );
       }
-      let writeContext = hostContext;
-      if (run) {
-        const ordinal = run.writes++;
-        writeContext = {
-          ...hostContext,
-          author: {
-            kind: "automation",
-            automationId: run.automationId,
-            onBehalfOf: run.onBehalfOf,
-            depth: run.depth,
-          },
-          collectionWriteIdempotencyKey: `${run.claimId}/${run.attempt}/${ordinal}`,
-          collectionRecordId: derivedRecordId(`${run.claimId}/${ordinal}`),
-        };
-      }
+      const writeContext: WorkspaceSdkHostContext = run
+        ? {
+            ...hostContext,
+            author: {
+              kind: "automation",
+              automationId: run.automationId,
+              onBehalfOf: run.onBehalfOf,
+              depth: run.depth,
+            },
+            collectionWriteIdempotencyKey: `${run.claimId}/${run.attempt}/${run.writes++}`,
+          }
+        : hostContext;
       return waitForOperation(
         context.signal,
         invokeWorkspaceSdkHost(writeContext, method, params),

@@ -181,8 +181,20 @@ function fakeEngine() {
       records.set(recordId, path);
       return recordId;
     },
+    /**
+     * Adopts the file at `path` under a new id, as the engine does when the
+     * file's own id belongs to another record now or in history, and writes
+     * that id back into the file.
+     */
+    async adoptUnderNewId(root: string, path: string, recordId: string) {
+      await writeFile(join(root, path), `---\nid: ${recordId}\n---\n`);
+      records.set(recordId, path);
+    },
   };
 }
+
+const ADOPTION_TIMEOUT_MESSAGE =
+  "The record file was created at tasks/two.md, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -296,6 +308,92 @@ describe("setCollectionRecordFields", () => {
         idempotencyKey: "claim-7/1/0",
       }),
     ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    expect(log.order).toEqual(["close"]);
+  });
+
+  it("compares a nested shared value by its JSON and returns that JSON as the replaced value", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const frontmatter = log.doc.getMap("frontmatter");
+    const tags = new Y.Array<string>();
+    tags.push(["a", "b"]);
+    frontmatter.set("tags", tags);
+    const owner = new Y.Map<string>();
+    owner.set("name", "Ana");
+    frontmatter.set("owner", owner);
+    const context = contextFor(root, session);
+
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { tags: ["a", "b"], owner: { name: "Ana" } },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {} });
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { tags: ["a"], owner: { name: "Ana" } },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { tags: ["a", "b"] } });
+    expect(log.order).toEqual(["close", "apply", "settle", "close"]);
+  });
+
+  it("treats a requested null on a field the record lacks as no change", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    log.doc.getMap("frontmatter").set("status", "open");
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { due: null, status: null },
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: { status: "open" } });
+    expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: null });
+  });
+
+  it("keeps a field named __proto__ in the replaced values", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    log.doc.getMap("frontmatter").set("__proto__", "old");
+    const fields = JSON.parse('{"__proto__": "new"}') as Record<string, unknown>;
+
+    const result = await setCollectionRecordFields(contextFor(root, session), {
+      recordPath: "tasks/one.md",
+      fields,
+      author: AGENT,
+    });
+
+    expect(Object.keys(result.replaced)).toEqual(["__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(result.replaced, "__proto__")?.value).toBe("old");
+    expect(log.doc.getMap("frontmatter").get("__proto__")).toBe("new");
+  });
+
+  it("writes nothing when its caller ends while the session opens", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const controller = new AbortController();
+    const context = contextFor(root, session, {
+      signal: controller.signal,
+      capture: {
+        async openYDocSession() {
+          // An automation run's deadline passes while the engine opens it.
+          controller.abort();
+          return session;
+        },
+      },
+    });
+
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: "tasks/one.md",
+        fields: { status: "done" },
+        author: AUTOMATION,
+      }),
+    ).rejects.toThrow(/no longer active/);
     expect(log.order).toEqual(["close"]);
   });
 
@@ -416,7 +514,7 @@ describe("setCollectionRecordFields", () => {
 });
 
 describe("createCollectionRecord", () => {
-  it("writes the file with a new record id, finishes on the engine's announcement without a timer, and seeds fields", async () => {
+  it("writes the file with a new record id, finishes on the engine's announcement without polling, and seeds fields", async () => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
@@ -432,10 +530,11 @@ describe("createCollectionRecord", () => {
       },
     );
 
-    await engine.listening();
-    // One lookup when the wait starts, and nothing scheduled to look again.
-    expect(engine.lookups).toHaveLength(1);
-    expect(vi.getTimerCount()).toBe(0);
+    // One lookup when the wait starts. The only timer is the adoption
+    // ceiling, and time short of it looks nothing up again.
+    await engine.lookupsReached(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(14_999);
     engine.announce(["tasks/other.md"]);
     expect(engine.lookups).toHaveLength(1);
 
@@ -508,6 +607,60 @@ describe("createCollectionRecord", () => {
     );
   });
 
+  it("returns the id the engine adopted the file under when it could not keep the requested one", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const requested = derivedRecordId("claim-7/0");
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        recordId: requested,
+      },
+    );
+    await engine.listening();
+    // The requested id belonged to a record someone deleted, so the engine
+    // adopts the file under a new id and writes that id into it.
+    const adopted = derivedRecordId("minted by the engine");
+    await engine.adoptUnderNewId(root, "tasks/two.md", adopted);
+    engine.announce(["tasks/two.md"]);
+
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId: adopted });
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  });
+
+  it("continues with an earlier attempt's file that the engine has not adopted yet", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const recordId = derivedRecordId("claim-7/0");
+    // The earlier attempt wrote the file and stopped before adoption.
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AUTOMATION,
+        recordId,
+      },
+    );
+    await engine.listening();
+    await engine.adopt(root, "tasks/two.md");
+    engine.announce(["tasks/two.md"]);
+
+    await expect(created).resolves.toEqual({ path: "tasks/two.md", recordId });
+    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  });
+
   it("refuses a taken name and never writes into the other record", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
@@ -540,32 +693,64 @@ describe("createCollectionRecord", () => {
     expect(engine.listeners.size).toBe(0);
   });
 
-  it("stops waiting when the caller's signal aborts, naming the file and the engine's last refusal", async () => {
+  it("stops waiting when the caller's signal aborts and never seeds a record adopted after that", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const engine = fakeEngine();
     const controller = new AbortController();
     engine.refuseLookups(new Error("collection reloading"));
+    const context = contextFor(root, session, {
+      ...engine.overrides,
+      signal: controller.signal,
+    });
 
-    const created = createCollectionRecord(
-      contextFor(root, session, { ...engine.overrides, signal: controller.signal }),
-      { collectionPath: "tasks", name: "two", author: AGENT },
-    );
+    const created = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "open" },
+      author: AUTOMATION,
+    });
+    // A second lookup starts only after the seam has taken the first refusal.
     await engine.listening();
-    // The seam asks again only after it has taken the first refusal.
     engine.announce(["tasks/two.md"]);
     await engine.lookupsReached(2);
     controller.abort();
-
     const error = await created.then(
       () => null,
       (reason: unknown) => reason,
     );
+
+    // The engine adopts the file only after the run's deadline.
+    engine.refuseLookups(null);
+    await engine.adopt(root, "tasks/two.md");
+    engine.announce(["tasks/two.md"]);
+
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(
-      "The record file was created at tasks/two.md, but the engine did not adopt it as a collection record before this request ended. Look for it in the Collection before you create it again.",
-    );
+    expect((error as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
     expect(((error as Error).cause as Error).message).toBe("collection reloading");
+    expect(engine.listeners.size).toBe(0);
+    expect(engine.lookups).toHaveLength(2);
+    expect(context.openedPaths).toEqual([]);
+  });
+
+  it("stops waiting at the adoption ceiling when the caller's signal allows longer", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-collection-edits-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+
+    const created = createCollectionRecord(
+      contextFor(root, session, engine.overrides),
+      { collectionPath: "tasks", name: "two", author: AGENT },
+    );
+    const outcome = created.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    await engine.lookupsReached(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(((await outcome) as Error).message).toBe(ADOPTION_TIMEOUT_MESSAGE);
     expect(engine.listeners.size).toBe(0);
   });
 

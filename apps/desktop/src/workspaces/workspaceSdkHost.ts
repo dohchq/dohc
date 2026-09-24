@@ -83,9 +83,6 @@ export interface WorkspaceSdkHostContext {
   // ordinal, host-derived like the author); every other write lets the
   // session generate one per update.
   collectionWriteIdempotencyKey?: string;
-  // The record id a collection create in an automation run takes, derived
-  // from the run's claim; every other create gets a new random id.
-  collectionRecordId?: string;
 }
 
 export interface WorkspaceSdkCollectionEditPort {
@@ -102,7 +99,6 @@ export interface WorkspaceSdkCollectionEditPort {
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
     idempotencyKey?: string;
-    recordId?: string;
     signal?: AbortSignal;
   }): Promise<{ path: string; recordId: string }>;
 }
@@ -623,9 +619,6 @@ export async function invokeWorkspaceSdkHost(
         ...(context.collectionWriteIdempotencyKey === undefined
           ? {}
           : { idempotencyKey: context.collectionWriteIdempotencyKey }),
-        ...(context.collectionRecordId === undefined
-          ? {}
-          : { recordId: context.collectionRecordId }),
         ...(context.signal ? { signal: context.signal } : {}),
       });
     }

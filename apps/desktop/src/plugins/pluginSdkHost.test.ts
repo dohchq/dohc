@@ -14,7 +14,6 @@ import {
 } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 
-import { derivedRecordId } from "../workspaces/collectionRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
 interface AuthoredWrite {
   path: string;
@@ -476,16 +475,15 @@ describe("invokePluginSdkHost", () => {
         author: automationAuthor,
         idempotencyKey: "claim-7/2/0",
       }),
-      // The record id names the claim's second write in every attempt, so
-      // a re-run finds the record an earlier attempt created.
       expect.objectContaining({
         collectionPath: "tasks",
         author: automationAuthor,
         idempotencyKey: "claim-7/2/1",
-        recordId: derivedRecordId("claim-7/1"),
       }),
     ]);
-    expect(calls[0]).not.toHaveProperty("recordId");
+    // A plugin handler has no stable step identity, so its create does not
+    // name a record id.
+    expect(calls[1]).not.toHaveProperty("recordId");
 
     // A read in the same run context stays a read: no author override applies.
     await expect(
