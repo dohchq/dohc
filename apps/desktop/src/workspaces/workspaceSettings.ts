@@ -8,6 +8,7 @@ import {
   WORKSPACE_PREVIEW_MODES,
   WORKSPACE_SETTINGS_DEFAULTS,
 } from "@dohc/workspace-contracts/workspace-settings-values";
+import { IgnoredSettings } from "../settings/settingsFile";
 import {
   SETTINGS_READ_SOURCES,
   settingsDeepEqual,
@@ -62,6 +63,7 @@ export const WorkspaceSettingsResult = z.object({
   // Set when a save was refused because the file on disk cannot be read.
   // Same bound as the warning, and for the same reason: it names the path.
   refusal: z.string().min(1).max(4600).optional(),
+  ignored: IgnoredSettings.optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 

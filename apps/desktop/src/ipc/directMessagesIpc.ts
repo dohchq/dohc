@@ -24,6 +24,7 @@ import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sha
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChannelSync";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 
@@ -83,7 +84,9 @@ export function registerDirectMessagesIpcHandlers<
   listWorkspaces(): RegistryEntry[];
   stateDir(): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
-  syncRendererSharedChannelsForChatTarget(operation: Operation, target?: ChatRelayIdentityTarget): Promise<unknown>;
+  syncRendererSharedChannelsForChatTarget(
+    operation: Operation, target?: ChatRelayIdentityTarget,
+  ): Promise<SharedChannelPassOutcome>;
   assertShareNotHeldElsewhere(shareId: string, workspaceId: string, channelWireId?: string): void;
   reserveAndPullSharedChannelForWorkspace(input: {
     operation: Operation; assertCurrent?: () => void; relay: SyncRelayConnection;
@@ -93,7 +96,10 @@ export function registerDirectMessagesIpcHandlers<
   endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
-  activity: { queueCloudSync(workspaceId: string): void };
+  activity: {
+    queueCloudSync(workspaceId: string): void;
+    queueCloudPull(workspaceId: string): void;
+  };
   chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
 }) {
   const {
@@ -169,6 +175,10 @@ export function registerDirectMessagesIpcHandlers<
             }
           : null;
         const store = linkedChatStoreFor(workspace);
+        // The request listing or the shared-channel pass failed as a whole.
+        // The renderer holds its polls on a failed result instead of trying
+        // again at once. One failing share does not count.
+        let failed = false;
         const { pending, declined } =
           await classifyDmRequestsWithFallback({
             workspaceId: workspace.workspaceId,
@@ -182,38 +192,43 @@ export function registerDirectMessagesIpcHandlers<
                 throw new Error("DM sync is unavailable: not signed in.");
               }
               assertCurrentDmSyncSession();
-              const listing = await relayShareJsonWithCredentials<{
-                received?: Array<{
-                  shareId?: unknown;
-                  granterEmail?: unknown;
-                  selector?: { kind?: unknown; channelWireId?: unknown };
-                }>;
-              }>(syncCredentials, "/sync/shares");
-              assertCurrentDmSyncSession();
-              // Re-derived on every call, not a snapshot taken once:
-              // classifyDmRequests calls this twice around its async peek.
-              return classifyDmRequests({
-                received: listing.received ?? [],
-                kindCache: peekedReceivedGrantKinds,
-                peekKind: async (shareId) => {
-                  assertCurrentDmSyncSession();
-                  const kind = await peekReceivedGrantKindForShare(
-                    relay,
-                    shareId,
-                  );
-                  assertCurrentDmSyncSession();
-                  return kind;
-                },
-                holdersByShareId: () => {
-                  assertCurrentDmSyncSession();
-                  return liveSharedChannelHoldersByShareId(listWorkspaces());
-                },
-                holdersByWireId: () => {
-                  assertCurrentDmSyncSession();
-                  return liveSharedChannelHoldersByWireId(listWorkspaces());
-                },
-                declinedShareIds: readDeclinedDms(dmRequestFile()),
-              });
+              try {
+                const listing = await relayShareJsonWithCredentials<{
+                  received?: Array<{
+                    shareId?: unknown;
+                    granterEmail?: unknown;
+                    selector?: { kind?: unknown; channelWireId?: unknown };
+                  }>;
+                }>(syncCredentials, "/sync/shares");
+                assertCurrentDmSyncSession();
+                // Re-derived on every call, not a snapshot taken once:
+                // classifyDmRequests calls this twice around its async peek.
+                return await classifyDmRequests({
+                  received: listing.received ?? [],
+                  kindCache: peekedReceivedGrantKinds,
+                  peekKind: async (shareId) => {
+                    assertCurrentDmSyncSession();
+                    const kind = await peekReceivedGrantKindForShare(
+                      relay,
+                      shareId,
+                    );
+                    assertCurrentDmSyncSession();
+                    return kind;
+                  },
+                  holdersByShareId: () => {
+                    assertCurrentDmSyncSession();
+                    return liveSharedChannelHoldersByShareId(listWorkspaces());
+                  },
+                  holdersByWireId: () => {
+                    assertCurrentDmSyncSession();
+                    return liveSharedChannelHoldersByWireId(listWorkspaces());
+                  },
+                  declinedShareIds: readDeclinedDms(dmRequestFile()),
+                });
+              } catch (error) {
+                failed = true;
+                throw error;
+              }
             },
           });
         assertCurrentDmSyncSession();
@@ -221,20 +236,34 @@ export function registerDirectMessagesIpcHandlers<
           try {
             // Push the member's local ops, pull everyone else's, for the joined
             // DMs (and other shared channels) this bounded pass reaches.
-            await syncRendererSharedChannelsForChatTarget(
+            const outcome = await syncRendererSharedChannelsForChatTarget(
               operation,
               input.openChannelId
                 ? { channelId: input.openChannelId }
                 : undefined,
             );
             assertCurrentDmSyncSession();
-            // The cloud engine owns its work after this request queues it. Do
-            // not extend the renderer operation into that durable process.
-            activity.queueCloudSync(workspace.workspaceId);
+            if (outcome.failed) failed = true;
+            // Only a pass that applied ops gives the cloud engine follow-up
+            // work: the queued pass scans the pulled messages for agents to
+            // call. Queueing after an idle pass would emit a change event,
+            // refresh Chats, and run this handler again. The renderer's own
+            // polls also ask for a pull, which fetches members' replies to
+            // the DMs and Groups this workspace owns without recording a
+            // change. A poll asks even after a changed pass: each write
+            // restarts the sync's debounce, and only the pull keeps its own
+            // deadline. That log does not depend on the listing or the joined
+            // rows, so their failures do not skip it; the engine backs off
+            // on its own failures. The cloud engine owns its work after this
+            // request queues it. Do not extend the renderer operation into
+            // that durable process.
+            if (outcome.changed) activity.queueCloudSync(workspace.workspaceId);
+            if (input.poll) activity.queueCloudPull(workspace.workspaceId);
           } catch (error) {
             assertCurrentDmSyncSession();
             // Offline degradation: the local DM list still serves and the next
             // pass retries.
+            failed = true;
             console.error(
               `[desktop] DM sync failed for ${workspace.rootPath}:`,
               error,
@@ -270,6 +299,7 @@ export function registerDirectMessagesIpcHandlers<
           }).map(dmRecordForIpc),
           pending,
           declined,
+          failed,
         });
       },
     );

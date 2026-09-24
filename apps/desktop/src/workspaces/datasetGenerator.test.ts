@@ -37,7 +37,9 @@ async function runtime(definition = fixture()) {
   };
 }
 
-describe("initial dataset source", { timeout: 30_000 }, () => {
+// Each test drives a real app runtime through dozens of worker calls; a loaded
+// gate host stretched one past 30 s while it passes alone in a few seconds.
+describe("initial dataset source", { timeout: 60_000 }, () => {
   it("keeps field identity through display renames and requires authored actions", () => {
     const definition = fixture(), first = generateDatasetSources(definition);
     expect(first.definition.operations.find(operation => operation.kind === "edit")!.reversible).toBe(true);

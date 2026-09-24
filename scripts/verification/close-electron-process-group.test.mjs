@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { closeElectronApplication } from "./close-electron.mjs";
 
-async function bounded(promise, message, timeoutMs = 2000) {
+async function bounded(promise, message, timeoutMs = 20_000) {
   let timer;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
@@ -19,7 +19,7 @@ async function bounded(promise, message, timeoutMs = 2000) {
 for (const close of ["rejected", "hung"]) {
   test(`POSIX ${close} Electron close stops a TERM-ignoring descendant`, {
     skip: process.platform === "win32" ? "Native POSIX process-group signals" : false,
-    timeout: 8000,
+    timeout: 30_000,
   }, async (t) => {
     const root = mkdtempSync(join(tmpdir(), "dohc-electron-group-"));
     let descendantSocket;

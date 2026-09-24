@@ -156,8 +156,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
   mkdirSync(workspace); mkdirSync(ownerRoot);
   mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({connectionString, connectionTimeoutMillis: 5000});
-  const pool = new Pool({connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000});
+  // The full gate once timed out a 2 s connect to a healthy Postgres (#1217).
+  const admin = new Client({connectionString, connectionTimeoutMillis: 30_000});
+  const pool = new Pool({connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 30_000});
   let schemaCreated = false, active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
   let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
   let enrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;

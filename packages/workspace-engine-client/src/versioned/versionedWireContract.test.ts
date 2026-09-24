@@ -2,6 +2,33 @@ import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
 import { decodeVersionedResult, VERSIONED_METHOD } from "./versionedWireContract";
 
+const validMoment = {
+  momentOrder: 1,
+  momentId: "m1",
+  versionId: "main",
+  objectId: "o",
+  path: "a.md",
+  recordedAtMs: 1,
+  operation: "write",
+  afterContentKind: "text",
+  afterBlobSha256: "b",
+  afterBinarySha256: null,
+  beforePresent: false,
+  beforeContentKind: "text",
+  beforeBlobSha256: null,
+  beforeBinarySha256: null,
+  beforeLatestMomentId: null,
+  metadataOrigin: "api",
+  author: null,
+  syncRecordOnly: false,
+  afterText: "a",
+  afterByteLength: 1,
+  afterInbandLimitBytes: null,
+  beforeText: null,
+  beforeByteLength: null,
+  beforeInbandLimitBytes: null,
+};
+
 describe("versioned result decoder rejection", () => {
   it("reports the wrong-typed nested write field path", () => {
     // The snapshot and moment stubs are complete so validation reaches the
@@ -19,32 +46,6 @@ describe("versioned result decoder rejection", () => {
       metadataOrigin: "api",
       text: "a",
       blobSha256: "b",
-    };
-    const validMoment = {
-      momentOrder: 1,
-      momentId: "m1",
-      versionId: "main",
-      objectId: "o",
-      path: "a.md",
-      recordedAtMs: 1,
-      operation: "write",
-      afterContentKind: "text",
-      afterBlobSha256: "b",
-      afterBinarySha256: null,
-      beforePresent: false,
-      beforeContentKind: "text",
-      beforeBlobSha256: null,
-      beforeBinarySha256: null,
-      beforeLatestMomentId: null,
-      metadataOrigin: "api",
-      author: null,
-      syncRecordOnly: false,
-      afterText: "a",
-      afterByteLength: 1,
-      afterInbandLimitBytes: null,
-      beforeText: null,
-      beforeByteLength: null,
-      beforeInbandLimitBytes: null,
     };
     expect(() =>
       decodeVersionedResult(VERSIONED_METHOD.textWrite, {
@@ -105,6 +106,20 @@ describe("versioned result decoder rejection", () => {
         nextCursor: null,
       }),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("accepts a named author only with its user, grant, and integer generation", () => {
+    const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 };
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author })?.author).toEqual(author);
+    for (const malformed of [
+      { kind: "named", userId: "ana", grantId: "grant" },
+      { ...author, grantGeneration: 1.5 },
+      { ...author, email: "ana@example.com" },
+    ]) {
+      expect(() =>
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, author: malformed }),
+      ).toThrow(ProtocolShapeError);
+    }
   });
 
   it("strips accepted over-cap metadata from in-band blob results", () => {

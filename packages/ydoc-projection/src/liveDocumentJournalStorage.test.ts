@@ -414,7 +414,7 @@ it('retries an actual SQLite writer lock before insertion without changing the c
     } finally { f.raw.exec('ROLLBACK') }
     expect(f.storage.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
   } finally { f.close() }
-}, 15_000)
+})
 
 it('checkpoints exactly the 4095th real no-op delivery and starts a fresh suffix', () => {
   const f = registered()

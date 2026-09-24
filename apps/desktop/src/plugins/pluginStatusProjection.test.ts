@@ -38,7 +38,6 @@ function candidate(label = "Candidate"): InstalledPluginRecord {
     iconPath: "candidate.svg",
     diagnostics: [],
     valid: true,
-    supersededPluginId: null,
   };
 }
 
