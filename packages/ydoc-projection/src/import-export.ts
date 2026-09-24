@@ -9,6 +9,7 @@ import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 
 import { StarterKit } from '@tiptap/starter-kit'
 import {
   escapeTableCellPipes,
+  preprocessTablePipes,
   renderTableToMarkdown,
   Table,
   TableCell,
@@ -229,13 +230,13 @@ function tableStart(src: string): number {
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
 
-// Finds the table under an annotation with marked's table rule and nothing
+// Finds the table at the start of `rest` with marked's table rule and nothing
 // else. Lexing the rest of the document would re-enter this tokenizer for
-// every later annotation, and even a plain lexer would parse every block
-// after the table, so a run of annotations would cost quadratic time. GFM
-// rows are one line each, which Tiptap's raw reconstruction gets wrong when
-// a cell holds a pipe inside inline code.
-function tableUnderAnnotation(rest: string): Tokens.Table | undefined {
+// every later table, and even a plain lexer would parse every block after
+// the table, so a run of tables would cost quadratic time. GFM rows are one
+// line each, which Tiptap's raw reconstruction gets wrong when a cell holds a
+// pipe inside inline code.
+function leadingTable(rest: string): Tokens.Table | undefined {
   const tokenizer = new Tokenizer()
   // The lexer gives the tokenizer its GFM rules and the inline queue the
   // table rule fills.
@@ -252,33 +253,73 @@ function tableUnderAnnotation(rest: string): Tokens.Table | undefined {
   return tokenizer.table(escaped + rest.slice(header.length))
 }
 
+// A table row's cells as marked splits them: at each unescaped pipe, without
+// the empty cells outside a leading or trailing pipe.
+function tableRowCells(row: string): string[] {
+  const cells: string[] = []
+  let start = 0
+  let backslashes = 0
+  for (let index = 0; index < row.length; index += 1) {
+    if (row[index] === '|' && backslashes % 2 === 0) {
+      cells.push(row.slice(start, index))
+      start = index + 1
+    }
+    backslashes = row[index] === '\\' ? backslashes + 1 : 0
+  }
+  cells.push(row.slice(start))
+  if (!cells[0]?.trim()) cells.shift()
+  if (cells.length > 0 && !cells.at(-1)?.trim()) cells.pop()
+  return cells
+}
+
+// The lines of the table at the start of `rest`, joined. marked drops the
+// cells of a row past its header's count, so a row whose extra cells hold
+// text ends the table instead, and that text stays in the document.
+// Otherwise a file, or a preserved source, could hold text its document
+// lacks.
+function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
+  const table = leadingTable(rest)
+  if (!table) return undefined
+  // The header, the delimiter, and each row take one line.
+  const lines = rest.split('\n', 2 + table.rows.length)
+  for (let row = 2; row < lines.length; row += 1) {
+    const extra = tableRowCells(preprocessTablePipes(lines[row])).slice(table.header.length)
+    if (extra.some(cell => cell.trim())) return { text: lines.slice(0, row).join('\n'), cut: true }
+  }
+  return { text: lines.join('\n'), cut: false }
+}
+
+// Only a line after the first that could be a delimiter row can start a
+// table, so ordinary blocks skip the table probe.
+const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
+function secondLine(src: string): string {
+  const first = src.indexOf('\n')
+  if (first < 0) return ''
+  const second = src.indexOf('\n', first + 1)
+  return src.slice(first + 1, second < 0 ? undefined : second)
+}
+
 export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
     start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
     tokenize: (src, tokens, helpers) => {
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
-      if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
-      // The annotation belongs to the table that starts right after it. With
+      const prefix = annotation?.[0] ?? ''
+      const rest = src.slice(prefix.length)
+      const extent = annotation || TABLE_DELIMITER_RE.test(secondLine(rest))
+        ? leadingTableText(rest)
+        : undefined
+      if (!annotation && !extent?.cut) return tableTokenizer.tokenize(src, tokens, helpers)
+      // An annotation belongs to the table that starts right after it. With
       // no table there it stays an ordinary HTML comment for marked.
-      const rest = src.slice(annotation[0].length)
-      const extent = tableUnderAnnotation(rest)
       if (!extent) return undefined
-      // The header, the delimiter, and each row take one line.
-      let end = rest.length
-      for (let line = 2 + extent.rows.length, cursor = 0; line > 0; line -= 1) {
-        const newline = rest.indexOf('\n', cursor)
-        if (newline < 0) break
-        if (line === 1) end = newline
-        cursor = newline + 1
-      }
-      const text = rest.slice(0, end)
-      const table = helpers.blockTokens(text)[0]
+      const table = helpers.blockTokens(extent.text)[0]
       if (table?.type !== 'table') return undefined
       // The newline after the last row belongs to the table, as in marked.
-      const raw = annotation[0] + text + (end < rest.length ? '\n' : '')
+      const raw = prefix + extent.text + (extent.text.length < rest.length ? '\n' : '')
       const rowHeights: [number, number][] = []
-      for (const pair of annotation[1].split(',')) {
+      for (const pair of annotation?.[1].split(',') ?? []) {
         const [index, height] = pair.split(':').map(Number)
         if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
           rowHeights.push([index, height])
