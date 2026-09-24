@@ -45,6 +45,8 @@ export function parseOptions(argv) {
   for (const [key, scenario] of [['soak-minutes', 'soak'], ['chat-messages', 'chat-history'], ['records', 'collection']]) {
     if (args.has(key) && options.scenario !== scenario) throw Error(`--${key} requires --scenario ${scenario}`);
   }
+  // go-to types fixture-004242 and search submits "fixture 4242."; both need that fixture file to exist.
+  if (['go-to', 'search'].includes(options.scenario) && options.fixtureFiles < 4243) throw Error(`--scenario ${options.scenario} needs --files of at least 4243 so fixture-004242 exists`);
   if (options.profileMain && (options.scenario !== 'startup' || /\s/.test(options.output))) throw Error('--profile-main requires --scenario startup and an output path without whitespace');
   if (options.profileRenderer && !SWITCHING_SCENARIOS.includes(options.scenario)) throw Error('--profile-renderer requires a scenario with workspace switches');
   return options;

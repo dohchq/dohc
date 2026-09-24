@@ -72,7 +72,7 @@ export async function summarize(data, readLog = async () => '') {
 // receipt of the trusted keydown or mousedown and end two animation frames after the DOM predicate.
 function surfaceSummaries(runs) {
   const of = key => runs.flatMap(run => run[key] ? [run[key]] : []);
-  const unique = values => [...new Set(values)];
+  const unique = values => [...new Set(values.filter(value => value !== undefined))];
   const trend = values => {
     const finite = values.filter(Number.isFinite);
     return finite.length ? { first: finite[0], last: finite.at(-1), max: Math.max(...finite), delta: finite.at(-1) - finite[0] } : null;
@@ -81,31 +81,33 @@ function surfaceSummaries(runs) {
   return {
     goTo: goTo.length ? {
       query: unique(goTo.map(g => g.query)),
-      coldOpenToEditableInputMs: stats(goTo.map(g => g.cold.keydownToPaintedMs)),
-      warmOpenToEditableInputMs: stats(goTo.map(g => g.warm.keydownToPaintedMs)),
+      coldOpenToEditableInputPaintedMs: stats(goTo.map(g => g.cold.keydownToPaintedMs)),
+      warmOpenToEditableInputPaintedMs: stats(goTo.map(g => g.warm.keydownToPaintedMs)),
       keystrokeToResultsPaintedMs: stats(goTo.flatMap(g => g.keystrokes.map(k => k.keydownToPaintedMs))),
       lastKeystrokeToResultsPaintedMs: stats(goTo.map(g => g.keystrokes.at(-1)?.keydownToPaintedMs)),
-      finalOptionCounts: unique(goTo.map(g => g.keystrokes.at(-1)?.optionCount)),
+      finalOptionCounts: unique(goTo.map(g => g.keystrokes.at(-1)?.optionCount)), finalFirstOptions: unique(goTo.map(g => g.firstOption)),
+      entranceAnimating: unique(goTo.flatMap(g => [g.cold.observed?.entranceAnimating, g.warm.observed?.entranceAnimating])),
     } : null,
     commandPalette: palette.length ? {
-      coldOpenToFirstRowMs: stats(palette.map(p => p.cold.keydownToPaintedMs)),
-      warmOpenToFirstRowMs: stats(palette.map(p => p.warm.keydownToPaintedMs)),
+      coldOpenToFirstRowPaintedMs: stats(palette.map(p => p.cold.keydownToPaintedMs)),
+      warmOpenToFirstRowPaintedMs: stats(palette.map(p => p.warm.keydownToPaintedMs)),
       optionCounts: unique(palette.map(p => p.cold.optionCount)),
+      entranceAnimating: unique(palette.flatMap(p => [p.cold.observed?.entranceAnimating, p.warm.observed?.entranceAnimating])),
     } : null,
     search: searches.length ? Object.fromEntries(unique(searches.map(s => s.query)).map(query => {
       const rows = searches.filter(s => s.query === query);
       return [query, {
-        openToInputFocusedMs: stats(rows.map(s => s.open?.clickToPaintedMs)),
-        submitToFirstResultMs: stats(rows.map(s => s.submitToFirstResultMs)),
-        submitToSettledMs: stats(rows.map(s => s.submitToSettledMs)),
-        debounceFiredBeforeSubmitCount: rows.filter(s => s.debounceFiredBeforeSubmit).length,
+        openToInputPaintedMs: stats(rows.map(s => s.open?.clickToPaintedMs)),
+        submitToFirstResultPaintedMs: stats(rows.map(s => s.submitToFirstResultMs)),
+        submitToSettledPaintedMs: stats(rows.map(s => s.submitToSettledMs)),
+        debounceFiredBeforeSubmitCount: rows.filter(s => s.debounceFiredBeforeSubmit).length, sawUpdatingCount: rows.filter(s => s.sawUpdating).length,
         summaries: unique(rows.map(s => s.summary)), limitHit: unique(rows.map(s => s.limitHit)), rowsRendered: unique(rows.map(s => s.rowsRendered)),
       }];
     })) : null,
     chatHistory: chats.length ? {
       messages: unique(chats.map(c => c.seed.messages)),
       seedingObservedMs: stats(chats.map(c => c.seed.seedingObservedMs)),
-      channelOpenToPostsPaintedMs: stats(chats.map(c => c.channelOpen.clickToPaintedMs)),
+      channelOpenToPostsPaintedMs: stats(chats.map(c => c.channelOpen.clickToPostsPaintedMs)),
       threadOpenToFirstCommentPaintedMs: stats(chats.map(c => c.threadOpen.clickToFirstCommentPaintedMs)),
       threadOpenToAllCommentsPaintedMs: stats(chats.map(c => c.threadOpen.clickToAllCommentsPaintedMs)),
       allCommentsUnobservedCount: chats.filter(c => !Number.isFinite(c.threadOpen.clickToAllCommentsPaintedMs)).length,

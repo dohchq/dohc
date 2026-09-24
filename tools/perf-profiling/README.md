@@ -29,19 +29,24 @@ The default workload uses three fresh/restart cycles, 100-paragraph rich editing
 `--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
 Fixture receipts contain file counts and content/name digests. Other scenarios are `startup`, `small-switch`, and `small-tab`.
 
-The palette, search, chat, Collection, and soak scenarios launch once per run. Each timing starts when the renderer
-receives the trusted keydown or mousedown and ends two animation frames after the DOM predicate holds. The harness
-wall time sits beside it in the receipt.
+The palette, search, Collection, and soak scenarios launch once per run. `chat-history` launches twice: once to seed,
+then a restart to measure. Each palette, search, chat, and Collection timing starts when the renderer receives the
+trusted keydown or mousedown and ends two animation frames after the DOM predicate holds. The observer checks the
+predicate on every animation frame, so a change without a DOM mutation is seen within one frame. Visible means the
+first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame, and
+`entranceAnimating` records whether it was still running. The harness wall time sits beside each timing in the receipt.
 
-- `--files 5000 --scenario go-to`: Ctrl+P to a focused Go to input, then `fixture-004242` one keystroke at a time to re-ranked results, then a warm reopen.
+- `--files 5000 --scenario go-to`: Ctrl+P to a focused Go to input, then `fixture-004242` one keystroke at a time until the input echoes the prefix and the first ranked row contains it in order, then a warm reopen. The last row must be `fixture-004242.txt`.
 - `--scenario command-palette`: Ctrl+Shift+P to the first command row, then a warm reopen.
 - `--files 5000 --scenario search`: the Search rail button to a focused input, then `fixture` and `fixture 4242.` submitted with Enter, each to its first result row and to the complete state.
-- `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and last comment rows.
+- `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows.
-- `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to, command palette, search, two switches) until the time is up and records working set and private bytes per process kind after each cycle.
+- `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to, command palette, search, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Its document-open and switch timings are the existing harness wall-clock observations.
 
+`go-to` and `search` reject `--files` below 4243, because their queries name `fixture-004242`.
 Search waits for the Explorer to list every fixture file before it submits. A sample whose search id changed before Enter is flagged `debounceFiredBeforeSubmit`.
-Chat seeding runs one CLI process per message. The thread comment list is not virtualized, so every reply renders.
+With an engine capture, search queries the engine index and returns at most 50 results in one batch, so `limitHit` false does not mean the results are complete. `sawUpdating` records whether the view passed through updating, whose retry backoff lands in the settled time.
+Chat seeding runs two Node processes per message, the launcher and the CLI. A timeout or cancellation stops that tree. The receipt hashes `packages/cli` bin, src, and package.json. The thread comment list is not virtualized, so every reply renders.
 The Collection table is virtualized and pages on demand: `rowsRendered` is the visible window and `loadedRecords` is the first page.
 Soak growth includes allocator and garbage-collector timing. It is not a leak proof.
 A chat lane with a long history has no seeding path outside the product UI or the engine daemon, so the benchmark does not measure it.

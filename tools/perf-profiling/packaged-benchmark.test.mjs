@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
-import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput, runOwnedProcess } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
@@ -204,63 +204,77 @@ test('startup observer propagates the editing refusal', async t => {
 });
 
 const paletteHtml = '<div data-testid="quick-open"><input aria-label="File"><ul role="listbox"><li role="option">a.md</li><li role="option">b.md</li></ul></div>';
-test('surface observer times a keydown-triggered palette to its focused input and two frames', async t => {
+test('surface observer sees a keydown-triggered palette on the next frame and paints two frames later', async t => {
   const p = fakePage(t, '<main></main>');
   const pending = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'p', target: '[data-testid="quick-open"] input', focused: '[data-testid="quick-open"] input', countSelector: '[role="option"]', timeoutMs: 1000 });
-  p.step();
+  p.frame();
   p.keydown(p.document.body, 'Control');
   p.document.body.insertAdjacentHTML('beforeend', paletteHtml);
   p.document.querySelector('input').focus();
-  await mutations(); p.step();
-  assert.equal(p.frames.size, 0, 'a surface present before the trigger is not a match');
+  await mutations(); p.frame();
+  assert.equal(p.frames.size, 1, 'only the frame loop is pending: a surface present before the trigger is not a match');
   p.keydown(p.document.body, 'p');
-  p.step();
-  assert.equal(p.frames.size, 1);
+  p.frame();
+  assert.equal(p.frames.size, 2, 'the frame loop matched without a mutation and started the two-frame wait');
   p.frame(); p.frame();
   const observed = await pending;
-  assert.equal(observed.triggerMs, 110);
+  assert.equal(observed.triggerMs, 42);
   assert.equal(observed.triggerTrusted, false);
-  assert.equal(observed.matchedMs, 160);
-  assert.equal(observed.paintedMs, 192);
-  assert.equal(observed.count, 2);
-  assert.equal(observed.matchedCount, 1);
+  assert.equal(observed.matchedMs, 58);
+  assert.equal(observed.paintedMs, 90);
+  assert.deepEqual([observed.count, observed.matchedCount, observed.firstText, observed.entranceAnimating, observed.fullTimedOut], [2, 1, 'a.md', false, false]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('surface observer waits for the typed value, a blurred input, and enough rows', async t => {
+test('surface observer waits for the typed value, a focused input, and an in-order first row', async t => {
   const p = fakePage(t, paletteHtml);
   const input = p.document.querySelector('input');
   input.focus();
-  const typed = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'x', target: 'input', value: 'x', focused: 'input', timeoutMs: 1000 });
+  const typed = p.run(observeSurface, { trigger: 'keydown', triggerKey: 'x', target: 'input', value: 'x', focused: 'input', firstTextMatches: 'AM', countSelector: '[role="option"]', timeoutMs: 1000 });
   p.keydown(input, 'x');
-  p.step();
-  assert.equal(p.frames.size, 0, 'the keystroke has not reached the input value yet');
+  p.frame();
+  assert.equal(p.frames.size, 1, 'the keystroke has not reached the input value yet');
   input.value = 'x';
   input.blur();
-  p.step();
-  assert.equal(p.frames.size, 0, 'focus left the input');
+  p.frame();
+  assert.equal(p.frames.size, 1, 'focus left the input');
   input.focus();
-  p.step(); p.frame(); p.frame();
-  assert.equal((await typed).text, '');
-  const rows = p.run(observeSurface, { target: '[role="option"]', minCount: 3, timeoutMs: 1000 });
-  p.step();
-  assert.equal(p.frames.size, 0);
-  p.document.querySelector('ul').insertAdjacentHTML('beforeend', '<li role="option">c.md</li>');
-  await mutations();
-  assert.equal(p.frames.size, 1, 'the mutation observer matched without waiting for the poll');
+  p.frame();
+  assert.equal(p.frames.size, 2);
   p.frame(); p.frame();
-  const observed = await rows;
-  assert.equal(observed.triggerMs, null);
-  assert.equal(observed.count, 3);
-  assert.equal(observed.text, 'a.md');
+  const observed = await typed;
+  assert.deepEqual([observed.text, observed.firstText, observed.count], ['', 'a.md', 2]);
+  const mismatch = p.run(observeSurface, { target: 'input', firstTextMatches: 'zz', countSelector: '[role="option"]', timeoutMs: 120 });
+  const rejected = assert.rejects(mismatch, /did not render within 120ms/);
+  p.step(); p.step(); p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('surface observer records a mousedown trigger and rejects unknown triggers and timeouts', async t => {
-  const p = fakePage(t, '<button>Open</button>');
-  await assert.rejects(p.run(observeSurface, { trigger: 'hover', target: 'button' }), /Unknown trigger/);
-  const clicked = p.run(observeSurface, { trigger: 'click', target: '[data-testid="collection-page"] [role="row"]', timeoutMs: 1000 });
+test('surface observer carries a first and a full milestone from one trigger and flags a full milestone that misses the deadline', async t => {
+  const p = fakePage(t, '<button>Open</button><ol></ol>');
+  const pending = p.run(observeSurface, { trigger: 'click', target: 'ol li', fullCount: 3, countSelector: 'ol li', timeoutMs: 1000 });
   p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  p.document.body.insertAdjacentHTML('beforeend', '<div data-testid="collection-page"><div role="row" data-index="0">Record 1</div></div>');
-  await mutations(); p.frame(); p.frame();
-  assert.equal((await clicked).triggerMs, 10);
+  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>1</li>');
+  await mutations();
+  p.frame(); p.frame();
+  assert.equal(p.frames.size, 1, 'the first milestone painted and only the frame loop remains');
+  p.document.querySelector('ol').insertAdjacentHTML('beforeend', '<li>2</li><li>3</li>');
+  await mutations();
+  p.frame(); p.frame();
+  const observed = await pending;
+  assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 42, 42, 74]);
+  assert.deepEqual([observed.count, observed.fullTimedOut], [3, false]);
+  const partial = p.run(observeSurface, { target: 'ol li', fullCount: 10, timeoutMs: 100 });
+  p.frame(); p.frame(); p.frame();
+  p.step(); p.step();
+  const timedOut = await partial;
+  assert.equal(timedOut.fullTimedOut, true);
+  assert.equal(timedOut.fullPaintedMs, null);
+  assert.notEqual(timedOut.paintedMs, null);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+test('surface observer rejects unknown triggers and a surface that never renders', async t => {
+  const p = fakePage(t, '<main></main>');
+  await assert.rejects(p.run(observeSurface, { trigger: 'hover', target: 'main' }), /Unknown trigger/);
   const missing = p.run(observeSurface, { target: '[data-testid="absent"]', timeoutMs: 120 });
   const rejected = assert.rejects(missing, /did not render within 120ms/);
   p.step(); p.step(); p.step();
@@ -273,9 +287,8 @@ test('search observer times Enter to the first result row and to the complete st
   const view = p.document.querySelector('[data-testid="search-view"]');
   const input = p.document.querySelector('input');
   const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
-  p.step();
+  p.frame();
   p.keydown(p.document.body, 'Enter');
-  assert.equal(p.now(), 60);
   p.keydown(input, 'Enter');
   view.dataset.searchId = 's1'; view.dataset.state = 'searching';
   view.querySelector('ul').innerHTML = '<li data-testid="search-result-row">hit</li>';
@@ -284,31 +297,30 @@ test('search observer times Enter to the first result row and to the complete st
   view.insertAdjacentHTML('beforeend', '<span data-testid="search-summary">1 result in 1 file</span>');
   await mutations(); p.frame(); p.frame();
   const observed = await pending;
-  assert.equal(observed.submitMs, 60);
+  assert.equal(observed.submitMs, 26);
   assert.equal(observed.submitTrusted, false);
   assert.equal(observed.debounceFiredBeforeSubmit, false);
-  assert.equal(observed.firstResultMs, 60);
-  assert.equal(observed.firstResultPaintedMs, 92);
-  assert.equal(observed.settledMs, 76);
-  assert.equal(observed.settledPaintedMs, 108);
+  assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 58, 42, 74]);
   assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
+  assert.deepEqual([[...observed.statesSeen], observed.sawUpdating], [['searching', 'complete'], false]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
-test('search observer flags a debounce that ran before Enter and keeps a missing first result missing', async t => {
+test('search observer flags a debounce that ran before Enter, records updating, and keeps a missing first result missing', async t => {
   const p = fakePage(t, searchHtml);
   const view = p.document.querySelector('[data-testid="search-view"]');
   const pending = p.run(observeSearchSubmit, { timeoutMs: 1000 });
   view.dataset.searchId = 'typed'; view.dataset.state = 'complete';
   await mutations();
   p.keydown(p.document.querySelector('input'), 'Enter');
-  view.dataset.searchId = 's2';
+  view.dataset.searchId = 's2'; view.dataset.state = 'updating';
+  await mutations();
+  view.dataset.state = 'complete';
   view.insertAdjacentHTML('beforeend', '<div data-testid="search-empty-state">No results found</div>');
   await mutations(); p.frame(); p.frame();
   const observed = await pending;
   assert.equal(observed.debounceFiredBeforeSubmit, true);
   assert.equal(observed.firstResultMs, null);
-  assert.equal(observed.emptyState, true);
-  assert.equal(observed.rowsRendered, 0);
+  assert.deepEqual([observed.emptyState, observed.rowsRendered, [...observed.statesSeen], observed.sawUpdating], [true, 0, ['updating', 'complete'], true]);
   const closed = fakePage(t, '<main></main>');
   await assert.rejects(closed.run(observeSearchSubmit, {}), /Search view is not open/);
 });
@@ -382,17 +394,20 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
     ['--profile-renderer', 'true', '--scenario', 'startup'], ['--profile-renderer', 'true', '--scenario', 'go-to'],
     ['--soak-minutes', '5'], ['--chat-messages', '5'], ['--records', '5'], ['--scenario', 'soak', '--soak-minutes', '0'],
     ['--scenario', 'chat-history', '--chat-messages', '1'], ['--scenario', 'soak', '--records', '5'],
+    ['--scenario', 'go-to'], ['--scenario', 'search', '--files', '4242'],
   ]) assert.throws(() => parseOptions([...required, ...extra]), JSON.stringify(extra));
   assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
+  assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
 });
 test('surface scenarios parse with their own sizes and defaults', () => {
   for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
-    const options = parseOptions([...required, '--scenario', scenario]);
+    const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
     assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
   }
+  assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
   assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
   assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
-  assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1', '--files', '5000']).records, 1);
+  assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);
 });
 
 test('evidence directory is exclusive even for concurrent starts', async t => {
@@ -545,6 +560,39 @@ test('launch before CDP cleans up the owned process and its child, preserving an
     await closeOwnedPackage(unrelated, 100).catch(() => {});
   }
 });
+test('owned process returns stdout on success and rejects a failing exit with its stderr', async () => {
+  assert.equal((await runOwnedProcess(process.execPath, ['-e', 'process.stdout.write("ok")'])).stdout, 'ok');
+  await assert.rejects(runOwnedProcess(process.execPath, ['-e', 'console.error("boom");process.exit(3)']), /exited 3\/null: boom/);
+  await assert.rejects(runOwnedProcess('dohc-no-such-command-executable', []), /failed to start/);
+});
+// A launcher that spawns a worker the way packages/cli/bin/dohc.js does, recording the worker pid.
+async function stoppedTree(run) {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-owned-tree-'));
+  const pidFile = join(root, 'child.pid').replaceAll('\\', '/');
+  const launcher = `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000);`;
+  try {
+    await run(launcher);
+    const childPid = Number(await readFile(pidFile, 'utf8'));
+    assert.ok(childPid > 0);
+    const deadline = performance.now() + 3000;
+    let alive = true;
+    while (alive && performance.now() < deadline) {
+      try { process.kill(childPid, 0); await delay(10); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; alive = false; }
+    }
+    assert.equal(alive, false, 'the worker must stop with its launcher');
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+test('owned process timeout stops the launcher and its worker', async () => {
+  await stoppedTree(code => assert.rejects(runOwnedProcess(process.execPath, ['-e', code], { timeoutMs: 500 }), /timed out after 500ms/));
+});
+test('owned process cancellation stops the launcher and its worker and refuses later starts', async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(Error('cancel seeding')), 500);
+  try { await stoppedTree(code => assert.rejects(runOwnedProcess(process.execPath, ['-e', code], { signal: controller.signal }), /cancel seeding/)); }
+  finally { clearTimeout(timer); }
+  await assert.rejects(runOwnedProcess(process.execPath, ['-e', ''], { signal: controller.signal }), /cancel seeding/);
+});
 test('CDP shutdown timeout still stops its owned process', async () => {
   const instance = await ownedNode(`console.log('ready');setInterval(()=>{},1000);`);
   instance.browser = { newBrowserCDPSession: () => new Promise(() => {}) };
@@ -609,32 +657,33 @@ test('summary keeps absent timing samples missing and labels diagnostic measurem
 });
 
 test('summary reports each surface scenario from its own runs and keeps unobserved samples missing', async () => {
-  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount });
+  const open = (painted, optionCount) => ({ keydownToReadyMs: painted - 20, keydownToPaintedMs: painted, optionCount, observed: { entranceAnimating: true } });
   const sample = (cycle, renderer, main) => ({ cycle, completedAtMs: 1000 + cycle * 60000, processCount: 5, kinds: { renderer: { count: 1, workingSetBytes: renderer, privateBytes: renderer / 2 }, main: { count: 1, workingSetBytes: main, privateBytes: main / 2 } } });
   const summary = await summarize({ label: 'baseline', status: 'complete', settings: {}, limits: [], runs: [
-    { index: 1, goTo: { query: 'fixture-004242', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
+    { index: 1, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(120, 50), warm: open(40, 50), keystrokes: [{ keydownToPaintedMs: 30, optionCount: 50 }, { keydownToPaintedMs: 18, optionCount: 1 }] },
       commandPalette: { cold: open(90, 12), warm: open(25, 12) },
-      search: [{ query: 'fixture', open: { clickToPaintedMs: 70 }, submitToFirstResultMs: 200, submitToSettledMs: 1500, debounceFiredBeforeSubmit: true, summary: '2000 results in 2000 files', limitHit: true, rowsRendered: 40 },
-        { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
+      search: [{ query: 'fixture', open: { clickToPaintedMs: 70 }, submitToFirstResultMs: 200, submitToSettledMs: 1500, debounceFiredBeforeSubmit: true, sawUpdating: true, summary: '50 results in 50 files', limitHit: false, rowsRendered: 40 },
+        { query: 'fixture 4242.', open: null, submitToFirstResultMs: null, submitToSettledMs: 300, debounceFiredBeforeSubmit: false, sawUpdating: false, summary: 'No results', limitHit: false, rowsRendered: 0 }],
       chatHistory: { seed: { messages: 200, seedingObservedMs: 90000 }, channelOpen: { clickToPostsPaintedMs: 150 }, threadOpen: { clickToFirstCommentPaintedMs: 400, clickToAllCommentsPaintedMs: null, commentRowsRendered: 120 } },
       collection: { records: 500, indexedWaitObservedMs: 800, clickToRowsPaintedMs: 210, rowsRendered: 24, loadedRecords: 100 },
       soak: { minutes: 2, elapsedMs: 120000, cycles: [{ durationMs: 50000 }, { durationMs: 55000 }], samples: [sample(0, 400, 100), sample(1, 450, 100), sample(2, 440, 110)] } },
-    { index: 2, goTo: { query: 'fixture-004242', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
+    { index: 2, goTo: { query: 'fixture-004242', firstOption: 'fixture-004242.txt', cold: open(100, 50), warm: open(30, 50), keystrokes: [{ keydownToPaintedMs: 26, optionCount: 1 }] },
       chatHistory: { seed: { messages: 200, seedingObservedMs: 80000 }, channelOpen: { clickToPostsPaintedMs: 130 }, threadOpen: { clickToFirstCommentPaintedMs: 380, clickToAllCommentsPaintedMs: 900, commentRowsRendered: 199 } } },
   ] });
   assert.deepEqual(summary.goTo.query, ['fixture-004242']);
-  assert.deepEqual(summary.goTo.coldOpenToEditableInputMs, { count: 2, p50: 100, p95: 120, max: 120 });
-  assert.equal(summary.goTo.warmOpenToEditableInputMs.max, 40);
+  assert.deepEqual(summary.goTo.coldOpenToEditableInputPaintedMs, { count: 2, p50: 100, p95: 120, max: 120 });
+  assert.equal(summary.goTo.warmOpenToEditableInputPaintedMs.max, 40);
   assert.equal(summary.goTo.keystrokeToResultsPaintedMs.count, 3);
   assert.deepEqual(summary.goTo.lastKeystrokeToResultsPaintedMs, { count: 2, p50: 18, p95: 26, max: 26 });
-  assert.deepEqual(summary.goTo.finalOptionCounts, [1]);
-  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12] });
-  assert.equal(summary.search.fixture.openToInputFocusedMs.p50, 70);
-  assert.equal(summary.search.fixture.debounceFiredBeforeSubmitCount, 1);
-  assert.deepEqual(summary.search.fixture.limitHit, [true]);
-  assert.deepEqual(summary.search['fixture 4242.'].submitToFirstResultMs, { count: 0, p50: null, p95: null, max: null });
-  assert.equal(summary.search['fixture 4242.'].openToInputFocusedMs.count, 0);
+  assert.deepEqual([summary.goTo.finalOptionCounts, summary.goTo.finalFirstOptions, summary.goTo.entranceAnimating], [[1], ['fixture-004242.txt'], [true]]);
+  assert.deepEqual(summary.commandPalette, { coldOpenToFirstRowPaintedMs: { count: 1, p50: 90, p95: 90, max: 90 }, warmOpenToFirstRowPaintedMs: { count: 1, p50: 25, p95: 25, max: 25 }, optionCounts: [12], entranceAnimating: [true] });
+  assert.equal(summary.search.fixture.openToInputPaintedMs.p50, 70);
+  assert.deepEqual([summary.search.fixture.debounceFiredBeforeSubmitCount, summary.search.fixture.sawUpdatingCount], [1, 1]);
+  assert.deepEqual(summary.search.fixture.limitHit, [false]);
+  assert.deepEqual(summary.search['fixture 4242.'].submitToFirstResultPaintedMs, { count: 0, p50: null, p95: null, max: null });
+  assert.equal(summary.search['fixture 4242.'].openToInputPaintedMs.count, 0);
   assert.deepEqual(summary.chatHistory.messages, [200]);
+  assert.deepEqual(summary.chatHistory.channelOpenToPostsPaintedMs, { count: 2, p50: 130, p95: 150, max: 150 });
   assert.equal(summary.chatHistory.threadOpenToAllCommentsPaintedMs.count, 1);
   assert.equal(summary.chatHistory.allCommentsUnobservedCount, 1);
   assert.deepEqual(summary.chatHistory.commentRowsRendered, [120, 199]);

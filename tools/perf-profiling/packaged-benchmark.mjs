@@ -1,11 +1,11 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
-import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput, runOwnedProcess } from './packaged-process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
@@ -34,9 +34,23 @@ await json(join(output, 'result.json'), receipt);
 const require = createRequire(join(root, 'apps/desktop/package.json'));
 const exec = promisify(execFile);
 const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+// One digest over the named files and directory trees, in sorted relative-path order.
+async function sha256Tree(base, subpaths) {
+  const files = [];
+  for (const subpath of subpaths) {
+    const path = join(base, subpath);
+    if ((await stat(path)).isDirectory()) files.push(...(await readdir(path, { withFileTypes: true, recursive: true })).filter(entry => entry.isFile()).map(entry => join(entry.parentPath, entry.name)));
+    else files.push(path);
+  }
+  const hash = createHash('sha256');
+  for (const file of files.sort()) hash.update(`${relative(base, file).replaceAll('\\', '/')}\0`).update(await readFile(file)).update('\0');
+  return hash.digest('hex');
+}
 const asar = join(dirname(binary), 'resources/app.asar');
 const engineBinary = join(dirname(binary), 'resources/workspace-engine/dohc-workspace-engine.exe');
-const cliLauncher = join(root, 'packages/cli/bin/dohc.js');
+const cli = join(root, 'packages/cli');
+const cliLauncher = join(cli, 'bin/dohc.js');
+const cliHashedPaths = ['bin', 'src', 'package.json'];
 Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
@@ -52,7 +66,7 @@ Object.assign(receipt, {
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
-  ...(scenario === 'chat-history' ? { cliLauncher, cliLauncherSha256: await sha256(cliLauncher) } : {}),
+  ...(scenario === 'chat-history' ? { cli, cliLauncher, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [],
   limits: [
@@ -70,8 +84,10 @@ Object.assign(receipt, {
     'Renderer CPU profiling is optional and diagnostic; profiled runs cannot serve as unprofiled performance comparisons.',
     'The local updater feed advertises version 0.0.0 and has no downloadable asset; update installation is never requested.',
     'Go to, command palette, search, chat, and collection durations start at the renderer receipt of the trusted keydown or mousedown and end two animation frames after the DOM predicate. They include React commit and layout, not compositor presentation.',
+    'The renderer observer evaluates its predicate on every animation frame, on mutations and on focus changes, and reads computed style each frame. Visible means the first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame and entranceAnimating records whether it was still running.',
     'Search submits with Enter after one programmatic fill. Search-as-you-type debounces at 150 ms; a sample whose search id changed before Enter is flagged debounceFiredBeforeSubmit.',
-    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. The thread comment list is not virtualized; every reply renders.',
+    'With an engine capture, search queries the engine index and returns at most 50 results in one batch, so limitHit false does not mean the results are complete. sawUpdating records whether the view passed through updating, whose retry backoff lands in the settled time.',
+    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Each message runs two Node processes, the launcher and the CLI; timeout or cancellation stops that tree. The thread comment list is not virtualized; every reply renders.',
     'collection seeds Markdown records with pre-minted ids. The table is virtualized and pages on demand: rowsRendered is the visible window and loadedRecords is the first page.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
@@ -414,6 +430,8 @@ const surfaces = {
 const GO_TO_QUERY = 'fixture-004242';
 const CHAT_TITLE = 'Long history';
 const SEARCH_QUERIES = ['fixture', 'fixture 4242.'];
+// Both editor documents contain this word, so the soak search hits with the default fixture.
+const SOAK_SEARCH_QUERY = 'Performance';
 const fromTrigger = observed => ({ keydownToReadyMs: observed.matchedMs - observed.triggerMs, keydownToPaintedMs: observed.paintedMs - observed.triggerMs });
 async function openPalette(page, surface, readyWhen) {
   if (await page.locator(surface.palette).count()) throw Error(`${surface.name} is already open`);
@@ -432,18 +450,20 @@ async function typeInPalette(page, surface, query) {
   let typed = '';
   for (const character of query) {
     typed += character;
-    const settle = await armSurface(page, observeSurface, { trigger: 'keydown', triggerKey: character, target: surface.input, value: typed, countSelector: surface.option });
+    // Ready means the input echoes the prefix and the first ranked row contains its characters in order.
+    const settle = await armSurface(page, observeSurface, { trigger: 'keydown', triggerKey: character, target: surface.input, value: typed, firstTextMatches: typed, countSelector: surface.option });
     const started = performance.now();
     await page.keyboard.press(character);
     const observed = await settle();
-    keystrokes.push({ character, typed, observedMs: performance.now() - started, ...fromTrigger(observed), optionCount: observed.count });
+    keystrokes.push({ character, typed, observedMs: performance.now() - started, ...fromTrigger(observed), optionCount: observed.count, firstOption: observed.firstText });
   }
   return keystrokes;
 }
 async function goTo(page) {
   const cold = await openPalette(page, surfaces.goTo, 'editable-input');
   const keystrokes = await typeInPalette(page, surfaces.goTo, GO_TO_QUERY);
-  const firstOption = await page.locator(surfaces.goTo.option).first().textContent({ timeout: 1000 }).catch(() => null);
+  const firstOption = keystrokes.at(-1).firstOption;
+  if (firstOption !== `${GO_TO_QUERY}.txt`) throw Error(`Go to ranked ${JSON.stringify(firstOption)} first for ${GO_TO_QUERY}`);
   await closePalette(page, surfaces.goTo);
   const warm = await openPalette(page, surfaces.goTo, 'editable-input');
   await closePalette(page, surfaces.goTo);
@@ -472,7 +492,7 @@ async function searchQuery(page, query, open) {
   const observed = await settle();
   return { query, open, observedMs: performance.now() - started,
     submitToFirstResultMs: observed.firstResultPaintedMs === null ? null : observed.firstResultPaintedMs - observed.submitMs,
-    submitToSettledMs: observed.settledPaintedMs - observed.submitMs, debounceFiredBeforeSubmit: observed.debounceFiredBeforeSubmit,
+    submitToSettledMs: observed.settledPaintedMs - observed.submitMs, debounceFiredBeforeSubmit: observed.debounceFiredBeforeSubmit, sawUpdating: observed.sawUpdating,
     summary: observed.summary, limitHit: observed.limitHit, rowsRendered: observed.rowsRendered, observed };
 }
 async function search(page) {
@@ -485,12 +505,12 @@ async function seedChatHistory(instance, workspace) {
   const profile = instance.fixture.profile;
   await waitUntil(() => Promise.all(['dohc-cli-endpoint', 'dohc-cli-token'].map(name => stat(join(profile, name)))).then(() => true, () => false), 60000);
   const cliEnv = { ...env, DOHC_STATE_DIR: profile, NODE_NO_WARNINGS: '1' };
-  const cli = async args => (await exec(process.execPath, [cliLauncher, ...args], { cwd: workspace.rootPath, env: cliEnv, windowsHide: true, timeout: 60000, signal: cancellation.signal, maxBuffer: 4 * 1024 * 1024 })).stdout;
+  const dohc = async args => (await runOwnedProcess(process.execPath, [cliLauncher, ...args], { cwd: workspace.rootPath, env: cliEnv, timeoutMs: 60000, signal: cancellation.signal })).stdout;
   const started = performance.now();
-  const posted = JSON.parse(await cli(['--json', 'chat', 'post', 'general', '--title', CHAT_TITLE, 'Message 0']));
+  const posted = JSON.parse(await dohc(['--json', 'chat', 'post', 'general', '--title', CHAT_TITLE, 'Message 0']));
   if (typeof posted.threadId !== 'string') throw Error(`CLI post returned no thread id: ${JSON.stringify(posted)}`);
   for (let n = 1; n < chatMessages; n++) {
-    await cli(['chat', 'reply', posted.threadId, `Message ${n}`]);
+    await dohc(['chat', 'reply', posted.threadId, `Message ${n}`]);
     if (n % 50 === 0) console.log(JSON.stringify({ label, phase: 'chat-seed', messages: n + 1 }));
   }
   // cliThreadId is the CLI's th_ handle, not the engine id the DOM carries.
@@ -511,18 +531,17 @@ async function openChatHistory(page, seed) {
   const channelObservedMs = performance.now() - channelStarted;
   const domThreadId = await page.evaluate(seededPostThreadId, { title: seed.title });
   const comment = '[data-testid="chats-thread-view"] [data-testid="chats-comments"] [data-testid="chats-message"]';
-  const threadSettle = await armSurface(page, observeSurface, { trigger: 'click', target: comment, countSelector: comment, timeoutMs: 120000 });
+  // One observer, armed before the click, carries both milestones from the same trigger timestamp.
+  const threadSettle = await armSurface(page, observeSurface, { trigger: 'click', target: comment, fullCount: seed.messages - 1, countSelector: comment, timeoutMs: 120000 });
   const threadStarted = performance.now();
   await page.locator(`${card}[data-thread-id="${domThreadId}"]`).getByTestId('chats-post-title').click();
-  const first = await threadSettle();
-  let all = null, allCommentsError = null;
-  try { all = await (await armSurface(page, observeSurface, { target: comment, minCount: seed.messages - 1, countSelector: comment, timeoutMs: 120000 }))(); }
-  catch (error) { allCommentsError = error.message; }
+  const thread = await threadSettle();
   return {
     seed,
     channelOpen: { observedMs: channelObservedMs, clickToPostsPaintedMs: channelObserved.paintedMs - channelObserved.triggerMs, postCards: channelObserved.count, observed: channelObserved },
-    threadOpen: { domThreadId, observedMs: performance.now() - threadStarted, clickToFirstCommentPaintedMs: first.paintedMs - first.triggerMs,
-      clickToAllCommentsPaintedMs: all ? all.paintedMs - first.triggerMs : null, commentRowsRendered: all?.count ?? first.count, allCommentsError, observed: first },
+    threadOpen: { domThreadId, observedMs: performance.now() - threadStarted, clickToFirstCommentPaintedMs: thread.paintedMs - thread.triggerMs,
+      clickToAllCommentsPaintedMs: thread.fullPaintedMs === null ? null : thread.fullPaintedMs - thread.triggerMs, allCommentsTimedOut: thread.fullTimedOut,
+      commentRowsRendered: thread.count, observed: thread },
   };
 }
 async function openCollection(page, folder) {
@@ -556,7 +575,7 @@ async function soak(instance, data) {
     cycle.commandPaletteOpenMs = (await openPalette(page, surfaces.commandPalette, 'first-row')).keydownToPaintedMs;
     await closePalette(page, surfaces.commandPalette);
     await openSearchView(page);
-    cycle.searchSettledMs = (await searchQuery(page, SEARCH_QUERIES[0], null)).submitToSettledMs;
+    cycle.searchSettledMs = (await searchQuery(page, SOAK_SEARCH_QUERY, null)).submitToSettledMs;
     await page.getByTestId('activity-explorer').click();
     await page.getByTestId('file-tree').waitFor({ timeout: 30000 });
     cycle.switchEditableObservedMs = [(await switchTo(page, 1)).editablePaintObservedMs, (await switchTo(page, 0)).editablePaintObservedMs];
