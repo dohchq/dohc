@@ -2135,8 +2135,10 @@ CREATE INDEX idx_automation_claims_automation
 /// may now hold a third trigger shape. SQLite cannot change a CHECK in
 /// place, so the claims table is rebuilt with every row kept. Capture now
 /// looks up the record a written file is bound to, so bindings gain an index
-/// by object. `merged_moments` names the moments a merge wrote: they replay
-/// another version's changes, which claimed where they were made.
+/// by object. The live host finds the attribution of its own drafts by
+/// digest, so outbox entries gain an index by digest. `merged_moments` names
+/// the moments a merge wrote: they replay another version's changes, which
+/// claimed where they were made.
 const V2_AUTOMATION_RECORD_LIFECYCLE_DDL: &str = "\
 CREATE TABLE automation_claims_next (
     workspace_id          TEXT    NOT NULL,
@@ -2196,6 +2198,8 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 CREATE INDEX collection_records_by_object
     ON collection_records(workspace_id, version_id, object_id);
+CREATE INDEX owner_ydoc_outbox_entries_by_digest
+    ON owner_ydoc_outbox_entries(update_digest);
 CREATE TABLE merged_moments (
     workspace_id TEXT    NOT NULL,
     moment_order INTEGER NOT NULL,
@@ -2489,7 +2493,7 @@ mod tests {
             ),
             (
                 "v2-automation-record-lifecycle",
-                "4303a35f9bcb94db49201155c1f0bab8bd94aa95d98fabb894333d2d1d70f64d",
+                "3b866e945c1e7dac18f19955802dce9d48ef8b99f496f2b9060bdd5fe2a3fbf1",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
