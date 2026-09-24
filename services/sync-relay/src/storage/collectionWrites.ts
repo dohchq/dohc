@@ -5,6 +5,7 @@ import {
   type Automation,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
+import { pathCollisionKey } from "../pathCollisionKey";
 import { parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
@@ -235,24 +236,14 @@ function currentFile(
 }
 
 // Compare-and-swap against the owner's current files: an edit's base is
-// the current content, a create finds nothing, and a new Collection's folder
-// holds nothing under any case or Unicode spelling.
+// the current content, and a create finds nothing at its path under any
+// spelling a disk would take for it. A new Collection's folder holds
+// nothing under any spelling either.
 function checkBases(storage: StorageContext, workspaceId: string, write: CollectionWrite): void {
   const schemaPath = `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`;
   if (write.kind === "new-collection") {
-    // Only the parent folder's files are read: "/" sorts just before "0".
-    const slash = write.collectionPath.lastIndexOf("/");
-    const parent = write.collectionPath.slice(0, slash + 1);
-    const name = folded(write.collectionPath.slice(slash + 1));
-    const taken = storage.db.prepare(
-      `SELECT path FROM sync_relay_current_files
-       WHERE workspace_id = ? AND version_id = ? AND path >= ? AND path < ?`,
-    ).iterate(workspaceId, MAIN_VERSION_ID, parent, `${parent.slice(0, -1)}0`);
-    for (const row of taken) {
-      const inside = folded(String(row.path).slice(parent.length));
-      if (inside === name || inside.startsWith(`${name}/`)) {
-        throw new CollectionWriteStaleError(write.collectionPath, null);
-      }
+    if (spellingTaken(storage, workspaceId, write.collectionPath)) {
+      throw new CollectionWriteStaleError(write.collectionPath, null);
     }
     return;
   }
@@ -267,12 +258,23 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   if ((current?.blobSha256 ?? null) !== change.basedOnBlobSha256 || (current !== null && current.contentKind !== "text")) {
     throw new CollectionWriteStaleError(change.afterPath!, current?.blobSha256 ?? null);
   }
+  if (current === null && spellingTaken(storage, workspaceId, change.afterPath!)) {
+    throw new CollectionWriteStaleError(change.afterPath!, null);
+  }
 }
 
-// Case and Unicode differences that name the same folder on a
-// case-insensitive disk.
-function folded(path: string): string {
-  return path.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFKC");
+// Whether the owner has a file at `path`, or under it, under any spelling
+// that shares its collision key. Two index lookups: "/" sorts just before
+// "0", so the keys under `key/` fall in [`key/`, `key0`).
+function spellingTaken(storage: StorageContext, workspaceId: string, path: string): boolean {
+  const key = pathCollisionKey(path);
+  const row = storage.db.prepare(
+    `SELECT EXISTS (SELECT 1 FROM sync_relay_current_file_keys
+         WHERE workspace_id = ? AND version_id = ? AND collision_key = ?)
+       OR EXISTS (SELECT 1 FROM sync_relay_current_file_keys
+         WHERE workspace_id = ? AND version_id = ? AND collision_key >= ? AND collision_key < ?) AS taken`,
+  ).get(workspaceId, MAIN_VERSION_ID, key, workspaceId, MAIN_VERSION_ID, `${key}/`, `${key}0`);
+  return Number(row?.taken) === 1;
 }
 
 // The owner's moment for one change: an edit builds on the owner's own
@@ -315,22 +317,41 @@ function momentFor(
 
 // Content checks with the shared parsers, before the write's transaction.
 // Blobs are named by their hash, so what is read here is what the moments
-// will name.
+// will name. Each blob is read and each record checked once, however many
+// files name it, so a write reads at most the bytes the decision allows.
 function validateContent(storage: StorageContext, workspaceId: string, write: CollectionWrite): void {
   const changes = changesOf(write);
-  const missing = storage.missingBlobs(workspaceId, changes.map((change) => change.afterBlobSha256!));
+  const missing = storage.missingBlobs(workspaceId, [...new Set(changes.map((change) => change.afterBlobSha256!))]);
   if (missing.length > 0) {
     throw new SyncRelayBlobMissingError(
       `this write references ${missing.length} blob(s) not stored on the relay (first: ${missing[0]}); upload and retry`,
     );
   }
+  const texts = new Map<string, { text: string; byteLength: number }>();
+  const text = (change: ProposedChange, limit: number): string => {
+    if (change.afterByteLength! > limit) throw refusal(`${change.afterPath} is larger than ${limit} bytes`);
+    const sha256 = change.afterBlobSha256!;
+    let read = texts.get(sha256);
+    if (read === undefined) {
+      const bytes = storedBlob(storage, workspaceId, sha256, change.afterByteLength!);
+      if (bytes === null) throw refusal(`${change.afterPath} does not match its stated size`);
+      const decoded = utf8(bytes);
+      if (decoded === null) throw refusal(`${change.afterPath} is not UTF-8 text`);
+      read = { text: decoded, byteLength: bytes.byteLength };
+      texts.set(sha256, read);
+    } else if (read.byteLength !== change.afterByteLength) {
+      throw refusal(`${change.afterPath} does not match its stated size`);
+    }
+    return read.text;
+  };
+  const records = new Set<string>();
   for (const change of changes) {
     const file = change.afterPath!.slice(change.afterPath!.lastIndexOf("/") + 1);
     if (file === COLLECTION_SCHEMA_FILE) {
-      const parsed = parseCollectionSchema(text(storage, workspaceId, change, MAX_COLLECTION_SCHEMA_BYTES));
+      const parsed = parseCollectionSchema(text(change, MAX_COLLECTION_SCHEMA_BYTES));
       if (parsed.status !== "valid") throw refusal(`${change.afterPath} is not a valid collection.yaml`);
     } else if (file === COLLECTION_AUTOMATIONS_FILE) {
-      const after = parseAutomationsFile(text(storage, workspaceId, change, MAX_AUTOMATIONS_FILE_BYTES));
+      const after = parseAutomationsFile(text(change, MAX_AUTOMATIONS_FILE_BYTES));
       if (after.status !== "read" || after.entries.some((entry) => entry.status !== "valid")) {
         throw refusal(`${change.afterPath} has an automation that is not valid`);
       }
@@ -339,8 +360,10 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
         throw refusal(`${change.afterPath} changes an automation with a personal step; send it as a proposal`);
       }
     } else {
-      const record = text(storage, workspaceId, change, MAX_COLLECTION_RECORD_BYTES);
+      const record = text(change, MAX_COLLECTION_RECORD_BYTES);
+      if (records.has(change.afterBlobSha256!)) continue;
       if (!frontmatterParses(record)) throw refusal(`${change.afterPath} has frontmatter that does not parse`);
+      records.add(change.afterBlobSha256!);
     }
   }
 }
@@ -351,77 +374,86 @@ function refusal(reason: string): RelayError {
   return relayError("share_op_rejected", reason);
 }
 
-function text(storage: StorageContext, workspaceId: string, change: ProposedChange, limit: number): string {
-  if (change.afterByteLength === null || change.afterByteLength > limit) {
-    throw refusal(`${change.afterPath} is larger than ${limit} bytes`);
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = boundedBlob(storage, workspaceId, change.afterBlobSha256!, limit);
-  } catch {
-    throw refusal(`${change.afterPath} does not match its stated size`);
-  }
-  if (bytes.byteLength !== change.afterByteLength) throw refusal(`${change.afterPath} does not match its stated size`);
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw refusal(`${change.afterPath} is not UTF-8 text`);
-  }
-}
-
 // The owner's current automations.yaml, which the compare-and-swap proves
 // is still current when the write commits. "unreadable" when it is too
 // large or not text: nothing about its automations can then be proven.
 function priorText(storage: StorageContext, workspaceId: string, sha256: string): string | "unreadable" {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(boundedBlob(storage, workspaceId, sha256, MAX_AUTOMATIONS_FILE_BYTES));
-  } catch (error) {
-    if (error instanceof RelayError && error.code !== "not_found") throw error;
-    return "unreadable";
-  }
-}
-
-function boundedBlob(storage: StorageContext, workspaceId: string, sha256: string, limit: number): Uint8Array {
   const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
     .get(workspaceId, sha256);
-  if (!row || Number(row.byte_length) > limit) throw notFound();
-  const blob = storage.getBlob(workspaceId, sha256);
-  if (!blob || createHash("sha256").update(blob).digest("hex") !== sha256) throw notFound();
-  return blob;
+  const byteLength = Number(row?.byte_length);
+  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_AUTOMATIONS_FILE_BYTES) return "unreadable";
+  const bytes = storedBlob(storage, workspaceId, sha256, byteLength);
+  return (bytes && utf8(bytes)) ?? "unreadable";
 }
 
-function hasPersonalStep(steps: readonly Automation["do"][number][]): boolean {
-  return steps.some((step) =>
-    step.kind === PERSONAL_STEP || (step.kind === "if" && (hasPersonalStep(step.do) || hasPersonalStep(step.otherwise))));
+// A stored blob of exactly `byteLength` bytes, read only once its stored
+// length matches. Uploads verify each blob's hash, so it is not computed
+// again here.
+function storedBlob(storage: StorageContext, workspaceId: string, sha256: string, byteLength: number): Uint8Array | null {
+  const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
+    .get(workspaceId, sha256);
+  if (!row || Number(row.byte_length) !== byteLength) return null;
+  const blob = storage.getBlob(workspaceId, sha256);
+  return blob && blob.byteLength === byteLength ? blob : null;
+}
+
+function utf8(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 // A direct write may not add, change, or remove an automation with a
-// personal step (ADR 0012): each such automation reads the same before and
-// after. An entry the old file could not read that mentions a personal step
-// cannot be proven unchanged, and neither can an unreadable old file.
+// personal step (ADR 0012). Both files must read with every entry valid,
+// because an entry that is not valid could hide a personal step. The
+// automations with a personal step must then be the same before and after,
+// compared as the parser's model.
 function changesPersonalStep(before: string | "unreadable" | null, after: AutomationsFileParseResult): boolean {
-  if (after.status !== "read") return true;
-  const afterById = new Map<string, string>();
-  for (const entry of after.entries) {
-    if (entry.status === "valid") afterById.set(entry.automation.id, JSON.stringify(entry.automation));
+  try {
+    const personalAfter = personalAutomations(after);
+    if (personalAfter === null) return true;
+    if (before === null) return personalAfter.length > 0;
+    if (before === "unreadable") return true;
+    const personalBefore = personalAutomations(parseAutomationsFile(before));
+    return personalBefore === null ||
+      personalBefore.length !== personalAfter.length ||
+      personalBefore.some((text, index) => text !== personalAfter[index]);
+  } catch {
+    return true;
   }
-  const personalAfter = after.entries.flatMap((entry) =>
-    entry.status === "valid" && hasPersonalStep(entry.automation.do) ? [entry.automation.id] : []);
-  if (before === null) return personalAfter.length > 0;
-  if (before === "unreadable") return true;
-  const parsedBefore = parseAutomationsFile(before);
-  if (parsedBefore.status !== "read") return before.includes(PERSONAL_STEP) || personalAfter.length > 0;
-  const beforeById = new Map<string, string>();
-  for (const entry of parsedBefore.entries) {
-    if (entry.status !== "valid") {
-      if (JSON.stringify(entry.raw).includes(PERSONAL_STEP)) return true;
-      continue;
+}
+
+// The automations with a personal step, each as the JSON of its model, in
+// sorted order, or null when the file does not read with every entry
+// valid. In that JSON a quote inside a string is escaped, so the text
+// `"kind":"wake-agent"` appears only where some object's kind is that
+// step, at any depth.
+function personalAutomations(result: AutomationsFileParseResult): string[] | null {
+  if (result.status !== "read") return null;
+  const texts: string[] = [];
+  for (const entry of result.entries) {
+    if (entry.status !== "valid") return null;
+    const text = modelJson(entry.automation);
+    if (text.includes(`"kind":"${PERSONAL_STEP}"`)) texts.push(text);
+  }
+  return texts.sort();
+}
+
+// The model as JSON. A value JSON would not show in full, such as a Map,
+// throws instead, so it can never make two different automations compare
+// equal.
+function modelJson(automation: Automation): string {
+  return JSON.stringify(automation, (_key, value: unknown) => {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const prototype: unknown = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new Error("an automation holds a value that cannot be compared");
+      }
     }
-    const automation = JSON.stringify(entry.automation);
-    beforeById.set(entry.automation.id, automation);
-    if (hasPersonalStep(entry.automation.do) && afterById.get(entry.automation.id) !== automation) return true;
-  }
-  return personalAfter.some((id) => beforeById.get(id) !== afterById.get(id));
+    return value;
+  });
 }
 
 // A record without frontmatter has no fields; one with frontmatter must

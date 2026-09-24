@@ -16,6 +16,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
+import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
 // PR 18 share grants: the server-side filter that decides which replicated
@@ -1427,6 +1428,8 @@ export const COLLECTION_SCHEMA_FILE = "collection.yaml";
 export const COLLECTION_AUTOMATIONS_FILE = "automations.yaml";
 // Records one new-Collection batch may create.
 export const MAX_NEW_COLLECTION_RECORDS = 500;
+// The content one direct write may carry, summed over its files.
+export const MAX_COLLECTION_WRITE_BYTES = 4 * 1024 * 1024;
 
 // One direct write, as the decision classifies it. Every change is a text
 // write with normalized paths, and `collectionPath` is never the root.
@@ -1481,19 +1484,27 @@ export function filterCollectionWriteForShare(
     return refused;
   }
   const changes: ProposedChange[] = [];
+  // Two paths that one disk would hold as one file are one path here.
   const paths = new Set<string>();
+  let bytes = 0;
   for (const entry of raw) {
     const decision = filterProposedChangeForShare(selector, entry, chat);
     if (!decision.allowed) return refused;
     const change = decision.change;
-    if (change.operation !== "write" || change.afterContentKind !== "text" || change.afterPath === null) {
+    if (
+      change.operation !== "write" || change.afterContentKind !== "text" ||
+      change.afterPath === null || change.afterByteLength === null
+    ) {
       return refused;
     }
     // A write in place names one path on both sides. Anything else moves a
     // file, which stays on proposals.
     if (change.basedOnPath !== null && change.basedOnPath !== change.afterPath) return refused;
-    if (paths.has(change.afterPath)) return refused;
-    paths.add(change.afterPath);
+    const key = pathCollisionKey(change.afterPath);
+    if (paths.has(key)) return refused;
+    paths.add(key);
+    bytes += change.afterByteLength;
+    if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
     changes.push(change);
   }
   // Edit on the Collection folder itself, not only on its files.

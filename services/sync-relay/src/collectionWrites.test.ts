@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
-import { readCollectionWritesConfig } from "./collectionWriteRoutes";
+import { MAX_COLLECTION_WRITE_BODY_BYTES, readCollectionWritesConfig } from "./collectionWriteRoutes";
+import { pathCollisionKey } from "./pathCollisionKey";
 import type { SyncRelayHandler } from "./server";
 import {
   filterCollectionWriteForShare,
+  MAX_COLLECTION_WRITE_BYTES,
   MAX_NEW_COLLECTION_RECORDS,
   type ProposedChange,
   type ShareSelector,
@@ -13,15 +15,19 @@ import {
 import type { SyncRelayStorage } from "./storage";
 import {
   claimWorkspace,
+  closeTestStorage,
   closeTestStorages,
   createShare,
+  inspectDatabase,
   json,
   jsonBody,
   putBlob,
+  reopenTestStorage,
   request,
   seedDependentGrant,
   seedLinkGrant,
   sha256,
+  storagePath,
   testHandler,
   testStorage,
   type HandlerOverrides,
@@ -454,7 +460,134 @@ describe("direct writes to a Collection's own files", () => {
   });
 });
 
+describe("round 1 of review", () => {
+  it("keeps the lane's origin and a named author out of the owner's own log", async () => {
+    const r = await relay();
+    const append = (originId: string, author: unknown) => r.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({
+      originId,
+      ops: [{
+        originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+        payload: {
+          momentId: "forged", versionId: "main", objectId: "object-forged", path: "trip/forged.md", recordedAtMs: 1,
+          operation: "write", payloadBeforeBlobSha256: null, payloadBeforePath: null,
+          payloadAfterBlobSha256: sha256("forged"), payloadAfterPath: "trip/forged.md", payloadAfterContentKind: "text",
+          metadata: { origin: "user" }, beforePresent: "null", ...(author ? { author } : {}),
+        },
+      }],
+    })));
+    await expectCode(await append(`relay:collection-file:${r.grantId}`, null), 400, "bad_request");
+    await expectCode(
+      await append("origin-owner", { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }),
+      403,
+      "authorship_mismatch",
+    );
+  });
+
+  it("refuses a batch whose files sum past the byte bound, before reading anything", async () => {
+    const r = await relay();
+    const big = Math.floor(MAX_COLLECTION_WRITE_BYTES / 4);
+    const records = Array.from({ length: 5 }, (_, index) =>
+      ({ ...create(`trip/ideas/${index}.md`, `${index}`), afterByteLength: big }));
+    const reads = vi.spyOn(r.storage, "getBlob");
+    await expectCode(await write(r, [create("trip/ideas/collection.yaml", SCHEMA), ...records]), 403, "share_op_rejected");
+    expect(reads).not.toHaveBeenCalled();
+  });
+
+  it("reads each blob once, however many files name it", async () => {
+    const r = await relay();
+    const record = "---\nTitle: Same\n---\n";
+    await upload(r, SCHEMA, record);
+    const reads = vi.spyOn(r.storage, "getBlob");
+    const response = await write(r, [
+      create("trip/ideas/collection.yaml", SCHEMA),
+      ...Array.from({ length: 50 }, (_, index) => create(`trip/ideas/${index}.md`, record)),
+    ]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(reads.mock.calls.map(([, sha]) => sha).sort()).toEqual([sha256(SCHEMA), sha256(record)].sort());
+  });
+
+  it("refuses a body past the route's bound", async () => {
+    const r = await relay();
+    const response = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ submitId: "big", changes: [], pad: "x".repeat(MAX_COLLECTION_WRITE_BODY_BYTES) }),
+    }));
+    await expectCode(response, 413, "payload_too_large");
+  });
+
+  it("spends a token on a request it refuses", async () => {
+    const r = await relay({ overrides: { collectionWriteRateLimiter: new TokenBucketLimiter(1, 0.001, 10) } });
+    await upload(r, SCHEMA_TWO);
+    await expectCode(await write(r, "not a list"), 403, "share_op_rejected");
+    await expectCode(
+      await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]),
+      429,
+      "collection_write_rate_limited",
+    );
+  });
+
+  it("finds a new Collection's folder taken under another spelling of its parent", async () => {
+    const r = await relay();
+    await r.owner.write("object-taken", "trip/Ideas/packing/collection.yaml", SCHEMA);
+    await upload(r, SCHEMA);
+    const body = await expectCode(await write(r, [create("trip/ideas/packing/collection.yaml", SCHEMA)]), 409, "stale");
+    expect(body).toMatchObject({ path: "trip/ideas/packing", currentBlobSha256: null });
+  });
+
+  it("finds a created file taken under another spelling", async () => {
+    const r = await relay();
+    const existing = automations(STAMP);
+    await r.owner.write("object-automations", `${PACKING}/Automations.yaml`, existing);
+    await upload(r, existing);
+    const body = await expectCode(await write(r, [create(`${PACKING}/automations.yaml`, existing)]), 409, "stale");
+    expect(body).toMatchObject({ path: `${PACKING}/automations.yaml`, currentBlobSha256: null });
+  });
+
+  it("keys current files that existed before the key table", async () => {
+    const r = await relay();
+    await r.owner.write("object-taken", "trip/Ideas/old.md", "old\n");
+    const path = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    const db = inspectDatabase(path);
+    db.prepare("DELETE FROM sync_relay_current_file_keys").run();
+    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = 'current-file-collision-keys-v1'").run();
+    db.close();
+    const reopened = reopenTestStorage(path);
+    const h = testHandler(reopened, { nowMs: () => CLOCK, collectionWritesEnabled: true });
+    const again: Relay = { ...r, h, storage: reopened };
+    await upload(again, SCHEMA);
+    await expectCode(await write(again, [create("trip/ideas/collection.yaml", SCHEMA)]), 409, "stale");
+  });
+
+  it("refuses a write to a file whose old version has an entry that is not valid", async () => {
+    const r = await relay();
+    const hidden = "  - id: hidden\n    name: Hidden\n    when: whenever\n    do:\n      - wake-agent: Look\n        person: user_ana\n";
+    const withHidden = automations(STAMP, hidden);
+    const parsed = parseAutomationsFile(withHidden);
+    expect(parsed.status === "read" && parsed.entries.map((entry) => entry.status)).toEqual(["valid", "invalid"]);
+    await r.owner.write("object-automations", `${PACKING}/automations.yaml`, withHidden);
+    const removed = automations(STAMP);
+    await upload(r, removed);
+    await expectCode(await write(r, [edit(`${PACKING}/automations.yaml`, withHidden, removed)]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+});
+
 describe("the direct-write decision", () => {
+  it("counts two paths one disk would hold as one file as the same path", () => {
+    const selector: ShareSelector = { versionId: null, paths: ["trip"], access: "edit" };
+    for (const [first, second] of [["a.md", "A.md"], ["caf\u00e9.md", "cafe\u0301.md"], ["b.md", "b.md. "]]) {
+      const decision = filterCollectionWriteForShare(selector, [
+        create("trip/ideas/collection.yaml", SCHEMA),
+        create(`trip/ideas/${first}`, "one"),
+        create(`trip/ideas/${second}`, "two"),
+      ]);
+      expect(decision.allowed, `${first} beside ${second}`).toBe(false);
+    }
+    expect(pathCollisionKey("Trip/Ideas. /A.MD")).toBe(pathCollisionKey("trip/ideas/a.md"));
+  });
+
   it("takes exactly 500 records in a new Collection", () => {
     const selector: ShareSelector = { versionId: null, paths: ["trip"], access: "edit" };
     const records = Array.from({ length: MAX_NEW_COLLECTION_RECORDS }, (_, index) =>

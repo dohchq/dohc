@@ -32,7 +32,11 @@ import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
-import { readCollectionWritesConfig } from "./collectionWriteRoutes";
+import {
+  COLLECTION_WRITES_PATH,
+  MAX_COLLECTION_WRITE_BODY_BYTES,
+  readCollectionWritesConfig,
+} from "./collectionWriteRoutes";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -426,6 +430,7 @@ const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
+    COLLECTION_WRITES_PATH.test(url.pathname) ? MAX_COLLECTION_WRITE_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :

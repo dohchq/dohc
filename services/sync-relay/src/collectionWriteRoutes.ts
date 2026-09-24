@@ -1,7 +1,8 @@
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import type { DiscussionActivityHub } from "./discussionActivity";
-import { notFound, relayError, RELAY_ERRORS } from "./errors";
-import { parseString, readJsonObject } from "./requestInputs";
+import { badRequest, notFound, relayError, RELAY_ERRORS } from "./errors";
+import { readBytes } from "./relayBytes";
+import { parseString } from "./requestInputs";
 import { authorizeShareGrantAction, type AuthorizedShareAction } from "./shareAuthorization";
 import { filterCollectionWriteForShare, type ShareSelector } from "./shareFilter";
 import { CollectionWriteStaleError, type SyncRelayStorage } from "./storage";
@@ -13,6 +14,9 @@ const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
 const COLLECTION_WRITE_REFILL_PER_SECOND = 0.5;
 const COLLECTION_WRITE_MAX_GRANTS = 10_000;
 const MAX_SUBMIT_ID_CHARS = 128;
+// A new Collection's 502 changes with long paths fit well inside this.
+export const MAX_COLLECTION_WRITE_BODY_BYTES = 1024 * 1024;
+export const COLLECTION_WRITES_PATH = /^\/sync\/shares\/[^/]+\/collection-writes$/u;
 
 export function createCollectionWriteRateLimiter(): TokenBucketLimiter {
   return new TokenBucketLimiter(
@@ -80,15 +84,17 @@ export function createCollectionWriteRoutes(input: {
     await input.claimPendingShares(actorUserId);
     const authorized = namedEditGrant(route.shareId, actorUserId);
     const { share, grant } = authorized;
-    const body = await readJsonObject(request);
+    // Every admitted request spends a token before its body is read, so a
+    // refused request costs its sender the same as a written one.
+    if (!input.rateLimiter.allow(grant.grantId, input.nowMs())) {
+      throw relayError("collection_write_rate_limited");
+    }
+    const body = await readBody(request);
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, body.changes, {
       channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
     });
     if (!decision.allowed) throw relayError("share_op_rejected");
-    if (!input.rateLimiter.allow(grant.grantId, input.nowMs())) {
-      throw relayError("collection_write_rate_limited");
-    }
     let committed: ReturnType<typeof storage.commitCollectionWrite>;
     try {
       committed = storage.commitCollectionWrite({
@@ -115,4 +121,18 @@ export function createCollectionWriteRoutes(input: {
     if (committed.created) input.discussionActivity.wake(`log:${share.workspaceId}`);
     return jsonResponse({ ok: true, ...committed.receipt, created: committed.created });
   };
+}
+
+async function readBody(request: Request): Promise<Record<string, unknown>> {
+  const bytes = await readBytes(request, MAX_COLLECTION_WRITE_BODY_BYTES);
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw badRequest("request body must be valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("request body must be a JSON object");
+  }
+  return value as Record<string, unknown>;
 }
