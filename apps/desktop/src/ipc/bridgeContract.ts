@@ -5481,6 +5481,14 @@ export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
 // `base` is the settings the caller changed. Main writes only the difference,
 // so a caller that has not yet seen an edit made in the file cannot undo it.
+// Pins or unpins one app in one workspace's sidebar.
+export const SetAppPinnedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: SITE_ROOT_STRING,
+  pinned: z.boolean(),
+}).strict();
+export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
   base: DesktopUserSettingsSchema,
@@ -6572,6 +6580,7 @@ export interface DohcDesktopBridge
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
   // Reads the settings file again, applies it, and answers what is in effect.
   reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
   getUserSettingsFilePath(): Promise<string>;
   // Opens the settings file in the system's editor, creating it first when
   // there is none.

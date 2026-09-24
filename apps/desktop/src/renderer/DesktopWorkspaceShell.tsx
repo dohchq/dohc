@@ -232,7 +232,7 @@ import {
   parsePluginWebAppTabPath,
   appViewId,
   clearPluginView,
-  clearUnpinnedAppView,
+  keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
   pluginDetailsTabPath,
@@ -260,7 +260,9 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import { ChatsPanel, type ChatsPanelTab } from "./workbench/ChatsPanel";
-import { pinnedAppLabel, pinnedAppsFor, withAppPinned } from "./workbench/pinnedApps";
+import { usePinnedApps } from "./workbench/pinnedApps";
+import { pinnedAppsFor } from "../settings/pinnedApps";
+import { ipcErrorMessage } from "./ipcError";
 import { createFirstAppFiles } from "./workbench/createFirstApp";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
@@ -1120,11 +1122,13 @@ export function DesktopWorkspaceShell(props: {
   );
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
   const railViews = useMemo(() => sidebarViews(sidebarSettings), [sidebarSettings]);
-  const pinnedApps = useMemo(
+  const pinnedRoots = useMemo(
     () => pinnedAppsFor(props.userSettings?.settings, workspaceId),
     [props.userSettings, workspaceId],
   );
+  const pinnedApps = usePinnedApps(workspaceId, pinnedRoots);
   const selectedAppRoot = parseAppViewId(wb.activeView);
+  const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
   // A shared view can never write the workspace (assertWritableWorkspace
   // refuses on the share's presence alone), so every plugin command
   // invoked from one is a dead click regardless of which plugin or command
@@ -1147,8 +1151,8 @@ export function DesktopWorkspaceShell(props: {
   // saying which view the user is looking at.
   const sidePanelTitle = isViewId(wb.activeView)
     ? activityViewLabel(wb.activeView)
-    : selectedAppRoot !== null
-      ? pinnedAppLabel(selectedAppRoot)
+    : selectedApp !== null
+      ? selectedApp.label
       : selectedPluginViewState?.status === "ready" ||
           selectedPluginViewState?.status === "off"
         ? selectedPluginViewState.title
@@ -1162,30 +1166,25 @@ export function DesktopWorkspaceShell(props: {
     mutateWb(clearPluginView);
   }, [selectedPluginViewState?.status, mutateWb]);
 
-  // An app that left the sidebar leaves no selection behind. Until the
-  // settings arrive the selection stands, so a restart keeps the app open.
+  // A view the sidebar stopped showing, hidden or unpinned, leaves no
+  // selection behind. Until the settings arrive the selection stands, so a
+  // restart keeps the view that was open.
   useEffect(() => {
     if (!props.userSettings) return;
-    mutateWb((state) => clearUnpinnedAppView(state, pinnedApps));
-  }, [mutateWb, pinnedApps, props.userSettings, wb.activeView]);
+    mutateWb((state) => keepActiveViewShown(state, railViews, pinnedRoots));
+  }, [mutateWb, pinnedRoots, props.userSettings, railViews, wb.activeView]);
 
-  // A pin is a personal setting. The root hears the save through the
+  // A pin is a personal setting. Main applies each pin to the file as it is
+  // now, so two quick pins both land; the root hears the save through the
   // settings broadcast, and the sidebar follows.
-  const userSettingsRef = useRef(props.userSettings);
-  userSettingsRef.current = props.userSettings;
   const setAppPinned = useCallback(
     async (appRoot: string, pinned: boolean): Promise<void> => {
-      const base = userSettingsRef.current?.settings;
-      if (!base) return;
       try {
-        await bridge().setUserSettings({
-          settings: withAppPinned(base, workspaceId, appRoot, pinned),
-          base,
-        });
+        await bridge().setAppPinned({ workspaceId, appRoot, pinned });
       } catch (error) {
         reportShellError(
           pinned ? "dohc could not pin this app." : "dohc could not unpin this app.",
-          error,
+          new Error(ipcErrorMessage(error)),
           () => void setAppPinned(appRoot, pinned),
         );
       }
@@ -3719,10 +3718,10 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${view.title}`,
         run: () => mutateWb((state) => setView(state, view.viewId)),
       })),
-      ...pinnedApps.map((appRoot) => ({
-        id: `show-${appViewId(appRoot)}`,
-        label: `View: ${pinnedAppLabel(appRoot)}`,
-        run: () => mutateWb((state) => setView(state, appViewId(appRoot))),
+      ...pinnedApps.map((app) => ({
+        id: `show-${appViewId(app.root)}`,
+        label: `View: ${app.label}`,
+        run: () => mutateWb((state) => setView(state, appViewId(app.root))),
       })),
       ...pluginCommandItems.map((entry) => ({
         id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
@@ -4904,7 +4903,7 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="apps" />}>
                 <LazyAppsView
                   workspaceId={workspaceId}
-                  pinnedApps={pinnedApps}
+                  pinnedApps={pinnedRoots}
                   onSetPinned={(appRoot, pinned) => void setAppPinned(appRoot, pinned)}
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
@@ -4928,6 +4927,7 @@ export function DesktopWorkspaceShell(props: {
                 <LazySitePreviewPage
                   key={selectedAppRoot}
                   variant="panel"
+                  onUnpin={() => void setAppPinned(selectedAppRoot, false)}
                   workspaceId={workspaceId}
                   reportError={reportShellError}
                   siteRoot={selectedAppRoot}

@@ -16949,6 +16949,7 @@ describe("apps pinned to the sidebar", () => {
       })),
       stopSitePreview: vi.fn(async () => undefined),
       getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
+      setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
     });
     bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
     const settings = {
@@ -16973,7 +16974,8 @@ describe("apps pinned to the sidebar", () => {
     const shell = await screen.findByTestId("workspace-shell");
     await waitFor(() => expect(shell.dataset.ready).toBe("true"));
     expect(screen.queryByTestId("activity-graph")).toBeNull();
-    const pinned = screen.getByRole("button", { name: "trip" });
+    // The pin carries its app's title once dohc has read the app.
+    const pinned = await screen.findByRole("button", { name: "Trip planner" });
     await user.click(pinned);
 
     const panel = screen.getByTestId("side-panel");
@@ -16984,13 +16986,16 @@ describe("apps pinned to the sidebar", () => {
       workspaceId: WORKSPACE.workspaceId,
       siteRoot: "apps/trip",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
 
     fireEvent.contextMenu(pinned);
     await waitFor(() =>
-      expect(bridge.setUserSettings).toHaveBeenCalledWith({
-        settings: { ...settings, sidebar: { ...settings.sidebar, pinnedApps: {} } },
-        base: settings,
+      expect(bridge.setAppPinned).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        appRoot: "apps/trip",
+        pinned: false,
       }),
     );
     expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({

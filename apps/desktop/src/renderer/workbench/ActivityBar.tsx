@@ -1,5 +1,4 @@
 import {
-  AppWindow,
   Blocks,
   Cloud,
   Files,
@@ -11,7 +10,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { PluginActivityView } from "./pluginActivityViews";
-import { pinnedAppLabel } from "./pinnedApps";
+import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
 import { PluginIcon } from "./PluginIcon";
 import { appViewId, type ActivityViewId, type ViewId } from "./workbenchState";
 
@@ -139,8 +138,8 @@ export function ActivityBar(props: {
   // The views plugins contribute, after dohc's own. A plugin that is gone or
   // turned off contributes none, so its button leaves the rail with it.
   pluginViews: readonly PluginActivityView[];
-  // Apps pinned in this workspace, by folder, after the plugin views.
-  pinnedApps?: readonly string[];
+  // Apps pinned in this workspace, after the plugin views.
+  pinnedApps?: readonly PinnedApp[];
   onPinnedAppMenu?: (appRoot: string) => void;
   onSelectView: (view: ActivityViewId) => void;
   onOpenCloud?: () => void;
@@ -188,19 +187,28 @@ export function ActivityBar(props: {
             }
           />
         ))}
-        {(props.pinnedApps ?? []).map((appRoot) => {
-          const viewId = appViewId(appRoot);
+        {(props.pinnedApps ?? []).map((app) => {
+          const viewId = appViewId(app.root);
           return (
             <RailButton
               key={viewId}
               testId="activity-pinned-app"
-              label={pinnedAppLabel(appRoot)}
+              label={app.label}
               active={props.sidebarVisible && props.activeView === viewId}
               onClick={() => props.onSelectView(viewId)}
               onContextMenu={
-                props.onPinnedAppMenu ? () => props.onPinnedAppMenu?.(appRoot) : undefined
+                props.onPinnedAppMenu ? () => props.onPinnedAppMenu?.(app.root) : undefined
               }
-              icon={<RailGlyph Icon={AppWindow} />}
+              // The app's initial tells pinned apps apart; its title is the
+              // button's name and tooltip.
+              icon={
+                <span
+                  aria-hidden
+                  className="grid size-[18px] place-items-center rounded-md border-[1.5px] border-current text-[11px] font-semibold leading-none"
+                >
+                  {pinnedAppInitial(app.label)}
+                </span>
+              }
             />
           );
         })}

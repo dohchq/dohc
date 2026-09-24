@@ -2964,12 +2964,20 @@ describe("site IPC contract", () => {
         workspaceId: "ws-sites",
         siteRoot: ".",
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).toEqual({
       workspaceId: "ws-sites",
       siteRoot: ".",
       mode: "static",
+      holderId: "tab",
+      restart: false,
     });
+    // A start names the surface that shows the preview.
+    expect(
+      StartSitePreviewPayload.safeParse({ workspaceId: "ws-sites", siteRoot: ".", mode: "static", restart: false }).success,
+    ).toBe(false);
 
     expect(
       StartSitePreviewResult.parse({
@@ -3000,8 +3008,9 @@ describe("site IPC contract", () => {
       StopSitePreviewPayload.parse({
         workspaceId: "ws-sites",
         siteRoot: ".",
+        holderId: "tab",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: ".", holderId: "tab" });
     expect(
       GetSitePreviewLogsPayload.parse({
         workspaceId: "ws-sites",

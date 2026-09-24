@@ -343,6 +343,7 @@ export const CHANNELS = {
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
   reloadUserSettings: "desktop:reload-user-settings",
+  setAppPinned: "desktop:set-app-pinned",
   getUserSettingsFilePath: "desktop:get-user-settings-file-path",
   openUserSettingsFile: "desktop:open-user-settings-file",
   openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",

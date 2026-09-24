@@ -101,17 +101,25 @@ export function clearPluginView(state: WorkbenchState): WorkbenchState {
     : { ...state, activeView: defaultWorkbenchState().activeView };
 }
 /**
- * Drops the selection of an app that is no longer pinned, the way an
- * uninstalled plugin's view is dropped.
+ * Moves the selection off a view the sidebar no longer shows: one of dohc's
+ * views the person hid, or an app they unpinned. The first view the sidebar
+ * shows takes its place, and with none left the side panel closes.
  */
-export function clearUnpinnedAppView(
+export function keepActiveViewShown(
   state: WorkbenchState,
+  shownViews: readonly ViewId[],
   pinnedApps: readonly string[],
 ): WorkbenchState {
   const appRoot = parseAppViewId(state.activeView);
-  return appRoot === null || pinnedApps.includes(appRoot)
-    ? state
-    : { ...state, activeView: defaultWorkbenchState().activeView };
+  const shown = appRoot !== null
+    ? pinnedApps.includes(appRoot)
+    : !isViewId(state.activeView) || shownViews.includes(state.activeView);
+  if (shown) return state;
+  const [first] = shownViews;
+  const fallback = first ?? (pinnedApps[0] === undefined ? null : appViewId(pinnedApps[0]));
+  return fallback === null
+    ? { ...state, sidebarVisible: false }
+    : { ...state, activeView: fallback };
 }
 // Reserved for dohc's own tabs. A workspace file path is never spelled this
 // way, so a persisted tab carrying it is always one of the kinds below.

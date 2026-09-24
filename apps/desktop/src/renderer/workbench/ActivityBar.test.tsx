@@ -217,7 +217,7 @@ describe("ActivityBar order and pinned apps", () => {
         workspaceId="workspace-a"
         views={VIEW_IDS}
         pluginViews={[]}
-        pinnedApps={["apps/trip"]}
+        pinnedApps={[{ root: "apps/trip", label: "Trip planner", missing: false }]}
         onPinnedAppMenu={onPinnedAppMenu}
         activeView={appViewId("apps/trip")}
         sidebarVisible
@@ -225,7 +225,10 @@ describe("ActivityBar order and pinned apps", () => {
         onSelectView={onSelectView}
       />,
     );
-    const pinned = screen.getByRole("button", { name: "trip" });
+    const pinned = screen.getByRole("button", { name: "Trip planner" });
+    expect(pinned.getAttribute("title")).toBe("Trip planner");
+    // Its initial tells it apart from other pinned apps.
+    expect(pinned.textContent).toBe("T");
     expect(pinned.getAttribute("aria-current")).toBe("page");
     fireEvent.click(pinned);
     expect(onSelectView).toHaveBeenCalledWith(appViewId("apps/trip"));

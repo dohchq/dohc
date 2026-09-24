@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconButton } from "./ui/controls";
+import { IconButton, SecondaryButton } from "./ui/controls";
 import type {
   SitePackageInfo,
   SitePreviewMode,
@@ -202,8 +202,10 @@ function shareRefusalMessage(
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
-  // A pinned app in the side panel, whose header already names its folder.
+  // A pinned app in the side panel, whose header already names the app.
   variant?: "panel";
+  // Takes a pinned app whose folder no longer holds an app out of the sidebar.
+  onUnpin?: () => void;
   sharedView?: boolean;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
@@ -663,13 +665,18 @@ export function SitePreviewPage(props: {
           Loading app…
         </div>
       ) : load.status === "missing" ? (
-        <EmptyState title="App not detected" body="dohc no longer detects an app in this folder." />
+        <EmptyState
+          title="App not detected"
+          body="dohc no longer detects an app in this folder."
+          onUnpin={props.onUnpin}
+        />
       ) : load.status === "error" ? (
         <EmptyState title="Could not load app" body={load.message} />
       ) : load.status === "ready" && !site ? (
         <EmptyState
           title="App not detected"
           body={APP_MISSING_MESSAGE}
+          onUnpin={props.onUnpin}
         />
       ) : site ? (
         <>
@@ -785,12 +792,17 @@ function LogsDetails(props: {
   );
 }
 
-function EmptyState(props: { title: string; body: string }) {
+function EmptyState(props: { title: string; body: string; onUnpin?: (() => void) | undefined }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
       <AlertTriangle size={20} aria-hidden className="text-warning" />
       <span className="text-sm text-ink">{props.title}</span>
       <span className="max-w-sm text-xs text-muted">{props.body}</span>
+      {props.onUnpin ? (
+        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin} className="mt-1">
+          Unpin
+        </SecondaryButton>
+      ) : null}
     </div>
   );
 }

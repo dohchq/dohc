@@ -588,6 +588,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
   reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
+  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
   getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
   openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
   openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>

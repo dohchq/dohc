@@ -112,6 +112,14 @@ describe("SitePreviewPage", () => {
     expect(second).toBe(first);
   });
 
+  it("offers Unpin in a pinned panel whose folder no longer holds an app", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce(null);
+    const onUnpin = vi.fn();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" variant="panel" onUnpin={onUnpin} />);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Unpin" }));
+    expect(onUnpin).toHaveBeenCalledOnce();
+  });
+
   it("starts the best available preview automatically and embeds the local URL", async () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 

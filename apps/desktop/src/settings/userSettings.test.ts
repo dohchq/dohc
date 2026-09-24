@@ -463,6 +463,18 @@ describe("desktop user settings store", () => {
     await writeUserSettingsFile(root, unpinned, pinned);
     expect((await readUserSettingsFile(root)).settings.sidebar.pinnedApps).toEqual({});
 
+    // One workspace's bad pin list turns off only that workspace's pins.
+    await writeFile(path, JSON.stringify({
+      sidebar: { pinnedApps: { "ws-a": ["report"], "ws-b": [""], "Not A Workspace": ["x"] } },
+    }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { sidebar: { pinnedApps: { "ws-a": ["report"] } } },
+      ignored: [
+        { key: "sidebar.pinnedApps.ws-b", reason: "invalid" },
+        { key: "sidebar.pinnedApps.Not A Workspace", reason: "invalid" },
+      ],
+    });
+
     // A view this build does not have turns off the order, not the pins.
     await writeFile(path, JSON.stringify({
       sidebar: { order: ["files", "search"], hidden: [], pinnedApps: { "ws-a": ["report"] } },

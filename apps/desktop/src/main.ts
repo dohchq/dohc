@@ -4063,6 +4063,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings,
   openPath: (path) => shell.openPath(path),
+  knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
 
 function registerIpcHandlers(): void {
