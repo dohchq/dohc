@@ -228,6 +228,9 @@ export function SitePreviewPage(props: {
   const logsRequestRef = useRef(0);
   const shareRequestRef = useRef(0);
   const siteContextRef = useRef("");
+  // This surface, among the tabs and pinned panels that can show one app's
+  // preview. Main keeps the preview running while any of them shows it.
+  const holderId = useRef(crypto.randomUUID()).current;
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
 
@@ -287,10 +290,10 @@ export function SitePreviewPage(props: {
   useEffect(() => {
     return () => {
       void bridge()
-        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot })
+        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot, holderId })
         .catch(() => undefined);
     };
-  }, [props.workspaceId, props.siteRoot]);
+  }, [holderId, props.workspaceId, props.siteRoot]);
 
 
   // getSitePackage intentionally returns the deepest containing site for a
@@ -309,7 +312,9 @@ export function SitePreviewPage(props: {
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
-  const start = useCallback(async (mode: SitePreviewMode) => {
+  // `restart` is a start the person asked for: it runs the preview again
+  // even when another surface already shows it in this mode.
+  const start = useCallback(async (mode: SitePreviewMode, restart: boolean) => {
     const request = ++previewStartRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
@@ -326,6 +331,8 @@ export function SitePreviewPage(props: {
         workspaceId: props.workspaceId,
         siteRoot: props.siteRoot,
         mode,
+        holderId,
+        restart,
       });
       if (!isCurrent()) return;
       setPreviewLogs(result.logs);
@@ -350,7 +357,7 @@ export function SitePreviewPage(props: {
     } finally {
       if (isCurrent()) setRunningMode(null);
     }
-  }, [props.siteRoot, props.workspaceId, siteContext]);
+  }, [holderId, props.siteRoot, props.workspaceId, siteContext]);
 
   const prepareShare = useCallback(async () => {
     const request = ++shareRequestRef.current;
@@ -391,7 +398,7 @@ export function SitePreviewPage(props: {
           }
           return;
         }
-        const built = await start("build");
+        const built = await start("build", true);
         if (!built || !isCurrent()) return;
         // This branch just built specifically to get a shareable
         // artifact — "build" is the mode that artifact was produced for.
@@ -487,7 +494,7 @@ export function SitePreviewPage(props: {
     const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
-    void start(mode);
+    void start(mode, false);
   }, [
     idleReason,
     load,
@@ -511,6 +518,7 @@ export function SitePreviewPage(props: {
       await bridge().stopSitePreview({
         workspaceId: props.workspaceId,
         siteRoot: props.siteRoot,
+        holderId,
       });
       if (!isCurrent()) return;
       setPreview(null);
@@ -620,7 +628,7 @@ export function SitePreviewPage(props: {
                     type="button"
                     data-testid={`site-preview-${mode}`}
                     disabled={runningMode !== null}
-                    onClick={() => void start(mode)}
+                    onClick={() => void start(mode, true)}
                     className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
                     {mode === "build" ? (

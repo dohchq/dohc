@@ -14,7 +14,7 @@ import {
   type SitePreviewMode,
 } from "./bridgeContract";
 
-type SitePreviewResultBody = Omit<
+export type SitePreviewResultBody = Omit<
   StartSitePreviewResult,
   "url" | "exited"
 >;
@@ -52,7 +52,10 @@ export interface StartSitePreviewDependencies<
     ): Promise<Result>;
   };
   catalog: OwnedSiteCatalog<Workspace>;
-  lifecycle: Pick<ReturnType<typeof createSitePreviewLifecycle>, "start">;
+  lifecycle: Pick<
+    ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
+    "acquire"
+  >;
   isSharedView(workspaceId: string): boolean;
   execute(
     input: SitePreviewExecutionInput,
@@ -94,10 +97,13 @@ export function createStartSitePreviewHandler<
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
         return StartSitePreviewResult.parse(
-          await dependencies.lifecycle.start<SitePreviewResultBody>({
+          await dependencies.lifecycle.acquire({
+            holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
             siteRoot: payload.siteRoot,
+            mode: payload.mode,
+            restart: payload.restart,
             isCurrent,
             prepare: async () => {
               const sharedView = dependencies.isSharedView(workspace.workspaceId);

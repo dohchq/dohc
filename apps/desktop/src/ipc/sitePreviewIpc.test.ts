@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../workspaces/sitePackage";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
+import type { SitePreviewResultBody } from "./sitePreviewIpc";
 import type { StaticSitePreview } from "../workspaces/siteRunner";
 import {
   createStartSitePreviewHandler,
@@ -81,7 +82,7 @@ function harness(input: {
       logs: [],
     },
   }));
-  const lifecycle = createSitePreviewLifecycle({
+  const lifecycle = createSitePreviewLifecycle<SitePreviewResultBody>({
     allowOrigin: () => () => undefined,
   });
   const dependencies: StartSitePreviewDependencies<
@@ -145,6 +146,8 @@ describe("start site preview IPC", () => {
       workspaceId: "workspace-1",
       siteRoot: "site",
       mode: "static",
+      holderId: "tab",
+      restart: false,
     });
 
     expect(result).toEqual({
@@ -184,6 +187,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: "ancestor/stale-child",
         mode: "dev",
+        holderId: "tab",
+        restart: false,
       }),
     ).rejects.toThrow("Not a detected app: ancestor/stale-child");
 
@@ -203,6 +208,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
         mode: "build",
+        holderId: "tab",
+        restart: false,
       }),
     ).rejects.toThrow(
       "Live and built app previews run the app's own code, so they're disabled in a shared view. Use the static preview.",
@@ -220,6 +227,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: "shared-with-me/team/site",
         mode: "dev",
+        holderId: "tab",
+        restart: false,
       }),
     ).rejects.toThrow(
       "Apps opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
@@ -238,6 +247,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: root,
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).resolves.toMatchObject({ siteRoot: root, mode: "static" });
 
@@ -255,6 +266,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).rejects.toThrow(
       "The app preview request does not target the active workspace. Open the workspace and start the preview again.",
@@ -296,6 +309,8 @@ describe("start site preview IPC", () => {
       workspaceId: "workspace-1",
       siteRoot: "site",
       mode: "static",
+      holderId: "tab",
+      restart: false,
     });
     await vi.waitFor(() => expect(test.execute).toHaveBeenCalledTimes(1));
 
@@ -315,6 +330,8 @@ describe("start site preview IPC", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).rejects.toThrow(/active workspace/i);
 

@@ -53,7 +53,7 @@ const workspaceSettingsResult = {
 const bridgeMock = {
   getSitePackage: vi.fn(async (_payload: SitePackagePayload): Promise<SitePackageInfo | null> => site),
   getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
-  startSitePreview: vi.fn(async (): Promise<StartSitePreviewResult> => ({
+  startSitePreview: vi.fn(async (_payload: { holderId: string }): Promise<StartSitePreviewResult> => ({
     siteRoot: "report",
     mode: "static" as const,
     url: "http://127.0.0.1:49152/",
@@ -95,6 +95,23 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByText("report")).toBeNull();
   });
 
+  it("shares a running preview when it opens, and starts again when the person picks a mode", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await screen.findByTestId("site-preview-frame");
+    expect(bridgeMock.startSitePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "static", restart: false }),
+    );
+    await user.click(screen.getByTestId("site-preview-options"));
+    await user.click(screen.getByTestId("site-preview-static"));
+    expect(bridgeMock.startSitePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "static", restart: true }),
+    );
+    // One surface keeps one name, so main counts it once.
+    const [first, second] = bridgeMock.startSitePreview.mock.calls.map(([payload]) => payload.holderId);
+    expect(second).toBe(first);
+  });
+
   it("starts the best available preview automatically and embeds the local URL", async () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -117,6 +134,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
   });
@@ -143,6 +162,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "dev",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -169,6 +190,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -195,6 +218,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "build",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -223,6 +248,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "build",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -277,6 +304,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -311,6 +340,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
@@ -335,6 +366,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -373,6 +406,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: sharedRoot,
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 
@@ -1331,9 +1366,12 @@ describe("SitePreviewPage", () => {
     await screen.findByText("Report");
     view.unmount();
 
+    // The page lets go under the name it started with.
+    const started = bridgeMock.startSitePreview.mock.calls[0]![0];
     expect(bridgeMock.stopSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
       siteRoot: "report",
+      holderId: started.holderId,
     });
   });
 
@@ -1455,6 +1493,8 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "replacement",
       mode: "static",
+      holderId: expect.any(String),
+      restart: false,
     });
   });
 

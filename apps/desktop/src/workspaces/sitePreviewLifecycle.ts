@@ -86,10 +86,25 @@ export type SitePreviewExecution<T extends { logs: SiteLogEntry[] }> = {
   result: T;
 };
 
-export function createSitePreviewLifecycle(input: {
+type StartedPreview<T> = T & { url: string; exited: boolean };
+
+// The surfaces showing one app's preview: an app's tab and its pinned panel
+// can show the same preview at once. Each holder is one surface, with the
+// window it lives in.
+type PreviewHold<T> = {
+  mode: string;
+  holders: Map<string, number>;
+  answer: Promise<StartedPreview<T>>;
+  settled: boolean;
+};
+
+export function createSitePreviewLifecycle<
+  T extends { logs: SiteLogEntry[] } = { logs: SiteLogEntry[] },
+>(input: {
   allowOrigin: (url: string) => () => void;
 }) {
   const startLanes = new Map<string, Promise<void>>();
+  const holds = new Map<string, PreviewHold<T>>();
   const activePreviews = new Map<string, PreviewRecord>();
   const pendingStarts = new Set<PendingStart>();
   const pendingBySender = new Map<number, Set<PendingStart>>();
@@ -326,7 +341,7 @@ export function createSitePreviewLifecycle(input: {
     }
   };
 
-  async function start<T extends { logs: SiteLogEntry[] }>(startInput: {
+  async function start(startInput: {
     senderId: number;
     workspaceId: string;
     siteRoot: string;
@@ -334,7 +349,7 @@ export function createSitePreviewLifecycle(input: {
     prepare: () => Promise<
       (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
     >;
-  }): Promise<T & { url: string; exited: boolean }> {
+  }): Promise<StartedPreview<T>> {
     if (retired) throw new Error(START_CANCELLED_MESSAGE);
     const pending = beginPending(
       startInput.senderId,
@@ -408,6 +423,79 @@ export function createSitePreviewLifecycle(input: {
     }
   }
 
+  /**
+   * Shows the app's preview in one more surface. A surface that asks for the
+   * mode already running, or starting, shares it. A different mode, or a
+   * restart the person asked for, starts the app's preview again: every
+   * surface showing the old one loses it, as a mode change always did.
+   */
+  function acquire(acquireInput: {
+    holderId: string;
+    senderId: number;
+    workspaceId: string;
+    siteRoot: string;
+    mode: string;
+    restart: boolean;
+    isCurrent: () => boolean;
+    prepare: () => Promise<
+      (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
+    >;
+  }): Promise<StartedPreview<T>> {
+    const key = previewKey(acquireInput.workspaceId, acquireInput.siteRoot);
+    const held = holds.get(key);
+    const sameMode = held?.mode === acquireInput.mode;
+    const running = activePreviews.get(key)?.state === "running";
+    if (held && sameMode && (!held.settled || (!acquireInput.restart && running))) {
+      held.holders.set(acquireInput.holderId, acquireInput.senderId);
+      return held.answer;
+    }
+    const holders = held && sameMode ? held.holders : new Map<string, number>();
+    holders.set(acquireInput.holderId, acquireInput.senderId);
+    const hold: PreviewHold<T> = {
+      mode: acquireInput.mode,
+      holders,
+      answer: start(acquireInput),
+      settled: false,
+    };
+    holds.set(key, hold);
+    hold.answer.then(
+      () => { hold.settled = true; },
+      () => { if (holds.get(key) === hold) holds.delete(key); },
+    );
+    return hold.answer;
+  }
+
+  /**
+   * One surface stops showing the app's preview. The preview stops when no
+   * surface shows it any more.
+   */
+  async function release(releaseInput: {
+    getActiveWorkspaceId: () => string | undefined;
+    holderId: string;
+    workspaceId: string;
+    siteRoot: string;
+  }): Promise<void> {
+    const key = previewKey(releaseInput.workspaceId, releaseInput.siteRoot);
+    const held = holds.get(key);
+    if (held) {
+      // Another surface still shows it, or this surface lost it to a mode
+      // change another surface made.
+      if (!held.holders.delete(releaseInput.holderId) || held.holders.size > 0) return;
+      holds.delete(key);
+    }
+    // With no surface holding it, what is left is stopped: this also retries
+    // a stop that failed.
+    await stop(releaseInput);
+  }
+
+  function dropHolds(workspaceId?: string): void {
+    for (const [key, held] of holds) {
+      if (workspaceId === undefined || key.startsWith(previewKey(workspaceId, ""))) {
+        holds.delete(key);
+      }
+    }
+  }
+
   function status(workspaceId: string, siteRoot: string): SitePreviewStatus {
     const active = activePreviews.get(previewKey(workspaceId, siteRoot));
     if (!active) return { logs: [], running: false, exited: false };
@@ -452,11 +540,25 @@ export function createSitePreviewLifecycle(input: {
     });
   }
 
+  // A window that went away shows nothing any more: its surfaces let go, and
+  // a preview only it showed stops.
   function cancelSender(senderId: number): void {
     abortPending(pendingBySender.get(senderId) ?? []);
+    for (const [key, held] of holds) {
+      for (const [holderId, holderSender] of held.holders) {
+        if (holderSender === senderId) held.holders.delete(holderId);
+      }
+      if (held.holders.size > 0) continue;
+      holds.delete(key);
+      abortPending(pendingBySite.get(key) ?? []);
+      void runInKeyedLane(startLanes, key, () => stopCurrent(key)).catch((error) => {
+        console.warn("[desktop] failed to stop an app preview no window shows", error);
+      });
+    }
   }
 
   async function stopWorkspace(workspaceId: string): Promise<void> {
+    dropHolds(workspaceId);
     const pending = abortPending(
       [...pendingStarts].filter((start) => start.workspaceId === workspaceId),
     );
@@ -484,6 +586,7 @@ export function createSitePreviewLifecycle(input: {
   function stopAll(): Promise<void> {
     if (stopAllPromise) return stopAllPromise;
     retired = true;
+    dropHolds();
     const pending = abortPending(pendingStarts);
     const draining = pending.filter((start) => start.phase !== "preparing");
     const keys = new Set([
@@ -519,6 +622,8 @@ export function createSitePreviewLifecycle(input: {
 
   return {
     start,
+    acquire,
+    release,
     status,
     stop,
     cancelSender,

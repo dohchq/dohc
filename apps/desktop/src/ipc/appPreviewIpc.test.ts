@@ -5,6 +5,7 @@ import type { SitePreviewExecutionInput } from "./sitePreviewIpc";
 import type { SitePackageInfo } from "../workspaces/sitePackage";
 import type { SiteLogEntry, SiteProcessHandle } from "../workspaces/siteRunner";
 import { createSitePreviewLifecycle, START_CANCELLED_MESSAGE } from "../workspaces/sitePreviewLifecycle";
+import type { SitePreviewResultBody } from "./sitePreviewIpc";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "../window/rendererWorkspaceSessionOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
@@ -12,8 +13,8 @@ import { createDesktopRendererWorkspaceRetirement } from "../mainRendererWorkspa
 import { deferred, type Deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
-const startPayload = { workspaceId: "a", siteRoot: "app", mode: "static" };
-const appPayload = { workspaceId: "a", siteRoot: "app" };
+const startPayload = { workspaceId: "a", siteRoot: "app", mode: "static", holderId: "tab", restart: false };
+const appPayload = { workspaceId: "a", siteRoot: "app", holderId: "tab" };
 const cleanup: Array<() => Promise<void>> = [];
 function sender(id: number) {
   return { id, isDestroyed: () => false, once(_event: "destroyed", _listener: () => void) { return this; } };
@@ -21,7 +22,7 @@ function sender(id: number) {
 type Sender = ReturnType<typeof sender>;
 type Event = { sender: Sender; trusted: boolean };
 type Workspace = { workspaceId: string; rootPath: string };
-type AppState = { sitePreviews: ReturnType<typeof createSitePreviewLifecycle> };
+type AppState = { sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>> };
 type Operation = ExactRendererWorkspaceOperation<PhysicalWorkspace<Workspace>, AppState, RendererWorkspaceSession<Sender>>;
 
 function appInfo(root = "app"): SitePackageInfo {
@@ -52,7 +53,7 @@ async function harness() {
     findWorkspace: id => entries.get(id) ?? null,
     canonicalizeRoot: root => root.replace("/registered/", "/canonical/"),
     createState: binding => {
-      const state = { sitePreviews: createSitePreviewLifecycle({ allowOrigin }) };
+      const state = { sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({ allowOrigin }) };
       states.set(binding.attachmentId, state); return state;
     },
     disposeState: state => state.sitePreviews.stopAll(),
@@ -92,8 +93,8 @@ async function harness() {
   }));
   const get = vi.fn(async (_workspace: PhysicalWorkspace<Workspace>, root: string, _mode: unknown): Promise<SitePackageInfo | null> => appInfo(root));
   const isSharedView = vi.fn((_workspaceId: string) => false);
-  const appPreviews: Pick<AppState["sitePreviews"], "start"> = {
-    start: input => authorities.withAuthority(input.workspaceId, lease => lease.state.sitePreviews.start(input)),
+  const appPreviews: Pick<AppState["sitePreviews"], "acquire"> = {
+    acquire: input => authorities.withAuthority(input.workspaceId, lease => lease.state.sitePreviews.acquire(input)),
   };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const assertTrustedSender = (event: Event) => { if (!event.trusted) throw new Error("untrusted"); };
@@ -317,9 +318,9 @@ describe("registered app preview IPC", () => {
     try {
       await reached.promise;
       const stopReached = deferred();
-      const stop = h.stateA.sitePreviews.stop;
-      vi.spyOn(h.stateA.sitePreviews, "stop").mockImplementationOnce(input => {
-        const pending = stop(input); stopReached.resolve(); return pending;
+      const release = h.stateA.sitePreviews.release;
+      vi.spyOn(h.stateA.sitePreviews, "release").mockImplementationOnce(input => {
+        const pending = release(input); stopReached.resolve(); return pending;
       });
       const stopping = h.invoke(CHANNELS.stopSitePreview, appPayload);
       stopRejected = expect(stopping).rejects.toThrow("does not target the active workspace");

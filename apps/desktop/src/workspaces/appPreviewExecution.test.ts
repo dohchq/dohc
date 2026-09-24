@@ -298,12 +298,12 @@ describe("app preview execution", () => {
     h.input.mode = "dev";
     h.app.scripts = { dev: "node server.js" };
     const allowOrigin = vi.fn(() => () => undefined);
-    const lifecycle = createSitePreviewLifecycle({ allowOrigin });
+    const lifecycle = createSitePreviewLifecycle<Awaited<ReturnType<typeof h.execute>>["result"]>({ allowOrigin });
     cleanups.push(() => lifecycle.stopAll());
     const reached = deferred<void>();
     const release = deferred<void>();
     vi.mocked(startSiteDevServer).mockImplementation(async () => { reached.resolve(); await release.promise; return h.devHandle; });
-    const pending = lifecycle.start<Awaited<ReturnType<typeof h.execute>>["result"]>({ senderId: 7, workspaceId: "workspace-a", siteRoot: "portal", isCurrent: h.input.isCurrent, prepare: async () => (signal) => h.execute({ ...h.input, signal }) });
+    const pending = lifecycle.start({ senderId: 7, workspaceId: "workspace-a", siteRoot: "portal", isCurrent: h.input.isCurrent, prepare: async () => (signal) => h.execute({ ...h.input, signal }) });
     const rejected = expect(pending).rejects.toThrow(START_CANCELLED_MESSAGE);
     try {
       await reached.promise;

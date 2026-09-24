@@ -2875,10 +2875,17 @@ export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 export const SitePackageResult = SitePackageInfo.nullable();
 export type SitePackageResult = z.infer<typeof SitePackageResult>;
 
+// One surface showing an app's preview: a tab or a pinned panel.
+const SITE_PREVIEW_HOLDER_ID = z.string().min(1).max(100);
+
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  // True when the person asked for this start, which starts the preview
+  // again even when it is running. Otherwise the surface shares it.
+  restart: z.boolean(),
 });
 export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
@@ -2947,9 +2954,12 @@ export type GetSitePreviewLogsResult = z.infer<
   typeof GetSitePreviewLogsResult
 >;
 
+// The surface stops showing the preview. The preview stops when no surface
+// shows it.
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 const StopSitePreviewResult = z.void();

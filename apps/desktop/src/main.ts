@@ -328,6 +328,7 @@ import {
   WILL_QUIT_BUDGET_MS,
 } from "./workspaces/siteRunner";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
+import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 import { createPluginPanelPreviewStarter } from "./plugins/pluginPanelLifecycle";
 import { createDesktopPluginRuntime, type DesktopPluginRuntimeDependencies } from "./plugins/desktopPluginRuntime";
 import {
@@ -1131,7 +1132,7 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
-  sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
+  sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
@@ -1189,7 +1190,7 @@ function createDesktopWorkspaceAuthorityState(
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
-    sitePreviews: createSitePreviewLifecycle({
+    sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
@@ -1485,7 +1486,7 @@ const pluginSurfaces: WorkspacePluginSurfaces = {
 };
 
 type SitePreviewLifecycle = Omit<
-  ReturnType<typeof createSitePreviewLifecycle>,
+  ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
   "stopWorkspace"
 > & {
   stopWorkspace(
@@ -1498,6 +1499,15 @@ const sitePreviews: SitePreviewLifecycle = {
     workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
       lease.state.sitePreviews.start(input),
     ),
+  acquire: (input) =>
+    workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.acquire(input),
+    ),
+  release(input) {
+    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.release(input),
+    );
+  },
   status(workspaceId, siteRoot) {
     const lease = requireWorkspaceAuthority(workspaceId);
     try {
