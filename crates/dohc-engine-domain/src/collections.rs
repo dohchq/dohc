@@ -43,6 +43,7 @@ pub enum CollectionFieldType {
     Person,
     Relation,
     Url,
+    Button,
 }
 
 impl CollectionFieldType {
@@ -57,6 +58,7 @@ impl CollectionFieldType {
             "person" => Some(Self::Person),
             "relation" => Some(Self::Relation),
             "url" => Some(Self::Url),
+            "button" => Some(Self::Button),
             _ => None,
         }
     }
@@ -96,6 +98,10 @@ pub enum FieldDefinition {
     Url {
         name: String,
     },
+    /// Shows a button on each record. It stores no value.
+    Button {
+        name: String,
+    },
 }
 
 impl FieldDefinition {
@@ -110,7 +116,8 @@ impl FieldDefinition {
             | Self::MultiSelect { name, .. }
             | Self::Person { name }
             | Self::Relation { name, .. }
-            | Self::Url { name } => name,
+            | Self::Url { name }
+            | Self::Button { name } => name,
         }
     }
 }
@@ -219,6 +226,7 @@ reason_code!(CollectionSchemaReasonCode {
     UnknownFieldReference,
     SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
+    UnsupportedFieldReference,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -338,6 +346,7 @@ reason_code!(FieldValueReasonCode {
     EmptyPersonId,
     InvalidRecordId,
     InvalidUrl,
+    ExpectedEmpty,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -863,7 +872,8 @@ fn parse_fields(
                     CollectionFieldType::Date => FieldDefinition::Date { name },
                     CollectionFieldType::Person => FieldDefinition::Person { name },
                     CollectionFieldType::Url => FieldDefinition::Url { name },
-                    _ => unreachable!("match arm only admits scalar Field types"),
+                    CollectionFieldType::Button => FieldDefinition::Button { name },
+                    _ => unreachable!("match arm only admits scalar and button Field types"),
                 });
             }
         }
@@ -871,10 +881,26 @@ fn parse_fields(
     fields
 }
 
+// A view sorts, groups, and dates by stored values, and a button stores none.
+fn value_field_reason_code(
+    name: &str,
+    field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
+) -> Option<CollectionSchemaReasonCode> {
+    if !field_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnknownFieldReference)
+    } else if button_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnsupportedFieldReference)
+    } else {
+        None
+    }
+}
+
 fn parse_field_reference(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Option<String> {
     let raw = raw?;
@@ -884,14 +910,10 @@ fn parse_field_reference(
     };
     if value.is_empty() {
         push_reason(reasons, CollectionSchemaReasonCode::EmptyValue, path);
-    } else if field_names.contains(value) {
-        return Some(value.to_owned());
+    } else if let Some(code) = value_field_reason_code(value, field_names, button_names) {
+        push_reason(reasons, code, path);
     } else {
-        push_reason(
-            reasons,
-            CollectionSchemaReasonCode::UnknownFieldReference,
-            path,
-        );
+        return Some(value.to_owned());
     }
     None
 }
@@ -900,6 +922,7 @@ fn parse_sort(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Vec<ViewSort> {
     let Some(raw) = raw else {
@@ -946,16 +969,10 @@ fn parse_sort(
             },
         };
         if let Some(field) = field {
-            if field_names.contains(field.as_str()) {
-                if let Some(direction) = direction {
-                    sort.push(ViewSort { field, direction });
-                }
-            } else {
-                push_reason(
-                    reasons,
-                    CollectionSchemaReasonCode::UnknownFieldReference,
-                    format!("{entry_path}/field"),
-                );
+            if let Some(code) = value_field_reason_code(&field, field_names, button_names) {
+                push_reason(reasons, code, format!("{entry_path}/field"));
+            } else if let Some(direction) = direction {
+                sort.push(ViewSort { field, direction });
             }
         }
     }
@@ -1029,6 +1046,11 @@ fn parse_views(
         return Vec::new();
     };
     let field_names: HashSet<&str> = fields.iter().map(FieldDefinition::name).collect();
+    let button_names: HashSet<&str> = fields
+        .iter()
+        .filter(|field| matches!(field, FieldDefinition::Button { .. }))
+        .map(FieldDefinition::name)
+        .collect();
     let mut view_names = HashSet::new();
     let mut views = Vec::new();
     for (index, view) in sequence.iter().enumerate() {
@@ -1084,12 +1106,14 @@ fn parse_views(
                 mapping_get(view, "groupBy"),
                 &format!("{path}/groupBy"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             sort: parse_sort(
                 mapping_get(view, "sort"),
                 &format!("{path}/sort"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             visible_fields: parse_visible_fields(
@@ -1102,6 +1126,7 @@ fn parse_views(
                 mapping_get(view, "dateField"),
                 &format!("{path}/dateField"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
         });
@@ -4837,6 +4862,32 @@ fn cursor_after_predicate(
     format!("({})", branches.join(" OR "))
 }
 
+/// A button stores no value, so a query cannot filter, sort, or group by one.
+fn reject_button_field_references(
+    schema: &CollectionSchema,
+    query: &CollectionQuery,
+) -> Result<(), crate::DomainError> {
+    let is_button = |name: &str| {
+        schema.fields.iter().any(
+            |field| matches!(field, FieldDefinition::Button { name: button } if button == name),
+        )
+    };
+    let reason = if query
+        .filter
+        .as_ref()
+        .is_some_and(|filter| is_button(&filter.field))
+    {
+        "collection query cannot filter by a button field"
+    } else if query.sort.iter().any(|sort| is_button(&sort.field)) {
+        "collection query cannot sort by a button field"
+    } else if query.group_by.as_deref().is_some_and(is_button) {
+        "collection query cannot group by a button field"
+    } else {
+        return Ok(());
+    };
+    Err(crate::DomainError::InvalidInput { reason })
+}
+
 /// Filter, sort, group, and optionally resolve relation labels from the active
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
@@ -4876,6 +4927,10 @@ pub fn query_collection_records(
     else {
         return Ok(None);
     };
+    if query.filter.is_some() || !query.sort.is_empty() || query.group_by.is_some() {
+        let schema = load_collection_schema(conn, workspace_id, &version_id, collection_path)?;
+        reject_button_field_references(&schema, query)?;
+    }
     register_collection_query_sql(conn)?;
     let mut parameters = vec![
         rusqlite::types::Value::Text(workspace_id.to_owned()),
@@ -5364,6 +5419,7 @@ pub fn validate_field_value(
                 validate_record_id(value, "")
             }
         }
+        FieldDefinition::Button { .. } => flagged(FieldValueReasonCode::ExpectedEmpty, ""),
     }
 }
 

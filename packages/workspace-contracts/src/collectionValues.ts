@@ -32,6 +32,7 @@ const FIELD_TYPES = new Set<CollectionFieldType>([
   "person",
   "relation",
   "url",
+  "button",
 ]);
 const VIEW_KINDS = new Set<ViewKind>(["table", "board", "calendar"]);
 
@@ -340,10 +341,21 @@ function parseFields(
   return fields;
 }
 
+// A view sorts, groups, and dates by stored values, and a button stores none.
+function valueFieldReasonCode(
+  name: string,
+  fieldNames: ReadonlySet<string>,
+  buttonNames: ReadonlySet<string>,
+): CollectionSchemaReason["code"] | null {
+  if (!fieldNames.has(name)) return "unknown-field-reference";
+  return buttonNames.has(name) ? "unsupported-field-reference" : null;
+}
+
 function parseFieldReference(
   raw: unknown,
   path: string,
   fieldNames: ReadonlySet<string>,
+  buttonNames: ReadonlySet<string>,
   reasons: CollectionSchemaReason[],
 ): string | null {
   if (raw === undefined) return null;
@@ -355,8 +367,9 @@ function parseFieldReference(
     reason(reasons, "empty-value", path);
     return null;
   }
-  if (!fieldNames.has(raw)) {
-    reason(reasons, "unknown-field-reference", path);
+  const code = valueFieldReasonCode(raw, fieldNames, buttonNames);
+  if (code !== null) {
+    reason(reasons, code, path);
     return null;
   }
   return raw;
@@ -366,6 +379,7 @@ function parseSort(
   raw: unknown,
   path: string,
   fieldNames: ReadonlySet<string>,
+  buttonNames: ReadonlySet<string>,
   reasons: CollectionSchemaReason[],
 ): ViewSort[] {
   if (raw === undefined) return [];
@@ -390,9 +404,11 @@ function parseSort(
     } else {
       direction = entry.direction;
     }
-    if (field !== null && !fieldNames.has(field)) {
-      reason(reasons, "unknown-field-reference", `${entryPath}/field`);
-    } else if (field !== null && direction !== null) {
+    if (field === null) return;
+    const code = valueFieldReasonCode(field, fieldNames, buttonNames);
+    if (code !== null) {
+      reason(reasons, code, `${entryPath}/field`);
+    } else if (direction !== null) {
       sort.push({ field, direction });
     }
   });
@@ -443,6 +459,9 @@ function parseViews(
     return [];
   }
   const fieldNames = new Set(fields.map((field) => field.name));
+  const buttonNames = new Set(
+    fields.filter((field) => field.type === "button").map((field) => field.name),
+  );
   const viewNames = new Set<string>();
   const views: ViewDefinition[] = [];
   raw.forEach((view, index) => {
@@ -476,8 +495,14 @@ function parseViews(
     views.push({
       name,
       kind,
-      groupBy: parseFieldReference(view.groupBy, `${path}/groupBy`, fieldNames, reasons),
-      sort: parseSort(view.sort, `${path}/sort`, fieldNames, reasons),
+      groupBy: parseFieldReference(
+        view.groupBy,
+        `${path}/groupBy`,
+        fieldNames,
+        buttonNames,
+        reasons,
+      ),
+      sort: parseSort(view.sort, `${path}/sort`, fieldNames, buttonNames, reasons),
       visibleFields: parseVisibleFields(
         view.visibleFields,
         `${path}/visibleFields`,
@@ -488,6 +513,7 @@ function parseViews(
         view.dateField,
         `${path}/dateField`,
         fieldNames,
+        buttonNames,
         reasons,
       ),
     });
@@ -645,6 +671,8 @@ export function validateFieldValue(
     case "url":
       if (typeof value !== "string") return flag("expected-text");
       return URL_PATTERN.test(value) ? { status: "valid" } : flag("invalid-url");
+    case "button":
+      return flag("expected-empty");
   }
 }
 

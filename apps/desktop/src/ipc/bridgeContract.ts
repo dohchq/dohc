@@ -511,7 +511,7 @@ const COLLECTION_NAME = z.string().min(1).max(200);
 
 const ScalarFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
-  type: z.enum(["text", "number", "checkbox", "date", "person", "url"]),
+  type: z.enum(["text", "number", "checkbox", "date", "person", "url", "button"]),
 });
 const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,

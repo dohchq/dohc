@@ -127,3 +127,31 @@ describe("paused table editing", () => {
     });
   });
 });
+
+describe("button fields", () => {
+  it("shows a button column as a label that neither sorts nor edits", () => {
+    const records = [makeRecord("rec-1", [indexedValue("title", "Invoice 12")])];
+    const schema = makeSchema([
+      { name: "title", type: "text" },
+      { name: "Mark paid", type: "button" },
+    ]);
+    const onSortChange = vi.fn();
+    const onCellChange = vi.fn(() => 1);
+    render(
+      <TableView
+        schema={schema}
+        records={records}
+        onSortChange={onSortChange}
+        onCellChange={onCellChange}
+      />,
+    );
+    const headers = screen.getAllByRole("columnheader");
+    expect(headers.map((header) => header.textContent)).toEqual(["title", "Mark paid"]);
+    expect(screen.queryByRole("button", { name: "Mark paid" })).toBeNull();
+    fireEvent.click(headers[1]!);
+    fireEvent.click(screen.getAllByText("Mark paid")[1]!);
+    expect(onSortChange).not.toHaveBeenCalled();
+    expect(onCellChange).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+  });
+});
