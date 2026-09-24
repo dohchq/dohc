@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
@@ -21,7 +21,7 @@ import {
 } from "./workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaceJoinEnrollment";
-import { createRelaySyncEngine } from "./relaySyncEngine";
+import { createRelaySyncEngine, type CloudSyncEngine } from "./relaySyncEngine";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -631,4 +631,130 @@ it.skipIf(engine.missing)(
     }
   },
   90_000,
+);
+
+interface OpenEditor {
+  session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
+  // What the renderer holds: the opening state plus every remote update.
+  doc: Y.Doc;
+}
+
+async function openEditor(daemon: LiveDaemonCapture, path: string): Promise<OpenEditor> {
+  const doc = new Y.Doc();
+  const session = await daemon.capture.openYDocSession({
+    path,
+    contentKind: "plaintext",
+    onRemoteUpdate: (update) => Y.applyUpdate(doc, update),
+  });
+  Y.applyUpdate(doc, session.initialUpdate);
+  return { session, doc };
+}
+
+async function typeAtEnd(editor: OpenEditor, text: string): Promise<void> {
+  const typed = editor.doc.getText("plainText");
+  const before = Y.encodeStateVector(editor.doc);
+  typed.insert(typed.length, text);
+  void editor.session.applyLocalUpdate(Y.encodeStateAsUpdate(editor.doc, before));
+  await editor.session.settleNow();
+}
+
+function shown(editor: OpenEditor): string {
+  return editor.doc.getText("plainText").toString();
+}
+
+it.skipIf(engine.missing)(
+  "shows each device's edit in the other device's idle open editor",
+  async () => {
+    const workspaceId = "two-daemon-idle-editors";
+    const token = `test:${workspaceId}`;
+    const path = "notes/shared.txt";
+    const rootA = await createTestScratch("dohc-idle-editor-a-");
+    const rootB = await createTestScratch("dohc-idle-editor-b-");
+    const relayRoot = await createTestScratch("dohc-idle-editor-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite") });
+    const relayConnection = { baseUrl: relay.baseUrl, token };
+    // The product pulls every few seconds. Any cadence proves the same path,
+    // and a short one keeps the waits short.
+    const idlePullMs = 100;
+    // Generous against that cadence plus one settle.
+    const arrival = { timeout: 60_000, interval: 100 };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const engines: CloudSyncEngine[] = [];
+    const editors: OpenEditor[] = [];
+    try {
+      daemonA = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: rootA,
+        relay: relayConnection,
+      });
+      await daemonA.relay.claim();
+      await daemonA.chats.ensureGeneralChannel({ workspaceId });
+      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+
+      // A starts the document in an editor and shares it.
+      await mkdir(join(rootA, "notes"), { recursive: true });
+      await writeFile(join(rootA, path), "");
+      const editorA = await openEditor(daemonA, path);
+      editors.push(editorA);
+      await typeAtEnd(editorA, "Starting together.\n");
+      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+
+      // B joins, receives the document, and opens it too.
+      daemonB = await openJoinedDaemonCapture({
+        workspaceId,
+        rootPath: rootB,
+        relay: relayConnection,
+      });
+      await daemonB.capture.runRelaySync((materializePage) =>
+        daemonB!.relay.pull(materializePage),
+      );
+      const editorB = await openEditor(daemonB, path);
+      editors.push(editorB);
+      expect(shown(editorB)).toBe("Starting together.\n");
+
+      // From here nothing asks either device to sync. Each pulls on its own.
+      for (const [daemon, rootPath] of [
+        [daemonA, rootA],
+        [daemonB, rootB],
+      ] as const) {
+        const sync = createRelaySyncEngine({
+          rootDir: rootPath,
+          relay: relayConnection,
+          operations: daemon.relay,
+          capture: daemon.capture,
+          onChange: () => undefined,
+          debounceMs: 0,
+          idlePullMs,
+        });
+        engines.push(sync);
+        await sync.start();
+      }
+
+      // Each device types while the other's editor sits idle, and the idle
+      // editor shows the edit without being touched.
+      await typeAtEnd(editorA, "Typed on A.\n");
+      await vi.waitFor(() => expect(shown(editorB)).toContain("Typed on A."), arrival);
+      await typeAtEnd(editorB, "Typed on B.\n");
+      await vi.waitFor(() => expect(shown(editorA)).toContain("Typed on B."), arrival);
+
+      // Both editors and both files hold every line exactly once.
+      const merged = shown(editorA);
+      for (const line of ["Starting together.", "Typed on A.", "Typed on B."]) {
+        expect(merged.split(line).length - 1, line).toBe(1);
+      }
+      expect(shown(editorB)).toBe(merged);
+      await vi.waitFor(async () => {
+        expect(await readFile(join(rootA, path), "utf8")).toBe(merged);
+        expect(await readFile(join(rootB, path), "utf8")).toBe(merged);
+      }, arrival);
+    } finally {
+      for (const sync of engines) await sync.stop().catch(() => undefined);
+      for (const editor of editors) await editor.session.close().catch(() => undefined);
+      await daemonB?.close().catch(() => undefined);
+      await daemonA?.close().catch(() => undefined);
+      await relay.stop();
+    }
+  },
+  180_000,
 );

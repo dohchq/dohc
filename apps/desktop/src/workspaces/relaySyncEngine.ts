@@ -55,6 +55,11 @@ export interface CloudSyncEngineOptions {
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
   afterSuccessfulPull?: () => Promise<void>;
+  // How long the engine waits after a pass before it pulls again on its own.
+  // Nothing else pulls while this device changes nothing, so without it an
+  // idle desktop never receives another device's edits, not even into a
+  // document it has open. Omitted, the engine pulls only when asked.
+  idlePullMs?: number;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -106,6 +111,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   // A pull the Chats polls asked for while local writes held the debounce.
   let pullTimer: ReturnType<typeof setTimeout> | undefined;
+  // The pull a quiet engine makes on its own after `idlePullMs`.
+  let idlePullTimer: ReturnType<typeof setTimeout> | undefined;
   let retryQueued = false;
   // Passes queued on the chain or running. Each of them pulls.
   let passesPending = 0;
@@ -138,6 +145,23 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       clearTimeout(pullTimer);
       pullTimer = undefined;
     }
+    if (idlePullTimer !== undefined) {
+      clearTimeout(idlePullTimer);
+      idlePullTimer = undefined;
+    }
+  }
+
+  // The last pass to finish arms the next idle pull, so a quiet workspace
+  // pulls once per interval and a busy one never waits on this timer. After a
+  // failure the backoff owns the retry.
+  function scheduleIdlePull(): void {
+    const delay = options.idlePullMs;
+    if (delay === undefined || stopped || authExpired) return;
+    if (passesPending > 0 || backoffTimer !== undefined || idlePullTimer !== undefined) return;
+    idlePullTimer = setTimeout(() => {
+      idlePullTimer = undefined;
+      void runPass(false, true);
+    }, delay);
   }
 
   function scheduleBackoff(): void {
@@ -281,6 +305,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       clearTimeout(pullTimer);
       pullTimer = undefined;
     }
+    if (idlePullTimer !== undefined) {
+      clearTimeout(idlePullTimer);
+      idlePullTimer = undefined;
+    }
     const result = chain.then(async () => {
       try {
         if (stopped) return;
@@ -302,6 +330,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         }
       } finally {
         passesPending -= 1;
+        scheduleIdlePull();
       }
     });
     chain = result.catch(() => undefined);

@@ -1754,6 +1754,9 @@ function engineForWorkspace(
         projectPendingChatBookmarks(workspace.workspaceId),
       ),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
+    // The same cadence as the Chats poll, so another device's edits reach
+    // this one, and a document open here, while nobody touches this desktop.
+    idlePullMs: 5_000,
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),

@@ -76,6 +76,7 @@ function engine(input: {
   syncSharedChannels?: () => Promise<boolean>;
   afterSuccessfulPull?: () => Promise<void>;
   operations?: RelaySyncOperations;
+  idlePullMs?: number;
 }) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
@@ -86,6 +87,7 @@ function engine(input: {
     ...(input.afterSuccessfulPull
       ? { afterSuccessfulPull: input.afterSuccessfulPull }
       : {}),
+    ...(input.idlePullMs === undefined ? {} : { idlePullMs: input.idlePullMs }),
     operations: input.operations ?? mockOperations(),
     debounceMs: 100,
     initialBackoffMs: 500,
@@ -644,6 +646,65 @@ describe("relaySyncEngine", () => {
     expect(onChange).toHaveBeenCalledTimes(2);
     expect(sync.snapshot().syncing).toBe(false);
     await sync.stop();
+  });
+
+  it("pulls on its own after each quiet interval and announces only a pull that changed something", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange, idlePullMs: 1000 });
+    await sync.start();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    onChange.mockClear();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(sync.snapshot().pendingChangeCount).toBe(0);
+
+    // Another device's edit arrives on the next pull, and the renderer hears it.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1 }));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    await sync.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+  });
+
+  it("restarts the quiet interval after every pass and leaves a failed pull's retry to the backoff", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cap = capture();
+    const sync = engine({ capture: cap, idlePullMs: 1000 });
+    await sync.start();
+
+    // A local change runs its own pass, and the next pull waits a whole
+    // interval after that pass.
+    await vi.advanceTimersByTimeAsync(600);
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+
+    // The next pull fails. The 500 ms backoff retries it, not the interval.
+    pullMock.mockRejectedValueOnce(new Error("network"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(6);
+
+    await sync.stop();
+    errorSpy.mockRestore();
   });
 
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {

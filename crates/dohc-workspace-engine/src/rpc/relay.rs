@@ -7,6 +7,7 @@ use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_collab::DocKey;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -614,6 +615,7 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
+        self.notify_editors_behind(ctx, &open).await;
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -645,6 +647,52 @@ impl EngineService {
             result["pendingCursor"] = issued;
         }
         Ok(result)
+    }
+
+    /// A pull parks every Y.Doc update for a document an editor holds open,
+    /// and only that editor's resync, settle, or close drains it. Ask each open
+    /// editor of this workspace with parked updates it can take to resync, so
+    /// an idle editor shows another device's edits. The request is advisory
+    /// like every event: the parked updates stay durable, and the next pull
+    /// asks again. A failed check therefore does not fail the committed pull.
+    async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        let (session_ids, sessions): (Vec<String>, Vec<(DocKey, String)>) = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                handles.contains(&session.workspace)
+                    && session.owner_draft.is_none()
+                    && session.restore_generation.is_none()
+            })
+            .filter_map(|(session_id, session)| {
+                let lineage_claim_id = session.lineage_claim_id.clone()?;
+                Some((session_id.clone(), (session.key.clone(), lineage_claim_id)))
+            })
+            .unzip();
+        if sessions.is_empty() {
+            return;
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        match open
+            .actor
+            .ydoc_sessions_behind(sessions, cancellation.token())
+            .await
+        {
+            Ok(behind) => {
+                for (session_id, _) in session_ids.iter().zip(behind).filter(|(_, is)| *is) {
+                    self.events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({ "sessionId": session_id, "resyncRequired": true }),
+                    );
+                }
+            }
+            Err(dohc_engine_runtime::RuntimeError::Cancelled) => {}
+            Err(error) => eprintln!("engine: open editor resync check failed: {error}"),
+        }
     }
 
     pub(super) async fn sync_materialize_pending_cursor(
