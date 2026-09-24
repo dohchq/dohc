@@ -137,12 +137,13 @@ function within(path: string, folder: string): boolean {
 }
 
 // One spelling for every way a filesystem may name the same path: Unicode
-// composed form, full case folding ("ſ" is "s"), and no Windows name endings.
+// composed form, no Windows name endings, and case folded until it stops
+// changing, so "ſ" is "s" and "ẞ", "ß", and "ss" are one spelling.
 function looseKey(path: string): string {
   return path
     .normalize("NFC")
     .split("/")
-    .map((segment) => stripWindowsAliasSuffix(segment).toUpperCase().toLowerCase())
+    .map((segment) => stripWindowsAliasSuffix(segment).toLowerCase().toUpperCase().toLowerCase().normalize("NFC"))
     .join("/");
 }
 

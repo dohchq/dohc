@@ -1,3 +1,4 @@
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -287,6 +288,17 @@ describe("keeping the roster current", () => {
   const offline: RosterAnswer = { kind: "unanswered", next: "Check your connection, then try again.", partial: false };
   const failing: RosterAnswer = { kind: "unanswered", next: "Your server is not answering. Try again later.", partial: false };
   const cached = { kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] };
+  const unchecked = (next: string) => ({ kind: "unknown", problem: { kind: "unchecked", next } });
+
+  // A roster listed a second ago, with no sync pass since.
+  function seed(): void {
+    store.setShareRoster(WORKSPACE, { grants: [ana] }, now - 1_000);
+  }
+
+  // The same registry file, read the way a restarted dohc reads it.
+  function restart(): void {
+    store = createRegistryStore(store.registryFile);
+  }
 
   function rosters(listRoster: (workspace: RegistryEntry) => Promise<RosterAnswer>, save = store.setShareRoster) {
     const logError = vi.fn();
@@ -295,7 +307,7 @@ describe("keeping the roster current", () => {
     return {
       list, logError, saveRoster,
       rosters: createShareRosters({
-        findWorkspace: store.find, saveRoster, listRoster: list,
+        findWorkspace: store.find, saveRoster, markRosterPulled: store.markShareRosterPulled, listRoster: list,
         localUserId: async () => null, logError, nowMs: () => now,
       }),
     };
@@ -307,7 +319,7 @@ describe("keeping the roster current", () => {
     r.open(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(1);
     await r.forRun(WORKSPACE);
-    expect(store.find(WORKSPACE)?.shareRoster).toEqual({ version: 1, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana] });
 
     vi.advanceTimersByTime(SHARE_ROSTER_REFRESH_MS);
     expect(list).toHaveBeenCalledTimes(2);
@@ -329,8 +341,8 @@ describe("keeping the roster current", () => {
 
   it("keeps the last answer while nothing from the relay answers, and says why when there is none", async () => {
     const { rosters: first } = rosters(async () => offline);
-    expect(await first.forRun(WORKSPACE)).toEqual({ kind: "unknown", problem: { kind: "unchecked", next: offline.next } });
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    expect(await first.forRun(WORKSPACE)).toEqual(unchecked(offline.next));
+    seed();
     const { list, rosters: r } = rosters(async () => offline);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     now += SHARE_ROSTER_FRESH_MS * 5;
@@ -339,17 +351,16 @@ describe("keeping the roster current", () => {
   });
 
   it("makes the roster unknown once sync reaches the relay while listings still fail", async () => {
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    seed();
     const { list, rosters: r } = rosters(async () => failing);
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
     await r.pulled(WORKSPACE, false);
-    const unchecked = { kind: "unknown", problem: { kind: "unchecked", next: failing.next } };
-    expect(await r.forRun(WORKSPACE)).toEqual(unchecked);
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
     for (let minute = 1; minute <= 5; minute += 1) {
       now += SHARE_ROSTER_FRESH_MS;
       await r.pulled(WORKSPACE, false);
       expect(list).toHaveBeenCalledTimes(1 + minute);
-      expect(await r.forRun(WORKSPACE), `minute ${minute}`).toEqual(unchecked);
+      expect(await r.forRun(WORKSPACE), `minute ${minute}`).toEqual(unchecked(failing.next));
     }
     list.mockImplementation(async () => answered({ grants: [ana] }));
     now += SHARE_ROSTER_FRESH_MS;
@@ -357,38 +368,97 @@ describe("keeping the roster current", () => {
     expect(await r.forRun(WORKSPACE)).toEqual(cached);
   });
 
+  it("makes the roster unknown when a pass ended after the cached listing, even before the failing listing", async () => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    // t=100: a pass brings changes the listing did not see. The listing is not due yet.
+    now += SHARE_ROSTER_FRESH_MS - 1;
+    await r.pulled(WORKSPACE, false);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
+    // t=101: the due listing fails.
+    list.mockImplementation(async () => failing);
+    now += 1;
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the cache when the last pass ended before the cached listing started", async () => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [ana] }));
+    await r.pulled(WORKSPACE, false);
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+    list.mockImplementation(async () => failing);
+    now += SHARE_ROSTER_FRESH_MS;
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+  });
+
+  it("remembers across a restart that a pass ended after the cached listing", async () => {
+    const before = rosters(async () => answered({ grants: [ana] }));
+    await before.rosters.forRun(WORKSPACE);
+    now += 1;
+    await before.rosters.pulled(WORKSPACE, false);
+    restart();
+    now += 1_000;
+    // A claim from before the restart runs before any pass or listing answers.
+    const { rosters: after } = rosters(async () => offline);
+    expect(await after.forRun(WORKSPACE)).toEqual(unchecked(offline.next));
+  });
+
+  it("uses the cache after a restart when no pass ended after it was listed", async () => {
+    const before = rosters(async () => answered({ grants: [ana] }));
+    await before.rosters.forRun(WORKSPACE);
+    restart();
+    now += 1_000;
+    const { rosters: after } = rosters(async () => offline);
+    expect(await after.forRun(WORKSPACE)).toEqual(cached);
+  });
+
+  it("counts any pass this session for a copy saved without its listing time", async () => {
+    seed();
+    const file = JSON.parse(readFileSync(store.registryFile, "utf8")) as { workspaces: Array<{ shareRoster?: { listedAtMs?: number } }> };
+    delete file.workspaces[0]!.shareRoster!.listedAtMs;
+    writeFileSync(store.registryFile, JSON.stringify(file));
+    restart();
+    const { rosters: r } = rosters(async () => failing);
+    expect(await r.forRun(WORKSPACE)).toEqual(cached);
+    now -= 60 * 60_000;
+    await r.pulled(WORKSPACE, false);
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
+  });
+
   it("makes the roster unknown when the relay answered part of a listing and then stopped", async () => {
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    seed();
     const { rosters: r } = rosters(async () => ({ ...failing, partial: true }));
-    expect(await r.forRun(WORKSPACE)).toEqual({ kind: "unknown", problem: { kind: "unchecked", next: failing.next } });
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked(failing.next));
   });
 
   it("replaces the cache when the relay answers with something dohc cannot use", async () => {
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    seed();
     const { rosters: r } = rosters(async () => answered({ grants: null, problem: { kind: "unusable-listing" } }));
     expect(await r.forRun(WORKSPACE)).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
-    expect(store.find(WORKSPACE)?.shareRoster).toEqual({ version: 2, grants: null, problem: { kind: "unusable-listing" } });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: null, problem: { kind: "unusable-listing" } });
   });
 
   it("treats a listing that throws as unusable, not as offline", async () => {
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    seed();
     const { rosters: r } = rosters(async () => { throw new Error("bug"); });
     expect(await r.forRun(WORKSPACE)).toEqual({ kind: "unknown", problem: { kind: "unusable-listing" } });
   });
 
   it("uses a new listing it could not save, and saves it on the next try", async () => {
-    store.setShareRoster(WORKSPACE, { grants: [ana] });
+    seed();
     let fail = true;
-    const { list, rosters: r } = rosters(async () => answered({ grants: [] }), (id, listing) => {
+    const { list, rosters: r } = rosters(async () => answered({ grants: [] }), (id, listing, listedAtMs) => {
       if (fail) throw new Error("disk full");
-      store.setShareRoster(id, listing);
+      store.setShareRoster(id, listing, listedAtMs);
     });
     expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
     expect(store.find(WORKSPACE)?.shareRoster?.grants).toEqual([ana]);
     fail = false;
     expect(await r.forRun(WORKSPACE)).toEqual({ kind: "owner", ownerUserId: "u-owner", grants: [] });
     expect(list, "the retry listed again instead of saving what it knew").toHaveBeenCalledTimes(1);
-    expect(store.find(WORKSPACE)?.shareRoster).toEqual({ version: 2, grants: [] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [] });
   });
 
   it("retries a listing that got no answer on sync passes, once a minute, until one answers", async () => {
@@ -408,7 +478,7 @@ describe("keeping the roster current", () => {
     now += SHARE_ROSTER_FRESH_MS;
     await r.pulled(WORKSPACE, false);
     expect(list, "a pass listed again after a listing answered").toHaveBeenCalledTimes(3);
-    expect(store.find(WORKSPACE)?.shareRoster).toEqual({ version: 1, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 1, grants: [ana] });
   });
 
   it("lists when sync recovers, at most once a minute", async () => {
@@ -438,7 +508,7 @@ describe("keeping the roster current", () => {
     first.resolve(answered({ grants: [] }));
     await r.forRun(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(2);
-    expect(store.find(WORKSPACE)?.shareRoster).toEqual({ version: 2, grants: [ana] });
+    expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [ana] });
   });
 
   it("refreshes every open workspace when a change names none", async () => {

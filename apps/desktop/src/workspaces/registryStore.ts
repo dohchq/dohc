@@ -608,15 +608,29 @@ export function createRegistryStore(registryFile: string) {
     },
 
     /**
-     * Store a new listing of the workspace's grants. The version rises only
-     * when the listing differs, so an unchanged listing writes nothing.
+     * Store a new listing of the workspace's grants, which started at
+     * `listedAtMs`. The version rises only when the listing differs.
      */
-    setShareRoster(workspaceId: string, listing: RosterListing): void {
+    setShareRoster(workspaceId: string, listing: RosterListing, listedAtMs: number): void {
       updateWorkspaceEntry(workspaceId, (entry) => {
         const stored = entry.shareRoster;
-        // JSON drops the undefined version, leaving only the listing to compare.
-        if (stored && JSON.stringify({ ...stored, version: undefined }) === JSON.stringify(listing)) return undefined;
-        return { ...entry, shareRoster: { ...listing, version: (stored?.version ?? 0) + 1 } };
+        // JSON drops the undefined fields, leaving only the listing to compare.
+        const unchanged = stored !== undefined &&
+          JSON.stringify({ ...stored, version: undefined, listedAtMs: undefined, pulledAfter: undefined }) === JSON.stringify(listing);
+        const version = (stored?.version ?? 0) + (unchanged ? 0 : 1);
+        return { ...entry, shareRoster: { ...listing, version, listedAtMs } };
+      });
+    },
+
+    /**
+     * Record that a relay sync pass succeeded after the stored listing, when
+     * that listing is still the one that started at `listedAtMs`.
+     */
+    markShareRosterPulled(workspaceId: string, listedAtMs: number): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const stored = entry.shareRoster;
+        if (!stored || stored.listedAtMs !== listedAtMs || stored.pulledAfter) return undefined;
+        return { ...entry, shareRoster: { ...stored, pulledAfter: true } };
       });
     },
 

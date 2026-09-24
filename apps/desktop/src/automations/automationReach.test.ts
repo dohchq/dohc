@@ -118,6 +118,10 @@ describe("reach check", () => {
     const plans = { path: "Plans", name: "Plans" };
     expect(check(owner(grant(ana, { paths: ["Planſ"], access: "edit" })), personal(OWNER), plans))
       .toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Plans."));
+    for (const [collection, granted] of [["Straße", "STRAẞE"], ["Straße", "Straẞe"], ["Strasse", "STRAẞE"], ["STRAẞE", "straße"]]) {
+      expect(check(owner(grant(ana, { paths: [granted!], access: "edit" })), personal(OWNER), { path: collection!, name: "Street" }), `${collection} ${granted}`)
+        .toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Street."));
+    }
     // A step that spells its target differently reaches nothing through the spelling.
     const roster = owner(grant(ana, { paths: ["Trip"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
     expect(check(roster, change({ path: "budget", name: "budget" }))).toEqual(stopped("ana@dohc.test cannot edit budget."));

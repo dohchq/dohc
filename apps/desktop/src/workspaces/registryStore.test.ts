@@ -148,21 +148,32 @@ describe("share roster", () => {
 
   it("raises the version only when the listing changes, and survives a reopen", () => {
     store.register(personal);
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] });
-    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")] });
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, 100);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")], listedAtMs: 100 });
 
-    vi.mocked(renameSync).mockClear();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")] });
-    expect(renameSync, "an unchanged listing rewrote the registry").not.toHaveBeenCalled();
-    expect(store.find("ws-1")?.shareRoster?.version).toBe(1);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, 200);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")], listedAtMs: 200 });
 
-    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } });
-    vi.mocked(renameSync).mockClear();
-    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } });
-    expect(renameSync, "an unchanged problem rewrote the registry").not.toHaveBeenCalled();
-    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")] });
-    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")] });
+    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, 300);
+    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, 400);
+    expect(store.find("ws-1")?.shareRoster?.version).toBe(2);
+    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")] }, 500);
+    expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")], listedAtMs: 500 });
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.version).toBe(3);
+  });
+
+  it("marks a pass after the listing it names, and a new listing clears the mark", () => {
+    store.register(personal);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, 100);
+    store.markShareRosterPulled("ws-1", 50);
+    expect(store.find("ws-1")?.shareRoster?.pulledAfter, "a pass marked a newer listing").toBeUndefined();
+    store.markShareRosterPulled("ws-1", 100);
+    expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.pulledAfter).toBe(true);
+    vi.mocked(renameSync).mockClear();
+    store.markShareRosterPulled("ws-1", 100);
+    expect(renameSync, "a second pass rewrote the registry").not.toHaveBeenCalled();
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] }, 200);
+    expect(store.find("ws-1")?.shareRoster?.pulledAfter).toBeUndefined();
   });
 });
 

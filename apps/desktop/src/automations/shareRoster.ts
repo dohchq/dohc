@@ -22,9 +22,9 @@ import {
 // owner's computer keeps this copy in the workspace registry.
 //
 // The copy is never broader than the relay's last answer. A relay that
-// answers nothing leaves the copy as it is. A relay that answers with anything
-// dohc cannot read replaces it with a problem, and the reach check stops every
-// step.
+// answers nothing leaves the copy in place, and it stands in until a sync
+// pass succeeds. A relay that answers with anything dohc cannot read replaces
+// it with a problem, and the reach check stops every step.
 
 export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
@@ -80,7 +80,13 @@ export type RosterListing =
   | { grants: ListedGrant[] }
   | { grants: null; problem: Exclude<RosterProblem, { kind: "unchecked" }> };
 
-export type ShareRoster = RosterListing & { version: number };
+/**
+ * The registry's copy. `version` rises when the listing changes.
+ * `listedAtMs` is when the last listing with this answer started, and
+ * `pulledAfter` records that a relay sync pass succeeded after it. Copies
+ * saved before `listedAtMs` existed lack it.
+ */
+export type ShareRoster = RosterListing & { version: number; listedAtMs?: number; pulledAfter?: true };
 
 const StoredRoster = z.union([
   z.object({ grants: z.array(ListedGrantSchema) }),
@@ -267,13 +273,13 @@ export function reachRosterFor(input: {
 interface RosterState {
   timer: ReturnType<typeof setInterval> | null;
   lastAttemptMs: number | null;
+  // When a relay sync pass last succeeded in this session.
   lastPullMs: number | null;
   // Set while listings get no answer, and cleared only when one answers.
-  // `sinceMs` is when the first of them started. `partial` is true when the
-  // relay answered part of one of them.
-  noAnswer: { sinceMs: number; next: string; partial: boolean } | null;
-  // A listing the registry has not saved yet.
-  unsaved: RosterListing | null;
+  // `partial` is true when the relay answered part of one of them.
+  noAnswer: { next: string; partial: boolean } | null;
+  // A listing the registry has not saved yet, and when it started.
+  unsaved: { listing: RosterListing; listedAtMs: number } | null;
   running: Promise<void> | null;
   again: boolean;
 }
@@ -283,14 +289,17 @@ interface RosterState {
  * changes a share, when relay sync recovers, and every 10 minutes. The
  * executor asks `forRun` before a run.
  *
- * While listings get no answer, the cached roster stands in only as long as
- * the relay answers nothing else either. Once a sync pass or part of a
- * listing succeeds, other people's changes are arriving while their grants
- * cannot be checked, so the roster is unknown until a listing answers.
+ * While listings get no answer, the cached roster stands in only if no relay
+ * sync pass has succeeded since that roster was listed. A pass can bring an
+ * automation from someone whose grant the cached roster does not show, so
+ * after one the roster is unknown until a listing answers. The registry
+ * records that a pass came, so a restart does not forget it.
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  saveRoster(workspaceId: string, listing: RosterListing): void;
+  saveRoster(workspaceId: string, listing: RosterListing, listedAtMs: number): void;
+  // Records that a sync pass succeeded after the listing that started at `listedAtMs`.
+  markRosterPulled(workspaceId: string, listedAtMs: number): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
   localUserId(): Promise<string | null>;
   logError(workspaceId: string, error: unknown): void;
@@ -314,16 +323,40 @@ export function createShareRosters(dependencies: {
   function save(workspaceId: string, state: RosterState): void {
     if (!state.unsaved) return;
     try {
-      dependencies.saveRoster(workspaceId, state.unsaved);
+      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.listedAtMs);
       state.unsaved = null;
+      markPulled(workspaceId, state);
     } catch (error) {
       dependencies.logError(workspaceId, error);
     }
   }
 
-  // The relay answered something since listings stopped getting an answer.
-  function relayAnswered(noAnswer: NonNullable<RosterState["noAnswer"]>, state: RosterState): boolean {
-    return noAnswer.partial || (state.lastPullMs !== null && state.lastPullMs >= noAnswer.sinceMs);
+  // A pass this session ended after the listing started, so it may carry
+  // changes newer than what the listing saw. A pass that ended before the
+  // listing started carries only changes the relay already had when the
+  // listing read it. A copy with no time counts every pass this session.
+  function pulledSince(state: RosterState, listedAtMs: number | undefined): boolean {
+    return state.lastPullMs !== null && (listedAtMs === undefined || state.lastPullMs > listedAtMs);
+  }
+
+  function markPulled(workspaceId: string, state: RosterState): void {
+    const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
+    if (!stored || stored.pulledAfter || stored.listedAtMs === undefined || !pulledSince(state, stored.listedAtMs)) return;
+    try {
+      dependencies.markRosterPulled(workspaceId, stored.listedAtMs);
+    } catch (error) {
+      dependencies.logError(workspaceId, error);
+    }
+  }
+
+  // The latest listing got no answer, and the roster it would fall back to
+  // may be missing an editor.
+  function stale(workspaceId: string, state: RosterState): boolean {
+    if (state.noAnswer === null) return false;
+    if (state.noAnswer.partial) return true;
+    if (state.unsaved) return pulledSince(state, state.unsaved.listedAtMs);
+    const stored = dependencies.findWorkspace(workspaceId)?.shareRoster;
+    return stored?.pulledAfter === true || pulledSince(state, stored?.listedAtMs);
   }
 
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
@@ -339,15 +372,11 @@ export function createShareRosters(dependencies: {
       answer = UNUSABLE;
     }
     if (answer.kind === "unanswered") {
-      state.noAnswer = {
-        sinceMs: state.noAnswer?.sinceMs ?? startedMs,
-        next: answer.next,
-        partial: (state.noAnswer?.partial ?? false) || answer.partial,
-      };
+      state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
       return;
     }
     state.noAnswer = null;
-    state.unsaved = answer.listing;
+    state.unsaved = { listing: answer.listing, listedAtMs: startedMs };
     save(workspaceId, state);
   }
 
@@ -377,22 +406,22 @@ export function createShareRosters(dependencies: {
 
   async function forRun(workspaceId: string): Promise<ReachRoster> {
     const state = stateFor(workspaceId);
-    // With no answer and nothing else from the relay either, a run does not
-    // wait on another listing. It uses the cached roster.
-    const relayUp = state.noAnswer === null || relayAnswered(state.noAnswer, state);
+    // While the cached roster stands in, the relay is answering nothing, so a
+    // run does not wait on another listing.
+    const cacheStandsIn = state.noAnswer !== null && !stale(workspaceId, state);
     if (state.running) await state.running;
-    else if (due(state) && relayUp) await refresh(workspaceId);
+    else if (due(state) && !cacheStandsIn) await refresh(workspaceId);
     save(workspaceId, state);
     const entry = dependencies.findWorkspace(workspaceId);
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && noAnswer && relayAnswered(noAnswer, state)) {
+    if (entry.remote && !entry.shareView && noAnswer && stale(workspaceId, state)) {
       return { kind: "unknown", problem: { kind: "unchecked", next: noAnswer.next } };
     }
     return reachRosterFor({
       entry,
       localUserId: entry.remote ? null : await dependencies.localUserId(),
-      latest: state.unsaved,
+      latest: state.unsaved?.listing ?? null,
       next: noAnswer?.next ?? "Try again in a moment.",
     });
   }
@@ -431,6 +460,7 @@ export function createShareRosters(dependencies: {
     pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
       state.lastPullMs = nowMs();
+      markPulled(workspaceId, state);
       return (recovered || state.noAnswer !== null) && due(state) ? refresh(workspaceId) : Promise.resolve();
     },
 

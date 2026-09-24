@@ -174,6 +174,7 @@ import {
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
+  markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
@@ -1032,6 +1033,7 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 const shareRosters = createShareRosters({
   findWorkspace,
   saveRoster: setWorkspaceShareRoster,
+  markRosterPulled: markWorkspaceShareRosterPulled,
   listRoster: async (workspace) => {
     let credentials: CloudSessionCredentials;
     try {
