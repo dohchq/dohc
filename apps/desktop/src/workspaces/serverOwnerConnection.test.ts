@@ -79,6 +79,32 @@ it.each(["credentials", "workspace", "signal"] as const)("does not publish a lat
   expect(f.changed).not.toHaveBeenCalled();
 });
 
+async function onPlatform(platform: NodeJS.Platform, run: () => Promise<void>) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!descriptor) throw new Error("process.platform has no property descriptor");
+  Object.defineProperty(process, "platform", {...descriptor, value: platform});
+  try {await run();} finally {Object.defineProperty(process, "platform", descriptor);}
+}
+
+it.each([
+  {platform: "win32", registered: "C:/Users/Ice/Workspace", same: "c:\\users\\ice\\workspace", other: "D:/Users/Ice/Workspace"},
+  {platform: "linux", registered: "/home/ice/Workspace", same: "/home/ice/Workspace", other: "/home/ice/workspace"},
+] as const)("on $platform, $same is the registered root $registered and $other is another workspace", ({platform, registered, same, other}) =>
+  onPlatform(platform, async () => {
+    const f = fixture();
+    f.setWorkspaces([{...f.workspace, rootPath: registered}]);
+    const session = (await f.connection.connect({...f.workspace, rootPath: same}, new AbortController().signal))!;
+    expect(() => session.assertCurrent()).not.toThrow();
+    f.fetch.mockResolvedValueOnce(refusalPage([refusal]));
+    await session.refusals(new AbortController().signal);
+    expect(f.connection.hasRefusals("workspace")).toBe(true);
+    const stranger = (await f.connection.connect({...f.workspace, rootPath: other}, new AbortController().signal))!;
+    expect(() => stranger.assertCurrent()).toThrow("changed");
+    f.setWorkspaces([{...f.workspace, rootPath: other}]);
+    expect(() => session.assertCurrent()).toThrow("changed");
+    expect(f.connection.hasRefusals("workspace")).toBeUndefined();
+  }));
+
 it("drops credential-scoped refusal state and starts the new session at its first page", async () => {
   const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
   f.fetch.mockResolvedValueOnce(refusalPage([refusal], "old-page"));
