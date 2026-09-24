@@ -996,6 +996,11 @@ mod tests {
     fn ordered_feed_contains_late_ack_and_preserves_exact_receipt_retry() {
         let (dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
+        let remote_changes = |store: &EngineStore| {
+            store
+                .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+                .unwrap()
+        };
         let owner = Ydoc::wire();
         owner.apply(&checkpoint).unwrap();
         let delta = owner.richdoc_append_paragraph("pending owner");
@@ -1017,6 +1022,7 @@ mod tests {
         remote.apply(&checkpoint).unwrap();
         let remote_delta = remote.richdoc_append_paragraph("remote first");
         feed(&mut store, &observed, 2, remote_delta);
+        assert_eq!(remote_changes(&store), 1, "another computer's frame counts");
         let mut wrong = receipt.clone();
         wrong.journal_cursor = 1;
         assert!(!store
@@ -1029,6 +1035,7 @@ mod tests {
             .unwrap());
         let ordinary_before = store.table_row_count("replication_log").unwrap();
         let retry = feed(&mut store, &observed, 4, delta);
+        assert_eq!(remote_changes(&store), 1, "the owner's own draft does not");
         assert_eq!(
             store.table_row_count("replication_log").unwrap(),
             ordinary_before
@@ -1040,6 +1047,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.table_row_count("ydoc_updates").unwrap(), before);
+        assert_eq!(remote_changes(&store), 1, "nor does a replayed frame");
         let mut wrong_retry = retry.clone();
         wrong_retry.relay_database_namespace = "other-relay".into();
         assert!(store
@@ -1052,6 +1060,7 @@ mod tests {
             .is_err());
         let later = remote.richdoc_append_paragraph("remote later");
         feed(&mut store, &observed, 9, later);
+        assert_eq!(remote_changes(&store), 2);
         assert_eq!(
             store.table_row_count("ydoc_owner_applied_frames").unwrap(),
             1
@@ -1073,6 +1082,7 @@ mod tests {
         .unwrap();
         drop(store);
         let mut reopened = EngineStore::open(&dir.join("engine.db"), 12).unwrap();
+        assert_eq!(remote_changes(&reopened), 2, "the count survives a restart");
         super::super::acknowledge(
             &mut reopened,
             "workspace",

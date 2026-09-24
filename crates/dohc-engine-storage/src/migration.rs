@@ -2208,6 +2208,19 @@ ALTER TABLE ydoc_docs ADD COLUMN creator_author_json TEXT
     CHECK (creator_author_json IS NULL OR json_valid(creator_author_json));
 ";
 
+/// The count of changes applied to each workspace that did not originate on
+/// this computer (`remote_changes.rs`). A store upgraded to this migration
+/// starts at 0. An owner tells its own accepted drafts from other frames by
+/// digest, so outbox entries gain an index by digest.
+const V2_REMOTE_CHANGES_DDL: &str = "\
+CREATE TABLE remote_changes (
+    workspace_id TEXT    NOT NULL PRIMARY KEY,
+    applied      INTEGER NOT NULL CHECK (applied >= 0)
+) STRICT;
+CREATE INDEX owner_ydoc_outbox_entries_by_digest
+    ON owner_ydoc_outbox_entries(update_digest);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2256,6 +2269,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 7,
         id: "v2-automation-record-lifecycle",
         sql: V2_AUTOMATION_RECORD_LIFECYCLE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 11,
+        id: "v2-remote-changes",
+        sql: V2_REMOTE_CHANGES_DDL,
         sets_user_version: None,
     },
 ];
@@ -2505,6 +2524,10 @@ mod tests {
             (
                 "v2-automation-record-lifecycle",
                 "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
+            ),
+            (
+                "v2-remote-changes",
+                "e7025812c2e9291510cd2a8fb99b6f5cd54bc001244b1e36ac399160dda57212",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2791,7 +2814,7 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_MIGRATIONS.len() as u32,
+            ordinal: BASELINE_MIGRATIONS[BASELINE_MIGRATIONS.len() - 1].ordinal + 1,
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,

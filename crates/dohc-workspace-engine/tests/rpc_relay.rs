@@ -2306,3 +2306,59 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         .expect("read retried rename projection");
     assert_eq!(paths, (false, true));
 }
+
+/// `sync.remoteChanges` answers the engine's durable count of changes from
+/// elsewhere, with no relay configured, and the count survives reopening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_changes_answer_the_durable_count_without_a_relay() {
+    const WORKSPACE: &str = "ws-remote-changes";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    {
+        let db = engine_db_path(&scratch).expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        for _ in 0..2 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::count_remote_change_in_tx(tx, WORKSPACE)
+                })
+                .expect("count a change from elsewhere");
+        }
+    }
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 0;
+    for _ in 0..2 {
+        id += 1;
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE,
+                        "captureMode": "none",
+                    }),
+                ),
+            )
+            .await
+            .expect("open workspace");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+        assert_eq!(
+            call(
+                &transport,
+                &handle,
+                &mut id,
+                "sync.remoteChanges",
+                json!({})
+            )
+            .await,
+            json!({ "applied": 2 })
+        );
+        call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    }
+}

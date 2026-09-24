@@ -259,6 +259,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
             .map_err(SyncError::persist)?;
+        // Whether this op changed the workspace: it applied, or its refusal
+        // kept its mutation.
+        let mut mutation_committed = true;
         let admission = match mutation(tx, envelope) {
             Ok(MutationOutcome::Applied(value)) => {
                 tx.execute_batch("RELEASE dohc_replication_mutation")
@@ -282,6 +285,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 let Some(reason) = refusal_reason(&error) else {
                     return Err(error);
                 };
+                mutation_committed = false;
                 tx.execute_batch(
                     "ROLLBACK TO dohc_replication_mutation; \
                      RELEASE dohc_replication_mutation",
@@ -320,6 +324,13 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             ],
         )
         .map_err(SyncError::persist)?;
+        // Every op another computer made reaches this computer here, once:
+        // the coordinate is new, and this computer's own ops echo back
+        // against their journal rows above. A parked op counts now, not
+        // when a later drain applies it.
+        if mutation_committed {
+            dohc_engine_storage::count_remote_change_in_tx(tx, &envelope.workspace_id)?;
+        }
         if let Admission::Refused(refusal) = &admission
             && envelope.op_kind == "moment.append"
             && matches!(

@@ -31,6 +31,33 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
+/// Whether this engine drafted an update with these bytes for this document:
+/// an owner outbox entry for it carries the digest, and the delivery id when
+/// the caller knows which delivery the relay accepted. A live frame that is
+/// this computer's own draft is not a change from another computer.
+pub fn is_own_draft_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+    update_digest: &str,
+    delivery_id: Option<&str>,
+) -> Result<bool, crate::CollabError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
+         JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
+         WHERE e.update_digest=?1 AND (?2 IS NULL OR e.delivery_id=?2) \
+           AND o.workspace_id=?3 AND o.main_version_id=?4 AND o.object_id=?5)",
+        params![
+            update_digest,
+            delivery_id,
+            key.workspace_id,
+            key.version_id,
+            key.object_id
+        ],
+        |r| r.get(0),
+    )
+    .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+}
+
 /// Bound owners settle through the admitted host cut, including after their
 /// pending queue drains. Ordinary settlement carries no accepted audit cut.
 pub fn require_ordinary_settlement(

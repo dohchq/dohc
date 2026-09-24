@@ -42,6 +42,7 @@ export const WORKSPACE_METHOD = {
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
+  syncRemoteChanges: "sync.remoteChanges",
 } as const;
 
 /**
@@ -270,6 +271,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
+  [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
 };
 
 type CollectionMethodResultMap = {
@@ -981,6 +983,14 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,
+  /**
+   * How many changes that did not originate on this computer the engine has
+   * applied to the workspace. Compare it for equality only: restoring a
+   * backup can lower it.
+   */
+  [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
+    applied: Schema.Int,
+  }),
 } as const;
 
 function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(

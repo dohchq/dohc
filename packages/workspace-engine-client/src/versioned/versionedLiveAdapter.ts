@@ -1215,6 +1215,19 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
   }
 
+  /**
+   * How many changes that did not originate on this computer the engine has
+   * applied to the workspace. Record it with a decision; an equal count
+   * later proves no one else's change arrived in between.
+   */
+  async remoteChangesApplied(): Promise<number> {
+    const result = await this.workspaceRequest(
+      WORKSPACE_METHOD.syncRemoteChanges,
+      {},
+    );
+    return result.applied;
+  }
+
   async writeSecretFile(input: {
     workspaceId: string;
     versionId: string;
