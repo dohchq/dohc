@@ -69,6 +69,10 @@ const LEXICAL: Record<string, string> = {
   "table-row-without-pipes": "| Name |\n|---|\nAda\n",
   "table-then-heading": "| Name |\n|---|\n| Ada |\n# Next\n",
   "plain-ampersands": "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
+  "bracket-line": "[WIP] fix\n",
+  "angle-words": "Vec<T> and cmd <file>\n",
+  "skipped-ordinals": "1. a\n3. b\n",
+  "cell-break": "| Name |\n|---|\n| Ada&lt;br&gt;Lovelace |\n",
 };
 
 it("the lexical source fixtures come from the real captured Markdown seeder", async () => {
