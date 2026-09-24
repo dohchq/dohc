@@ -85,9 +85,9 @@ function valid(automation: Partial<Automation>): AutomationEntry {
       id: "a",
       name: "A",
       enabled: true,
-      when: { kind: "record-added" },
+      when: { kind: "record-added", table: null },
       if: null,
-      do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null }],
+      do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: null }],
       ...automation,
     },
   };
@@ -242,17 +242,18 @@ describe("automations.yaml round trip", () => {
       id: "stamp-finish-date",
       name: "Stamp the finish date",
       enabled: true,
-      when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+      when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
       if: null,
       do: [
         {
           kind: "set",
           values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }],
           records: null,
+          operation: null,
         },
       ],
     });
-    expect(welcome?.when).toEqual({ kind: "record-added" });
+    expect(welcome?.when).toEqual({ kind: "record-added", table: null });
     expect(welcome?.do[0]).toEqual({
       kind: "notify",
       text: "New sign-up {record.Name}",
@@ -261,14 +262,15 @@ describe("automations.yaml round trip", () => {
         { kind: "literal", value: "user_ana" },
       ],
     });
-    expect(review?.when).toEqual({ kind: "record-changed", fields: ["Estimate", "Due"] });
+    expect(review?.when).toEqual({ kind: "record-changed", fields: ["Estimate", "Due"], table: null });
     expect(review?.if).toBe("record.Estimate > 8");
-    expect(archive?.when).toEqual({ kind: "record-removed" });
+    expect(archive?.when).toEqual({ kind: "record-removed", table: null });
     expect(archive?.do[0]).toMatchObject({ collection: "Archive/Removed tasks", as: "logged" });
     expect(archive?.do[1]).toMatchObject({ kind: "set", records: "logged" });
     expect(late?.when).toEqual({
       kind: "starts-matching",
       condition: 'record.Due < today() && record.Status != "Done"',
+      table: null,
     });
     expect(standup?.enabled).toBe(false);
     expect(standup?.do[1]).toMatchObject({ kind: "if", if: "doing.length > 0" });
@@ -289,7 +291,7 @@ describe("automations.yaml round trip", () => {
         { field: "Total cell", value: { kind: "literal", value: "=SUM(A1:A3)" } },
       ],
     });
-    expect(markPaid?.when).toEqual({ kind: "button", field: "Mark paid" });
+    expect(markPaid?.when).toEqual({ kind: "button", field: "Mark paid", table: null });
     expect(markPaid?.do[1]).toEqual({
       kind: "run",
       code: "return { total: record.Amount * 2 };\n",
@@ -389,6 +391,7 @@ function fieldsOfLengths(lengths: number[]): AutomationEntry[] {
           })),
           collection: null,
           as: null,
+          operation: null,
         },
       ],
     }),
@@ -424,9 +427,9 @@ describe("the checked writer", () => {
   it("keeps text and formulas at their bounds and refuses them past it", () => {
     const setX = (value: Automation["do"][number]) => valid({ do: [value] });
     const literal = (text: string) =>
-      setX({ kind: "set", values: [{ field: "X", value: { kind: "literal", value: text } }], records: null });
+      setX({ kind: "set", values: [{ field: "X", value: { kind: "literal", value: text } }], records: null, operation: null });
     const formula = (expression: string) =>
-      setX({ kind: "set", values: [{ field: "X", value: { kind: "formula", expression } }], records: null });
+      setX({ kind: "set", values: [{ field: "X", value: { kind: "formula", expression } }], records: null, operation: null });
     for (const entry of [
       literal(`=${"x".repeat(MAX_AUTOMATION_TEXT_LENGTH - 1)}`),
       formula("1".repeat(MAX_EXPRESSION_LENGTH)),
@@ -459,7 +462,7 @@ describe("the checked writer", () => {
     expect(
       refusal([
         valid({
-          do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "=x" } }], records: null }],
+          do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "=x" } }], records: null, operation: null }],
         }),
       ]),
     ).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
@@ -511,7 +514,7 @@ describe("values, conditions, and templates", () => {
 
   it("keeps a literal that starts with = a literal, and a formula a formula, after a save", () => {
     const entry = valid({
-      when: { kind: "field-changed", field: "Code", to: { kind: "literal", value: "=5" } },
+      when: { kind: "field-changed", field: "Code", to: { kind: "literal", value: "=5" }, table: null },
       do: [
         {
           kind: "set",
@@ -521,6 +524,7 @@ describe("values, conditions, and templates", () => {
             { field: "Sum", value: { kind: "formula", expression: '"=" + 5' } },
           ],
           records: null,
+          operation: null,
         },
       ],
     });
@@ -560,6 +564,7 @@ describe("values, conditions, and templates", () => {
       kind: "field-changed",
       field: "Due",
       to: { kind: "formula", expression: "record.Due > today()" },
+      table: null,
     });
   });
 
@@ -569,7 +574,7 @@ describe("values, conditions, and templates", () => {
       values: [{ field: "X", value: { kind: "formula", expression: "a + 1" } }],
     });
     const entry = valid({
-      do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "a + 1 # b" } }], records: null }],
+      do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "a + 1 # b" } }], records: null, operation: null }],
     });
     expect(written([entry])).toContain("X: '=a + 1 # b'\n");
   });
@@ -1005,6 +1010,202 @@ const BOUND_CASES: AutomationCase[] = [
     ],
   },
 ];
+
+// Steps and triggers on dataset Collections, in the writer's own form.
+const DATASET_KINDS = `version: 1
+automations:
+  - id: close-invoice
+    name: Close paid invoices
+    when:
+      field-changed: Paid
+      to: true
+      table: Invoices
+    do:
+      - set:
+          Status: Closed
+        operation: invoices.edit
+      - add-record:
+          Invoice: '=record.Number'
+        collection: Finance/Ledger
+        as: entry
+        operation: ledger.create
+      - find: record.Customer == trigger.record.Customer
+        collection: Finance/Ledger
+        as: entries
+        operation: ledger.read
+      - set:
+          Reconciled: true
+        records: entries
+        operation: ledger.edit
+
+  - id: new-customer
+    name: Welcome new customers
+    when:
+      record-added: null
+      table: Customers
+    do:
+      - set:
+          Welcomed: true
+        operation: customers.edit
+
+  - id: changed-customer
+    name: Changed customers
+    when:
+      record-changed: null
+      table: Customers
+    do:
+      - set:
+          Reviewed: false
+        operation: customers.edit
+
+  - id: changed-address
+    name: Changed addresses
+    when:
+      record-changed:
+        - Address
+      table: Customers
+    do:
+      - set:
+          Verified: false
+        operation: customers.edit
+
+  - id: removed-customer
+    name: Removed customers
+    when:
+      record-removed: null
+      table: Customers
+    do:
+      - add-record:
+          Name: '=record.Name'
+        operation: archive.create
+
+  - id: overdue
+    name: Overdue invoices
+    when:
+      starts-matching: record.Due < today()
+      table: Invoices
+    do:
+      - set:
+          Overdue: true
+        operation: invoices.edit
+
+  - id: send
+    name: Send invoice
+    when:
+      button: Send
+      table: Invoices
+    do:
+      - set:
+          Sent: true
+        operation: invoices.edit
+`;
+
+const DATASET_CASES: AutomationCase[] = [
+  {
+    name: "a table on a schedule",
+    item: "id: a\nname: A\nwhen: {schedule: day, timezone: UTC, table: Invoices}\ndo: [{find: 'true', as: found}]",
+    expected: [{ code: "unknown-property", path: at("/when/table") }],
+  },
+  {
+    name: "a table on a Group trigger",
+    item: "id: a\nname: A\nwhen: {group-message: Team, table: Invoices}\ndo: [{post: Hi, group: Team}]",
+    expected: [{ code: "unknown-property", path: at("/when/table") }],
+  },
+  {
+    name: "a table on a step, which takes its operation's table",
+    item: withStep("{set: {X: 1}, operation: invoices.edit, table: Invoices}"),
+    expected: [{ code: "unknown-property", path: at("/do/0/table") }],
+  },
+  {
+    name: "an operation on a step that invokes none",
+    item: withStep("{notify: Hi, to: [user_ana], operation: invoices.edit}"),
+    expected: [{ code: "unknown-property", path: at("/do/0/operation") }],
+  },
+  {
+    name: "an empty operation",
+    item: withStep("{set: {X: 1}, operation: ''}"),
+    expected: [{ code: "empty-value", path: at("/do/0/operation") }],
+  },
+  {
+    name: "an operation written as a formula",
+    item: withStep("{add-record: {X: 1}, operation: '=pick()'}"),
+    expected: [{ code: "unexpected-formula-marker", path: at("/do/0/operation") }],
+  },
+  {
+    name: "an operation that is not text",
+    item: withStep("{find: 'true', as: found, operation: [read]}"),
+    expected: [{ code: "expected-text", path: at("/do/0/operation") }],
+  },
+  {
+    name: "a table past the reference bound",
+    item: `id: a\nname: A\nwhen: {record-added: null, table: ${"t".repeat(MAX_REFERENCE_LENGTH + 1)}}\ndo: [{set: {X: 1}}]`,
+    expected: [{ code: "too-long", path: at("/when/table") }],
+  },
+  {
+    name: "a table and a record-added argument",
+    item: "id: a\nname: A\nwhen: {record-added: Invoices, table: Invoices}\ndo: [{set: {X: 1}}]",
+    expected: [{ code: "expected-empty", path: at("/when/record-added") }],
+  },
+];
+
+describe("dataset entries", () => {
+  it("reads every dataset trigger and step and writes the same text back", () => {
+    const parsed = entries(DATASET_KINDS);
+    expect(parsed.map((entry) => entry.status)).toEqual(parsed.map(() => "valid"));
+    expect(written(parsed)).toBe(DATASET_KINDS);
+  });
+
+  it("reads the operation each step invokes and the table each trigger watches", () => {
+    const [close, added, changed, address, removed, overdue, send] = validAutomations(DATASET_KINDS);
+    expect(close?.when).toEqual({ kind: "field-changed", field: "Paid", to: { kind: "literal", value: true }, table: "Invoices" });
+    expect(close?.do).toEqual([
+      { kind: "set", values: [{ field: "Status", value: { kind: "literal", value: "Closed" } }], records: null, operation: "invoices.edit" },
+      {
+        kind: "add-record",
+        values: [{ field: "Invoice", value: { kind: "formula", expression: "record.Number" } }],
+        collection: "Finance/Ledger",
+        as: "entry",
+        operation: "ledger.create",
+      },
+      {
+        kind: "find",
+        condition: "record.Customer == trigger.record.Customer",
+        collection: "Finance/Ledger",
+        as: "entries",
+        operation: "ledger.read",
+      },
+      { kind: "set", values: [{ field: "Reconciled", value: { kind: "literal", value: true } }], records: "entries", operation: "ledger.edit" },
+    ]);
+    expect(added?.when).toEqual({ kind: "record-added", table: "Customers" });
+    expect(changed?.when).toEqual({ kind: "record-changed", fields: null, table: "Customers" });
+    expect(address?.when).toEqual({ kind: "record-changed", fields: ["Address"], table: "Customers" });
+    expect(removed?.when).toEqual({ kind: "record-removed", table: "Customers" });
+    expect(overdue?.when).toEqual({ kind: "starts-matching", condition: "record.Due < today()", table: "Invoices" });
+    expect(send?.when).toEqual({ kind: "button", field: "Send", table: "Invoices" });
+  });
+
+  it("keeps field names as written, for the executor to resolve against the dataset", () => {
+    const [automation] = validAutomations(automationsFile(withStep("{set: {Finished on: '=today()'}, operation: tasks.edit}")));
+    expect(automation?.do[0]).toMatchObject({ values: [{ field: "Finished on" }], operation: "tasks.edit" });
+  });
+
+  it("accepts an operation and a table at the reference bound", () => {
+    const longest = "o".repeat(MAX_REFERENCE_LENGTH);
+    expect(diagnosticsOf(withStep(`{set: {X: 1}, operation: ${longest}}`, `{record-added: null, table: ${longest}}`))).toEqual([]);
+  });
+
+  it("refuses to save an operation or a table past the reference bound", () => {
+    const tooLong = "o".repeat(MAX_REFERENCE_LENGTH + 1);
+    expect(refusal([valid({ when: { kind: "record-added", table: tooLong } })]))
+      .toEqual([{ code: "too-long", path: "/automations/0/when/table" }]);
+    expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: tooLong }] })]))
+      .toEqual([{ code: "too-long", path: "/automations/0/do/0/operation" }]);
+  });
+
+  it.each(DATASET_CASES)("turns off one automation for $name", ({ item, expected }) => {
+    expect(diagnosticsOf(item)).toEqual(expected);
+  });
+});
 
 describe("automations.yaml diagnostics", () => {
   it.each(FILE_CASES)("turns every automation off for $name", ({ text, expected }) => {

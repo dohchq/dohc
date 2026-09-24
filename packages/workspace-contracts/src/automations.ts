@@ -71,6 +71,25 @@ import { isNormalizedRelativePath, yamlKeyText } from "./collectionValues";
 // Collection's folder and cannot leave it, so the people who can edit the
 // automation are the people who can edit its code.
 //
+// A dataset Collection changes its records only through its approved
+// operations. A set, add-record, or find step on one names the operation it
+// invokes with `operation`, and that operation's table is the step's table:
+// operation names are unique within a dataset. A record trigger on a dataset
+// with several tables names its table with `table`. Fields stay names, and
+// the executor resolves names to field ids against the approved revision.
+// This parser does not know whether a Collection is a dataset, so the
+// executor refuses a missing or unknown operation or table.
+//
+//   - id: close-invoice
+//     name: Close paid invoices
+//     when:
+//       field-changed: Paid
+//       table: Invoices
+//     do:
+//       - set:
+//           Status: Closed
+//         operation: invoices.edit
+//
 // An invalid automation turns off only itself and keeps its own diagnostics.
 // That includes a key written twice inside it. A problem with the whole file,
 // such as broken YAML, an unknown version, or a repeated top-level key, turns
@@ -201,28 +220,38 @@ type AutomationScheduleTrigger =
   | { kind: "schedule"; every: "week"; at: string; days: AutomationWeekday[]; timezone: string }
   | { kind: "schedule"; every: "month"; at: string; days: number[]; timezone: string };
 
+// `table` names a dataset table, or is null for a document Collection or a
+// dataset with one table.
 type AutomationTrigger =
-  | { kind: "record-added" }
+  | { kind: "record-added"; table: string | null }
   /** `fields` is null when any field change counts. */
-  | { kind: "record-changed"; fields: string[] | null }
-  | { kind: "record-removed" }
+  | { kind: "record-changed"; fields: string[] | null; table: string | null }
+  | { kind: "record-removed"; table: string | null }
   /** `to` is null when any new value counts. */
-  | { kind: "field-changed"; field: string; to: AutomationValue | null }
+  | { kind: "field-changed"; field: string; to: AutomationValue | null; table: string | null }
   /** Fires when a record that did not match the condition starts to match it. */
-  | { kind: "starts-matching"; condition: string }
+  | { kind: "starts-matching"; condition: string; table: string | null }
   | AutomationScheduleTrigger
-  | { kind: "button"; field: string }
+  | { kind: "button"; field: string; table: string | null }
   | { kind: "group-message"; group: string; startsWith: string | null };
 
+// `operation` names the approved dataset operation a step invokes, or is
+// null for a document Collection.
 type AutomationStep =
   /**
    * Sets fields on the triggering record, or on the record or records bound
    * to `records` by an earlier add-record or find step.
    */
-  | { kind: "set"; values: AutomationFieldValue[]; records: string | null }
+  | { kind: "set"; values: AutomationFieldValue[]; records: string | null; operation: string | null }
   /** `collection` is null for this Collection. */
-  | { kind: "add-record"; values: AutomationFieldValue[]; collection: string | null; as: string | null }
-  | { kind: "find"; condition: string; collection: string | null; as: string }
+  | {
+      kind: "add-record";
+      values: AutomationFieldValue[];
+      collection: string | null;
+      as: string | null;
+      operation: string | null;
+    }
+  | { kind: "find"; condition: string; collection: string | null; as: string; operation: string | null }
   | { kind: "if"; if: string; do: AutomationStep[]; otherwise: AutomationStep[] }
   | { kind: "notify"; text: string; to: AutomationValue[] }
   | { kind: "post"; text: string; group: string }
@@ -358,20 +387,20 @@ const DAY_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const HOUR_TIME_PATTERN = /^:[0-5]\d$/;
 
 const TRIGGER_OPTIONS = {
-  "record-added": [],
-  "record-changed": [],
-  "record-removed": [],
-  "field-changed": ["to"],
-  "starts-matching": [],
+  "record-added": ["table"],
+  "record-changed": ["table"],
+  "record-removed": ["table"],
+  "field-changed": ["to", "table"],
+  "starts-matching": ["table"],
   schedule: ["at", "days", "timezone"],
-  button: [],
+  button: ["table"],
   "group-message": ["starts-with"],
 } as const satisfies Record<AutomationTrigger["kind"], readonly string[]>;
 
 const STEP_OPTIONS = {
-  set: ["records"],
-  "add-record": ["collection", "as"],
-  find: ["collection", "as"],
+  set: ["records", "operation"],
+  "add-record": ["collection", "as", "operation"],
+  find: ["collection", "as", "operation"],
   if: ["do", "otherwise"],
   notify: ["to"],
   post: ["group"],
@@ -768,29 +797,30 @@ function readTrigger(value: unknown, path: string, issues: Issues): AutomationTr
   const { kind, entries } = read;
   const argument = entries.get(kind);
   const argumentPath = pointer(path, kind);
+  const table = readReference(entries.get("table"), pointer(path, "table"), issues);
   switch (kind) {
     case "record-added":
     case "record-removed":
       if (argument !== null) issues.push({ code: "expected-empty", path: argumentPath });
-      return { kind };
+      return { kind, table };
     case "record-changed": {
       const fields = argument === null ? null : readFieldList(argument, argumentPath, issues);
-      return { kind, fields };
+      return { kind, fields, table };
     }
     case "field-changed": {
       const field = readReference(argument, argumentPath, issues);
       const to = entries.has("to") ? readValue(entries.get("to"), pointer(path, "to"), issues) : null;
-      return field === null ? null : { kind, field, to };
+      return field === null ? null : { kind, field, to, table };
     }
     case "starts-matching": {
       const condition = readCondition(argument, argumentPath, issues);
-      return condition === null ? null : { kind, condition };
+      return condition === null ? null : { kind, condition, table };
     }
     case "schedule":
       return readSchedule(argument, entries, path, issues);
     case "button": {
       const field = readReference(argument, argumentPath, issues);
-      return field === null ? null : { kind, field };
+      return field === null ? null : { kind, field, table };
     }
     case "group-message": {
       const group = readReference(argument, argumentPath, issues);
@@ -875,6 +905,7 @@ function readStep(
   const argument = entries.get(kind);
   const argumentPath = pointer(path, kind);
   const option = (key: string) => pointer(path, key);
+  const operation = () => readReference(entries.get("operation"), option("operation"), issues);
   switch (kind) {
     case "set": {
       const values = readFieldValues(argument, argumentPath, issues);
@@ -886,20 +917,23 @@ function readStep(
       if (records !== undefined && bound !== "record" && bound !== "records") {
         issues.push({ code: "unknown-binding", path: option("records") });
       }
+      const operationName = operation();
       if (values === null) return null;
-      return { kind, values, records: typeof records === "string" ? records : null };
+      return { kind, values, records: typeof records === "string" ? records : null, operation: operationName };
     }
     case "add-record": {
       const values = readFieldValues(argument, argumentPath, issues);
       const collection = readPath(entries.get("collection"), option("collection"), issues);
       const as = bindName(entries.get("as"), option("as"), "record", scope, context);
-      return values === null ? null : { kind, values, collection, as };
+      const operationName = operation();
+      return values === null ? null : { kind, values, collection, as, operation: operationName };
     }
     case "find": {
       const condition = readCondition(argument, argumentPath, issues);
       const collection = readPath(entries.get("collection"), option("collection"), issues);
       const as = bindName(required(entries, "as", path, issues), option("as"), "records", scope, context);
-      return condition === null || as === null ? null : { kind, condition, collection, as };
+      const operationName = operation();
+      return condition === null || as === null ? null : { kind, condition, collection, as, operation: operationName };
     }
     case "if": {
       if (ifDepth >= MAX_IF_DEPTH) {
@@ -1180,18 +1214,21 @@ function triggerYaml(trigger: AutomationTrigger): unknown {
   switch (trigger.kind) {
     case "record-added":
     case "record-removed":
-      return trigger.kind;
+      return trigger.table === null ? trigger.kind : withOptions(trigger.kind, null, [["table", trigger.table]]);
     case "record-changed":
-      return trigger.fields === null ? trigger.kind : withOptions(trigger.kind, trigger.fields, []);
+      return trigger.fields === null && trigger.table === null
+        ? trigger.kind
+        : withOptions(trigger.kind, trigger.fields, [["table", trigger.table]]);
     case "field-changed": {
       // `to: null` means the field was cleared, so it cannot pass through
       // withOptions, which leaves nulls out.
       const entries = withOptions(trigger.kind, trigger.field, []);
       if (trigger.to !== null) entries.set("to", valueYaml(trigger.to));
+      if (trigger.table !== null) entries.set("table", trigger.table);
       return entries;
     }
     case "starts-matching":
-      return withOptions(trigger.kind, trigger.condition, []);
+      return withOptions(trigger.kind, trigger.condition, [["table", trigger.table]]);
     case "schedule":
       return withOptions(trigger.kind, trigger.every, [
         ["at", trigger.at],
@@ -1199,7 +1236,7 @@ function triggerYaml(trigger: AutomationTrigger): unknown {
         ["timezone", trigger.timezone],
       ]);
     case "button":
-      return withOptions(trigger.kind, trigger.field, []);
+      return withOptions(trigger.kind, trigger.field, [["table", trigger.table]]);
     case "group-message":
       return withOptions(trigger.kind, trigger.group, [["starts-with", trigger.startsWith]]);
   }
@@ -1208,16 +1245,21 @@ function triggerYaml(trigger: AutomationTrigger): unknown {
 function stepYaml(step: AutomationStep): Map<string, unknown> {
   switch (step.kind) {
     case "set":
-      return withOptions(step.kind, fieldValuesYaml(step.values), [["records", step.records]]);
+      return withOptions(step.kind, fieldValuesYaml(step.values), [
+        ["records", step.records],
+        ["operation", step.operation],
+      ]);
     case "add-record":
       return withOptions(step.kind, fieldValuesYaml(step.values), [
         ["collection", step.collection],
         ["as", step.as],
+        ["operation", step.operation],
       ]);
     case "find":
       return withOptions(step.kind, step.condition, [
         ["collection", step.collection],
         ["as", step.as],
+        ["operation", step.operation],
       ]);
     case "if":
       return withOptions(step.kind, step.if, [
