@@ -9274,6 +9274,8 @@ describe("share changes review", () => {
 describe("automation failure notices", () => {
   const FAILURE = {
     automationId: "hello-plugin/triage",
+    claimId: "atc_failed",
+    chainStopped: false,
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,
@@ -9324,7 +9326,13 @@ describe("automation failure notices", () => {
     // is unacknowledged again.
     bridge.listAutomationFailures.mockResolvedValue({
       failures: [
-        { ...FAILURE, error: "chain-stopped", generation: 2, updatedAtMs: 9_000 },
+        {
+          ...FAILURE,
+          chainStopped: true,
+          error: "chain-stopped",
+          generation: 2,
+          updatedAtMs: 9_000,
+        },
       ],
     });
     act(() => {

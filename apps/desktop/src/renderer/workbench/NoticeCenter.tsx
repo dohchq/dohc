@@ -59,9 +59,9 @@ export interface WorkspaceErrorNotice {
 }
 
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
-// cap and the two engine-minted failure reasons a failed claim can carry.
+// cap, and the failure reason the reaper records for a run that did not
+// finish. A chain stop is a flag on the failure, not a reason text.
 const AUTOMATION_CHAIN_DEPTH_CAP = 4;
-const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
 const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
 
 /** An error text as one sentence: the handler's message rarely ends one. */
@@ -113,7 +113,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  if (failure.error === AUTOMATION_CHAIN_STOPPED) {
+  if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:

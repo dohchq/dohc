@@ -1,15 +1,19 @@
 //! The origin-device automation trigger (ADR 0008) through the real local
 //! apply path: a committed `ydoc_record_update` with a registered
 //! subscription inserts exactly one pending claim, in the append's own
-//! transaction, keyed by the journaled replication coordinate. A replay of
-//! the same update dedupes into no second claim, and a peer applying the
-//! same ops by replication claims nothing at all — the non-origin device's
-//! half of the two-device exactly-once rule.
+//! transaction, keyed by the journaled replication coordinate and carrying
+//! the change's kind, actor, and field facts. A field-filtered subscription
+//! claims only its fields' changes, and each executor drains only its own
+//! automation id prefix. A replay of the same update dedupes into no second
+//! claim, and a peer applying the same ops by replication claims nothing at
+//! all — the non-origin device's half of the two-device exactly-once rule.
 
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_domain::{
-    AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaimState, AutomationSettle, AutomationTrigger,
-    ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText, subscribe_automation,
+    AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange, AutomationChangeKind, AutomationClaimState,
+    AutomationFactValue, AutomationFieldFact, AutomationSettle, AutomationSubscription,
+    AutomationTrigger, ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText,
+    subscribe_automation,
 };
 use dohc_engine_runtime::{
     CancellationToken, LifecycleState, NoFaults, RuntimeError, WorkspaceSupervisor,
@@ -25,6 +29,16 @@ const PATH: &str = "tasks/alpha.md";
 const OBJECT: &str = "automation-claim-record-object";
 const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const AUTOMATION: &str = "plugin:triage";
+
+/// Added and changed records under "tasks", on any field or only `field`.
+fn subscription(automation_id: &str, field: Option<&str>) -> AutomationSubscription {
+    AutomationSubscription {
+        automation_id: automation_id.to_owned(),
+        prefix: "tasks".to_owned(),
+        kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+        fields: field.map(|field| vec![field.to_owned()]),
+    }
+}
 
 fn seed_identity(db: &Path, workspace_id: &str) {
     let mut store = EngineStore::open(db, 9_103).expect("open store");
@@ -228,14 +242,25 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     handle
         .automation_subscribe(
             WS.to_owned(),
-            AUTOMATION.to_owned(),
-            "tasks".to_owned(),
+            subscription(AUTOMATION, None),
             150,
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
         .expect("subscribe automation");
+    // A second automation watches only another field: the status edit
+    // below costs it nothing.
+    handle
+        .automation_subscribe(
+            WS.to_owned(),
+            subscription("collection:tasks#priority", Some("priority")),
+            150,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("subscribe field-filtered automation");
 
     let edit = doc.frontmatter_set("status", "done");
     let append = handle
@@ -293,6 +318,53 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         },
         "the claim key is the same coordinate every peer derives"
     );
+    assert_eq!(
+        claim.change,
+        AutomationChange {
+            kind: AutomationChangeKind::Changed,
+            author_origin_id: Some("agent-editor".to_owned()),
+            actor_kind: Some(ChangeActorKind::Agent),
+            on_behalf_of: Some("user:ice".to_owned()),
+        },
+        "the claim names the change's kind and actor"
+    );
+    let (served, served_facts) = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            250,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next")
+        .expect("the status claim is pending");
+    assert_eq!(served.claim_id, claim.claim_id);
+    assert_eq!(
+        served_facts.fields,
+        vec![AutomationFieldFact {
+            field_name: "status".to_owned(),
+            history_id: facts.fields[0].history_id,
+            previous: Some(AutomationFactValue::Whole {
+                value: serde_json::json!("open"),
+            }),
+            next: Some(AutomationFactValue::Whole {
+                value: serde_json::json!("done"),
+            }),
+        }],
+        "the served claim carries the field's previous and next values"
+    );
+    handle
+        .automation_settle(
+            WS.to_owned(),
+            served.claim_id,
+            AutomationSettle::Done,
+            260,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle the status claim");
 
     // The identical update again: the append dedupes, derives no facts, and
     // therefore claims nothing — one durable claim per change, ever.
@@ -366,14 +438,79 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         at_cap.automation_claims[0].error.as_deref(),
         Some(dohc_engine_domain::AUTOMATION_CHAIN_STOPPED),
     );
+
+    // A priority edit wakes both automations.
+    let priority = handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            doc.frontmatter_set("priority", "high"),
+            None,
+            Some(ChangeAttribution {
+                actor_kind: ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+            }),
+            at_cap.lineage_claim_id.clone(),
+            false,
+            None,
+            None,
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("apply priority edit");
+    assert_eq!(
+        priority
+            .automation_claims
+            .iter()
+            .map(|claim| claim.automation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["collection:tasks#priority", AUTOMATION],
+    );
+    // Each executor drains only its own namespace.
+    let (collection_claim, _) = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            "collection:".to_owned(),
+            510,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next")
+        .expect("the collection claim is pending");
+    assert_eq!(collection_claim.automation_id, "collection:tasks#priority");
+    assert_eq!(
+        collection_claim.change.actor_kind,
+        Some(ChangeActorKind::Human)
+    );
+    assert!(
+        handle
+            .automation_claim_next(
+                WS.to_owned(),
+                "collection:".to_owned(),
+                520,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claim next")
+            .is_none(),
+        "the plugin automation's claim waits for its own executor"
+    );
     supervisor.close(&source_db).expect("close source actor");
 
     let source_claims = claim_rows(&source_db, WS);
     assert_eq!(
         source_claims.len(),
-        2,
-        "the origin device holds exactly one claim for the change plus the \
-         recorded chain stop: {source_claims:?}"
+        4,
+        "the origin device holds exactly one claim per automation per change, \
+         plus the recorded chain stop: {source_claims:?}"
     );
     assert_eq!(source_claims[1].1, "failed", "the stop row is terminal");
 
@@ -381,8 +518,14 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     // subscription registered — and claims nothing: the sync apply path has
     // no claim hook (ADR 0008's origin test is structural).
     let mut peer = EngineStore::open(&peer_db, 300).expect("open peer store");
-    subscribe_automation(&mut peer, WS, AUTOMATION, "tasks", 310, &NoFaults)
-        .expect("peer subscribes the same automation");
+    subscribe_automation(
+        &mut peer,
+        WS,
+        &subscription(AUTOMATION, None),
+        310,
+        &NoFaults,
+    )
+    .expect("peer subscribes the same automation");
     let ops = local_ydoc_ops(&source_db);
     assert!(ops.len() >= 2, "base plus edits journaled: {}", ops.len());
     let first_origin_seq = ops[0].origin_seq;
@@ -471,9 +614,10 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
     // Attempt 1: the claim is served exactly once.
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -487,6 +631,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             210,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -537,9 +682,10 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
         .expect("reclaim after restart");
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].state, AutomationClaimState::Pending);
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             1_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -591,6 +737,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             2_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -619,7 +766,13 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     handle
-        .automation_claim_next(WS.to_owned(), 200, faults.clone(), CancellationToken::new())
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            200,
+            faults.clone(),
+            CancellationToken::new(),
+        )
         .await
         .expect_err("the injected mid-claim crash surfaces as an error");
     assert!(faults.fired());
@@ -632,9 +785,10 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
 
     // Restart: the retry serves the claim exactly once, as attempt 1.
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -674,7 +828,13 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let error = handle
-        .automation_claim_next(WS.to_owned(), 200, Arc::new(NoFaults), cancelled.clone())
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            200,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
         .await
         .expect_err("a cancelled claim next returns the cancellation error");
     assert!(matches!(error, RuntimeError::Cancelled));
@@ -704,10 +864,20 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
         .expect_err("a cancelled settle returns the cancellation error");
     assert!(matches!(error, RuntimeError::Cancelled));
     let error = handle
+        .automation_retry(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            300,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled retry returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
         .automation_subscribe(
             WS.to_owned(),
-            AUTOMATION.to_owned(),
-            "tasks".to_owned(),
+            subscription(AUTOMATION, None),
             400,
             Arc::new(NoFaults),
             cancelled.clone(),
@@ -757,7 +927,13 @@ async fn abandoning_a_claim_request_does_not_cancel_its_admitted_transaction() {
         let gate = Arc::clone(&gate);
         tokio::spawn(async move {
             handle
-                .automation_claim_next(WS.to_owned(), 200, gate, CancellationToken::new())
+                .automation_claim_next(
+                    WS.to_owned(),
+                    "plugin:".to_owned(),
+                    200,
+                    gate,
+                    CancellationToken::new(),
+                )
                 .await
         })
     };
@@ -802,6 +978,7 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             200,
             PanicFaults::at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),

@@ -418,7 +418,7 @@ describe("invokePluginSdkHost", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("attributes an automation run's collection writes to the automation, keyed by claim, attempt, and write ordinal", async () => {
+  it("attributes an automation run's collection writes to the automation, keyed by claim id, run, and write ordinal", async () => {
     const root = await createTestScratch("dohc-plugin-sdk-host-");
     const calls: unknown[] = [];
     const tasksCollection = {
@@ -433,10 +433,10 @@ describe("invokePluginSdkHost", () => {
       automationClaimId: "claim-7",
       automationRun: {
         claimId: "claim-7",
-        automationId: "hello-plugin/triage",
+        automationId: "plugin:hello-plugin/triage",
+        run: 2,
         onBehalfOf: "local",
         depth: 1,
-        attempt: 2,
         writes: 0,
       },
       reads: {
@@ -465,7 +465,7 @@ describe("invokePluginSdkHost", () => {
     });
     const automationAuthor = {
       kind: "automation",
-      automationId: "hello-plugin/triage",
+      automationId: "plugin:hello-plugin/triage",
       onBehalfOf: "local",
       depth: 1,
     };
