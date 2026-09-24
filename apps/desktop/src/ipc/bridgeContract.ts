@@ -2146,6 +2146,12 @@ export const SyncDmsPayload = z.object({
   // pass is bounded, so a poll that names its open conversation keeps that one
   // fresh instead of waiting for the rotation to reach it.
   openChannelId: OPAQUE_ID.optional(),
+  // True for the renderer's own scheduled refreshes: the list and conversation
+  // timers, and the first refresh when Chats opens. Main may pull this
+  // workspace's own relay log for these, where members' replies to owned DMs
+  // and Groups land. A refresh that reacts to a workspace activity event
+  // leaves it unset, because the pull's own events would refresh again.
+  poll: z.boolean().optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
 
@@ -2156,6 +2162,9 @@ export const SyncDmsResult = z.object({
   dms: z.array(DmRecord),
   pending: z.array(DmRequestRow),
   declined: z.array(DmRequestRow),
+  // True when relay work this pass attempted did not complete. The renderer
+  // holds its polls for a while instead of trying again at once.
+  failed: z.boolean(),
 });
 export type SyncDmsResult = z.infer<typeof SyncDmsResult>;
 

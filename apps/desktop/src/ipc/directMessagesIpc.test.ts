@@ -110,9 +110,12 @@ async function harness() {
   });
   const project = vi.fn(async () => { events.push("project"); });
   const sync = vi.fn(async (): Promise<SharedChannelPassOutcome> => {
-    events.push("sync"); return { unrefreshed: 0, pushed: false, changed: false };
+    events.push("sync"); return { unrefreshed: 0, changed: false, failed: false };
   });
-  const activity = { queueCloudSync: vi.fn(() => { events.push("cloud"); }) };
+  const activity = {
+    queueCloudSync: vi.fn(() => { events.push("cloud"); }),
+    queueCloudPull: vi.fn(() => { events.push("pull"); }),
+  };
   const dispatch = { scanWorkspace: vi.fn(async () => { events.push("dispatch"); }) };
   const kinds = new Map<string, "dm" | "not-dm">([["request", "dm"]]);
   const assertTrustedSender = (event: Event) => { if (!event.trusted) throw new Error("untrusted"); };
@@ -250,27 +253,55 @@ describe("registered direct message boundaries", () => {
     expect(h.linkedChatStoreFor).not.toHaveBeenCalled();
   });
 
-  it("does not queue a cloud sync after a pass that moved nothing", async () => {
+  it("neither syncs nor pulls after an idle refresh that no poll asked for", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" })).resolves.toMatchObject({ available: true, dms: [], pending: [], declined: [] });
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" })).resolves.toMatchObject({ available: true, dms: [], pending: [], declined: [], failed: false });
     expect(h.events).toEqual(["list-grants", "sync"]);
     expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
   });
 
-  it.each<[string, SharedChannelPassOutcome]>([
-    ["pushed", { unrefreshed: 0, pushed: true, changed: false }],
-    ["applied pulled", { unrefreshed: 0, pushed: false, changed: true }],
-  ])("queues one cloud sync after a pass that %s ops and none after the idle passes that follow", async (_moved, outcome) => {
+  it("queues one cloud sync after a pass that applied ops and none after the idle refreshes that follow", async () => {
     const h = await harness();
-    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return outcome; });
-    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 0, changed: true, failed: false }; });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true });
     expect(h.events).toEqual(["list-grants", "sync", "cloud"]);
-    // The cloud engine's change event refreshes Chats. Those passes move
-    // nothing, so they must not queue again.
+    // The cloud engine's change events refresh Chats without the poll flag.
+    // Those passes apply nothing, so they must not queue again.
     await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
     await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
     expect(h.sync).toHaveBeenCalledTimes(3);
     expect(h.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
+    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
+  });
+
+  it("pulls the workspace's own relay log for a poll, which is how an owner DM with no joined channel receives replies", async () => {
+    const h = await harness();
+    h.seedConversation();
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({
+      dms: [{ channelId: "channel", role: "owner", shareId: null }], failed: false,
+    });
+    expect(h.events).toEqual(["list-grants", "sync", "pull"]);
+    // The pull's own change events refresh Chats without the poll flag.
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", openChannelId: "channel", poll: true });
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
+    expect(h.activity.queueCloudPull).toHaveBeenCalledWith("workspace");
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed pass, a failed relay listing, and a thrown sync, and pulls for none of them", async () => {
+    const h = await harness();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 1, changed: false, failed: true }; });
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
+    h.sync.mockRejectedValueOnce(new Error("relay down"));
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
+    h.relayJson.mockRejectedValueOnce(new Error("relay down"));
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true, pending: [], declined: [] });
+    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("serves local conversations while signed out without syncing", async () => {

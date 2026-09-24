@@ -1880,6 +1880,12 @@ const activity = {
       workspaceActivity.queueCloudSync(lease.state.activity),
     );
   },
+  queueCloudPull: (workspaceId: string): void => {
+    if (!findWorkspace(workspaceId)) return;
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.queueCloudPull(lease.state.activity),
+    );
+  },
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.setAgentRun(

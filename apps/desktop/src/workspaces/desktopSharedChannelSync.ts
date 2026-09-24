@@ -11,6 +11,7 @@ import {
   RELAY_FETCH_TIMEOUT_MS,
   SHARED_CHANNEL_SYNC_PASS_ROWS,
   syncJoinedSharedChannels,
+  type SyncJoinedSharedChannelsResult,
 } from "./sharedChannels";
 import { joinedChannelMatchesCredentials } from "./chatRelayIdentity";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
@@ -21,20 +22,20 @@ interface SharedChannelSyncState {
 }
 
 // What one pass did. Freshness callers read `unrefreshed`. The DM sync reads
-// `pushed` and `changed`: only a pass that moved ops gives the cloud engine
-// follow-up work, and queueing one after an idle pass restarts the relay
-// debounce, whose change event refreshes Chats, which runs the DM sync again.
+// `changed`, because only a pass that applied ops gives the cloud engine
+// follow-up work, and `failed`, so the renderer can hold its polls.
 export interface SharedChannelPassOutcome {
   // Live rows this pass did not leave fresh.
   unrefreshed: number;
-  // True when the pass sent local ops to the relay.
-  pushed: boolean;
-  // True when a pull applied new ops.
+  // True when a pull applied new ops, including pages applied before a
+  // later failure.
   changed: boolean;
+  // True when the pass, or a row in it, did not complete.
+  failed: boolean;
 }
 
 function idlePass(unrefreshed: number): SharedChannelPassOutcome {
-  return { unrefreshed, pushed: false, changed: false };
+  return { unrefreshed, changed: false, failed: false };
 }
 
 export function createDesktopSharedChannelSync<
@@ -212,6 +213,9 @@ export function createDesktopSharedChannelSync<
     // and must say so rather than report a clean sweep. Seeded before the
     // credential work so a rejection there still knows the count.
     let liveRows = 0;
+    // What the rows reported, kept for the catch below: the registry write and
+    // bookmark projection after the rows can fail without undoing applied ops.
+    let progress: SyncJoinedSharedChannelsResult | null = null;
     try {
       authority.assertCurrent();
       const current = operation ? operation.workspace : findWorkspace(workspaceId);
@@ -279,6 +283,7 @@ export function createDesktopSharedChannelSync<
           const pulled = await daemonRelay.pullSharedChannel({
             shareId: input.shareId,
             channelWireId: input.channelWireId,
+            onApplied: input.onApplied,
           });
           assertRequestCurrent();
           return pulled;
@@ -293,6 +298,7 @@ export function createDesktopSharedChannelSync<
           return pushed;
         },
       });
+      progress = result;
       assertRequestCurrent();
       if (result.resumeAfterChannelWireId === null) {
         authority.state.sharedChannelSyncCursor = null;
@@ -336,11 +342,11 @@ export function createDesktopSharedChannelSync<
         await projectPendingChatBookmarksAfterPull(workspaceId);
         assertRequestCurrent();
       }
-      return { unrefreshed, pushed: result.pushed, changed: result.changed };
+      return { unrefreshed, changed: result.changed, failed: result.failedRows > 0 };
     } catch (error) {
       if (operation) assertRequestCurrent();
       console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
-      return idlePass(liveRows);
+      return { unrefreshed: liveRows, changed: progress?.changed ?? false, failed: true };
     }
   }
 

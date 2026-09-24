@@ -96,7 +96,10 @@ export function registerDirectMessagesIpcHandlers<
   endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
-  activity: { queueCloudSync(workspaceId: string): void };
+  activity: {
+    queueCloudSync(workspaceId: string): void;
+    queueCloudPull(workspaceId: string): void;
+  };
   chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
 }) {
   const {
@@ -172,6 +175,9 @@ export function registerDirectMessagesIpcHandlers<
             }
           : null;
         const store = linkedChatStoreFor(workspace);
+        // Relay work this pass attempted and could not finish. The renderer
+        // holds its polls on a failed result instead of trying again at once.
+        let failed = false;
         const { pending, declined } =
           await classifyDmRequestsWithFallback({
             workspaceId: workspace.workspaceId,
@@ -185,38 +191,43 @@ export function registerDirectMessagesIpcHandlers<
                 throw new Error("DM sync is unavailable: not signed in.");
               }
               assertCurrentDmSyncSession();
-              const listing = await relayShareJsonWithCredentials<{
-                received?: Array<{
-                  shareId?: unknown;
-                  granterEmail?: unknown;
-                  selector?: { kind?: unknown; channelWireId?: unknown };
-                }>;
-              }>(syncCredentials, "/sync/shares");
-              assertCurrentDmSyncSession();
-              // Re-derived on every call, not a snapshot taken once:
-              // classifyDmRequests calls this twice around its async peek.
-              return classifyDmRequests({
-                received: listing.received ?? [],
-                kindCache: peekedReceivedGrantKinds,
-                peekKind: async (shareId) => {
-                  assertCurrentDmSyncSession();
-                  const kind = await peekReceivedGrantKindForShare(
-                    relay,
-                    shareId,
-                  );
-                  assertCurrentDmSyncSession();
-                  return kind;
-                },
-                holdersByShareId: () => {
-                  assertCurrentDmSyncSession();
-                  return liveSharedChannelHoldersByShareId(listWorkspaces());
-                },
-                holdersByWireId: () => {
-                  assertCurrentDmSyncSession();
-                  return liveSharedChannelHoldersByWireId(listWorkspaces());
-                },
-                declinedShareIds: readDeclinedDms(dmRequestFile()),
-              });
+              try {
+                const listing = await relayShareJsonWithCredentials<{
+                  received?: Array<{
+                    shareId?: unknown;
+                    granterEmail?: unknown;
+                    selector?: { kind?: unknown; channelWireId?: unknown };
+                  }>;
+                }>(syncCredentials, "/sync/shares");
+                assertCurrentDmSyncSession();
+                // Re-derived on every call, not a snapshot taken once:
+                // classifyDmRequests calls this twice around its async peek.
+                return await classifyDmRequests({
+                  received: listing.received ?? [],
+                  kindCache: peekedReceivedGrantKinds,
+                  peekKind: async (shareId) => {
+                    assertCurrentDmSyncSession();
+                    const kind = await peekReceivedGrantKindForShare(
+                      relay,
+                      shareId,
+                    );
+                    assertCurrentDmSyncSession();
+                    return kind;
+                  },
+                  holdersByShareId: () => {
+                    assertCurrentDmSyncSession();
+                    return liveSharedChannelHoldersByShareId(listWorkspaces());
+                  },
+                  holdersByWireId: () => {
+                    assertCurrentDmSyncSession();
+                    return liveSharedChannelHoldersByWireId(listWorkspaces());
+                  },
+                  declinedShareIds: readDeclinedDms(dmRequestFile()),
+                });
+              } catch (error) {
+                failed = true;
+                throw error;
+              }
             },
           });
         assertCurrentDmSyncSession();
@@ -231,18 +242,26 @@ export function registerDirectMessagesIpcHandlers<
                 : undefined,
             );
             assertCurrentDmSyncSession();
-            // Only a pass that moved ops gives the cloud engine follow-up work.
-            // Queueing after an idle pass would emit a change event, refresh
-            // Chats, and run this handler again.
-            // The cloud engine owns its work after this request queues it. Do
-            // not extend the renderer operation into that durable process.
-            if (outcome.pushed || outcome.changed) {
+            if (outcome.failed) failed = true;
+            // Only a pass that applied ops gives the cloud engine follow-up
+            // work: the queued pass scans the pulled messages for agents to
+            // call. Queueing after an idle pass would emit a change event,
+            // refresh Chats, and run this handler again. The renderer's own
+            // polls ask for a pull instead, which fetches members' replies to
+            // the DMs and Groups this workspace owns without recording a
+            // change. The cloud engine owns its work after this request
+            // queues it. Do not extend the renderer operation into that
+            // durable process.
+            if (outcome.changed) {
               activity.queueCloudSync(workspace.workspaceId);
+            } else if (input.poll && !failed) {
+              activity.queueCloudPull(workspace.workspaceId);
             }
           } catch (error) {
             assertCurrentDmSyncSession();
             // Offline degradation: the local DM list still serves and the next
             // pass retries.
+            failed = true;
             console.error(
               `[desktop] DM sync failed for ${workspace.rootPath}:`,
               error,
@@ -278,6 +297,7 @@ export function registerDirectMessagesIpcHandlers<
           }).map(dmRecordForIpc),
           pending,
           declined,
+          failed,
         });
       },
     );

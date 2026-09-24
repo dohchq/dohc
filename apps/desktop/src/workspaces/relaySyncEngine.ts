@@ -75,6 +75,7 @@ export interface CloudSyncSnapshot {
 export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
+  queuePull(): void;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -278,6 +279,17 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         debounceTimer = undefined;
         void runPass(false);
       }, debounceMs);
+    },
+
+    // A pull the Chats polls ask for. Members' replies to conversations this
+    // workspace owns land in its own relay log, and nothing else fetches them
+    // while the desktop is idle. Unlike queueSync this records no local change,
+    // so a poll cannot show "Local changes", and it yields to a pass that is
+    // running, queued, or backing off, because that pass pulls too.
+    queuePull() {
+      if (authExpired || stopped || syncing) return;
+      if (debounceTimer !== undefined || backoffTimer !== undefined) return;
+      void runPass(false);
     },
 
     snapshot() {

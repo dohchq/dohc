@@ -249,9 +249,8 @@ export interface SyncJoinedSharedChannelsResult {
   // Shares whose ACCESS turned out read-only on push (flipped or always was):
   // their local ops stay local; pull still ran.
   readOnlyShareIds: string[];
-  // True when any push sent local ops to the relay.
-  pushed: boolean;
   // True when any pull applied new ops — the caller should refresh the UI.
+  // Pages applied before a later page or row failed count.
   changed: boolean;
   // Live rows the rotation did not reach this pass.
   uncovered: number;
@@ -290,6 +289,9 @@ export async function syncJoinedSharedChannels(input: {
     relay: SyncRelayConnection;
     shareId: string;
     channelWireId: string;
+    // The pull calls this after each page it applied, so a failure on a
+    // later page still reports the change.
+    onApplied: () => void;
   }) => Promise<PullSharedChannelResult>;
   push: (input: {
     rootDir: string;
@@ -302,7 +304,6 @@ export async function syncJoinedSharedChannels(input: {
   const { pull, push } = input;
   const endedShareIds: string[] = [];
   const readOnlyShareIds: string[] = [];
-  let pushed = false;
   let changed = false;
   let failedRows = 0;
   // The window rotates: this pass resumes after the row the last one stopped on
@@ -365,7 +366,7 @@ export async function syncJoinedSharedChannels(input: {
     try {
       if (channel.access === "read-write") {
         try {
-          if ((await push(target)).pushed > 0) pushed = true;
+          await push(target);
         } catch (error) {
           // The grant's access can be read-only even when we recorded
           // read-write (a stale registry row): reads keep flowing, appends
@@ -374,7 +375,12 @@ export async function syncJoinedSharedChannels(input: {
           readOnlyShareIds.push(channel.shareId);
         }
       }
-      const pulled = await pull(target);
+      const pulled = await pull({
+        ...target,
+        onApplied: () => {
+          changed = true;
+        },
+      });
       if (pulled.applied > 0) changed = true;
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
@@ -394,7 +400,6 @@ export async function syncJoinedSharedChannels(input: {
   return {
     endedShareIds,
     readOnlyShareIds,
-    pushed,
     changed,
     uncovered,
     failedRows,

@@ -501,7 +501,6 @@ describe("syncJoinedSharedChannels", () => {
     expect(result).toEqual({
       endedShareIds: [],
       readOnlyShareIds: [],
-      pushed: true,
       changed: true,
       uncovered: 0,
       failedRows: 0,
@@ -571,7 +570,6 @@ describe("syncJoinedSharedChannels", () => {
     expect(result).toEqual({
       endedShareIds: [],
       readOnlyShareIds: [],
-      pushed: false,
       changed: false,
       uncovered: 0,
       // The flaky row was reached and not refreshed: in the rotation, not fresh.
@@ -581,6 +579,31 @@ describe("syncJoinedSharedChannels", () => {
     // Only the healthy share pulled; the flaky one logged and moved on.
     expect(pull).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("keeps the pages a failed pull applied, and an empty retry reports no change", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const push = vi.fn(async () => ({ pushed: 0 }));
+    const pull = vi.fn<(input: { onApplied: () => void }) => Promise<ReturnType<typeof pullResult>>>(
+      async (input) => {
+        // The engine committed the first page before the second failed.
+        input.onApplied();
+        throw new Error("ECONNRESET");
+      },
+    );
+    const pass = () => syncJoinedSharedChannels({
+      rootDir: "/tmp/ws",
+      workspaceId: "ws-1",
+      relay: RELAY,
+      ...passOver([joined()]),
+      passRows: 1,
+      pull,
+      push,
+    });
+    await expect(pass()).resolves.toMatchObject({ changed: true, failedRows: 1, uncovered: 0 });
+    pull.mockImplementation(async () => pullResult(0));
+    await expect(pass()).resolves.toMatchObject({ changed: false, failedRows: 0, uncovered: 0 });
     errorSpy.mockRestore();
   });
 

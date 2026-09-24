@@ -243,6 +243,7 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.syncDms.mock.calls[1]?.[0]).toEqual({
       workspaceId: "workspace-a",
       openChannelId: oldDm.channelId,
+      poll: true,
     });
 
     act(() => emitCloudSessionChanged("session-b"));
@@ -1175,5 +1176,64 @@ describe("ChatsView direct messages", () => {
 
     await user.click(screen.getByTestId("chats-dm-back"));
     expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
+  });
+});
+
+// The DM polls and the workspace activity event both refresh the list, but
+// only the polls may pull the owner's relay log. A refresh an activity event
+// caused must not, or the pull's own events would refresh again while the
+// desktop sits idle. A failed sync holds both polls instead of running a
+// queued one the moment it ends.
+describe("ChatsView DM polling", () => {
+  const idle = { available: true, dms: [], pending: [], declined: [], failed: false };
+
+  it("marks its own polls and the first refresh, not a refresh an activity event caused", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.syncDms.mockResolvedValue(idle);
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledWith({ workspaceId: "workspace-a", poll: true });
+
+      bridgeMock.syncDms.mockClear();
+      act(() => emitWorkspaceActivity());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
+
+      bridgeMock.syncDms.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", poll: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the polls after a failed sync instead of running the queued one the moment it ends", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.syncDms.mockResolvedValue(idle);
+      renderView();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const mounted = bridgeMock.syncDms.mock.calls.length;
+
+      // The poll at 5 s fails slowly; the poll at 10 s queues behind it.
+      let finishFailure!: () => void;
+      bridgeMock.syncDms.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFailure = () => resolve({ ...idle, failed: true });
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      await act(async () => { finishFailure(); await vi.advanceTimersByTimeAsync(0); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+
+      // The polls at 15 s and 20 s fall inside the hold; the one at 25 s runs.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

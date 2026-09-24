@@ -538,6 +538,49 @@ describe("relaySyncEngine", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
+  it("queuePull runs a pass without recording a change and yields to a running, queued, or backing-off pass", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(sync.snapshot().pendingChangeCount).toBe(0);
+
+    // A queued sync is about to pull, so the request adds no pass.
+    sync.queueSync();
+    sync.queuePull();
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+
+    // A running pass pulls, so the request adds no pass either.
+    let release!: () => void;
+    pullMock.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return pullResult();
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    sync.queuePull();
+    release();
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+
+    // A failed pass backs off; the request does not shorten the wait.
+    pullMock.mockRejectedValueOnce(new Error("network"));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(5);
+    await sync.stop();
+    errorSpy.mockRestore();
+  });
+
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {
     pushMock.mockImplementation(async () => {
       throw new RelayUnauthorizedError();

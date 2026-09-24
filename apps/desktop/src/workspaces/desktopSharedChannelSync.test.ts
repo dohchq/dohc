@@ -35,7 +35,7 @@ function harness(rows: JoinedSharedChannel[]) {
   let generation = 1;
   let currentCredentials: CloudCredentials | null = credentials;
   const warm = vi.fn(async () => undefined);
-  const pull = vi.fn(async (_input: { shareId: string; channelWireId: string }) => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }));
+  const pull = vi.fn(async (_input: { shareId: string; channelWireId: string; onApplied?: () => void }) => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }));
   const push = vi.fn(async (_input: { shareId: string; channelWireId: string }) => ({ pushed: 0 }));
   const relayForRegistered = vi.fn((_input: {
     workspaceId: string; rootPath: string; attachmentId: symbol;
@@ -115,22 +115,37 @@ describe("desktop shared-channel pass composition", () => {
 
   it("reports an idle pass without waking the renderer", async () => {
     const h = harness([joined("one", { access: "read-write" })]);
-    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: false, changed: false });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, changed: false, failed: false });
     expect(h.push).toHaveBeenCalledOnce();
     expect(h.pull).toHaveBeenCalledOnce();
     expect(h.notify).not.toHaveBeenCalled();
     expect(h.project).not.toHaveBeenCalled();
   });
 
-  it("reports pushed and applied ops apart, and wakes the renderer only for applied ones", async () => {
+  it("reports applied ops and wakes the renderer once", async () => {
     const h = harness([joined("one", { access: "read-write" })]);
     h.push.mockResolvedValueOnce({ pushed: 2 });
-    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: true, changed: false });
-    expect(h.notify).not.toHaveBeenCalled();
     h.pull.mockResolvedValueOnce({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
-    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, pushed: false, changed: true });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, changed: true, failed: false });
     expect(h.notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
     expect(h.project).toHaveBeenCalledExactlyOnceWith("workspace");
+  });
+
+  it("keeps applied pages when a later page or the work after the rows fails", async () => {
+    const h = harness([joined("one")]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.pull.mockImplementationOnce(async (input) => {
+      input.onApplied?.();
+      throw new Error("ECONNRESET");
+    });
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: true });
+    h.pull.mockResolvedValueOnce({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
+    h.project.mockRejectedValueOnce(new Error("projection failed"));
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 1, changed: true, failed: true });
+    expect(h.notify).toHaveBeenCalledTimes(2);
+    // Nothing new after the failure: the applied pages were reported already.
+    await expect(h.rendererPassForChannel()).resolves.toEqual({ unrefreshed: 0, changed: false, failed: false });
+    errorSpy.mockRestore();
   });
 
   it("keeps registry downgrades and bookmark projection after a current pass", async () => {
