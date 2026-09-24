@@ -1,6 +1,6 @@
 use dohc_engine_collab::{ClaimOutcome, ContentKind, DocKey};
 use dohc_engine_domain::ChangeAttribution;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
 
@@ -36,6 +36,37 @@ pub enum BaseOrigination {
     NothingToDo,
     /// The lineage could have originated and did not. The edit still commits.
     Declined(SharingDeclined),
+}
+
+/// Whether this device claimed `marker`'s lineage from the lineage's own
+/// unclaimed history. Origination records this workspace's sync origin as the
+/// base origin, and a first claim has no parent. A base imported from the
+/// relay carries its sender's origin, and a successor names its parent, so
+/// neither reads as originated here.
+///
+/// A session that opened the lineage unclaimed reads this as its own claim:
+/// the base is that lineage's durable state, so the session's unrecorded
+/// edits extend it.
+pub fn lineage_originated_here(
+    conn: &Connection,
+    key: &DocKey,
+    marker: &dohc_engine_collab::Marker,
+) -> Result<bool, SyncError> {
+    if !marker.lineage_claim_status.has_claimed_base() || marker.lineage_parent_claim_id.is_some() {
+        return Ok(false);
+    }
+    let Some(base_origin) = marker.base_origin_id.as_deref() else {
+        return Ok(false);
+    };
+    let local_origin: Option<String> = conn
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(local_origin.as_deref() == Some(base_origin))
 }
 
 /// Claim and journal the base that originates `key`'s replicated lineage.

@@ -1552,6 +1552,34 @@ mod tests {
         let (status, claim) = claim_status(&store, "open-plan");
         assert_eq!(status, "exact");
         assert!(claim.is_some());
+        let marker = dohc_engine_collab::read_marker(&store, &key)
+            .expect("marker")
+            .expect("claimed marker");
+        let originated_here = |marker: &dohc_engine_collab::Marker| {
+            store
+                .read_with(|conn| crate::lineage_originated_here(conn, &key, marker))
+                .expect("origin check")
+        };
+        assert!(
+            originated_here(&marker),
+            "a session that opened this lineage unclaimed may keep its document"
+        );
+        let relay_base = dohc_engine_collab::Marker {
+            base_origin_id: Some("peer".to_owned()),
+            ..marker.clone()
+        };
+        let successor = dohc_engine_collab::Marker {
+            lineage_parent_claim_id: Some("f".repeat(64)),
+            ..marker.clone()
+        };
+        assert!(
+            !originated_here(&relay_base),
+            "a relay base is another lineage"
+        );
+        assert!(
+            !originated_here(&successor),
+            "a successor is another lineage"
+        );
         assert_eq!(
             local_ops(&store)
                 .iter()

@@ -53,6 +53,8 @@ pub struct YdocOpenState {
     pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
@@ -78,6 +80,8 @@ pub struct YdocSeedMaterialization {
 pub struct YdocResyncState {
     pub initial_update: Vec<u8>,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
 }
@@ -1667,6 +1671,7 @@ pub(super) fn ydoc_open_state_on_store(
     } else {
         Vec::new()
     };
+    let lineage_originated_here = lineage_originated_here_on_store(store, &key)?;
     Ok(YdocOpenState {
         owner_seed_source: head.as_ref().map(|snapshot| {
             dohc_engine_collab::owner_base_source::OwnerSeedSource {
@@ -1681,6 +1686,7 @@ pub(super) fn ydoc_open_state_on_store(
         initial_update,
         lineage_existing,
         lineage_claim_id,
+        lineage_originated_here,
         restore_generation,
         seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
@@ -2714,6 +2720,16 @@ pub(super) fn ydoc_settle_on_store(
     })))
 }
 
+fn lineage_originated_here_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<bool, RuntimeError> {
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(false);
+    };
+    Ok(store.read_with(|conn| dohc_engine_sync::lineage_originated_here(conn, key, &marker))?)
+}
+
 fn ydoc_resync_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -2765,6 +2781,7 @@ fn ydoc_resync_on_store(
     let lineage_claim_id = marker
         .as_ref()
         .and_then(|marker| marker.lineage_claim_id.clone());
+    let lineage_originated_here = lineage_originated_here_on_store(store, key)?;
     let cached_doc = if marker.is_some() {
         store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))?
     } else {
@@ -2801,6 +2818,7 @@ fn ydoc_resync_on_store(
     Ok(YdocResyncState {
         initial_update,
         lineage_claim_id,
+        lineage_originated_here,
         recovered_paths,
         artifact_assets,
     })

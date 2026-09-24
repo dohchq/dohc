@@ -114,7 +114,8 @@ pub use ydoc_apply::{
     retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
-    BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
+    BaseOrigination, SharingDeclined, lineage_originated_here, originate_ydoc_base_in_tx,
+    ydoc_update_payload,
 };
 pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
 

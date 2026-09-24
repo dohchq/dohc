@@ -556,6 +556,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         contentKind,
         lineage: lineage ? "existing" : "absent",
         lineageClaimId: null,
+        lineageOriginatedHere: false,
         head: file ? file.head : "absent",
         ...(seedContent !== undefined ? { seedContent } : {}),
       },
@@ -790,6 +791,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     return {
       result: {
         lineageClaimId: null,
+        lineageOriginatedHere: false,
         recoveredPaths: [],
         artifactAssets: [],
       },

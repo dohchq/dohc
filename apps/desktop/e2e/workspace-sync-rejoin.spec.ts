@@ -1062,14 +1062,6 @@ async function relayOpsFor(
 // may be set aside, and the editor must end on Saved.
 for (const pattern of ["through", "pause", "stop"] as const) {
   test(`every word reaches the disk when typing is ${pattern} while sync turns on`, async () => {
-    // Enabling sync drops the engine session, so a pause lets the sweep claim
-    // the lineage with no session holding it. Main then compares the claim
-    // with a document that holds unrecorded and garbage-collected state, the
-    // hashes differ, and the next words are set aside.
-    test.fixme(
-      pattern === "pause",
-      "a lineage claimed while its session is gone is treated as a fork",
-    );
     test.setTimeout(300_000);
     await typeWhileEnablingSync(pattern);
   });

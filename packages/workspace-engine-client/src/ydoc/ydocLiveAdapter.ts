@@ -595,6 +595,9 @@ export class YdocAdapterSession {
   // unsettled close.
   lineage: "existing" | "absent" = "existing";
   lineageClaimId: string | null;
+  // Whether this device claimed the lineage from its own unclaimed history,
+  // as of the last open or resync.
+  lineageOriginatedHere: boolean;
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
@@ -640,6 +643,7 @@ export class YdocAdapterSession {
       initialUpdate: Uint8Array;
       artifactAssets?: readonly ArtifactAssetDescriptor[];
       lineageClaimId: string | null;
+      lineageOriginatedHere: boolean;
       ownerDraft?: YdocOwnerDraft;
     },
   ) {
@@ -652,6 +656,7 @@ export class YdocAdapterSession {
     this.activeArtifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.lineageClaimId = input.lineageClaimId;
+    this.lineageOriginatedHere = input.lineageOriginatedHere;
     this.ownerDraft = input.ownerDraft;
     this.activeDoc = new Y.Doc();
     declareDohcRootSchema(this.activeDoc, this.contentKind);
@@ -865,7 +870,7 @@ export class YdocAdapterSession {
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
       const durableState = await this.requestResyncState();
-      if (durableState.lineageClaimId !== this.lineageClaimId) {
+      if (!this.continuesLineage(durableState)) {
         throw new YdocAdapterError(
           "lineage-changed",
           "The document lineage changed before missing local state could be resent. The edit remains in this editor and was not applied to the winning lineage.",
@@ -937,7 +942,7 @@ export class YdocAdapterSession {
     YdocRecordUpdateResult | undefined
   > {
     const durableState = await this.requestResyncState();
-    if (durableState.lineageClaimId !== this.lineageClaimId) {
+    if (!this.continuesLineage(durableState)) {
       throw new YdocAdapterError(
         "lineage-changed",
         "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
@@ -1108,7 +1113,7 @@ export class YdocAdapterSession {
         const result = await this.requestResyncState();
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
-        if (result.lineageClaimId !== this.lineageClaimId) {
+        if (!this.continuesLineage(result)) {
           const replacement = new Y.Doc();
           declareDohcRootSchema(replacement);
           Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
@@ -1117,6 +1122,7 @@ export class YdocAdapterSession {
           this.retiredDocs.add(this.activeDoc);
           this.activeDoc = replacement;
           this.lineageClaimId = result.lineageClaimId;
+          this.lineageOriginatedHere = result.lineageOriginatedHere;
           this.initialUpdate = update;
           this.activeArtifactAssets = result.artifactAssets;
           for (const listener of this.lineageReplacementListeners) {
@@ -1151,9 +1157,35 @@ export class YdocAdapterSession {
     }
   }
 
+  /**
+   * Whether durable state read back from the engine continues this session's
+   * lineage. The engine claims an unclaimed lineage in the transaction of a
+   * record, so a record whose response was lost leaves this session unclaimed
+   * while the engine holds the claim it made from this very history. The
+   * session takes that claim and keeps its document. Any other change of
+   * claim is a different lineage.
+   */
+  private continuesLineage(durable: {
+    lineageClaimId: string | null;
+    lineageOriginatedHere: boolean;
+  }): boolean {
+    if (durable.lineageClaimId === this.lineageClaimId) return true;
+    if (
+      this.lineageClaimId !== null ||
+      durable.lineageClaimId === null ||
+      !durable.lineageOriginatedHere
+    ) {
+      return false;
+    }
+    this.lineageClaimId = durable.lineageClaimId;
+    this.lineageOriginatedHere = true;
+    return true;
+  }
+
   private async requestResyncState(): Promise<{
     update: Uint8Array;
     lineageClaimId: string | null;
+    lineageOriginatedHere: boolean;
     recoveredPaths: string[];
     artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
@@ -1168,6 +1200,7 @@ export class YdocAdapterSession {
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
+      lineageOriginatedHere: result.lineageOriginatedHere,
       recoveredPaths: result.recoveredPaths,
       artifactAssets: result.artifactAssets,
     };
@@ -1378,6 +1411,7 @@ export class YdocLiveAdapter {
       ownerDraft: result.ownerDraft,
       artifactAssets: result.artifactAssets,
       lineageClaimId: result.lineageClaimId,
+      lineageOriginatedHere: result.lineageOriginatedHere,
     });
     this.sessions.set(result.sessionId, session);
     session.head = result.head;

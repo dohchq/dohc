@@ -137,6 +137,8 @@ const OpenResultSchema = mutableStruct({
   artifactAssets: Schema.optionalKey(Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema))),
   seedContent: Schema.optionalKey(Schema.String),
   lineageClaimId: Schema.NullOr(Schema.String),
+  // Whether this device claimed the lineage from its own unclaimed history.
+  lineageOriginatedHere: Schema.Boolean,
 });
 const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   seq: Schema.Int,
@@ -152,6 +154,7 @@ const RecordUpdateResultSchema = Schema.Union([mutableStruct({
 const ResyncResultSchema = mutableStruct({
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   lineageClaimId: Schema.NullOr(Schema.String),
+  lineageOriginatedHere: Schema.Boolean,
   recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
   artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),
 });

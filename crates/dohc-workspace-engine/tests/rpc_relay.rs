@@ -621,8 +621,11 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
     );
 }
 
+// Enrolment leaves a lineage alone while a session holds it: claiming under
+// the session would turn its next record into a stale write. Closing the
+// session claims it, even when the session never settled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
+async fn a_live_never_settled_ydoc_reaches_a_clean_peer_when_its_session_closes() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -656,6 +659,32 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     )
     .await;
     seed_sync_identity(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.push",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert!(
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .pushed_workspace_ops
+            .iter()
+            .all(|op| op["opKind"] != "ydoc.update"),
+        "enrolment must not claim a lineage an open session holds"
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "ydoc.close",
+        json!({ "sessionId": session_id, "settle": false }),
+    )
+    .await;
     call(
         &transport,
         &handle,
@@ -726,7 +755,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
     assert_eq!(
         peer_text.as_deref(),
         Some("edited before enrollment"),
-        "the first enrollment must replicate a live lineage before its first settle"
+        "closing the session must replicate a lineage that never settled"
     );
 }
 

@@ -812,6 +812,7 @@ it("keeps a locally promoted lineage after later updates change its full state",
 async function typeIntoLostGeneration(input: {
   base: string;
   claimedState: (base: Uint8Array) => Uint8Array;
+  originatedHere: boolean;
   edit: (text: Y.Text) => void;
 }) {
   const rootPath = await createTestScratch("dohc-ydoc-lineage-claim-typing-");
@@ -856,6 +857,7 @@ async function typeIntoLostGeneration(input: {
       doc,
       initialUpdate: Y.encodeStateAsUpdate(doc),
       lineageClaimId: unclaimed ? null : claimId,
+      lineageOriginatedHere: !unclaimed && input.originatedHere,
       contentKind: "plaintext",
       path: options.path,
       head: "present",
@@ -929,6 +931,28 @@ async function typeIntoLostGeneration(input: {
   };
 }
 
+// Enabling sync dropped the generation, and the sync pass claimed the
+// lineage from what it had recorded, which lacks the word the lost
+// generation could not record. The full-state hash cannot match, so the
+// engine's report that it made this claim from this history is what keeps
+// the word.
+it("keeps typing the lost generation could not record when the engine claimed its history", async () => {
+  const typed = await typeIntoLostGeneration({
+    base: "recorded",
+    claimedState: (base) => base,
+    originatedHere: true,
+    edit: (text) => text.insert(text.length, " typed"),
+  });
+
+  expect(typed.settled).toMatchObject({ content: "recorded typed" });
+  expect(typed.replacements).toEqual([]);
+  expect(typed.session.doc).toBe(typed.openedDoc);
+  expect(typed.session.lineageClaimId).toBe(typed.claimId);
+  expect(typed.claimedRecords).toHaveLength(1);
+  expect(typed.claimedTexts()).toEqual(["recorded typed"]);
+  await typed.close();
+});
+
 // Another machine forked the same base and its claim reached this engine
 // first. The claim's deletion of "a" is inside the local deletion of "ab",
 // so containment would call it the same document. It is not, and the local
@@ -942,6 +966,7 @@ it("replaces the document when a foreign fork claims it while the generation is 
       fork.getText("plainText").delete(0, 1);
       return Y.encodeStateAsUpdate(fork);
     },
+    originatedHere: false,
     edit: (text) => {
       text.delete(0, 2);
       text.insert(text.length, " local");

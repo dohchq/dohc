@@ -1981,10 +1981,18 @@ export function createWorkspaceEngineCapture(
       try {
         let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
+        // Enabling sync drops this session's generation, and the sync pass
+        // can claim the lineage before the next edit reopens it. The engine
+        // then reports that it made the claim from this lineage's own
+        // unclaimed history, and the canonical doc extends that history. A
+        // hash of the full state cannot prove it: the doc holds edits the
+        // lost generation never recorded, and it garbage-collects deleted
+        // content the engine keeps.
         const promotedSameLineage =
           canonicalLineageClaimId === null &&
           replacementClaimId !== null &&
-          isExactYDocClaimPromotion(doc, replacementClaimId);
+          (replacement.lineageOriginatedHere === true ||
+            isExactYDocClaimPromotion(doc, replacementClaimId));
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
           canonicalDoc = replacement.doc;

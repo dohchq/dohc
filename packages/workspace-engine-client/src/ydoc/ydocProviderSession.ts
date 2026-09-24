@@ -115,6 +115,8 @@ export interface EngineYdocProviderSession {
   // The provider echoes the requested versionId.
   readonly versionId?: string;
   readonly lineageClaimId?: string | null;
+  // Whether this device claimed the lineage from its own unclaimed history.
+  readonly lineageOriginatedHere?: boolean;
   readonly contentKind: YdocContentKind;
   readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
@@ -363,6 +365,9 @@ export async function openEngineYdocProviderSession(
     versionId: options.versionId,
     get lineageClaimId() {
       return session.lineageClaimId;
+    },
+    get lineageOriginatedHere() {
+      return session.lineageOriginatedHere;
     },
     contentKind: session.contentKind,
     get artifactAssets() {
