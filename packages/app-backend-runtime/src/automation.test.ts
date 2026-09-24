@@ -340,25 +340,43 @@ describe("limits", () => {
     expect(await evaluator.runCode(scope, `return { output: ${nested(100)} };`)).toEqual({ ok: false, error: expect.objectContaining({ code: "invalid_result" }) });
   });
 
-  it("stop native work that finishes past its limit", async () => {
-    // QuickJS checks its interrupt handler between bytecodes, not while native code converts a huge BigInt.
-    // The conversion takes about 500 ms, so its result arrives after the 100 ms limit and before the watchdog.
-    expect(await value("String(1n << 500000n).length")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
+  it("stop work that finishes past its limit without an interrupt", async () => {
+    // QuickJS checks its interrupt handler between bytecodes, not during native work such as converting a huge BigInt.
+    // Each reading of this clock is 100 ms after the last, so the formula's result arrives at its limit.
+    const stepping = () => { let readings = 0; return () => 100 * readings++; };
+    const quickjs = await newQuickJS();
+    expect(evaluateItem(quickjs, JSON.stringify(scope), expression("1 + 1"), stepping()).result)
+      .toEqual({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms, so it stopped. Check it for a loop that never ends." } });
+    expect(evaluateItem(quickjs, JSON.stringify(scope), expression("1 + 1")).result).toEqual({ ok: true, value: 2 });
   });
 
+  // This stand-in worker never answers "hang", as a worker stuck in native work would not.
+  const hanging = `for (const item of items) {
+    if (item.source === "hang") return;
+    reply({ kind: "result", result: { ok: true, value: item.source }, prepareMs: 0, runMs: 1 });
+  }`;
+  const stuck = { ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms, so it stopped. Check it for a loop that never ends." } };
+
   it("replace a worker that stops answering and finish the run on a new one", async () => {
+    await using worker = await standInWorker(hanging);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
     const started = threads.started;
-    const [stuck, next, last] = await evaluator.evaluate(scope, [expression("Array(16).fill(1n << 1048000n).map(String).length"), expression("1 + 1"), expression("2 + 2")]);
-    expect(stuck).toEqual({ ok: false, error: { code: "timeout", message: expect.stringContaining(`${AUTOMATION_LIMITS.formulaMs} ms`) } });
-    expect([next, last]).toEqual([{ ok: true, value: 2 }, { ok: true, value: 4 }]);
-    expect(threads.started).toBe(started + 1);
+    try {
+      expect(await standIn.evaluate(scope, ["hang", "a", "b"].map(expression))).toEqual([stuck, { ok: true, value: "a" }, { ok: true, value: "b" }]);
+      expect(threads.started).toBe(started + 2);
+    } finally { await standIn.close(); }
   }, 60_000);
 
-  it("stop a run at its total time limit", async () => {
-    const stuck = expression("Array(16).fill(1n << 1048000n).map(String).length");
-    const results = await evaluator.evaluate(scope, [stuck, stuck, stuck, stuck, stuck, expression("1 + 1")]);
-    expect(results.every(result => !result.ok && result.error.code === "timeout")).toBe(true);
-    expect(results.at(-1)).toEqual({ ok: false, error: { code: "timeout", message: `The formula did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.` } });
+  it("count replaced workers' time toward the run's total", async () => {
+    await using worker = await standInWorker(hanging);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
+    try {
+      // Each hang waits 3.1 s for the watchdog, so the fourth starts after 8 s of running and does not run.
+      const results = await standIn.evaluate(scope, ["hang", "hang", "hang", "hang", "a"].map(expression));
+      expect(results[0]).toEqual(stuck);
+      expect(results.every(result => !result.ok && result.error.code === "timeout")).toBe(true);
+      expect(results.at(-1)).toEqual({ ok: false, error: runSpent });
+    } finally { await standIn.close(); }
   }, 60_000);
 });
 
@@ -525,6 +543,18 @@ describe("scope preparation", () => {
     expect(running.results).toEqual([{ ok: true, value: 1 }, { ok: true, value: 1 }, { ok: false, error: runSpent }, { ok: false, error: runSpent }]);
   });
 
+  it("asks for a new worker on the result of the item that broke it, and sends nothing after", () => {
+    const replies: AutomationWorkerReply[] = [];
+    answerItems(["1", "break", "2"].map(expression), { prepareMs: 0, runMs: 0 }, item => {
+      if ((item as { source: string }).source === "break") throw new Error("QuickJS aborted.");
+      return { result: { ok: true, value: 1 }, prepareMs: 1, runMs: 1 };
+    }, reply => replies.push(reply));
+    expect(replies).toEqual([
+      { kind: "result", result: { ok: true, value: 1 }, prepareMs: 1, runMs: 1 },
+      { kind: "result", result: { ok: false, error: { code: "runtime", message: "The evaluator failed while it ran the formula." } }, prepareMs: 0, runMs: expect.any(Number), restart: true },
+    ]);
+  });
+
   it("stops a request's items once the real worker is given a spent budget", async () => {
     const worker = new Worker(fileURLToPath(new URL("../dist/automation-worker.mjs", import.meta.url)));
     try {
@@ -539,11 +569,11 @@ describe("scope preparation", () => {
   });
 
   it("carries the time spent reading the scope to a new worker", async () => {
-    // Each item's source is its name, the milliseconds it spent reading the scope, and whether its worker then asks to restart.
+    // Each item's source is its name, the milliseconds it spent reading the scope, and whether it asks for a new worker.
     await using worker = await standInWorker(`for (const item of items) {
       const [name, prepareMs, restart] = item.source.split(":");
-      reply({ kind: "result", result: { ok: true, value: { name, spent } }, prepareMs: Number(prepareMs), runMs: 1 });
-      if (restart) return reply({ kind: "restart" });
+      reply({ kind: "result", result: { ok: true, value: { name, spent } }, prepareMs: Number(prepareMs), runMs: 1, ...restart ? { restart: true } : {} });
+      if (restart) return;
     }`);
     const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
     try {
@@ -600,6 +630,15 @@ describe("evaluator lifetime", () => {
     }) as AutomationScope;
     expect(await evaluator.evaluate(untouched, [expression("1"), expression("2")])).toEqual([busy, busy]);
     expect(await evaluator.runCode(untouched, "return {};")).toEqual(busy);
+    const formula = new Proxy({}, {
+      get: (_target, key) => { reads.push(key); throw new Error("The formula was read."); },
+      has: (_target, key) => { reads.push(key); return false; },
+      getPrototypeOf: () => { reads.push("getPrototypeOf"); return null; },
+    }) as AutomationFormula;
+    expect(await evaluator.evaluate(untouched, [formula, { kind: "bogus" } as unknown as AutomationFormula])).toEqual([busy, busy]);
+    expect(await evaluator.evaluate(scope, Array.from({ length: AUTOMATION_LIMITS.formulasPerBatch + 1 }, () => formula)))
+      .toEqual(Array.from({ length: AUTOMATION_LIMITS.formulasPerBatch + 1 }, () => busy));
+    expect(await evaluator.runCode(untouched, 42 as unknown as string)).toEqual(busy);
     expect(reads).toEqual([]);
     expect(await evaluator.evaluate({ ...scope, now: "not a time", record: { Bad: 1n as unknown as JsonValue } }, [expression("1")])).toEqual([busy]);
     expect(await Promise.all(waiting)).toEqual(Array.from({ length: 16 }, (_, index) => ({ ok: true, value: index })));
@@ -630,8 +669,7 @@ describe("evaluator lifetime", () => {
         for (let i = 0; i < 3000; i++) v = [v];
         reply({ kind: "result", result: { ok: true, value: v } });
       } else if (item.source === "restart") {
-        reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } } });
-        return reply({ kind: "restart" });
+        return reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } }, restart: true });
       } else reply({ kind: "result", result: { ok: true, value: item.source } });
     }`);
     const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
@@ -643,6 +681,20 @@ describe("evaluator lifetime", () => {
         { ok: false, error: { code: "memory", message: "Broken." } },
         { ok: true, value: "c" },
       ]);
+      expect(threads.started).toBe(2);
+    } finally { await standIn.close(); }
+  });
+
+  it("sends a request queued behind one whose last item broke the worker to a new worker", async () => {
+    await using worker = await standInWorker(`for (const item of items) {
+      if (item.source === "break") return reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } }, prepareMs: 0, runMs: 1, restart: true });
+      reply({ kind: "result", result: { ok: true, value: item.source }, prepareMs: 0, runMs: 1 });
+    }`);
+    const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
+    try {
+      const [first, second] = await Promise.all([standIn.evaluate(scope, ["a", "break"].map(expression)), standIn.evaluate(scope, ["b", "c"].map(expression))]);
+      expect(first).toEqual([{ ok: true, value: "a" }, { ok: false, error: { code: "memory", message: "Broken." } }]);
+      expect(second).toEqual([{ ok: true, value: "b" }, { ok: true, value: "c" }]);
       expect(threads.started).toBe(2);
     } finally { await standIn.close(); }
   });

@@ -185,10 +185,13 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
         idle.unref();
       };
       // Without the worker's own times, the item's whole wait counts as running time.
-      const accept = (result: AutomationOutcome<JsonValue>, times?: AutomationTimeSpent) => {
+      const record = (result: AutomationOutcome<JsonValue>, times?: AutomationTimeSpent) => {
         spent.prepareMs += times?.prepareMs ?? 0;
         spent.runMs += times?.runMs ?? performance.now() - itemStarted;
         report(received++, result);
+      };
+      const accept = (result: AutomationOutcome<JsonValue>, times?: AutomationTimeSpent) => {
+        record(result, times);
         if (received < items.length) arm();
         else { rest(); resolve(); }
       };
@@ -209,15 +212,19 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS);
       };
       const onMessage = (reply: AutomationWorkerReply) => {
-        if (reply.kind === "result") accept(reply.result, reply);
-        else if (reply.kind === "restart") {
+        if (reply.kind === "result" && !reply.restart) accept(reply.result, reply);
+        else if (reply.kind === "result") {
+          // The item broke the worker. The caller sends the items after it to a new worker.
           settle();
           void stop(thread);
-          // A worker that asks to restart before it finishes any item would do so again, so its items fail instead.
-          if (received === 0) {
-            spent.runMs += performance.now() - itemStarted;
-            items.forEach((item, offset) => report(offset, failure("runtime", `The evaluator stopped before it ran ${subjectOf(item).toLowerCase()}.`)));
-          }
+          record(reply.result, reply);
+          resolve();
+        } else if (reply.kind === "restart") {
+          settle();
+          void stop(thread);
+          // A worker that fails before it finishes any item would fail again, so its items fail instead.
+          // The request then has no items left, so the time this took is not counted.
+          if (received === 0) items.forEach((item, offset) => report(offset, failure("runtime", `The evaluator stopped before it ran ${subjectOf(item).toLowerCase()}.`)));
           resolve();
         }
         else if (reply.kind === "refused") { rest(); reject(new Error(reply.message)); }
@@ -235,12 +242,18 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     });
   }
 
-  async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
+  /**
+   * A full queue answers before the evaluator reads the scope or the formulas, so a request it turns away costs
+   * nothing and gets `busy` even for input it would reject. It returns nothing when the request can wait.
+   */
+  function busy(count: number): AutomationOutcome<never>[] | undefined {
     if (closed) throw new Error("The automation evaluator is closed.");
-    // A full queue answers before the scope is read, so a request it turns away costs nothing.
-    if (queued >= AUTOMATION_LIMITS.queuedRequests) {
-      return items.map(() => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
-    }
+    if (queued < AUTOMATION_LIMITS.queuedRequests) return undefined;
+    return Array.from({ length: count }, () => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
+  }
+
+  /** Called at once after `busy` returns nothing, so the queue cannot fill in between. */
+  async function run(scope: AutomationScope, items: AutomationWorkerItem[]): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
     const measured = measureScope(scope);
@@ -267,11 +280,15 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
 
   return {
     async evaluate(scope, formulas) {
+      const full = busy(formulas.length);
+      if (full) return full;
       if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
       if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
       return formulas.length === 0 ? [] : run(scope, [...formulas]);
     },
     async runCode(scope, source) {
+      const full = busy(1);
+      if (full) return full[0]!;
       if (typeof source !== "string") throw new Error("A code step's source must be text.");
       const [result] = await run(scope, [{ kind: "code", source }]);
       // The worker checked the shape of a successful result.

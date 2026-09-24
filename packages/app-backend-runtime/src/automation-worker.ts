@@ -22,7 +22,8 @@ const globals = await (async () => {
 const reply = (message: AutomationWorkerReply) => port.postMessage(message);
 // Requests run one at a time: the next message waits until this one has replied for every item.
 let requests = Promise.resolve();
-// An unexpected failure asks for a new worker, so the request's remaining items still get results.
+// An unexpected failure asks for a new worker, so the request's remaining items still get results. It can only come
+// before the request's last result, because nothing runs after that.
 port.on("message", (request: AutomationWorkerRequest) => {
   requests = requests.then(() => answer(request)).catch(() => reply({ kind: "restart" }));
 });

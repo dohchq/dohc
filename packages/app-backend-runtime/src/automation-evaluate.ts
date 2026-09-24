@@ -165,7 +165,8 @@ export function evaluateItem(quickjs: QuickJSWASMModule, scopeJson: string, item
 
 /**
  * Evaluates one request's items in order and replies after each. An item that starts after either of the request's
- * time budgets is spent does not run. When `evaluate` throws, the item fails and the worker asks to be replaced.
+ * time budgets is spent does not run. When `evaluate` throws, the item fails, its result asks for a new worker, and
+ * no later item runs here.
  */
 export function answerItems(items: AutomationWorkerItem[], spent: AutomationTimeSpent, evaluate: (item: AutomationWorkerItem) => Evaluated,
   reply: (message: AutomationWorkerReply) => void): void {
@@ -179,13 +180,13 @@ export function answerItems(items: AutomationWorkerItem[], spent: AutomationTime
       try {
         evaluated = evaluate(item);
       } catch (error) {
-        // An aborted QuickJS module cannot evaluate again.
-        reply({
-          kind: "result", prepareMs: 0, runMs: performance.now() - began, result: error instanceof WebAssembly.RuntimeError
+        // An aborted QuickJS module cannot evaluate again. The restart travels on this item's own result, so it can
+        // never reach the next request.
+        return reply({
+          kind: "result", restart: true, prepareMs: 0, runMs: performance.now() - began, result: error instanceof WebAssembly.RuntimeError
             ? failure("memory", `${subjectOf(item)} used more memory than it is allowed, so it stopped.`)
             : failure("runtime", `The evaluator failed while it ran ${subjectOf(item).toLowerCase()}.`),
         });
-        return reply({ kind: "restart" });
       }
     }
     prepareMs += evaluated.prepareMs;

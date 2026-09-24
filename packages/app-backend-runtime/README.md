@@ -273,11 +273,11 @@ The worker evaluates one formula as it starts, so a cold worker's first formula 
 QuickJS checks the limits between bytecodes, so native work such as converting a huge BigInt to text can run past them.
 A result or a read scope that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limits.
 That formula times out and a new worker evaluates the ones after it.
-A worker also asks to be replaced when its QuickJS instance fails. If a new worker asks before it finishes any item, the items it did not reach fail with `runtime` instead of starting another worker.
+When an item breaks a worker's QuickJS instance, that item's own result asks for a new worker, which evaluates the items after it. A worker that fails before it finishes any item makes the items sent to it fail with `runtime` instead of starting another worker.
 A request keeps two totals: the time its formulas run, and the time it spends reading the scope.
 Reading a 256 KiB scope takes 15 to 25 ms on a desktop, so 64 formulas can spend several seconds reading it. That time never cuts off a formula's run time.
 Formulas that start after either total passes 8 seconds time out without running. Each total passes 8 seconds only by the item running when it did, so one request takes at most about 21 seconds.
-When 16 requests are waiting or running, a new request returns `busy` for every item at once. The evaluator does this before it reads the scope, so it returns `busy` even for a scope it would reject. The caller runs the automation again later.
+When 16 requests are waiting or running, a new request returns `busy` for every item at once. The evaluator does this before it reads the scope or the formulas, so it returns `busy` even for input it would reject. The caller runs the automation again later.
 
 The scope and formulas must be plain JSON data: no bigints, functions, symbols, or class instances such as dates, maps, and `Array` subclasses.
 Before the caller's thread copies anything to the worker, the evaluator rejects a scope with such a value. It refuses an oversized source or message text, and an oversized or deeply nested scope, as `too_large`.

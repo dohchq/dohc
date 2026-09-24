@@ -97,12 +97,13 @@ export interface AutomationTimeSpent { prepareMs: number; runMs: number }
 /** `spent` is the time earlier workers spent on this request, before one was replaced. */
 export type AutomationWorkerRequest = { scope: AutomationScope; items: AutomationWorkerItem[]; spent: AutomationTimeSpent };
 /**
- * The worker answers each item in order with `result` and the time the item took. It sends `restart` after an
- * item that broke its QuickJS module, and `refused` instead of any result for a scope it cannot evaluate.
+ * The worker answers each item in order with `result` and the time the item took. A result with `restart` is the
+ * last one this worker sends for the request: its item broke the worker's QuickJS instance. A plain `restart` means the
+ * worker failed before it evaluated any item. `refused` replaces every result for a scope the worker cannot evaluate.
  */
 export type AutomationWorkerReply =
   | { kind: "ready" }
-  | ({ kind: "result"; result: AutomationOutcome<JsonValue> } & AutomationTimeSpent)
+  | ({ kind: "result"; result: AutomationOutcome<JsonValue>; restart?: true } & AutomationTimeSpent)
   | { kind: "restart" }
   | { kind: "refused"; message: string };
 
