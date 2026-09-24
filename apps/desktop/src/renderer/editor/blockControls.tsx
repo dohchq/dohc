@@ -2,6 +2,7 @@ import { mapWidgetOwners } from "./widgetOwnership";
 import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
+import { useEditorState } from "@tiptap/react";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
@@ -727,7 +728,12 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const activeId = activeTurnIntoId(editor);
+  // The editor does not re-render React per transaction, so the label reads
+  // the block under the current selection from the editor's state.
+  const activeId = useEditorState({
+    editor,
+    selector: ({ editor: current }) => activeTurnIntoId(current),
+  });
   const activeIndex = TURN_INTO_ENTRIES.findIndex((entry) => entry.id === activeId);
   const activeEntry = TURN_INTO_ENTRIES[activeIndex] ?? TURN_INTO_ENTRIES[0]!;
 

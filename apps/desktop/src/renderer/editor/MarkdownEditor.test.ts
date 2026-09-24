@@ -32,7 +32,7 @@ import {
   getDohcYDocBodyFragment,
   markdownToYDoc,
 } from "./import-export";
-import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
+import { MarkdownEditor, SelectionToolbar, type MarkdownEditorHandle } from "./MarkdownEditor";
 import {
   findEmptyListItemParagraph,
   makeCodeBlockChromePlugin,
@@ -574,6 +574,41 @@ describe("MarkdownEditor slash commands", () => {
     expect(slashCommandStatesEqual(state, { ...state, selected: 1 })).toBe(false);
     expect(slashCommandStatesEqual(state, { ...state, y: 21 })).toBe(false);
     expect(slashCommandStatesEqual(state, CLOSED_SLASH_COMMAND_STATE)).toBe(false);
+  });
+});
+
+describe("MarkdownEditor selection toolbar", () => {
+  it("shows the block and marks of the current selection, not the first one", () => {
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        Markdown.configure({ indentation: { style: "space", size: 2 } }),
+      ],
+      content: "# Big heading\n\nA paragraph with **bold words** in it.",
+      contentType: "markdown",
+    });
+    try {
+      editor.commands.setTextSelection({ from: 2, to: 5 });
+      render(createElement(SelectionToolbar, { editor, onOpenLink: vi.fn() }));
+      const bold = screen.getByRole("button", { name: "Bold" });
+      expect(screen.getByTitle("Turn into").textContent).toContain("Heading 1");
+      expect(bold.className).not.toContain("is-active");
+
+      let boldFrom = -1;
+      editor.state.doc.descendants((node, pos) => {
+        if (boldFrom === -1 && node.isText && node.text === "bold words") boldFrom = pos;
+      });
+      act(() => {
+        editor.commands.setTextSelection({ from: boldFrom, to: boldFrom + 4 });
+      });
+
+      expect(screen.getByTitle("Turn into").textContent).toContain("Text");
+      expect(bold.className).toContain("is-active");
+    } finally {
+      editor.destroy();
+    }
   });
 });
 

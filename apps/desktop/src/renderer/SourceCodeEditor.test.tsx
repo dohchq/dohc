@@ -3,7 +3,42 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SourceCodeEditor } from "./SourceCodeEditor";
+import { javascript } from "@codemirror/lang-javascript";
+import { highlightCode } from "@lezer/highlight";
+import { CODE_HIGHLIGHT_STYLE, SourceCodeEditor } from "./SourceCodeEditor";
+
+describe("code highlighting", () => {
+  // Each theme sets these variables, so one style reads in light and dark.
+  // A literal color here is what painted #00f on the dark page.
+  it("colors tokens only with theme variables", () => {
+    const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
+    const colors = [...rules.matchAll(/color:\s*([^;}]+)/g)].map((match) => match[1]?.trim());
+    expect(colors.length).toBeGreaterThan(0);
+    for (const color of colors) expect(color).toMatch(/^var\(--dohc-[a-z-]+\)$/);
+  });
+
+  it("gives keywords, strings, comments, numbers, and types their token colors", () => {
+    const code = 'import { x } from "react";\n// note\nexport function useRows(rows: Array<number>) { return rows[0] ?? 1; }\n';
+    const tree = javascript({ typescript: true }).language.parser.parse(code);
+    const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
+    const colorOf = (token: string): string | null => {
+      let classes = "";
+      highlightCode(code, tree, CODE_HIGHLIGHT_STYLE, (text, tokenClasses) => {
+        if (text === token) classes = tokenClasses;
+      }, () => undefined);
+      if (!classes) return null;
+      const rule = rules.split("\n").find((line) => line.startsWith(`.${classes} `));
+      return rule?.match(/color:\s*([^;}]+)/)?.[1]?.trim() ?? null;
+    };
+
+    expect(colorOf("import")).toBe("var(--dohc-ink)");
+    expect(colorOf('"react"')).toBe("var(--dohc-success)");
+    expect(colorOf("// note")).toBe("var(--dohc-muted)");
+    expect(colorOf("1")).toBe("var(--dohc-warning)");
+    expect(colorOf("useRows")).toBe("var(--dohc-agent)");
+    expect(colorOf("number")).toBe("var(--dohc-agent)");
+  });
+});
 
 function stubCodeMirrorLayout() {
   vi.stubGlobal(

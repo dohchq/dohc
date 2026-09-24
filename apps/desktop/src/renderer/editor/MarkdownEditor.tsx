@@ -12,7 +12,7 @@ import {
 } from "react";
 import { Extension, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -319,6 +319,77 @@ function BubbleButton(props: {
     >
       {props.children}
     </button>
+  );
+}
+
+// The bubble menu's contents. The editor does not re-render React on each
+// transaction, so the toolbar reads the marks under the selection from the
+// editor's state; a render-time read showed the previous selection's marks.
+export function SelectionToolbar(props: {
+  editor: Editor;
+  onOpenLink: (state: LinkMenuState) => void;
+}) {
+  const { editor } = props;
+  const active = useEditorState({
+    editor,
+    selector: ({ editor: current }) => ({
+      bold: current.isActive("bold"),
+      italic: current.isActive("italic"),
+      underline: current.isActive("underline"),
+      strike: current.isActive("strike"),
+      code: current.isActive("code"),
+      highlight: current.isActive("highlight"),
+      link: current.isActive("link"),
+    }),
+  });
+  return (
+    <>
+      <TurnIntoMenu editor={editor} />
+      <span className="dohc-bubble-menu__divider" aria-hidden="true" />
+      <BubbleButton
+        label="Bold"
+        active={active.bold}
+        onClick={() => editor.chain().focus().toggleBold().run()}
+      >
+        <Bold size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Italic"
+        active={active.italic}
+        onClick={() => editor.chain().focus().toggleItalic().run()}
+      >
+        <Italic size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Underline"
+        active={active.underline}
+        onClick={() => editor.chain().focus().toggleUnderline().run()}
+      >
+        <UnderlineIcon size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Strikethrough"
+        active={active.strike}
+        onClick={() => editor.chain().focus().toggleStrike().run()}
+      >
+        <Strikethrough size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Code"
+        active={active.code}
+        onClick={() => editor.chain().focus().toggleCode().run()}
+      >
+        <Code size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Highlight"
+        active={active.highlight}
+        onClick={() => editor.chain().focus().toggleMark("highlight").run()}
+      >
+        <Highlighter size={14} aria-hidden />
+      </BubbleButton>
+      <LinkBubbleButton editor={editor} active={active.link} onOpen={props.onOpenLink} />
+    </>
   );
 }
 
@@ -1066,51 +1137,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               return selection instanceof TextSelection && !selection.empty;
             }}
           >
-            <TurnIntoMenu editor={editor} />
-            <span className="dohc-bubble-menu__divider" aria-hidden="true" />
-            <BubbleButton
-              label="Bold"
-              active={editor.isActive("bold")}
-              onClick={() => editor.chain().focus().toggleBold().run()}
-            >
-              <Bold size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Italic"
-              active={editor.isActive("italic")}
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-            >
-              <Italic size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Underline"
-              active={editor.isActive("underline")}
-              onClick={() => editor.chain().focus().toggleUnderline().run()}
-            >
-              <UnderlineIcon size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Strikethrough"
-              active={editor.isActive("strike")}
-              onClick={() => editor.chain().focus().toggleStrike().run()}
-            >
-              <Strikethrough size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Code"
-              active={editor.isActive("code")}
-              onClick={() => editor.chain().focus().toggleCode().run()}
-            >
-              <Code size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Highlight"
-              active={editor.isActive("highlight")}
-              onClick={() => editor.chain().focus().toggleMark("highlight").run()}
-            >
-              <Highlighter size={14} aria-hidden />
-            </BubbleButton>
-            <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
+            <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (

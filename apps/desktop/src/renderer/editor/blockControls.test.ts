@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { createElement } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -487,6 +488,20 @@ describe("TurnIntoMenu dropdown rendering", () => {
     for (const entry of TURN_INTO_ENTRIES) {
       expect(within(listbox).getByText(entry.label)).toBeTruthy();
     }
+  });
+
+  it("follows the selection into another block without a parent render", () => {
+    const editor = track(makeEditor("# Heading\n\nText"));
+    editor.commands.setTextSelection(3);
+    render(createElement(TurnIntoMenu, { editor }));
+    expect(screen.getByTitle("Turn into").textContent).toContain("Heading 1");
+
+    const [, paragraph] = topLevelBlocks(editor);
+    act(() => {
+      editor.commands.setTextSelection(paragraph.pos + 2);
+    });
+
+    expect(screen.getByTitle("Turn into").textContent).toContain("Text");
   });
 
   it("converts the selection's block when an option is clicked", () => {
