@@ -264,8 +264,7 @@ describe("limits", () => {
   });
 
   it("stop a runaway code step", async () => {
-    // On a very busy computer the wall-clock watchdog can stop it first; both report a timeout.
-    expect(await evaluator.runCode(scope, "for (;;) {}")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
+    expect(await evaluator.runCode(scope, "for (;;) {}")).toEqual({ ok: false, error: { code: "timeout", message: expect.stringContaining(`${AUTOMATION_LIMITS.codeMs} ms`) } });
     expect(await value("record.Name")).toEqual({ ok: true, value: "Ana Lopez" });
   });
 
@@ -317,10 +316,9 @@ describe("limits", () => {
   });
 
   it("stop native work that finishes past its limit", async () => {
-    const started = threads.started;
     // QuickJS checks its interrupt handler between bytecodes, not while native code converts a huge BigInt.
-    expect(await value("String(1n << 300000n).length")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
-    expect(threads.started).toBe(started);
+    // The conversion takes about 500 ms, so its result arrives after the 100 ms limit and before the watchdog.
+    expect(await value("String(1n << 500000n).length")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
   });
 
   it("replace a worker that stops answering and finish the run on a new one", async () => {

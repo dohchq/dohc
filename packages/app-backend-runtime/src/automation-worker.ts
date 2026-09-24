@@ -53,12 +53,6 @@ function jsonDepth(json: string): number {
   return deepest;
 }
 
-/** This thread's CPU time. A busy computer slows evaluation without using up its limit. */
-const cpuMs = () => {
-  const { user, system } = process.threadCpuUsage();
-  return (user + system) / 1000;
-};
-
 const sourceBytes = (item: AutomationWorkerItem) => item.kind === "text"
   ? item.parts.reduce((total, part) => total + Buffer.byteLength(part.kind === "text" ? part.text : part.expression), 0)
   : Buffer.byteLength(item.source);
@@ -73,15 +67,17 @@ function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, item: Automatio
   try {
     runtime.setMaxStackSize(AUTOMATION_LIMITS.stackBytes);
     runtime.removeModuleLoader();
-    const deadline = cpuMs() + limitMs;
-    runtime.setInterruptHandler(() => cpuMs() >= deadline);
+    // The time limit starts once the context and the guest's own code are ready.
+    let deadline = Infinity;
+    runtime.setInterruptHandler(() => performance.now() >= deadline);
     const timeout = () => failure("timeout", `${subject} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`);
     // Only an interrupt or exhausted memory escapes the guest's own error handling.
-    const stopped = () => cpuMs() >= deadline ? timeout() : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
+    const stopped = () => performance.now() >= deadline ? timeout() : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
     const vm = runtime.newContext();
     try {
       const guest = vm.evalCode(GUEST_SOURCE, "automation.js");
       if (guest.error) { guest.error.dispose(); return stopped(); }
+      deadline = performance.now() + limitMs;
       const source = item.kind === "text" ? JSON.stringify(item.parts) : item.source;
       const args = [vm.newString(scopeJson), vm.newString(item.kind), vm.newString(source), vm.newNumber(AUTOMATION_LIMITS.resultBytes)];
       const result = vm.callFunction(guest.value, vm.undefined, ...args);
@@ -89,7 +85,7 @@ function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, item: Automatio
       if (result.error) { result.error.dispose(); return stopped(); }
       try {
         // Native work, such as converting a huge BigInt, can finish past the limit without an interrupt.
-        if (cpuMs() >= deadline) return timeout();
+        if (performance.now() >= deadline) return timeout();
         const reply = vm.typeof(result.value) === "string" ? vm.getString(result.value) : "";
         if (Buffer.byteLength(reply) > AUTOMATION_LIMITS.resultBytes) {
           return failure("too_large", `${subject} produced more than ${AUTOMATION_LIMITS.resultBytes / KiB} KiB.`);
@@ -126,6 +122,9 @@ const globals = (() => {
     try { return new Set(vm.dump(names) as string[]); } finally { names.dispose(); }
   } finally { vm.dispose(); }
 })();
+
+// A first evaluation compiles QuickJS's code paths, so a cold worker's first formula does not spend its time on that.
+evaluate(quickjs, JSON.stringify({ trigger: { kind: "button" }, person: null, now: "2026-01-01T00:00:00Z" }), { kind: "expression", source: "today()" });
 
 const reply = (message: AutomationWorkerReply) => port.postMessage(message);
 port.on("message", ({ scope, items }: AutomationWorkerRequest) => {

@@ -7,9 +7,9 @@ const KiB = 1024, MiB = 1024 * KiB;
  * The scope is host data, like `queryBytes`.
  */
 export const AUTOMATION_LIMITS = Object.freeze({
-  /** Processor time for one formula, including its fresh context. */
+  /** Time for one formula once its context is ready. */
   formulaMs: 100,
-  /** Processor time for one code step. */
+  /** Time for one code step once its context is ready. */
   codeMs: 1000,
   /** Wall time for one request, like the dataset guest's `deadlineMs`. Items it does not reach time out. */
   requestMs: 8000,

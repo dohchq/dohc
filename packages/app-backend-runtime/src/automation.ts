@@ -8,7 +8,7 @@ export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol
 export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, CodeStepReturn, JsonObject } from "./automation-protocol.js";
 export type { JsonValue } from "./protocol.js";
 
-/** Wall time an item gets beyond its processor-time limit before its worker is replaced. */
+/** Time an item gets beyond its limit before its worker is replaced. */
 const WATCHDOG_GRACE_MS = 2000;
 /** An idle worker exits after this long, which returns its memory. */
 const IDLE_MS = 30_000;

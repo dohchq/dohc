@@ -251,8 +251,8 @@ Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten
 
 | Limit | Value | Dataset guest |
 |---|---|---|
-| Processor time for one formula | 100 ms | none |
-| Processor time for one code step | 1 s | 1 s of wall time for one operation |
+| Time for one formula | 100 ms | none |
+| Time for one code step | 1 s | 1 s for one operation |
 | Wall time for one request | 8 s | 8 s for one operation |
 | Memory for one formula or code step | about 17 MiB, from a 24 MiB cap | 16 MiB for one operation |
 | Stack | 256 KiB | 256 KiB |
@@ -263,9 +263,11 @@ Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten
 | Formulas in one request | 64 | none |
 | Requests waiting or running | 16 | 8 operations running |
 
-The time limits count the worker thread's processor time, so a busy computer slows evaluation without stopping it.
-QuickJS checks them between bytecodes, so native work such as converting a huge BigInt to text can run past them.
-A result that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds of wall time past its limit.
+The time limits count wall time from when the formula's context is ready, as the dataset guest's limits do.
+Windows counts a thread's processor time by clock ticks, and on a busy machine it counted 47 ms for 570 ms of work, so processor time cannot bound a formula.
+The worker evaluates one formula as it starts, so a cold worker's first formula does not spend its time compiling QuickJS's code paths.
+QuickJS checks the limits between bytecodes, so native work such as converting a huge BigInt to text can run past them.
+A result that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limit.
 That formula times out and a new worker evaluates the ones after it. Formulas that the request reaches after 8 seconds time out without running.
 When 16 requests are waiting or running, a new request rejects at once instead of waiting.
 
