@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import * as Y from "yjs";
@@ -198,6 +198,36 @@ describe("PageIdentity", () => {
       await user.keyboard("{Enter}");
 
       expect(onEnterBody).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps Enter for an input method while it composes, and Shift+ArrowDown for selecting", () => {
+      const onEnterBody = vi.fn();
+      render(
+        <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="note" onEnterBody={onEnterBody} />,
+      );
+      const title = screen.getByTestId("page-title");
+
+      fireEvent.keyDown(title, { key: "Enter", isComposing: true });
+      fireEvent.keyDown(title, { key: "ArrowDown", shiftKey: true });
+
+      expect(onEnterBody).not.toHaveBeenCalled();
+    });
+
+    it("turns pasted line breaks into spaces and keeps the caret after the pasted text", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(
+        <PageIdentity body={"---\ntitle: Trip plan\n---\n# Body\n"} onChange={onChange} filenameStem="note" />,
+      );
+      const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
+      title.focus();
+      title.setSelectionRange(5, 5);
+
+      await user.paste("to\nTokyo ");
+
+      expect(title.value).toBe("Trip to Tokyo plan");
+      expect(title.selectionStart).toBe("Trip to Tokyo ".length);
+      expect(onChange.mock.lastCall?.[0]).toContain("title: Trip to Tokyo plan");
     });
   });
 
