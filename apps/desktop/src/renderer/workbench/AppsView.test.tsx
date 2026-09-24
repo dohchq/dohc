@@ -92,6 +92,40 @@ describe("AppsView", () => {
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps the apps and their count on screen while a settled listing refetches", async () => {
+    const view = render(
+      <AppsView
+        workspaceId="ws-apps"
+        filesSettledRevision={0}
+        onOpenPath={vi.fn()}
+        onCreateFirstApp={vi.fn()}
+      />,
+    );
+    await screen.findByText("Client Portal");
+    const refetch = deferred<{ sites: SitePackageInfo[] }>();
+    bridgeMock.listSites.mockReturnValueOnce(refetch.promise);
+
+    view.rerender(
+      <AppsView
+        workspaceId="ws-apps"
+        filesSettledRevision={1}
+        onOpenPath={vi.fn()}
+        onCreateFirstApp={vi.fn()}
+      />,
+    );
+    await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByText("Client Portal")).toBeTruthy();
+    expect(screen.getByTestId("sites-count").textContent).toBe("1 app");
+    expect(screen.queryByText("Loading apps…")).toBeNull();
+
+    await act(async () => {
+      refetch.resolve({ sites: [app, { ...app, root: "docs", title: "Docs" }] });
+      await refetch.promise;
+    });
+    expect(screen.getByTestId("sites-count").textContent).toBe("2 apps");
+  });
+
   it("does not reload detected apps for an unchanged settled files revision", async () => {
     const view = render(
       <AppsView
@@ -168,7 +202,8 @@ describe("AppsView", () => {
 
     expect(screen.queryByText("Report")).toBeNull();
     expect(screen.queryByTestId("sites-row")).toBeNull();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
+    // No count until one is known: "0 apps" would be a claim.
+    expect(screen.getByTestId("sites-count").textContent).toBe("");
   });
 
   it("renders the IPC error state", async () => {
@@ -183,7 +218,7 @@ describe("AppsView", () => {
     );
 
     expect(await screen.findByText("App scan failed")).toBeTruthy();
-    expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
+    expect(screen.getByTestId("sites-count").textContent).toBe("");
   });
 
   it("offers a keyboard-accessible first-app action when no apps are detected", async () => {

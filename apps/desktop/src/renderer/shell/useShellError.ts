@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
-type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
+type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search" | "import-files";
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -141,12 +141,16 @@ export function useShellError(workspaceId: string) {
     [push],
   );
 
+  // A kind makes a newer message replace the row of an older one, such as
+  // one import's result replacing the last import's.
   const showShellError = useCallback(
-    (message: string) => push({ message, retry: null }),
+    (message: string, kind?: ShellErrorKind) =>
+      push({ message, retry: null, ...(kind ? { kind } : {}) }),
     [push],
   );
   const showSuccessNotice = useCallback(
-    (message: string) => push({ message, retry: null, tone: "success" }),
+    (message: string, kind?: ShellErrorKind) =>
+      push({ message, retry: null, tone: "success", ...(kind ? { kind } : {}) }),
     [push],
   );
   // The toast closes; the row in Notices stays.

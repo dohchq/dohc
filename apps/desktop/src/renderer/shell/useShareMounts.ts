@@ -15,7 +15,7 @@ export function useShareMounts(
   onExplorerPathsChanged: (changes: PendingTreeChange[]) => void,
   refreshFiles: () => Promise<unknown>,
   reportShellError: (fallback: string, error: unknown) => void,
-  showShellNotice: (message: string) => void,
+  showSuccessNotice: (message: string) => void,
 ) {
   // Share mounts: the registry is loaded once at boot, so the shell owns a
   // live copy of this workspace's mounts — reloaded after every mount /
@@ -88,9 +88,13 @@ export function useShareMounts(
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (announce) showShellNotice(shareRefreshSummary(results));
+      if (!announce) return;
+      // A share dohc cannot read is a failure the person has to act on.
+      const summary = shareRefreshSummary(results);
+      if (results.some((row) => row.status === "damaged")) reportShellError(summary, null);
+      else showSuccessNotice(summary);
     },
-    [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
+    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts],
   );
 
   // DesktopRoot owns the live registry snapshot above this keyed shell. A
@@ -137,7 +141,7 @@ export function useShareMounts(
       // The record went but its folder stayed, because its label is not one
       // this app would ever address a folder through. The files are still on
       // disk, so say where they are and leave the choice to the user.
-      showShellNotice(
+      showSuccessNotice(
         folderLeft
           ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
           : `Removed ${label} from this workspace.`,
@@ -149,7 +153,7 @@ export function useShareMounts(
       onExplorerPathsChanged,
       refreshFiles,
       reportShellError,
-      showShellNotice,
+      showSuccessNotice,
       reloadShareMounts,
     ],
   );

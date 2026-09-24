@@ -976,7 +976,7 @@ test("mount side: add a share into a workspace and open it beside local files", 
 
     // The mount lands: notice, tree rows under shared-with-me/e2e-granter,
     // the private file never crosses, and the host file is untouched.
-    await expect(page.getByTestId("shell-notice")).toContainText(
+    await expect(page.getByTestId("workspace-shell-notice")).toContainText(
       "Added e2e-granter to shared-with-me",
     );
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");

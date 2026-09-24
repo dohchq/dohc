@@ -3,7 +3,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -74,7 +74,6 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
-import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
@@ -1372,7 +1371,6 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, reportShellError],
   );
 
-  const { shellNotice, showShellNotice, dismissShellNotice } = useShellNotice();
 
   const { onManageWorkspaces } = props;
   const manageWorkspaces = useCallback(() => {
@@ -2060,10 +2058,11 @@ export function DesktopWorkspaceShell(props: {
       }
       const count = outcome.imported.length;
       if (outcome.interrupted) {
-        showShellNotice(
+        showShellError(
           count === 0
             ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
             : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
+          "import-files",
         );
         try {
           await refreshFiles();
@@ -2078,21 +2077,23 @@ export function DesktopWorkspaceShell(props: {
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
-      showShellNotice(
-        count === 0
-          ? `Nothing imported${skippedSuffix}.`
-          : `Imported ${count} ${count === 1 ? "file" : "files"}${
-              targetDir ? ` into ${targetDir}` : ""
-            }${skippedSuffix}.`,
+      if (count === 0) {
+        showShellError(`Nothing imported${skippedSuffix}.`, "import-files");
+        return;
+      }
+      showSuccessNotice(
+        `Imported ${count} ${count === 1 ? "file" : "files"}${
+          targetDir ? ` into ${targetDir}` : ""
+        }${skippedSuffix}.`,
+        "import-files",
       );
-      if (count === 0) return;
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showShellNotice],
+    [workspaceId, refreshFiles, reportShellError, showShellError, showSuccessNotice],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -2860,7 +2861,7 @@ export function DesktopWorkspaceShell(props: {
     onExplorerPathsChanged,
     refreshFiles,
     reportShellError,
-    showShellNotice,
+    showSuccessNotice,
   );
 
   // Reveal-then-create: the inline editbox lives in the explorer view, so
@@ -3883,7 +3884,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (outcome.collisionRecordQuarantined) {
-        showShellNotice(
+        showShellError(
           "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
         );
       }
@@ -4335,7 +4336,7 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles().catch(() => undefined);
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    showShellNotice(
+    showSuccessNotice(
       `Added ${label} to shared-with-me — read-only, kept up to date.`,
     );
   }
@@ -4501,22 +4502,6 @@ export function DesktopWorkspaceShell(props: {
           onToggle: () => mutateWb(toggleChats),
         }}
       />
-      {shellNotice ? (
-        <div
-          data-testid="shell-notice"
-          className="flex min-h-8 items-center gap-2 border-b border-line bg-panel-2 px-3 text-[12px] text-muted"
-        >
-          <span className="min-w-0 flex-1 truncate">{shellNotice}</span>
-          <button
-            type="button"
-            aria-label="Dismiss notice"
-            onClick={dismissShellNotice}
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
       {shareView ? (
         <div
           data-testid="shared-view-banner"

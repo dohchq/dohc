@@ -19,11 +19,11 @@ it.each([false, true])("keeps newer mount props when an older registry reload re
   const onExplorerPathsChanged = vi.fn();
   const refreshFiles = vi.fn().mockResolvedValue(undefined);
   const reportShellError = vi.fn();
-  const showShellNotice = vi.fn();
+  const showSuccessNotice = vi.fn();
   const { result, rerender } = renderHook(
     ({ shareMounts }) => useShareMounts(
       "ws-1", shareMounts, refreshWorkspaceRegistry, onExplorerPathsChanged,
-      refreshFiles, reportShellError, showShellNotice,
+      refreshFiles, reportShellError, showSuccessNotice,
     ),
     { initialProps: { shareMounts: mounts } },
   );

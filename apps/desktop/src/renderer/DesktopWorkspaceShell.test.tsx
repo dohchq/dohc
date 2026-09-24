@@ -4821,7 +4821,9 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
-    expect((await screen.findByTestId("shell-notice")).textContent).toBe(
+    // A warning the person may need to act on: an error toast, then a row
+    // in Notices. Nothing is inserted above the workbench.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
     );
   });
@@ -15218,6 +15220,35 @@ describe("file transfers", () => {
         workspaceId: "ws-shell-test",
       });
     });
+  });
+
+  it("reports an import as a toast and a Notices row, and a newer import replaces the row", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain("Imported 1 file.");
+    expect(screen.getByTestId("notice-toasts").contains(toast)).toBe(true);
+
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["one.md", "two.md"],
+      skipped: 0,
+    });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
+        "Imported 2 files.",
+      ),
+    );
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.textContent).toContain("Imported 2 files.");
+    expect(notices.textContent).not.toContain("Imported 1 file.");
   });
 
   it("reports an interrupted shared import separately from ordinary skips", async () => {
