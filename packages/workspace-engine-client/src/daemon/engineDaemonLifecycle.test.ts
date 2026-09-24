@@ -1831,12 +1831,39 @@ describe("Rust engine daemon lifecycle", () => {
 
   it("condemns silence during versions.active without waiting on its close", async () => {
     const failures: Error[] = [];
-    const client = new FakeClient((request) =>
-      request.method === "workspace.open"
+    const client: FakeClient = new FakeClient((request) => {
+      // Like the real client, a condemned client refuses the smoke's close.
+      if (client.closed) return Promise.reject(new Error("The engine client is closed."));
+      return request.method === "workspace.open"
         ? healthyPing(request)
         : new Promise<Response>(() => {
             // Silent from here on, probes included.
-          }),
+          });
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async () => client,
+      onFailure: (error) => failures.push(error),
+    });
+    await lifecycle.start();
+    await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
+    // stop() joins the smoke, so every failure it caused is in by now.
+    await lifecycle.stop();
+    expect(failures.map((error) => error.message)).toEqual([
+      "Rust engine versions.active got no answer: a probe expired after 40ms with no frame of any kind from the engine.",
+    ]);
+    expect(client.closeCause).toBe("transport-error");
+  });
+
+  it("reports no failure for a request that stop() ends", async () => {
+    const failures: Error[] = [];
+    const client = new FakeClient(
+      () =>
+        new Promise<Response>(() => {
+          // Silent, so the smoke's watcher reaches a verdict after stop().
+        }),
     );
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
@@ -1845,16 +1872,13 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
       onFailure: (error) => failures.push(error),
     });
-    try {
-      await lifecycle.start();
-      await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
-      expect(failures[0]?.message).toBe(
-        "Rust engine versions.active got no answer: a probe expired after 40ms with no frame of any kind from the engine.",
-      );
-      expect(client.closeCause).toBe("transport-error");
-    } finally {
-      await lifecycle.stop();
-    }
+    await lifecycle.start();
+    await vi.waitFor(
+      () => expect(client.requests.some(({ method }) => method === "workspace.open")).toBe(true),
+      WAIT,
+    );
+    await lifecycle.stop();
+    expect(failures).toEqual([]);
   });
 
   it("probes again when a probe expiry fires late, instead of condemning", async () => {
@@ -2062,12 +2086,12 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("ends a slow read at the caller's budget without condemning the engine", async () => {
-    let hangOpen = false;
+    let hangRead = false;
     const failures: Error[] = [];
     const client = new FakeClient((request) => {
-      if (request.method === "workspace.open" && hangOpen) {
+      if (request.method === "search.queryChatMessagesGranular" && hangRead) {
         return new Promise<Response>(() => {
-          // The daemon never acknowledges this read attach.
+          // The attach opened; the read itself is slow.
         });
       }
       return healthyPing(request);
@@ -2084,33 +2108,117 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.start();
     await startupSmokeDone(client);
     client.requests.length = 0;
-    hangOpen = true;
+    hangRead = true;
     await expect(
       lifecycle.requestWorkspace(
-        "C:\\workspace",
+        "C:\workspace",
         "workspace",
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 50_000 },
       ),
-    ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
-    const open = client.requests.find(({ method }) => method === "workspace.open");
-    expect(open?.deadlineMs).toBeLessThanOrEqual(100);
-    expect(client.cancelledRequestIds).toEqual([open?.id]);
-    // Probes were answered while the read waited: the engine stays.
-    expect(client.requests.some(({ method }) => method === "engine.ping")).toBe(true);
+    ).rejects.toThrow(/^Rust engine search\.queryChatMessagesGranular timed out after \d+ms\.$/);
+    const read = client.requests.find(({ method }) => method === "search.queryChatMessagesGranular");
+    expect(read?.deadlineMs).toBeLessThanOrEqual(100);
+    expect(client.cancelledRequestIds).toEqual([read?.id]);
+    // The attachment is still released, and the engine stays.
+    expect(client.requests.some(({ method }) => method === "workspace.close")).toBe(true);
     expect(client.closed).toBe(false);
     expect(failures).toEqual([]);
 
-    hangOpen = false;
+    hangRead = false;
     await expect(
       lifecycle.requestWorkspace(
-        "C:\\workspace",
+        "C:\workspace",
         "workspace",
         "search.queryChatMessagesGranular",
         { query: "needle", limit: 1 },
       ),
     ).resolves.toBeNull();
     await lifecycle.stop();
+  });
+
+  it("replaces an engine whose attach open cannot open in a whole budget while probes answer", async () => {
+    const failures: Error[] = [];
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
+    let stuck = false;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      initialBackoffMs: 0,
+      workspaceReadTimeoutMs: 100,
+      requestProbeDelayMs: 10,
+      pingExpiryMs: 40,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const client = new FakeClient((request) =>
+          // Behind an open that holds the engine's open lock and never ends.
+          stuck && client === clients[0] && request.method === "workspace.open"
+            ? new Promise<Response>(() => {})
+            : healthyPing(request),
+        );
+        client.closeUnresponsive = () => {
+          FakeClient.prototype.closeUnresponsive.call(client);
+          queueMicrotask(() => exits[clients.indexOf(client)]?.(null, "SIGKILL"));
+        };
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error) => failures.push(error),
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(clients[0]!);
+      stuck = true;
+      await expect(
+        lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+      ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
+      expect(clients[0]!.requests.some(({ method }) => method === "engine.ping")).toBe(true);
+      expect(clients[0]!.closeCause).toBe("transport-error");
+      expect(failures[0]?.message).toMatch(/^Rust engine workspace\.open timed out after \d+ms\.$/);
+      await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
+      await expect(
+        lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
+      ).resolves.toBeNull();
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("expires a read still queued behind this workspace's earlier read at its own budget", async () => {
+    let holdClose = false;
+    let releaseClose: (() => void) | undefined;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.close" && holdClose && !releaseClose) {
+        // The first read's release holds this root's queue for at least 1 s.
+        return new Promise<Response>((resolve) => {
+          releaseClose = () => resolve(healthyPing(request));
+        });
+      }
+      return healthyPing(request);
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      workspaceReadTimeoutMs: 50,
+      launch: async () => client,
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(client);
+      client.requests.length = 0;
+      holdClose = true;
+      const first = lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "first", limit: 1 });
+      await vi.waitFor(() => expect(releaseClose).toBeDefined(), WAIT);
+      const second = lifecycle.requestWorkspace("C:\workspace", "workspace", "search.queryChatMessagesGranular", { query: "second", limit: 1 });
+      await expect(second).rejects.toThrow(
+        "Rust engine search.queryChatMessagesGranular waited 50ms behind earlier reads of this workspace.",
+      );
+      // It never reached the engine, and the first read still holds the queue.
+      expect(client.requests.filter(({ method }) => method === "workspace.open")).toHaveLength(1);
+      releaseClose!();
+      await expect(first).resolves.toBeNull();
+    } finally {
+      await lifecycle.stop();
+    }
   });
 
   it("resolves the dev and packaged binary layouts", () => {

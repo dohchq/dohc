@@ -363,32 +363,58 @@ export class EngineDaemonLifecycle {
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
   }
 
+  // A read is the caller's budget, not a verdict on the engine. The CLI waits
+  // 30s for its whole command and falls back when a read fails, so the wait in
+  // this root's queue, the open, the read, and the release share one short
+  // budget from the call. A read still queued when it runs out never starts.
   async requestWorkspace(
     rootDir: string,
     workspaceId: string,
     method: string,
     params: Request["params"],
   ): Promise<JsonValue> {
-    const previous = this.workspaceRequestTails.get(rootDir) ?? Promise.resolve();
+    const budgetMs =
+      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
+    const endsAt = this.monotonicNowMs() + budgetMs;
+    let started = false;
+    let expired = false;
+    const earlier = this.workspaceRequestTails.get(rootDir);
+    const previous = earlier ?? Promise.resolve();
     const request = previous
       .catch(() => undefined)
-      .then(
-        async () =>
-          await this.requestWorkspaceOnce(
-            rootDir,
-            workspaceId,
-            method,
-            params,
-          ),
-      );
+      .then(async (): Promise<JsonValue> => {
+        if (expired) return null;
+        started = true;
+        return await this.requestWorkspaceOnce(
+          rootDir,
+          workspaceId,
+          method,
+          params,
+          { endsAt, queued: earlier !== undefined },
+        );
+      });
     const tail = request.then(
       () => undefined,
       () => undefined,
     );
     this.workspaceRequestTails.set(rootDir, tail);
+    let queueTimer: ReturnType<typeof setTimeout> | undefined;
+    const queueExpiry = new Promise<never>((_resolve, reject) => {
+      queueTimer = setTimeout(() => {
+        if (started) return;
+        expired = true;
+        reject(
+          new EngineDaemonUnavailableError(
+            `Rust engine ${method} waited ${budgetMs}ms behind earlier reads of this workspace.`,
+          ),
+        );
+      }, budgetMs);
+      queueTimer.unref();
+    });
     try {
-      return await request;
+      return await Promise.race([request, queueExpiry]);
     } finally {
+      if (queueTimer) clearTimeout(queueTimer);
       if (this.workspaceRequestTails.get(rootDir) === tail) {
         this.workspaceRequestTails.delete(rootDir);
       }
@@ -400,17 +426,16 @@ export class EngineDaemonLifecycle {
     workspaceId: string,
     method: string,
     params: Request["params"],
+    budget: { endsAt: number; queued: boolean },
   ): Promise<JsonValue> {
     const client = this.requireClient();
-    // A read is the caller's budget, not a verdict on the engine. The CLI waits
-    // 30s for its whole command and falls back when a read fails, so the open,
-    // the read, and the release share one short budget, and running out of it
-    // cancels the read without condemning the engine.
-    const budgetMs =
-      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
-    const endsAt = this.monotonicNowMs() + budgetMs;
     const remaining = () =>
-      Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
+      Math.max(1, Math.ceil(budget.endsAt - this.monotonicNowMs()));
+    // An attach open does not read the store; it takes the engine's open lock
+    // and mints a handle. One that did not queue behind another read had the
+    // whole budget. If it still cannot open, it is stuck behind an open that
+    // stopped while probes keep answering, so it replaces the engine. A read
+    // that queued, or a slow read after the open, is only the caller's wait.
     const opened = resultObject(
       await this.sendLifecycleRequest(
         client,
@@ -424,7 +449,7 @@ export class EngineDaemonLifecycle {
             skipStartupMaintenance: true,
           },
         },
-        { capMs: remaining(), onCap: "cancel" },
+        { capMs: remaining(), onCap: budget.queued ? "cancel" : "condemn" },
       ),
       "workspace.open",
     );
@@ -1136,7 +1161,8 @@ export class EngineDaemonLifecycle {
 
   private condemn(client: EngineDaemonClient, error: Error): void {
     killForReplacement(client);
-    this.reportFailure(error, false);
+    // stop() closes every client itself; a request it ends is not a failure.
+    if (!this.stopping) this.reportFailure(error, false);
   }
 
   private reportFailure(error: Error, terminal: boolean): void {
