@@ -1,0 +1,203 @@
+import { randomUUID } from "node:crypto";
+
+// Crash reports a person chose to send from the desktop app. The desktop shows
+// the whole report and sends it only after the person confirms, so this route
+// takes no account and stores only the text it was sent. It never logs a
+// report: the person read it before sending, and nobody else should.
+
+export const CRASH_REPORT_PATH = "/api/crash-reports";
+// Every report starts with this line (the desktop's crashReportText).
+export const CRASH_REPORT_HEADER = "dohc crash report";
+// The desktop caps a report at 32,768 UTF-16 code units, which is at most
+// 96 KiB of UTF-8.
+export const CRASH_REPORT_MAX_BYTES = 96 * 1024;
+export const CRASH_REPORTS_PER_CLIENT_PER_HOUR = 10;
+export const CRASH_REPORTS_PER_HOUR = 1_000;
+// At most about 4.6 GiB at the largest report size, and far less in
+// practice: a real report is a few KiB.
+export const CRASH_REPORTS_STORED_MAX = 50_000;
+export const CRASH_REPORT_RETENTION_DAYS = 90;
+const HOUR_MS = 60 * 60 * 1000;
+
+export interface StoredCrashReport {
+  id: string;
+  // Read from the report's "Version:" line, so reports can be grouped
+  // without reading every body.
+  appVersion: string | null;
+  body: string;
+}
+
+export interface CrashReportStore {
+  // False when storage already holds CRASH_REPORTS_STORED_MAX reports.
+  insert(report: StoredCrashReport): Promise<boolean>;
+  // Deletes reports older than the retention period and returns the count.
+  deleteExpired(): Promise<number>;
+}
+
+/** The slice of `pg.Pool` the store uses. */
+export interface CrashReportQuery {
+  query(sql: string, values: unknown[]): Promise<{ rowCount: number | null }>;
+}
+
+export function createPostgresCrashReportStore(
+  pool: CrashReportQuery,
+  storedMax = CRASH_REPORTS_STORED_MAX,
+): CrashReportStore {
+  return {
+    async insert(report) {
+      // Concurrent inserts can pass the count together, so the cap can be
+      // exceeded by the number of requests in flight. That is still a bound.
+      const result = await pool.query(
+        `insert into crash_reports (id, app_version, body)
+         select $1, $2, $3
+         where (select count(*) from crash_reports) < $4`,
+        [report.id, report.appVersion, report.body, storedMax],
+      );
+      return result.rowCount === 1;
+    },
+    async deleteExpired() {
+      const result = await pool.query(
+        "delete from crash_reports where received_at < now() - make_interval(days => $1)",
+        [CRASH_REPORT_RETENTION_DAYS],
+      );
+      return result.rowCount ?? 0;
+    },
+  };
+}
+
+export interface CrashReportAnswer {
+  status: number;
+  body: { ok: true; id: string } | { ok: false; error: string };
+  headers?: Record<string, string>;
+}
+
+export type CrashReportIntake = (request: Request) => Promise<CrashReportAnswer>;
+
+/**
+ * Checks and stores one report. The client is the x-dohc-auth-client-ip
+ * header, which main.ts sets on every request from the socket and this
+ * server's trusted proxies, so no caller chooses it. The per-client and
+ * overall hourly limits hold only accepted reports, so memory stays within
+ * CRASH_REPORTS_PER_HOUR entries.
+ */
+export function createCrashReportIntake(deps: {
+  store: CrashReportStore;
+  nowMs?: () => number;
+}): CrashReportIntake {
+  const nowMs = deps.nowMs ?? Date.now;
+  // Accepted reports in the last hour, oldest first, and a count per client.
+  const accepted: { atMs: number; client: string }[] = [];
+  const perClient = new Map<string, number>();
+
+  function prune(now: number): void {
+    while (accepted.length > 0 && accepted[0]!.atMs <= now - HOUR_MS) {
+      const { client } = accepted.shift()!;
+      const count = (perClient.get(client) ?? 1) - 1;
+      if (count === 0) perClient.delete(client);
+      else perClient.set(client, count);
+    }
+  }
+
+  // Seconds until the oldest entry that blocks this client leaves the window.
+  function retryAfter(now: number, client: string | null): string {
+    const oldest = client === null ? accepted[0] : accepted.find((entry) => entry.client === client);
+    return String(Math.max(1, Math.ceil(((oldest?.atMs ?? now) + HOUR_MS - now) / 1000)));
+  }
+
+  return async (request) => {
+    // The desktop posts from its main process, which sends no Origin. A
+    // browser always does, so a web page cannot make its visitors post.
+    if (request.headers.get("origin") !== null) return refuse(403, "browsers cannot send crash reports");
+    if (!isPlainText(request.headers.get("content-type"))) {
+      return refuse(415, "send the report as text/plain; charset=utf-8");
+    }
+    const declared = Number(request.headers.get("content-length") ?? "0");
+    if (declared > CRASH_REPORT_MAX_BYTES) return refuse(413, "the report is too large");
+    const bytes = await readAtMost(request, CRASH_REPORT_MAX_BYTES);
+    if (bytes === "too-large") return refuse(413, "the report is too large");
+    let body: string;
+    try {
+      body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      return refuse(400, "the report is not a dohc crash report");
+    }
+    // Postgres text cannot hold NUL, and a report never has control
+    // characters other than tabs and line breaks.
+    if (!body.startsWith(CRASH_REPORT_HEADER) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) {
+      return refuse(400, "the report is not a dohc crash report");
+    }
+
+    const now = nowMs();
+    prune(now);
+    const client = clientKey(request.headers.get("x-dohc-auth-client-ip"));
+    if ((perClient.get(client) ?? 0) >= CRASH_REPORTS_PER_CLIENT_PER_HOUR) {
+      return refuse(429, "too many crash reports from this address", { "retry-after": retryAfter(now, client) });
+    }
+    if (accepted.length >= CRASH_REPORTS_PER_HOUR) {
+      return refuse(429, "this server is taking no more crash reports this hour", { "retry-after": retryAfter(now, null) });
+    }
+    // Counted before the write, so concurrent requests cannot pass the limit.
+    accepted.push({ atMs: now, client });
+    perClient.set(client, (perClient.get(client) ?? 0) + 1);
+
+    const id = randomUUID();
+    const stored = await deps.store.insert({ id, appVersion: appVersion(body), body });
+    if (!stored) return refuse(503, "this server's crash report storage is full");
+    return { status: 201, body: { ok: true, id } };
+  };
+}
+
+function refuse(status: number, error: string, headers?: Record<string, string>): CrashReportAnswer {
+  return { status, body: { ok: false, error }, ...(headers ? { headers } : {}) };
+}
+
+function isPlainText(value: string | null): boolean {
+  if (value === null) return false;
+  const [type, ...parameters] = value.split(";").map((part) => part.trim().toLowerCase());
+  if (type !== "text/plain") return false;
+  return parameters.every((parameter) => !parameter.startsWith("charset=") || parameter === "charset=utf-8");
+}
+
+async function readAtMost(request: Request, maxBytes: number): Promise<Uint8Array | "too-large"> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return "too-large";
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function appVersion(body: string): string | null {
+  return /^Version: ([^\s(]{1,64})/m.exec(body)?.[1] ?? null;
+}
+
+/**
+ * The key a client's reports count against: an IPv4 address, or the /64 an
+ * IPv6 address belongs to, since one host commonly holds a whole /64.
+ */
+export function clientKey(address: string | null): string {
+  if (!address) return "unknown";
+  if (!address.includes(":")) return address;
+  const [head = "", tail] = address.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined
+    ? left
+    : [...left, ...Array<string>(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  return `${groups.slice(0, 4).map((group) => group.padStart(4, "0")).join(":")}::/64`;
+}
