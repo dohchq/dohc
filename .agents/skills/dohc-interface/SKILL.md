@@ -136,7 +136,7 @@ An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that sa
 
 ### Agent copy
 
-An agent is marked visually by its rounded square avatar, and a run by its olive dot (see Agent attribution). In words:
+An agent is marked visually by its rounded square avatar, and a running agent by its agent-colored dot (see Agent attribution). In words:
 
 - Completed work: past tense, with the count when one exists and means something. `Updated 3 files`. Some runs change no countable set, say what happened without inventing a number.
 - Work in progress: name the concrete action, and the count when known. `Reading 40 files`. Never `Working on it…`.
@@ -275,7 +275,7 @@ Segmented control: container `flex rounded-lg border border-line bg-panel-2 p-0.
 
 Empty state: centered column, `gap-4`; optional `DohcMark` in `text-line` (ghost); one `text-sm text-muted` line; actions as kbd-chip buttons. Never a wall of gray text.
 
-Agent attribution: shape first. An agent's avatar is a rounded square (`rounded-md`) and a person's is round (`rounded-full`), in both themes and whatever the colors. The square's color is the `agent` token by default, and people will be able to change it, so the shape is the visual cue and color is not. Shape is visual only: every agent mark keeps its text alternative, such as the screen-reader "agent" label in `AgentBadge`. Name text uses `text-agent`. The square is for avatars; a run-state dot stays a 6px round `bg-agent` dot. `ChatAvatar` still draws agents round, so do not copy its agent shape.
+Agent attribution: shape first. An agent's avatar is a rounded square (`rounded-md`) and a person's is round (`rounded-full`), in both themes and whatever the colors. The square's color is the `agent` token by default, and people will be able to change it, so the shape is the visual cue and color is not. Shape is visual only: every agent mark needs a text alternative, such as the screen-reader "agent" label in `AgentBadge`. Name text uses `text-agent`. The square is for avatars; a running dot stays a 6px round `bg-agent` dot. `ChatAvatar` still draws agents round; that is a known gap, not the rule.
 
 ### Motion
 
