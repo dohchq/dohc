@@ -1061,7 +1061,8 @@ pub(super) fn confirm_absent_on_disk(
     };
     if store.path_is_displaced(workspace_id, path)? {
         // A replace could not put a displaced file back when it ran. Try
-        // again now; the check below then sees the file that returned.
+        // again now, without sleeping on the actor thread; the sweep retries
+        // with backoff. The check below then sees a file that returned.
         let _ = dohc_engine_files::recover_path_displacements(
             store,
             root_dir,
@@ -1070,7 +1071,7 @@ pub(super) fn confirm_absent_on_disk(
             &dohc_engine_files::MaterializeOptions {
                 policy: dohc_engine_files::DurabilityPolicy::per_os(),
                 replacer: &dohc_engine_files::StdReplacer,
-                backoff: &dohc_engine_files::StdBackoff,
+                backoff: &dohc_engine_files::NoBackoff,
                 now_ms,
                 faults: &dohc_engine_storage::NoFaults,
             },

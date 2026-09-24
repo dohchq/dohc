@@ -2036,3 +2036,105 @@ fn the_name_is_empty_only_between_two_renames() {
     );
     assert_outside_change_returned(&sc, &store);
 }
+
+/// A replace placed its content and found an outside change, then stopped
+/// before swapping it back. While dohc was closed, the person saved a newer
+/// file. Replay must not move that newer file: the older outside change stays
+/// displaced, with its row kept, and the job conflicts.
+#[test]
+fn a_newer_save_after_a_crash_is_never_moved_aside() {
+    const NEWEST: &[u8] = b"the person's newest save, made while dohc was closed";
+    let sc = Scratch::new("newer-save-after-crash");
+    {
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        stage_overwrite(&sc, &mut store);
+        let racer = RaceBefore::new(
+            RenameStep::Displace,
+            write_in_place(sc.target("a.md"), OUTSIDE),
+        );
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+        assert!(matches!(
+            drain(&store, &sc, &racer, faults.as_ref())[..],
+            [JobOutcome::Crashed(_)]
+        ));
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OURS));
+    }
+    std::fs::write(sc.target("a.md"), NEWEST).expect("a newer save");
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    let recorder = RecordRenames::default();
+    drain(&store, &sc, &recorder, &NoFaults);
+    assert!(
+        recorder.steps.lock().unwrap().is_empty(),
+        "replay moved nothing: {:?}",
+        recorder.steps.lock().unwrap()
+    );
+
+    assert_eq!(
+        read(&sc, "a.md").as_deref(),
+        Some(NEWEST),
+        "the newest save stays"
+    );
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OUTSIDE));
+    assert_eq!(displaced_files(&sc), vec![kept[0].displaced_name.clone()]);
+    assert_eq!(job_status(&store), JobStatus::Conflict);
+}
+
+/// The job writes an empty file, and a writer truncates the target to start
+/// its own write. The empty displaced file is still the writer's: only an
+/// empty preimage makes an empty file known.
+#[test]
+fn an_empty_write_does_not_make_a_truncated_file_known() {
+    let sc = Scratch::new("empty-write-truncated");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target("a.md"), PREIMAGE).expect("preimage on disk");
+    store.put_binary_blob(PREIMAGE).expect("preimage blob");
+    let job = spec(
+        "j1",
+        "a.md",
+        &hex_sha256(b""),
+        Preimage::Present(hex_sha256(PREIMAGE)),
+        1,
+        10,
+    );
+    stage_job(&mut store, b"", &job);
+    let racer = RaceBefore::new(RenameStep::Displace, write_in_place(sc.target("a.md"), b""));
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(&b""[..]));
+    assert_eq!(read(&sc, "a.md.j1.conflict").as_deref(), Some(&b""[..]));
+    assert_nothing_displaced(&sc, &store);
+}
+
+/// The job's content cannot move to the conflict sibling. It stays at its
+/// displaced name under a kept row that names its hash, instead of being
+/// deleted with no copy to open.
+#[test]
+fn a_failed_conflict_copy_keeps_the_jobs_content() {
+    let sc = Scratch::new("conflict-copy-fails");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    stage_overwrite(&sc, &mut store);
+    std::fs::create_dir(sc.target("a.md.j1.conflict")).expect("block the conflict name");
+    let racer = RaceBefore::new(
+        RenameStep::Displace,
+        write_in_place(sc.target("a.md"), OUTSIDE),
+    );
+
+    assert_eq!(
+        drain(&store, &sc, &racer, &NoFaults),
+        vec![JobOutcome::Conflict]
+    );
+    assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+    let kept = store.list_kept_displacements("ws").expect("kept");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        kept[0].displaced_sha256.as_deref(),
+        Some(hex_sha256(OURS).as_str())
+    );
+    assert_eq!(read(&sc, &kept[0].displaced_name).as_deref(), Some(OURS));
+    assert_eq!(job_status(&store), JobStatus::Conflict);
+}
