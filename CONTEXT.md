@@ -51,11 +51,11 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also change a shared Collection's schema and automations, create Collections in a shared folder, and send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:
-A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access, and owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
+A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access. A named recipient with Edit also changes a shared Collection's schema and automations directly, and creates Collections in a shared folder. Owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
 _Avoid_: pull request, patch, suggestion
 
 **Share code**:
