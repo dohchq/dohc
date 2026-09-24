@@ -69,7 +69,8 @@ export async function summarize(data, readLog = async () => '') {
 }
 
 // Each section is null when its scenario did not run. Durations start at the renderer's
-// receipt of the trusted keydown or mousedown and end two animation frames after the DOM predicate.
+// receipt of the trusted keydown or mousedown and end at the first animation-frame callback after
+// the DOM predicate matched, within one frame of the paint.
 function surfaceSummaries(runs) {
   const of = key => runs.flatMap(run => run[key] ? [run[key]] : []);
   const unique = values => [...new Set(values.filter(value => value !== undefined))];

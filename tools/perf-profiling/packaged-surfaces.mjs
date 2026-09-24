@@ -3,14 +3,15 @@ import { createHash } from 'node:crypto';
 // observeSurface, observeSearchSubmit and seededPostThreadId are serialized by Playwright into
 // the renderer. Keep them self-contained: no module-scope references.
 
-// Resolves at the first animation-frame callback after the paint that first shows `target` with
-// `minCount` matches, the first one visible, optionally focused, holding `value`, or with the first
-// `countSelector` element's text containing `firstTextMatches` in order. The predicate runs on DOM
-// mutations, focus changes and every animation frame, so a change without a mutation (an entrance
-// animation's opacity, a focus from an effect) is seen within one frame. A match found between
-// frames waits two frames; a match found inside a frame callback waits one, because that frame
-// paints it. `matchedIn` records which. Visible means the first frame where no ancestor computes
-// to opacity 0; `entranceAnimating` records whether an animation was still running at that frame.
+// Waits until `target` has `minCount` matches, the first one visible, optionally focused, holding
+// `value`, or with the first `countSelector` element's text containing `firstTextMatches` in order.
+// The predicate runs at installation, on DOM mutations, on focus changes and in every animation
+// frame, so a change without a mutation (an entrance animation's opacity, a focus from an effect)
+// is seen within one frame. A painted time is the first animation-frame callback after the
+// predicate matched, so within one frame of the paint that first shows the surface. `matchedIn`
+// records which check saw the match: 'install', 'frame', 'mutation' or 'focus'; the end rule is
+// the same for all four. Visible means the first frame where no ancestor computes to opacity 0;
+// `entranceAnimating` records whether an animation was still running at that frame.
 // `trigger` records the first keydown or mousedown (`triggerKey` filters keydown) seen after
 // installation. `fullCount` adds a second milestone, reached when `target` has that many matches;
 // both milestones share the trigger. When only the second milestone misses the deadline, the
@@ -85,21 +86,17 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
     const fullReached = () => document.querySelectorAll(target).length >= fullCount;
     const complete = () => { if (first.paintedMs !== null && (fullCount === null || full.paintedMs !== null)) finish(null, result(false)); };
     const afterPaint = (milestone, source, stillValid) => {
-      const step = remaining => {
-        const frame = requestAnimationFrame(() => {
-          frames.delete(frame);
-          try {
-            if (!stillValid()) { milestone.matchedMs = null; return; }
-            if (remaining > 1) { step(remaining - 1); return; }
-            milestone.paintedMs = performance.now();
-            complete();
-          } catch (error) { finish(error); }
-        });
-        frames.add(frame);
-      };
       milestone.matchedMs = performance.now();
       milestone.matchedIn = source;
-      step(source === 'frame' ? 1 : 2);
+      const frame = requestAnimationFrame(() => {
+        frames.delete(frame);
+        try {
+          if (!stillValid()) { milestone.matchedMs = null; return; }
+          milestone.paintedMs = performance.now();
+          complete();
+        } catch (error) { finish(error); }
+      });
+      frames.add(frame);
     };
     const check = source => {
       if (finished) return;
@@ -117,17 +114,17 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
     if (eventName) window.addEventListener(eventName, onTrigger, true);
     window.addEventListener('focusin', onFocus, true);
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-    frameLoop();
+    check('install');
+    if (!finished) loop = requestAnimationFrame(frameLoop);
   });
 }
 
 // Install before the query is submitted with Enter. Records the Enter keydown, then the first
 // visible result row and the complete state of the search issued after it, each at the first
-// frame callback after the paint that shows it (two frames after a match between frames, one
-// after a match inside a frame callback). `debounceFiredBeforeSubmit` is true when
-// search-as-you-type already replaced the search id between installation and Enter.
-// `statesSeen` lists the view states after submit; `sawUpdating` means the settled time
-// includes the renderer's retry backoff.
+// animation-frame callback after its predicate matched, as in observeSurface.
+// `debounceFiredBeforeSubmit` is true when search-as-you-type already replaced the search id
+// between installation and Enter. `statesSeen` lists the view states after submit;
+// `sawUpdating` means the settled time includes the renderer's retry backoff.
 export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
   const installedMs = performance.now();
   return new Promise((resolve, reject) => {
@@ -159,15 +156,12 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
     };
-    const afterPaint = (source, done) => {
-      const step = remaining => {
-        const frame = requestAnimationFrame(() => {
-          frames.delete(frame);
-          try { if (remaining > 1) step(remaining - 1); else done(performance.now()); } catch (error) { finish(error); }
-        });
-        frames.add(frame);
-      };
-      step(source === 'frame' ? 1 : 2);
+    const afterPaint = done => {
+      const frame = requestAnimationFrame(() => {
+        frames.delete(frame);
+        try { done(performance.now()); } catch (error) { finish(error); }
+      });
+      frames.add(frame);
     };
     const onKeydown = event => {
       if (event.key !== 'Enter' || result.submitMs !== null || !event.target?.matches?.('[data-testid="search-input"]')) return;
@@ -189,13 +183,13 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
         if (state && result.statesSeen.at(-1) !== state) result.statesSeen.push(state);
         if (result.firstResultMs === null) {
           const row = current.querySelector('[data-testid="search-result-row"]');
-          if (row && visible(row)) { result.firstResultMs = performance.now(); result.firstResultMatchedIn = source; afterPaint(source, now => { result.firstResultPaintedMs ??= now; }); }
+          if (row && visible(row)) { result.firstResultMs = performance.now(); result.firstResultMatchedIn = source; afterPaint(now => { result.firstResultPaintedMs ??= now; }); }
         }
         if (state !== 'complete') return;
         settling = true;
         result.settledMs = performance.now();
         result.settledMatchedIn = source;
-        afterPaint(source, now => {
+        afterPaint(now => {
           const settled = view();
           result.settledPaintedMs = now;
           result.sawUpdating = result.statesSeen.includes('updating');
@@ -210,7 +204,8 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
     const frameLoop = () => { loop = null; check('frame'); if (!finished) loop = requestAnimationFrame(frameLoop); };
     window.addEventListener('keydown', onKeydown, true);
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-    frameLoop();
+    check('install');
+    if (!finished) loop = requestAnimationFrame(frameLoop);
   });
 }
 

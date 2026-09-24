@@ -1,7 +1,7 @@
-// Seeds one #general post and its replies through the checkout CLI. The harness runs this
-// script through scripts/verification/process.mjs, so it lives inside a Windows job object
-// (KILL_ON_JOB_CLOSE) or a detached POSIX process group. Every CLI launcher and worker it
-// starts stops with that job or group, including a worker whose launcher exited abnormally.
+// Seeds one #general post and its replies through the checkout CLI. The Windows-only harness
+// runs this script through scripts/verification/process.mjs, so it lives inside a job object
+// (KILL_ON_JOB_CLOSE). Every CLI launcher and worker it starts stops with that job, including
+// a worker whose launcher exited abnormally or timed out.
 // cwd selects the workspace and DOHC_STATE_DIR names the app profile; both come from the
 // harness. Prints one JSON progress line per 50 messages and a final JSON result line.
 import { execFile } from 'node:child_process';
@@ -15,7 +15,7 @@ if (!launcher || !title || !Number.isSafeInteger(messages) || messages < 2) {
 }
 const exec = promisify(execFile);
 // execFile settles after both pipes close, so stdout is complete before it is parsed.
-const dohc = async args => (await exec(process.execPath, [launcher, ...args], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 })).stdout;
+const dohc = async args => (await exec(process.execPath, [launcher, ...args], { windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 60000 })).stdout;
 try {
   const started = performance.now();
   const posted = JSON.parse(await dohc(['--json', 'chat', 'post', 'general', '--title', title, 'Message 0']));

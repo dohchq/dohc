@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -220,7 +220,7 @@ test('surface observer sees a keydown-triggered palette on the next frame and pa
   const observed = await pending;
   assert.equal(observed.triggerMs, 42);
   assert.equal(observed.triggerTrusted, false);
-  // Matched inside frame N's callback, which paints it; the next callback is after that paint.
+  // Matched inside frame N's callback, which paints it; the next callback comes after that paint.
   assert.deepEqual([observed.matchedMs, observed.matchedIn, observed.paintedMs], [58, 'frame', 74]);
   assert.deepEqual([observed.count, observed.matchedCount, observed.firstText, observed.entranceAnimating, observed.fullTimedOut], [2, 1, 'a.md', false, false]);
   assert.equal(p.frames.size + p.timers.size, 0);
@@ -238,10 +238,10 @@ test('surface observer waits for the typed value, a focused input, and an in-ord
   p.frame();
   assert.equal(p.frames.size, 1, 'focus left the input');
   input.focus();
+  assert.equal(p.frames.size, 2, 'the focus change matched and started the one-frame wait');
   p.frame();
-  assert.equal(p.frames.size, 2);
-  p.frame(); p.frame();
   const observed = await typed;
+  assert.deepEqual([observed.matchedIn, observed.paintedMs - observed.matchedMs], ['focus', 16]);
   assert.deepEqual([observed.text, observed.firstText, observed.count], ['', 'a.md', 2]);
   const mismatch = p.run(observeSurface, { target: 'input', firstTextMatches: 'zz', countSelector: '[role="option"]', timeoutMs: 120 });
   const rejected = assert.rejects(mismatch, /did not render within 120ms/);
@@ -261,8 +261,8 @@ test('surface observer carries a first and a full milestone from one trigger and
   await mutations();
   p.frame(); p.frame();
   const observed = await pending;
-  // Both milestones matched between frames through mutations, so each waits two frames.
-  assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 42, 42, 74]);
+  // Both milestones matched between frames through mutations; each ends at the next frame callback.
+  assert.deepEqual([observed.triggerMs, observed.matchedMs, observed.paintedMs, observed.fullMatchedMs, observed.fullPaintedMs], [10, 10, 26, 42, 58]);
   assert.deepEqual([observed.matchedIn, observed.fullMatchedIn, observed.count, observed.fullTimedOut], ['mutation', 'mutation', 3, false]);
   const partial = p.run(observeSurface, { target: 'ol li', fullCount: 10, timeoutMs: 100 });
   p.frame(); p.frame();
@@ -270,7 +270,8 @@ test('surface observer carries a first and a full milestone from one trigger and
   const timedOut = await partial;
   assert.equal(timedOut.fullTimedOut, true);
   assert.equal(timedOut.fullPaintedMs, null);
-  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ['frame', 16]);
+  // The rows were already present, so the installation check matched; it is not a frame callback.
+  assert.deepEqual([timedOut.matchedIn, timedOut.paintedMs - timedOut.matchedMs], ['install', 16]);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 test('surface observer rejects unknown triggers and a surface that never renders', async t => {
@@ -301,7 +302,7 @@ test('search observer times Enter to the first result row and to the complete st
   assert.equal(observed.submitMs, 26);
   assert.equal(observed.submitTrusted, false);
   assert.equal(observed.debounceFiredBeforeSubmit, false);
-  assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 58, 42, 74]);
+  assert.deepEqual([observed.firstResultMs, observed.firstResultPaintedMs, observed.settledMs, observed.settledPaintedMs], [26, 42, 42, 58]);
   assert.deepEqual([observed.firstResultMatchedIn, observed.settledMatchedIn], ['mutation', 'mutation']);
   assert.deepEqual([observed.rowsRendered, observed.summary, observed.limitHit, observed.emptyState, observed.searchIdChanges], [1, '1 result in 1 file', false, false, 0]);
   assert.deepEqual([[...observed.statesSeen], observed.sawUpdating], [['searching', 'complete'], false]);
@@ -566,7 +567,8 @@ test('launch before CDP cleans up the owned process and its child, preserving an
 // process-group behavior scripts/verification/process-group.test.mjs covers. This checks the
 // script's own contract against a stand-in launcher.
 test('chat seed script posts once, replies for the rest, reports the CLI thread id, and fails on a CLI error', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-seed-cli-'));
+  // Canonical, so a symlinked temp directory (macOS /var is /private/var) matches the child's cwd.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dohc-seed-cli-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = join(root, 'calls.jsonl');
   const launcher = join(root, 'fake-dohc.mjs');

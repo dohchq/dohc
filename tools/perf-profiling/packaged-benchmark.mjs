@@ -88,12 +88,13 @@ Object.assign(receipt, {
     'Native launch log marks start when launchMarks.ts evaluates, not at OS process birth; no launch phase is renamed to actual process-start time.',
     'Renderer CPU profiling is optional and diagnostic; profiled runs cannot serve as unprofiled performance comparisons.',
     'The local updater feed advertises version 0.0.0 and has no downloadable asset; update installation is never requested.',
-    'Go to, command palette, search, chat, and collection durations start at the renderer receipt of the trusted keydown or mousedown and end two animation frames after the DOM predicate. They include React commit and layout, not compositor presentation.',
-    'The renderer observer evaluates its predicate on every animation frame, on mutations and on focus changes, and reads computed style each frame. Visible means the first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame and entranceAnimating records whether it was still running.',
-    'A painted time is the first animation-frame callback after the paint that first shows the surface: two frames after a match found between frames, one after a match found inside a frame callback. matchedIn records which path matched.',
+    'Go to, command palette, search, chat, and collection durations start at the renderer receipt of the trusted keydown or mousedown and end at the first animation-frame callback after the DOM predicate matched. They include React commit and layout, not compositor presentation.',
+    'The renderer observer evaluates its predicate at installation, on every animation frame, on mutations and on focus changes, and reads computed style each frame. Visible means the first frame where no ancestor computes to opacity 0; a palette entrance animation counts from that frame and entranceAnimating records whether it was still running.',
+    'A painted time, the first animation-frame callback after the predicate matched, is within one frame of the paint that first shows the surface: that callback runs before the paint when the match came between frames, and one frame after it when the match came during a frame. matchedIn records which check saw the match (install, frame, mutation or focus); the end rule is the same for all four.',
+    'Every palette close first waits until no animation runs on the palette or its ancestors, so a warm reopen never interrupts the cold open\'s entrance animation.',
     'Search submits with Enter after one programmatic fill. Search-as-you-type debounces at 150 ms; a sample whose search id changed before Enter is flagged debounceFiredBeforeSubmit.',
     'With an engine capture, search queries the engine index and returns at most 50 results in one batch, so limitHit false does not mean the results are complete. sawUpdating records whether the view passed through updating, whose retry backoff lands in the settled time.',
-    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Seeding runs seed-chat-cli.mjs through scripts/verification/process.mjs: a Windows job object that kills every descendant when the harness-owned job owner exits, or a detached POSIX process group. Each message runs two Node processes, the launcher and the CLI. The thread comment list is not virtualized; every reply renders.',
+    'chat-history seeds one #general post and its replies through the checkout CLI (packages/cli) against the running package, then restarts before measuring. Seeding runs seed-chat-cli.mjs through scripts/verification/process.mjs. The benchmark runs only on Windows, where that runner holds seeding in a job object that kills every descendant when the harness-owned job owner exits. Each CLI call times out after 60 seconds. Each message runs two Node processes, the launcher and the CLI. The thread comment list is not virtualized; every reply renders.',
     'collection seeds Markdown records with pre-minted ids. The table is virtualized and pages on demand: rowsRendered is the visible window and loadedRecords is the first page.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
@@ -447,7 +448,15 @@ async function openPalette(page, surface, readyWhen) {
   const observed = await settle();
   return { shortcut: surface.shortcut, readyWhen, observedMs: performance.now() - started, ...fromTrigger(observed), optionCount: observed.count, observed };
 }
+// Go to's typing outlasts the entrance animation. Waiting for it here gives the command palette's
+// warm reopen the same settled start instead of interrupting the cold open's animation.
 async function closePalette(page, surface) {
+  await page.waitForFunction(selector => {
+    for (let node = document.querySelector(selector); node; node = node.parentElement) {
+      if (node.getAnimations().some(animation => animation.playState === 'running')) return false;
+    }
+    return true;
+  }, surface.palette, { timeout: 10000 });
   await page.keyboard.press('Escape');
   await page.locator(surface.palette).waitFor({ state: 'detached', timeout: 10000 });
 }
@@ -510,9 +519,10 @@ async function search(page) {
 async function seedChatHistory(instance, workspace, runDir) {
   const profile = instance.fixture.profile;
   await waitUntil(() => Promise.all(['dohc-cli-endpoint', 'dohc-cli-token'].map(name => stat(join(profile, name)))).then(() => true, () => false), 60000);
-  // One owned job (Windows) or process group (POSIX) holds every CLI launcher and worker the
-  // seed script starts. The runner settles after the pipes close and kills the tree on timeout
-  // or interrupt; a failure rejects with the tail of stderr.
+  // The benchmark runs only on Windows, so one job object holds every CLI launcher and worker the
+  // seed script starts, and the job kills them when its owner exits. The runner settles after the
+  // pipes close and ends the job on timeout or interrupt. It writes both streams to chat-seed.log,
+  // and a failure rejects with that log's path.
   const { stdout } = await runOwnedCommand(process.execPath, [seedScript, cliLauncher, CHAT_TITLE, String(chatMessages)],
     { cwd: workspace.rootPath, env: { ...env, DOHC_STATE_DIR: profile, NODE_NO_WARNINGS: '1' }, timeoutMs: chatMessages * 30000, log: join(runDir, 'chat-seed.log') });
   return { ...JSON.parse(stdout.trim().split(/\r?\n/).at(-1)), seededThrough: seedScript, cliLauncher };
