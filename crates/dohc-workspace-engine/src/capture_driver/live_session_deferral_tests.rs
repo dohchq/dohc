@@ -364,3 +364,78 @@ async fn a_switch_refuses_while_a_new_file_is_held_unrecorded() {
     assert_eq!(head_count(&harness.db, NEW_FILE), 1);
     harness.close();
 }
+
+// A recorded file's head is deleted, and a file at the same path is created
+// and opened before capture's next scan. Capture still has the old file in
+// its manifest, so it sees a change, not a new file; the store has no head,
+// and the session's settle creates one. That is deferred like a new file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), "First file.\n").expect("first file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the first file is captured"
+    );
+    assert_eq!(head_count(&harness.db, NEW_FILE), 1);
+
+    harness
+        .actor
+        .versioned_text_delete(
+            dohc_engine_domain::DeleteTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                path: NEW_FILE.to_owned(),
+                moment_id: "moment-deleted".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+            },
+            harness.root.clone(),
+            Arc::new(harness.self_writes.scoped(&harness.root)),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the head is deleted");
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    std::fs::write(harness.root.join(NEW_FILE), "Second file.\n").expect("second file");
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the second file");
+
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the held file is not a failed capture"
+    );
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        0,
+        "the session, not capture, records it"
+    );
+
+    drop(lease);
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "captured once released"
+    );
+
+    files.close().await;
+    harness.close();
+}
