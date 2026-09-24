@@ -25,7 +25,7 @@ async function expectDisposeToExit(detached?: true): Promise<void> {
   });
 
   await transport.dispose();
-  await vi.waitFor(() => expect(exited).toBe(true), { timeout: 10_000, interval: 25 });
+  await vi.waitFor(() => expect(exited).toBe(true), { interval: 25 });
 }
 
 describe("JsonRpcTransport disposal", () => {

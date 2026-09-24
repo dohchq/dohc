@@ -11,6 +11,7 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
   REAL_DAEMON_TEST_TIMEOUT_MS,
 } from "../testing/realDaemonWorkspaceSessions";
 import {
@@ -270,7 +271,7 @@ function relayHarness(
     sessions,
     routes,
     allowInsecureLoopbackForTests: true,
-    requestDeadlineMs: 10_000,
+    requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
   });
   return {
     sessions,

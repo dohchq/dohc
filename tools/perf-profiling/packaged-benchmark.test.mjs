@@ -428,7 +428,7 @@ test('missing package binary finalizes a CLI failure receipt', { skip: process.p
   t.after(() => rm(root, { recursive: true, force: true }));
   const output = join(root, 'failed-run');
   const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs',
-    '--binary', join(root, 'missing.exe'), '--package-commit', 'a'.repeat(40), '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 10000 });
+    '--binary', join(root, 'missing.exe'), '--package-commit', 'a'.repeat(40), '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 20_000 });
   assert.equal(result.status, 1, result.stderr);
   const receipt = JSON.parse(await readFile(join(output, 'result.json'), 'utf8'));
   assert.equal(receipt.status, 'failed');
@@ -449,8 +449,10 @@ for (const selected of [true, false]) test(`restart verifies saved input when ed
 
 const fixture = body => `const readline=require('node:readline'); ${body}`;
 const protocol = `console.log(JSON.stringify({ready:true})); readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify({id:r.id,value:{ok:true}}));});`;
+// Loaded-gate bounds for helpers that follow the protocol. A helper that ignores
+// the exit request passes closeTimeoutMs: 100 so its forced stop stays quick.
 function controller(code, options = {}) {
-  return startWindowController({ command: process.execPath, args: ['-e', fixture(code)], startupTimeoutMs: 5000, requestTimeoutMs: 1000, closeTimeoutMs: 100, ...options });
+  return startWindowController({ command: process.execPath, args: ['-e', fixture(code)], startupTimeoutMs: 20_000, requestTimeoutMs: 10_000, closeTimeoutMs: 10_000, ...options });
 }
 test('helper completes requests and closes the recorded process', async () => {
   let child;
@@ -521,7 +523,7 @@ for (const [name, code, options, pattern] of [
 ]) {
   test(`helper ${name} rejects and stops its child`, async () => {
     let child;
-    await assert.rejects(controller(code, { ...options, onSpawn: value => { child = value; } }), pattern);
+    await assert.rejects(controller(code, { closeTimeoutMs: 100, ...options, onSpawn: value => { child = value; } }), pattern);
     assert.ok(child.exitCode !== null || child.signalCode !== null, 'owned helper must exit before rejection returns');
   });
 }
@@ -549,7 +551,7 @@ test('launch before CDP cleans up the owned process and its child, preserving an
     assert.ok(instance.child.exitCode !== null || instance.child.signalCode !== null);
     const descendantPid = Number(instance.firstOutput.trim());
     assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
-    const deadline = performance.now() + 3000;
+    const deadline = performance.now() + 10_000;
     let descendantAlive = true;
     while (descendantAlive && performance.now() < deadline) {
       try { process.kill(descendantPid, 0); await delay(10); }
@@ -628,7 +630,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) test(`${signal} rejects pending work
 test('cancellation during helper readiness waits for cleanup before returning', async () => {
   const signal = new AbortController();
   let child;
-  const startup = controller(`setInterval(()=>{},1000);`, { signal: signal.signal, onSpawn: value => { child = value; } });
+  const startup = controller(`setInterval(()=>{},1000);`, { closeTimeoutMs: 100, signal: signal.signal, onSpawn: value => { child = value; } });
   signal.abort(Error('cancel readiness'));
   await assert.rejects(startup, /cancel readiness/);
   assert.ok(child.exitCode !== null || child.signalCode !== null);

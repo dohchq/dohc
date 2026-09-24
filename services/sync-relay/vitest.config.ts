@@ -11,5 +11,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     testTimeout: 30_000,
+    // expect.poll's own default is 1 s; a loaded host needs the same 10 s as desktop.
+    expect: { poll: { timeout: 10_000 } },
   },
 });

@@ -387,7 +387,7 @@ describe("workspace database worker", () => {
       }),
     ).resolves.toMatchObject({ path: "large.sqlite" });
     expect(workers).toHaveLength(2);
-  }, 20_000);
+  });
 
   it("migrates the old nonblank-line version once and keeps the counter across restart", async () => {
     const root = await createTestScratch("dohc-db-worker-migration-");
@@ -444,7 +444,7 @@ describe("workspace database worker", () => {
       4,
       5,
     ]);
-  }, 20_000);
+  });
 
   it("pages at the row limit and at the serialized byte budget", async () => {
     const root = await createTestScratch("dohc-db-worker-page-");
@@ -478,7 +478,7 @@ describe("workspace database worker", () => {
     expect(byteBound.tables[0]!.nextOffset).toBe(
       byteBound.tables[0]!.rows.length,
     );
-  }, 20_000);
+  });
 
   it("cancels a queued edit before it can mutate or log", async () => {
     const root = await createTestScratch("dohc-db-worker-cancel-");
@@ -512,7 +512,7 @@ describe("workspace database worker", () => {
     await expect(readFile(paths.logPath, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
-  }, 20_000);
+  });
 
   it("holds prepared file identity while a read waits for the worker", async () => {
     const root = await createTestScratch("dohc-db-worker-identity-");
@@ -554,7 +554,7 @@ describe("workspace database worker", () => {
     const error = await outcome;
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/file changed/i);
-  }, 20_000);
+  });
 
   it("waits for a started edit to become durable before rejecting cancellation", async () => {
     const root = await createTestScratch("dohc-db-worker-started-cancel-");
@@ -607,5 +607,5 @@ describe("workspace database worker", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(readSettled).toBe(false);
     await read;
-  }, 20_000);
+  });
 });

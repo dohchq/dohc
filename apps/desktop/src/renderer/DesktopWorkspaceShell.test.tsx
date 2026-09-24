@@ -2222,8 +2222,8 @@ describe("collection folders", () => {
 
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
     // The surface is a lazy chunk (@dohc/collection-views pulls the table,
-    // board, and calendar libraries) plus two bridge round trips; under a
-    // loaded worker that outlasts findBy's default second.
+    // board, and calendar libraries) plus two bridge round trips; on a
+    // loaded worker that cold load can outlast the default wait.
     expect(
       await screen.findByText("No records in this collection yet.", undefined, {
         timeout: 15_000,
@@ -2390,10 +2390,7 @@ describe("collection folders", () => {
     });
 
     // The second accepted edit still reaches its record's live document.
-    await waitFor(
-      () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
-      { timeout: 10_000 },
-    );
+    await waitFor(() => expect(sessionsByPath.has("tasks/two.md")).toBe(true));
     await waitFor(() => {
       const updates =
         updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
@@ -3815,7 +3812,7 @@ describe("editor groups", () => {
       })),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
 
@@ -4643,7 +4640,6 @@ describe("ui-state merge-on-load", () => {
           states.some((state) => storedTabs(state).includes("a.md")),
         ).toBe(true);
       },
-      { timeout: 2000 },
     );
   });
 
@@ -5512,7 +5508,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("tab-a.md")).toBeNull();
     });
-  }, 20_000);
+  });
 
   // A provisional display-fill must not drive a destructive close: the pull
   // still in flight can carry back a file the older listing predates.
@@ -5717,15 +5713,11 @@ describe("ui-state merge-on-load", () => {
         expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
         expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
       },
-      { timeout: 10_000 },
     );
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(
-      () => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
-      { timeout: 10_000 },
-    );
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
 
     // The pre-pull snapshot commits; it predates the file coming back.
     await act(async () => {
@@ -5822,7 +5814,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // The same invalidation from the other side: mutateWb is the seam every
   // user-driven transition routes through, so a file click has to cancel a
@@ -5865,7 +5857,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // A chat thread opening in the panel moves no tab either, and it is the
   // destination change that conflicts most directly: the user chose another
@@ -5913,7 +5905,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
-  }, 20_000);
+  });
 
   // The third seam of the same kind, and the reason the predicate now lives at
   // the destination write: with the Chats tab already active, moving to
@@ -5989,7 +5981,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByText("Hiring discussion")).toBeTruthy();
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
-  }, 20_000);
+  });
 
   // The positive direction, and the reason it is not optional: every
   // cancellation test above also passes when nothing ever lands, so a fix that
@@ -6021,7 +6013,7 @@ describe("ui-state merge-on-load", () => {
     });
 
     expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
-  }, 20_000);
+  });
 
   // Cancelling on every workbench write would make this seam hostile: a user
   // who clicks a DM and then adjusts the sidebar would lose the click when the
@@ -6069,7 +6061,7 @@ describe("ui-state merge-on-load", () => {
     });
 
     expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
-  }, 20_000);
+  });
 
   // A destination change inside the active file moves no tab, so the check
   // above cannot see it — but the user did navigate, and a late DM would open
@@ -6134,7 +6126,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // The residual window the destination KEY cannot see: opening the chat
   // destination that is already open. Nothing about the key changed, the tab
@@ -6206,7 +6198,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByText("Planning discussion")).toBeTruthy();
     expect(screen.queryByText(CANONICAL_DM.name)).toBeNull();
-  }, 20_000);
+  });
 
   // The session signal reaches the SHELL: cloudStatus derives the presence
   // collaboration, so a sign-out must tear the old account's presence down
@@ -6289,7 +6281,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() =>
       expect(bridge.cloudStatus.mock.calls.length).toBeGreaterThan(statusQueries),
     );
-  }, 20_000);
+  });
 
   // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
   // engine bridge only stubs the navigator's overview surface.
@@ -6484,7 +6476,7 @@ describe("ui-state merge-on-load", () => {
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
     expect(screen.queryByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeNull();
 
-  }, 20_000);
+  });
 
   // The same race through the back button: every BackHeader and the keyboard
   // shortcut route through goBack, which must issue the same synchronous
@@ -6530,7 +6522,7 @@ describe("ui-state merge-on-load", () => {
     // page, which loads the overview again. The cancel won only if it
     // did not.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
-  }, 20_000);
+  });
 
   // The same race through "New message": the compose screen opens with a
   // direct nav write, and a DM answer queued in the same tick would remount
@@ -6575,7 +6567,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
     // The sidebar command mounts once; a late DM must not remount it again.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-  }, 20_000);
+  });
 
   // The awaited form of the same click: a feed item carrying a focus target
   // navigates in place (openConversation -> command + report), and the DM
@@ -6607,7 +6599,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-  }, 20_000);
+  });
 
   // The in-thread reply-parent jump. It is the one command in the page
   // that writes NO navigation — it only scrolls — so every other seam here
@@ -6684,7 +6676,7 @@ describe("ui-state merge-on-load", () => {
     // The proof, as in the feed-click race: a DM answer that wins remounts the
     // page and loads the overview again. The cancel won only if it did not.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
-  }, 20_000);
+  });
 
   // The surviving mutant from the review: openFile's heading-target
   // invalidation. A heading jump into the ALREADY-ACTIVE file moves no tab,
@@ -6741,7 +6733,7 @@ describe("ui-state merge-on-load", () => {
     });
     expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-  }, 20_000);
+  });
 
   // A request that is merely in flight has not answered anything, and a
   // request that fails never will. Superseding on ISSUE would drop the only
@@ -7222,11 +7214,7 @@ describe("engine store recovery", () => {
         })),
       });
       const { user, dialog } = await openRebuildDialog(bridge);
-      await screen.findByTestId(
-        "markdown-source-toggle",
-        {},
-        { timeout: 10_000 },
-      );
+      await screen.findByTestId("markdown-source-toggle");
       await waitFor(() =>
         expect(openEngineYDocSession).toHaveBeenCalledTimes(1),
       );
@@ -7498,7 +7486,7 @@ describe("engine store recovery", () => {
       })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
 
     await user.click(
@@ -16035,7 +16023,7 @@ describe("set-aside draft recovery", () => {
       ),
     });
     renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await user.type(screen.getByTestId("page-title"), " changed");
     await screen.findByTestId("tab-dirty");
@@ -16664,7 +16652,6 @@ describe("workbench render cost", () => {
       await waitFor(
         () =>
           expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1),
-        { timeout: 10_000 },
       );
       expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
         workspaceId: WORKSPACE.workspaceId,
@@ -16687,7 +16674,6 @@ describe("workbench render cost", () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
         expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
       },
-      { timeout: 10_000 },
     );
 
     vi.useFakeTimers();

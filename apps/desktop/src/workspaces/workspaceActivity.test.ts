@@ -100,15 +100,12 @@ describe("workspaceActivity capture hooks", () => {
 
     await writeFile(join(root, "changed.md"), "changed");
 
-    await vi.waitFor(
-      () => {
-        expect(notify).toHaveBeenCalledWith({
-          workspaceId: "activity-test",
-          paths: ["changed.md"],
-        });
-      },
-      { timeout: 3_000 },
-    );
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith({
+        workspaceId: "activity-test",
+        paths: ["changed.md"],
+      });
+    });
     await activity.stopAll();
   });
 

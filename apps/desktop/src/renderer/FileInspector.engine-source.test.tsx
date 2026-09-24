@@ -214,11 +214,7 @@ describe("engine markdown source view", () => {
     );
     // The engine session takes over once bound: the legacy Edit toggle gives
     // way to the engine header's Source toggle.
-    const toggle = await screen.findByTestId(
-      "markdown-source-toggle",
-      {},
-      { timeout: 10_000 },
-    );
+    const toggle = await screen.findByTestId("markdown-source-toggle");
     return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
 
@@ -227,11 +223,7 @@ describe("engine markdown source view", () => {
     const { toggle } = await renderEngineDoc();
 
     await user.click(toggle);
-    const sourceView = await screen.findByTestId(
-      "markdown-source-view",
-      {},
-      { timeout: 10_000 },
-    );
+    const sourceView = await screen.findByTestId("markdown-source-view");
     // Raw markdown, not rendered document: frontmatter and heading markup are
     // visible as text.
     await waitFor(() => {
@@ -257,7 +249,7 @@ describe("engine markdown source view", () => {
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await user.type(screen.getByTestId("page-title"), " Retitled");
     await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
@@ -297,7 +289,7 @@ describe("engine markdown source view", () => {
     vi.stubGlobal("dohcDesktop", bridgeMock);
     captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     act(() => pushSaveState("deleted", 0));
 
@@ -316,7 +308,7 @@ describe("engine markdown source view", () => {
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     await user.type(screen.getByTestId("page-title"), " Retitled");
     await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
@@ -347,7 +339,7 @@ describe("engine markdown source view", () => {
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
 
     const title = screen.getByTestId("page-title");
     await user.type(title, " Retitled");
@@ -402,7 +394,7 @@ describe("engine markdown source view", () => {
     );
     removalInProgress = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-toggle");
     expect(screen.queryByTestId("engine-removal-in-progress-notice")).toBeNull();
     expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
     expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
@@ -415,11 +407,7 @@ describe("engine markdown source view", () => {
     const { toggle, pushRemoteMarkdown } = await renderEngineDoc();
 
     await user.click(toggle);
-    const sourceView = await screen.findByTestId(
-      "markdown-source-view",
-      {},
-      { timeout: 10_000 },
-    );
+    const sourceView = await screen.findByTestId("markdown-source-view");
     await waitFor(() => expect(sourceView.textContent).toContain("Base paragraph."));
 
     act(() => {
@@ -444,7 +432,7 @@ describe("engine markdown source view", () => {
 
     expect(registered).not.toBeNull();
     await toggleSourceOnce(() => registered);
-    await screen.findByTestId("markdown-source-view", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-view");
     expect(screen.getByTestId("view-markdown").hidden).toBe(true);
 
     await toggleSourceOnce(() => registered);
@@ -456,7 +444,7 @@ describe("engine markdown source view", () => {
     const user = userEvent.setup();
     const { toggle, view } = await renderEngineDoc();
     await user.click(toggle);
-    await screen.findByTestId("markdown-source-view", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-source-view");
     expect(screen.getByTestId("view-markdown").hidden).toBe(true);
 
     view.rerender(
@@ -490,11 +478,7 @@ describe("engine markdown source view", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const notice = await screen.findByTestId(
-      "file-not-in-version",
-      {},
-      { timeout: 10_000 },
-    );
+    const notice = await screen.findByTestId("file-not-in-version");
     expect(notice.textContent).toContain("This version doesn't have this file.");
     // The Next names a control the shell actually has (the version menu).
     expect(notice.textContent).toContain("Switch to the version that has it.");
@@ -519,11 +503,7 @@ describe("engine markdown source view", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const notice = await screen.findByTestId(
-      "file-unavailable",
-      {},
-      { timeout: 10_000 },
-    );
+    const notice = await screen.findByTestId("file-unavailable");
     expect(notice.textContent).toContain(
       "This file is no longer available at this path.",
     );
@@ -552,11 +532,7 @@ describe("engine markdown source view", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const notice = await screen.findByTestId(
-      "engine-may-hold-document-notice",
-      {},
-      { timeout: 10_000 },
-    );
+    const notice = await screen.findByTestId("engine-may-hold-document-notice");
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
@@ -607,7 +583,7 @@ describe("engine markdown source view", () => {
       });
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       // Drive source directly; this case tests draft capture, not rich-editor
       // pointer behavior.
       await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
@@ -615,11 +591,7 @@ describe("engine markdown source view", () => {
       view.rerender(
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />,
       );
-      await screen.findByTestId(
-        "engine-may-hold-document-notice",
-        {},
-        { timeout: 10_000 },
-      );
+      await screen.findByTestId("engine-may-hold-document-notice");
       // The keystrokes are recoverable, and the armed timer did not write
       // them during the read-only window.
       await screen.findByTestId("orphaned-draft-notice");
@@ -672,14 +644,10 @@ describe("engine markdown source view", () => {
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId(
-      "engine-may-hold-document-notice",
-      {},
-      { timeout: 10_000 },
-    );
+    await screen.findByTestId("engine-may-hold-document-notice");
     fireEvent.click(screen.getByText("Try again"));
 
-    await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+    await screen.findByTestId("view-markdown");
     expect(screen.queryByText("Couldn't read this file."), "let the read-error branch win over a bound engine doc -> this never appears and the user keeps 'Couldn't read this file.'").toBeNull();
   });
 
@@ -706,11 +674,7 @@ describe("engine markdown source view", () => {
       });
 
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId(
-        "engine-may-hold-document-notice",
-        {},
-        { timeout: 10_000 },
-      );
+      await screen.findByTestId("engine-may-hold-document-notice");
       await user.click(screen.getByText("Try again"));
       await waitFor(() => expect(opens).toBe(2));
       await waitFor(() =>
@@ -754,11 +718,7 @@ describe("engine markdown source view", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    const notice = await screen.findByTestId(
-      "engine-may-hold-document-notice",
-      {},
-      { timeout: 10_000 },
-    );
+    const notice = await screen.findByTestId("engine-may-hold-document-notice");
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
@@ -801,7 +761,7 @@ describe("engine markdown source view", () => {
     );
 
     // The document is on screen through the bound Y.Doc, with no disk text.
-    await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+    await screen.findByTestId("view-markdown");
     expect(screen.queryByText("Couldn't read this file.")).toBeNull();
 
     await waitFor(() => expect(onScrollConsumed, "keep `textReady` on the disk read alone -> this never fires, the shell holds the jump, and it replays on a later open of this path.").toHaveBeenCalledWith(1));
@@ -834,10 +794,8 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
-    await waitFor(() => expect(flashedBlockText(), "drop the engine branch of the pending-line effect -> the document opens at the top and nothing is ever revealed.").toBe("Third paragraph."), {
-      timeout: 5_000,
-    });
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(flashedBlockText(), "drop the engine branch of the pending-line effect -> the document opens at the top and nothing is ever revealed.").toBe("Third paragraph."));
   });
 
   // One top-level block can be a hundred items long, and revealing its
@@ -861,10 +819,8 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
-    await waitFor(() => expect(flashedBlockText(), "drop `match` from the block target the shell sends, or return null from intraBlockRange -> 'Item 1' flashes and the reader lands 29 items above what they searched for.").toBe("Item 30"), {
-      timeout: 5_000,
-    });
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(flashedBlockText(), "drop `match` from the block target the shell sends, or return null from intraBlockRange -> 'Item 1' flashes and the reader lands 29 items above what they searched for.").toBe("Item 30"));
   });
 
   // codex on 76298ccd. The source projection hides the editor pane, so a jump
@@ -879,7 +835,7 @@ describe("engine markdown source view", () => {
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     await user.click(screen.getByTestId("markdown-source-toggle"));
     await screen.findByTestId("view-markdown-source");
     expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(true);
@@ -896,9 +852,7 @@ describe("engine markdown source view", () => {
     await waitFor(() =>
       expect(screen.getByTestId("view-markdown").hasAttribute("hidden"), "drop the setShowSource(false) -> the pane stays hidden and the reveal lands behind the source view.").toBe(false),
     );
-    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."));
   });
 
   // codex on 76298ccd. A frontmatter hit has no body block to land on: the
@@ -921,7 +875,7 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(scrollTo, "map the frontmatter line onto block 0 anyway -> the first body block is revealed and the matched title scrolls out of view.").toHaveBeenCalledWith({ top: 0 }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
@@ -949,7 +903,7 @@ describe("engine markdown source view", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     await user.click(screen.getByTestId("markdown-source-toggle"));
     await screen.findByTestId("view-markdown-source");
     expect(screen.getByTestId("view-markdown").hasAttribute("hidden")).toBe(true);
@@ -997,7 +951,7 @@ describe("engine markdown source view", () => {
         onScrollConsumed={vi.fn()}
       />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
     expect(scrollTo).toHaveBeenCalledTimes(1);
 
@@ -1040,7 +994,7 @@ describe("engine markdown source view", () => {
         onScrollConsumed={vi.fn()}
       />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
     expect(scrollTo).toHaveBeenCalledTimes(1);
 
@@ -1070,7 +1024,7 @@ describe("engine markdown source view", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
 
     // No await between them: the editor's settle frames are 16ms timers, so
     // the block target is set and unconsumed when the heading arrives.
@@ -1118,7 +1072,7 @@ describe("engine markdown source view", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
 
     // No await between them: the settle frames are 16ms timers, so the body
     // target is set and unconsumed when the frontmatter one lands.
@@ -1159,7 +1113,7 @@ describe("engine markdown source view", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
 
     view.rerender(
       <FileInspector
@@ -1181,7 +1135,7 @@ describe("engine markdown source view", () => {
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     for (let settle = 0; settle < 2; settle += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(150);
@@ -1237,7 +1191,7 @@ describe("engine markdown source view", () => {
     );
     releaseOpen();
     await waitFor(() => expect(opens).toBe(2));
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     for (let settle = 0; settle < 2; settle += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(150);
@@ -1271,10 +1225,8 @@ describe("engine markdown source view", () => {
         onScrollConsumed={vi.fn()}
       />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
-    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
-      timeout: 5_000,
-    });
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."));
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
 
     // readOnly flips `enabled`, which is part of the request key — the doc
@@ -1293,7 +1245,7 @@ describe("engine markdown source view", () => {
     view.rerender(
       <FileInspector workspaceId="ws-1" path="a.md" onScrollConsumed={vi.fn()} />,
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     for (let settle = 0; settle < 2; settle += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(150);
@@ -1318,10 +1270,8 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
-    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
-      timeout: 5_000,
-    });
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."));
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
 
     // The version switch: the shell cleared its target, and engineVersionKey
@@ -1337,7 +1287,7 @@ describe("engine markdown source view", () => {
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     for (let settle = 0; settle < 2; settle += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(150);
@@ -1378,14 +1328,12 @@ describe("engine markdown source view", () => {
     // mutation passes. Delivering it to a bound engine editor is what makes
     // the second reveal mean the remount.
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
 
     view.rerender(
       <FileInspector workspaceId="ws-1" path="a.md" headingTarget={headingTarget} />,
     );
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
 
     // engineVersionKey reopens the session, so the editor unmounts and a fresh
     // one binds. Nothing consumed the target, so it stands.
@@ -1400,11 +1348,9 @@ describe("engine markdown source view", () => {
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
     );
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
 
-    await waitFor(() => expect(scrollIntoView, "give headingTarget the onBlockTargetConsumed shape -> one reveal, and the reader lands at the top of the new version.").toHaveBeenCalledTimes(2), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(scrollIntoView, "give headingTarget the onBlockTargetConsumed shape -> one reveal, and the reader lands at the top of the new version.").toHaveBeenCalledTimes(2));
     // Which heading, not just how many reveals: the count alone would accept a
     // second reveal that landed somewhere else.
     expect(revealedTargets[1]).toEqual({
@@ -1444,14 +1390,8 @@ describe("engine markdown source view", () => {
         headingTarget={headingTarget}
       />,
     );
-    const destination = await screen.findByRole(
-      "heading",
-      { name: "Exact destination" },
-      { timeout: 10_000 },
-    );
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
-      timeout: 10_000,
-    });
+    const destination = await screen.findByRole("heading", { name: "Exact destination" });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
     expect(scrollIntoView.mock.instances[0]).toBe(destination);
 
     view.rerender(
@@ -1464,9 +1404,7 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
-      timeout: 10_000,
-    });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
     expect(scrollIntoView.mock.instances[1]).toBe(destination);
 
     // A tab return clears the place without changing the version.
@@ -1526,14 +1464,8 @@ describe("engine markdown source view", () => {
         headingTarget={headingTarget}
       />,
     );
-    const firstDestination = await screen.findByRole(
-      "heading",
-      { name: "Exact destination" },
-      { timeout: 10_000 },
-    );
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1), {
-      timeout: 10_000,
-    });
+    const firstDestination = await screen.findByRole("heading", { name: "Exact destination" });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
     expect(scrollIntoView.mock.instances[0]).toBe(firstDestination);
 
     view.rerender(
@@ -1557,11 +1489,8 @@ describe("engine markdown source view", () => {
         }
         return heading;
       },
-      { timeout: 10_000 },
     );
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2), {
-      timeout: 10_000,
-    });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
     expect(scrollIntoView.mock.instances[1]).toBe(secondDestination);
   });
 
@@ -2305,10 +2234,7 @@ describe("engine markdown source view", () => {
     // regressed to refusing on every answer.
     const title = screen.getByTestId("page-title") as HTMLInputElement;
     await userEvent.setup().type(title, "!");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
-      { timeout: 10_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled());
   });
 
   it("PROBE-STALE-FLUSH: the registered draft flush must refuse the switch window too", async () => {
@@ -2584,7 +2510,6 @@ describe("engine markdown source view", () => {
           text: freshBody,
           expectedContentHash: TEST_CONTENT_HASH,
         }),
-      { timeout: 10_000 },
     );
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -2904,10 +2829,8 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
-    await waitFor(() => expect(flashedBlockText()).toBe("Second paragraph."), {
-      timeout: 5_000,
-    });
+    await screen.findByTestId("markdown-editor");
+    await waitFor(() => expect(flashedBlockText()).toBe("Second paragraph."));
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
 
     // What the shell does next: it consumed the target and cleared it. Then an
@@ -2953,12 +2876,12 @@ describe("engine markdown source view", () => {
       />,
     );
 
-    await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 });
+    await screen.findByTestId("markdown-editor");
     // The read failed, so the Markdown the line was numbered against is gone
     // and the line resolves to the first block. The seam still runs — the
     // recovery path is not a document where jumps quietly do nothing.
     //
-    await waitFor(() => expect(flashedBlockText(), "gate the effect on disk text being present -> no flash here.").toBe("Plan"), { timeout: 10_000 });
+    await waitFor(() => expect(flashedBlockText(), "gate the effect on disk text being present -> no flash here.").toBe("Plan"));
   });
 
   // codex on the round-9 head: the same failed-read branch, but reached with a
@@ -2997,7 +2920,7 @@ describe("engine markdown source view", () => {
       });
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
 
       // Both keys, as a version switch bumps them: `refreshKey` re-reads the
@@ -3010,11 +2933,7 @@ describe("engine markdown source view", () => {
           engineVersionKey={1}
         />,
       );
-      await screen.findByTestId(
-        "engine-may-hold-document-notice",
-        {},
-        { timeout: 10_000 },
-      );
+      await screen.findByTestId("engine-may-hold-document-notice");
       expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
 
       // The armed autosave must not land either.
@@ -3064,7 +2983,7 @@ describe("engine markdown source view", () => {
       });
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
 
       view.rerender(
@@ -3075,7 +2994,7 @@ describe("engine markdown source view", () => {
           engineVersionKey={1}
         />,
       );
-      await screen.findByText("Couldn't read this file.", {}, { timeout: 10_000 });
+      await screen.findByText("Couldn't read this file.");
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
@@ -3088,7 +3007,7 @@ describe("engine markdown source view", () => {
       // Refused, never dropped: the text is on the recovery surface the
       // failed-read branch renders.
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 10_000 });
+      await screen.findByTestId("orphaned-draft-notice");
     } finally {
       vi.useRealTimers();
     }
@@ -3115,10 +3034,10 @@ describe("engine markdown source view", () => {
       });
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       await user.click(screen.getByTestId("markdown-edit-toggle"));
       await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 10_000 }),
+        await screen.findByTestId("markdown-editor"),
         "typed",
       );
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
@@ -3199,7 +3118,7 @@ describe("engine markdown source view", () => {
         engineVersionKey={0}
       />,
     );
-    await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+    await screen.findByTestId("view-markdown");
 
     // The switch: both tokens move together, exactly as the shell bumps them.
     view.rerender(
@@ -3211,7 +3130,7 @@ describe("engine markdown source view", () => {
       />,
     );
     // The reread loses the file first.
-    await screen.findByText("Couldn't read this file.", {}, { timeout: 10_000 });
+    await screen.findByText("Couldn't read this file.");
     expect(reads).toBeGreaterThan(1);
 
     // ...and only THEN does the open answer. The notice must still arrive.
@@ -3219,11 +3138,7 @@ describe("engine markdown source view", () => {
       refuse();
       await refused;
     });
-    const notice = await screen.findByTestId(
-      "file-not-in-version",
-      {},
-      { timeout: 10_000 },
-    );
+    const notice = await screen.findByTestId("file-not-in-version");
     expect(notice.textContent).toContain("This version doesn't have this file.");
     expect(screen.queryByText("Couldn't read this file.")).toBeNull();
   });
@@ -3255,7 +3170,7 @@ describe("engine markdown source view", () => {
           onSaveStateChange={(state) => states.push(state)}
         />,
       );
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       await user.click(screen.getByTestId("markdown-edit-toggle"));
       const sourceEditor = await findSourceEditor();
       await user.type(await textEditorContent(sourceEditor), "held");
@@ -3309,7 +3224,7 @@ describe("engine markdown source view", () => {
       const view = render(
         <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={0} />,
       );
-      await screen.findByTestId("view-markdown", {}, { timeout: 10_000 });
+      await screen.findByTestId("view-markdown");
       // Same draft, no pointer: this test's typed click reached prosemirror's
       // mousedown and threw after it passed, which failed the whole run with
       // every assertion green. See typeIntoSourceEditor.
@@ -3324,11 +3239,7 @@ describe("engine markdown source view", () => {
         refuse();
         await refused;
       });
-      const notice = await screen.findByTestId(
-        "file-not-in-version",
-        {},
-        { timeout: 10_000 },
-      );
+      const notice = await screen.findByTestId("file-not-in-version");
 
       // Route 1: the read-only transition must not have written.
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();

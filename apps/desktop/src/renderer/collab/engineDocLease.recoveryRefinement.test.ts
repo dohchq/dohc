@@ -176,7 +176,6 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
         expect.stringContaining("could not refine the recovery draft"),
         expect.any(Error),
       ),
-    { timeout: 10_000 },
   );
 
   expect(drafts.result.current.at(-1)?.text, "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.").toContain("edit-1");

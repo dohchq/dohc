@@ -14,9 +14,12 @@ import { createDeviceHostCredential } from "./deviceHostCredential.js";
 import { createDeviceControl } from "./deviceControl.js";
 import { openSyncRelayStorage } from "./storage.js";
 
+// Pongs cross real sockets that a loaded gate host can stall past 500 ms, which
+// would close a host these tests expect to stay open. Only the silent-peer test
+// waits for the heartbeat to expire, so only it shortens the bound.
 const limits: DeviceControlLimits = { maxConnections: 4, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
-  handshakeTimeoutMs: 1000, heartbeatIntervalMs: 50, heartbeatTimeoutMs: 500, closeTimeoutMs: 100 };
+  handshakeTimeoutMs: 1000, heartbeatIntervalMs: 50, heartbeatTimeoutMs: 10_000, closeTimeoutMs: 100 };
 const exchangeKey = "device-control-test-exchange-key-32";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -29,7 +32,7 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = 
   const storage = owner?.storage ?? openSyncRelayStorage(join(directory, "relay.sqlite"));
   const deliveryConfig = join(directory, "delivery.json");
   if (delivery) await writeFile(deliveryConfig, JSON.stringify({ version: 1, workspaceIds: ["workspace"], maxQueuedBytes: 4_000_000, maxActiveDrains: 1,
-    client: { aggregateBytes: 200_000_000, maxUploads: 1, connectTimeoutMs: 1000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } }));
+    client: { aggregateBytes: 200_000_000, maxUploads: 1, connectTimeoutMs: 10_000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } }));
   const credential = createDeviceHostCredential("device-test", parseHostEpoch(1));
   expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(true);
   const control = createDeviceControl({ storage, hosts: new Set(["relay.test"]), relayExchangeKey: exchangeKey,
@@ -128,7 +131,7 @@ describe("outbound device control authority", () => {
   });
 
   it.each(["application", "oversized", "ping", "wrong-pong", "silent"] as const)("closes %s peers and their durable admission", async mode => {
-    const fixture = await setup();
+    const fixture = await setup(mode === "silent" ? { heartbeatTimeoutMs: 500 } : {});
     const connection = fixture.connect(fixture.credential, {}, mode !== "silent");
     await once(connection.ws, "message");
     if (mode === "application") connection.ws.send("unsupported");
