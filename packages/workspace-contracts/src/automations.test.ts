@@ -637,6 +637,10 @@ describe("values, conditions, and templates", () => {
     ]);
   });
 
+  it.each(["(a)", "(a + b)", "((a))", "(record?.of) / 2"])("reads the grouped expression %s", (expression) => {
+    expect(automationTextParts(`{${expression}}`)).toEqual([{ kind: "expression", expression }]);
+  });
+
   it("ends each expression at its own brace", () => {
     expect(automationTextParts("{x.of / 2}{y}")).toEqual([
       { kind: "expression", expression: "x.of / 2" },
@@ -884,6 +888,16 @@ const AUTOMATION_CASES: AutomationCase[] = [
   {
     name: "a keyword after optional chaining, before a division",
     item: withStep("notify: '{record?.return / 2}'\nto: [user_ana]"),
+    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+  },
+  {
+    name: "a comment after an optional property, before a division",
+    item: withStep("notify: '{record?.of /* c */ / 2}'\nto: [user_ana]"),
+    expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
+  },
+  {
+    name: "a comment inside an optional property, before a division",
+    item: withStep("notify: '{record?./* c */of / 2}'\nto: [user_ana]"),
     expected: [{ code: "optional-chain-needs-parentheses", path: at("/do/0/notify") }],
   },
   {

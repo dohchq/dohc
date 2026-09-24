@@ -1079,7 +1079,9 @@ type TemplateProblem = "invalid-template" | "optional-chain-needs-parentheses";
 // acorn 8.18 reads a "/" after a keyword-named property that follows "?.",
 // as in "record?.of / 2", as the start of a regular expression. The text
 // up to where parsing stopped holds that pattern when this is the cause.
-const OPTIONAL_PROPERTY_BEFORE_DIVISION = /\?\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*\s*\/(?![/*])/u;
+// Spaces and block comments can sit between its parts.
+const OPTIONAL_PROPERTY_BEFORE_DIVISION =
+  /\?\.(?:\s|\/\*[\s\S]*?\*\/)*[\p{ID_Start}$_][\p{ID_Continue}$]*(?:\s|\/\*[\s\S]*?\*\/)*\/(?![/*])/u;
 
 function templateProblem(source: string, start: number, stop: number): TemplateProblem {
   return OPTIONAL_PROPERTY_BEFORE_DIVISION.test(source.slice(start, stop + 1))
@@ -1090,12 +1092,14 @@ function templateProblem(source: string, start: number, stop: number): TemplateP
 // The index of the "}" that ends the JavaScript expression starting at
 // `start`, or the problem that stops one ending. acorn parses one expression
 // in expression context, so a "}" inside a string, template literal, regular
-// expression, or object literal does not end it. Its tokenizer then reads
-// the next token, skipping spaces and comments; that token must be "}".
+// expression, or object literal does not end it. preserveParens keeps
+// grouping parentheses in the tree, so the end of "(a + b)" includes its
+// ")". acorn's tokenizer then reads the next token, skipping spaces and
+// comments; that token must be "}".
 function expressionEnd(source: string, start: number): number | TemplateProblem {
   let end: number;
   try {
-    end = parseExpressionAt(source, start, { ecmaVersion: "latest" }).end;
+    end = parseExpressionAt(source, start, { ecmaVersion: "latest", preserveParens: true }).end;
   } catch (error) {
     const stop = error instanceof SyntaxError && "pos" in error && typeof error.pos === "number" ? error.pos : start;
     return templateProblem(source, start, stop);
