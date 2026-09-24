@@ -15369,6 +15369,51 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
   });
 
+  it("keeps the skipped count when the first copy fails", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 2,
+      stop: { file: "three.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'three.md'" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files (2 skipped). The disk is full.",
+    );
+  });
+
+  // Try again removes the row before it runs. When the shared view cannot
+  // refresh first, the person still learns why no file picker opened.
+  it("says why no file picker opened when the shared view does not refresh before Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["notes/one.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", damaged: true as const },
+    });
+    const user = userEvent.setup();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not open the file picker, because the shared view has not refreshed.",
+      ),
+    );
+    expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+  });
+
   it("words a failed first copy the same way, with the raw error only in Copy details", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
@@ -15389,6 +15434,8 @@ describe("file transfers", () => {
     expect(await navigator.clipboard.readText()).toContain("Cause: ENOSPC: no space left on device");
   });
 
+  // The refresh reports its own cause; the toast after it says why no file
+  // picker opened and what to do next.
   it("asks for no files when the refresh before Try again fails", async () => {
     const bridge = sharedViewBridge([true, false]);
     renderShell(bridge, { ...WORKSPACE, shareView: SHARED_VIEW });
@@ -15399,10 +15446,16 @@ describe("file transfers", () => {
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByTestId("workspace-shell-error-retry"));
 
     await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't refresh the shared view."),
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc did not open the file picker, because the shared view has not refreshed.",
+      ),
     );
     expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
     expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-center")).textContent).toContain(
+      "Couldn't refresh the shared view. The relay did not answer.",
+    );
   });
 
   it("reports an interrupted shared import separately from ordinary skips", async () => {

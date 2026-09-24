@@ -2058,10 +2058,20 @@ export function DesktopWorkspaceShell(props: {
     async (droppedPaths?: string[], targetDir?: string) => {
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
-      // A refresh that fails reports itself and asks for nothing.
+      // Try again already removed the row, so a refresh that leaves the view
+      // stale (damaged, failed, or overtaken by another refresh) says why
+      // nothing opened.
       const retry = () => {
         void refreshShareViewRef.current().then((current) => {
-          if (current) void importFiles(undefined, targetDir);
+          if (current) {
+            void importFiles(undefined, targetDir);
+            return;
+          }
+          reportShellFailure({
+            message:
+              "dohc did not open the file picker, because the shared view has not refreshed. Refresh it, then import the files that are still missing.",
+            kind: "import-files",
+          });
         });
       };
       let outcome: ImportWorkspaceFilesResult;
@@ -2076,10 +2086,12 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
+      const skippedSuffix =
+        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
       // The first copy failed, so nothing landed.
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
-          message: `Could not import files. ${importStopSentence(outcome.stop)}`,
+          message: `Could not import files${skippedSuffix}. ${importStopSentence(outcome.stop)}`,
           detail: outcome.stop.detail,
           retry,
           kind: "import-files",
@@ -2111,8 +2123,6 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
-      const skippedSuffix =
-        outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
       // Every file was skipped for its name or kind; the same files would be
       // skipped again, so there is nothing to try again.
       if (count === 0) {
