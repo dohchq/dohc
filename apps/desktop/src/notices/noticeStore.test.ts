@@ -12,6 +12,7 @@ import {
 } from "@dohc/sync-relay/testing";
 import type { SyncRelayHandler } from "@dohc/sync-relay";
 import type { SyncRelayStorage } from "@dohc/sync-relay/storage";
+import { NOTICE_ROWS_PER_SENDER } from "../../../../services/sync-relay/src/storage/limits";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_LIST_ROW_LIMIT,
@@ -92,6 +93,8 @@ interface Computer {
   reach: Map<string, NoticeReach>;
   // Runs when the store asks how a workspace reaches the relay.
   onReach?: () => void;
+  // Runs when the store reads which account a session belongs to.
+  onAccountRead?: () => void;
 }
 
 function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
@@ -118,7 +121,10 @@ async function computer(
       const generation = state.generation;
       if (!account) return null;
       return {
-        account,
+        get account() {
+          state.onAccountRead?.();
+          return account;
+        },
         isCurrent: () => state.generation === generation,
         reachFor: (workspaceId) => {
           state.onReach?.();
@@ -336,6 +342,27 @@ describe("notices on one person's computers", () => {
     })]);
   });
 
+  it("drops a notice the relay removed to make room", async () => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const fromOwner = (index: number) => server.storage.postNotice({
+      noticeId: `n${index}`, recipientUserId: "ana", reach: { workspaceId: WORKSPACE }, kind: "automation-failed",
+      title: `Failure ${index}`, body: "", target: { path: "trip/tasks" }, originInstallId: "install-b",
+      senderUserId: "owner", senderLabel: "Owner", nowMs: clock + index,
+    });
+    for (let index = 0; index < NOTICE_ROWS_PER_SENDER; index += 1) fromOwner(index);
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.sync();
+    expect(await laptop.store.list()).toHaveLength(NOTICE_ROWS_PER_SENDER);
+
+    fromOwner(NOTICE_ROWS_PER_SENDER);
+    await laptop.store.sync();
+    const titlesNow = (await laptop.store.list()).map((row) => row.title);
+    expect(titlesNow).toHaveLength(NOTICE_ROWS_PER_SENDER);
+    expect(titlesNow).not.toContain("Failure 0");
+    expect(titlesNow).toContain(`Failure ${NOTICE_ROWS_PER_SENDER}`);
+  });
+
   it("keeps a sender name at the relay's limit, counted in characters", async () => {
     const label = "🎉".repeat(NOTICE_SENDER_LABEL_MAX_CHARS);
     const server = await relay({ lookupUserDisplayName: () => label });
@@ -460,6 +487,25 @@ describe("notices while the signed-in account changes", () => {
     // Ben signs in while the notice is being placed.
     laptop.onReach = () => {
       laptop.onReach = undefined;
+      switchTo(laptop, account(server, "ben"));
+    };
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+
+    const ana = await computer(account(server, "ana"));
+    const ben = await computer(account(server, "ben"));
+    await ana.store.sync();
+    await ben.store.sync();
+    expect(await ana.store.list()).toEqual([]);
+    expect(await titles(ben)).toEqual(["account:Your agent finished"]);
+  });
+
+  it("queues a notice for the account signed in when the lists change, not when they load", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    // Ben signs in while the store loads Ana's list.
+    laptop.onAccountRead = () => {
+      laptop.onAccountRead = undefined;
       switchTo(laptop, account(server, "ben"));
     };
     await laptop.store.postNotice(notice());

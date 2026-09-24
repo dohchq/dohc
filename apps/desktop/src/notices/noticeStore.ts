@@ -137,6 +137,7 @@ const RelayRow = z.object({
   createdAtMs: NoticeRow.shape.createdAtMs,
   readAtMs: NoticeRow.shape.readAtMs,
   dismissedAtMs: z.number().int().nonnegative().nullable(),
+  removed: z.boolean(),
 });
 type RelayRow = z.infer<typeof RelayRow>;
 
@@ -558,11 +559,12 @@ export function createNoticeStore(deps: {
     }
     const createdAtMs = nowMs();
     const queued = await locked(async () => {
-      if (session && !session.isCurrent()) throw new SessionChanged();
       const local = await loadLocal();
+      const file = session && reach ? await loadAccount(session.account) : null;
+      // Checked after the loads, just before either list changes.
+      if (session && !session.isCurrent()) throw new SessionChanged();
       // A notice kept on this computer stays here.
       if (local.rows.some((row) => row.noticeId === content.noticeId)) return false;
-      const file = session && reach ? await loadAccount(session.account) : null;
       if (session && reach && file && !file.routesMissing) {
         const known = file.rows.some((row) => row.noticeId === content.noticeId) ||
           file.posts.some((post) => post.request.noticeId === content.noticeId);
@@ -710,7 +712,8 @@ export function createNoticeStore(deps: {
 // Folds one page into the stored rows. A page that starts the list over
 // replaces every cached row first; the outbox stays. Read and dismissed only
 // move forward, so a row marked here stays marked whatever order changes
-// arrive in. A pulled row settles the sent post with its id.
+// arrive in. A row the relay removed to make room is dropped. A pulled row
+// settles the sent post with its id.
 function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
   let changed = false;
   if (page.replace && file.rows.length > 0) {
@@ -727,6 +730,11 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
     file.posts = file.posts.filter((post) => !(post.sent && post.request.noticeId === row.noticeId));
     const index = file.rows.findIndex((existing) => existing.noticeId === row.noticeId);
     const existing = file.rows[index];
+    if (row.removed) {
+      if (existing) file.rows.splice(index, 1);
+      changed = true;
+      continue;
+    }
     const next = existing
       ? { ...row, readAtMs: row.readAtMs ?? existing.readAtMs, dismissedAtMs: row.dismissedAtMs ?? existing.dismissedAtMs }
       : row;
