@@ -110,6 +110,14 @@ describe("reach check", () => {
       expect(check(roster, personal(OWNER)), spelling).toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Trip."));
       expect(check(roster, change(trip)), spelling).toEqual(stopped("ana@dohc.test cannot edit Trip."));
     }
+    // Unicode composed and decomposed forms, and full case folding.
+    const cafe = { path: "Café", name: "Café" };
+    const cafeGrant = owner(grant(ana, { paths: ["Café/automations.yaml"], access: "edit" }));
+    expect(check(cafeGrant, personal(OWNER), cafe)).toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Café."));
+    expect(check(cafeGrant, change(cafe), cafe)).toEqual(stopped("ana@dohc.test cannot edit Café."));
+    const plans = { path: "Plans", name: "Plans" };
+    expect(check(owner(grant(ana, { paths: ["Planſ"], access: "edit" })), personal(OWNER), plans))
+      .toEqual(stopped("This step acts as you, and ana@dohc.test can also edit Plans."));
     // A step that spells its target differently reaches nothing through the spelling.
     const roster = owner(grant(ana, { paths: ["Trip"], access: "edit" }), grant(ana, { paths: ["Budget"], access: "edit" }));
     expect(check(roster, change({ path: "budget", name: "budget" }))).toEqual(stopped("ana@dohc.test cannot edit budget."));

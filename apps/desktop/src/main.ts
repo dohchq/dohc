@@ -1039,10 +1039,10 @@ const shareRosters = createShareRosters({
     } catch (error) {
       // Signed out, or signed in to another account or server: the message
       // says which, and dohc could not ask.
-      return { kind: "unanswered", next: error instanceof Error ? error.message : "Sign in to your server first." };
+      return { kind: "unanswered", next: error instanceof Error ? error.message : "Sign in to your server first.", partial: false };
     }
     if (!credentials.relayUrl) {
-      return { kind: "unanswered", next: "Reconnect your sharing server, then try again." };
+      return { kind: "unanswered", next: "Reconnect your sharing server, then try again.", partial: false };
     }
     return listRosterGrants(workspace.workspaceId, async (path) => {
       const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
@@ -1774,7 +1774,7 @@ function engineForWorkspace(
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: ({ recovered }) => {
-      shareRosters.pulled(workspace.workspaceId, recovered);
+      void shareRosters.pulled(workspace.workspaceId, recovered);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );

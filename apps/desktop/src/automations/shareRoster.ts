@@ -21,9 +21,10 @@ import {
 // (automationReach.ts) must answer without a network round trip, so the
 // owner's computer keeps this copy in the workspace registry.
 //
-// The copy is never broader than the relay's last answer. A relay that does
-// not answer leaves the copy as it is. A relay that answers with anything dohc
-// cannot read replaces it with a problem, and the reach check stops every step.
+// The copy is never broader than the relay's last answer. A relay that
+// answers nothing leaves the copy as it is. A relay that answers with anything
+// dohc cannot read replaces it with a problem, and the reach check stops every
+// step.
 
 export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
@@ -86,18 +87,22 @@ const StoredRoster = z.union([
   z.object({ grants: z.null(), problem: ProblemSchema }),
 ]);
 
-/** A relay listing, or the Next a person needs when the relay did not answer. */
+/**
+ * A relay listing, or the Next a person needs when the relay did not answer.
+ * `partial` is true when the relay answered one request of the listing and
+ * then stopped answering, so the relay was up.
+ */
 export type RosterAnswer =
   | { kind: "answered"; listing: RosterListing }
-  | { kind: "unanswered"; next: string };
+  | { kind: "unanswered"; next: string; partial: boolean };
 
 const UNUSABLE: RosterAnswer = {
   kind: "answered",
   listing: { grants: null, problem: { kind: "unusable-listing" } },
 };
 
-function unanswered(next: string): RosterAnswer {
-  return { kind: "unanswered", next };
+function answered(listing: RosterListing): RosterAnswer {
+  return { kind: "answered", listing };
 }
 
 function isFileGrant(grant: ListedGrant): grant is z.infer<typeof FileGrant> {
@@ -133,26 +138,18 @@ const LinkRow = z.object({
   dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown() })),
 });
 
-/**
- * The roster for one workspace from the relay's listings: the owner's granted
- * rows, and the dependents of the owner's share links.
- *
- * Link holders are not on the roster: they cannot change files other than
- * live documents (ADR 0002). A dependent is different. It is a person who
- * opened a link in dohc, and the relay lets a dependent with Edit send change
- * proposals, so the roster lists dependents like named grants.
- *
- * Rows for other workspaces are skipped before anything else is read, so
- * their damage cannot hide this workspace's grants.
- */
-export function rosterListingFrom(workspaceId: string, shares: unknown, links: readonly unknown[]): RosterListing {
-  const unusable = { grants: null, problem: { kind: "unusable-listing" } } as const;
+const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
+
+// The owner's grants on this workspace from GET /sync/shares. Rows for other
+// workspaces are skipped before anything else is read, so their damage cannot
+// hide this workspace's grants.
+function grantedListing(workspaceId: string, shares: unknown): RosterListing {
   const listing = z.object({ granted: z.array(z.unknown()) }).safeParse(shares);
-  if (!listing.success) return unusable;
+  if (!listing.success) return { grants: null, problem: { kind: "unusable-listing" } };
   const grants: ListedGrant[] = [];
   for (const row of listing.data.granted) {
     const where = RowWorkspace.safeParse(row);
-    if (!where.success) return unusable;
+    if (!where.success) return { grants: null, problem: { kind: "unusable-listing" } };
     if (where.data.workspaceId !== workspaceId) continue;
     const state = RowState.safeParse(row);
     const grant = ListedGrantSchema.safeParse(row);
@@ -163,6 +160,12 @@ export function rosterListingFrom(workspaceId: string, shares: unknown, links: r
     }
     grants.push(grant.data);
   }
+  return { grants };
+}
+
+// The dependents on one page of the owner's share links.
+function linkListing(links: readonly unknown[]): RosterListing {
+  const grants: ListedGrant[] = [];
   for (const value of links) {
     const link = LinkRow.safeParse(value);
     if (!link.success) return { grants: null, problem: { kind: "damaged-link" } };
@@ -173,36 +176,49 @@ export function rosterListingFrom(workspaceId: string, shares: unknown, links: r
       grants.push(grant.data);
     }
   }
-  return { grants: grants.sort((left, right) => (left.grantId < right.grantId ? -1 : left.grantId > right.grantId ? 1 : 0)) };
+  return { grants };
 }
 
 /**
- * Lists the roster from the relay. `get` sends one GET with the owner's
- * session and throws only when no response arrives.
+ * Lists the roster for one workspace from the relay: the owner's granted
+ * rows, and the dependents of the owner's share links. `get` sends one GET
+ * with the owner's session and throws only when no response arrives.
+ *
+ * Link holders are not on the roster: they cannot change files other than
+ * live documents (ADR 0002). A dependent is different. It is a person who
+ * opened a link in dohc, and the relay lets a dependent with Edit send change
+ * proposals, so the roster lists dependents like named grants.
+ *
+ * Each answer is read as it arrives. Damage or a refusal decides the listing
+ * at once, whatever happens to the requests after it.
  */
 export async function listRosterGrants(
   workspaceId: string,
   get: (path: string) => Promise<{ status: number; body: unknown }>,
 ): Promise<RosterAnswer> {
+  let partial = false;
+  const noAnswer = (next: string) => ({ ok: false, answer: { kind: "unanswered", next, partial } }) as const;
   async function read(path: string): Promise<{ ok: true; body: unknown } | { ok: false; answer: RosterAnswer }> {
     let response: { status: number; body: unknown };
     try {
       response = await get(path);
     } catch {
-      return { ok: false, answer: unanswered("Check your connection, then try again.") };
+      return noAnswer("Check your connection, then try again.");
     }
-    if (response.status === 401) return { ok: false, answer: unanswered("Sign in again, then try again.") };
+    if (response.status === 401) return noAnswer("Sign in again, then try again.");
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
-      return { ok: false, answer: unanswered("Your server is not answering. Try again later.") };
+      return noAnswer("Your server is not answering. Try again later.");
     }
-    return response.status >= 200 && response.status < 300
-      ? { ok: true, body: response.body }
-      : { ok: false, answer: UNUSABLE };
+    if (response.status < 200 || response.status >= 300) return { ok: false, answer: UNUSABLE };
+    partial = true;
+    return { ok: true, body: response.body };
   }
 
   const shares = await read("/sync/shares");
   if (!shares.ok) return shares.answer;
-  const links: unknown[] = [];
+  const granted = grantedListing(workspaceId, shares.body);
+  if (granted.grants === null) return answered(granted);
+  const grants = granted.grants;
   const cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; ; page += 1) {
@@ -210,17 +226,17 @@ export async function listRosterGrants(
     const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
     const answer = await read(`/sync/${encodeURIComponent(workspaceId)}/shares/links${query}`);
     if (!answer.ok) return answer.answer;
-    const body = z
-      .object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() })
-      .safeParse(answer.body);
+    const body = LinkPage.safeParse(answer.body);
     if (!body.success) return UNUSABLE;
-    links.push(...body.data.links);
+    const linked = linkListing(body.data.links);
+    if (linked.grants === null) return answered(linked);
+    grants.push(...linked.grants);
     cursor = body.data.nextCursor;
     if (cursor === undefined) break;
     if (cursors.has(cursor)) return UNUSABLE;
     cursors.add(cursor);
   }
-  return { kind: "answered", listing: rosterListingFrom(workspaceId, shares.body, links) };
+  return answered({ grants: grants.sort((left, right) => (left.grantId < right.grantId ? -1 : left.grantId > right.grantId ? 1 : 0)) });
 }
 
 /**
@@ -251,10 +267,11 @@ export function reachRosterFor(input: {
 interface RosterState {
   timer: ReturnType<typeof setInterval> | null;
   lastAttemptMs: number | null;
-  // False after the relay did not answer, until a sync pass reaches it.
-  reachable: boolean;
-  // The Next from the last listing the relay did not answer.
-  next: string;
+  lastPullMs: number | null;
+  // Set while listings get no answer, and cleared only when one answers.
+  // `sinceMs` is when the first of them started. `partial` is true when the
+  // relay answered part of one of them.
+  noAnswer: { sinceMs: number; next: string; partial: boolean } | null;
   // A listing the registry has not saved yet.
   unsaved: RosterListing | null;
   running: Promise<void> | null;
@@ -265,6 +282,11 @@ interface RosterState {
  * Keeps each open workspace's roster current: at open, after this computer
  * changes a share, when relay sync recovers, and every 10 minutes. The
  * executor asks `forRun` before a run.
+ *
+ * While listings get no answer, the cached roster stands in only as long as
+ * the relay answers nothing else either. Once a sync pass or part of a
+ * listing succeeds, other people's changes are arriving while their grants
+ * cannot be checked, so the roster is unknown until a listing answers.
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -281,8 +303,8 @@ export function createShareRosters(dependencies: {
     let state = states.get(workspaceId);
     if (!state) {
       state = {
-        timer: null, lastAttemptMs: null, reachable: true,
-        next: "Try again in a moment.", unsaved: null, running: null, again: false,
+        timer: null, lastAttemptMs: null, lastPullMs: null, noAnswer: null,
+        unsaved: null, running: null, again: false,
       };
       states.set(workspaceId, state);
     }
@@ -299,10 +321,16 @@ export function createShareRosters(dependencies: {
     }
   }
 
+  // The relay answered something since listings stopped getting an answer.
+  function relayAnswered(noAnswer: NonNullable<RosterState["noAnswer"]>, state: RosterState): boolean {
+    return noAnswer.partial || (state.lastPullMs !== null && state.lastPullMs >= noAnswer.sinceMs);
+  }
+
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
     const workspace = dependencies.findWorkspace(workspaceId);
     if (!workspace?.remote || workspace.shareView) return;
-    state.lastAttemptMs = nowMs();
+    const startedMs = nowMs();
+    state.lastAttemptMs = startedMs;
     let answer: RosterAnswer;
     try {
       answer = await dependencies.listRoster(workspace);
@@ -311,11 +339,14 @@ export function createShareRosters(dependencies: {
       answer = UNUSABLE;
     }
     if (answer.kind === "unanswered") {
-      state.reachable = false;
-      state.next = answer.next;
+      state.noAnswer = {
+        sinceMs: state.noAnswer?.sinceMs ?? startedMs,
+        next: answer.next,
+        partial: (state.noAnswer?.partial ?? false) || answer.partial,
+      };
       return;
     }
-    state.reachable = true;
+    state.noAnswer = null;
     state.unsaved = answer.listing;
     save(workspaceId, state);
   }
@@ -346,16 +377,23 @@ export function createShareRosters(dependencies: {
 
   async function forRun(workspaceId: string): Promise<ReachRoster> {
     const state = stateFor(workspaceId);
+    // With no answer and nothing else from the relay either, a run does not
+    // wait on another listing. It uses the cached roster.
+    const relayUp = state.noAnswer === null || relayAnswered(state.noAnswer, state);
     if (state.running) await state.running;
-    else if (due(state) && state.reachable) await refresh(workspaceId);
+    else if (due(state) && relayUp) await refresh(workspaceId);
     save(workspaceId, state);
     const entry = dependencies.findWorkspace(workspaceId);
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
+    const noAnswer = state.noAnswer;
+    if (entry.remote && !entry.shareView && noAnswer && relayAnswered(noAnswer, state)) {
+      return { kind: "unknown", problem: { kind: "unchecked", next: noAnswer.next } };
+    }
     return reachRosterFor({
       entry,
       localUserId: entry.remote ? null : await dependencies.localUserId(),
       latest: state.unsaved,
-      next: state.next,
+      next: noAnswer?.next ?? "Try again in a moment.",
     });
   }
 
@@ -386,15 +424,14 @@ export function createShareRosters(dependencies: {
 
     /**
      * A relay sync pass succeeded. `recovered` is true when the pass before
-     * it failed. The roster lists again then. It also lists when its own last
-     * listing got no answer, as after signing in to the right account, at
-     * most once a minute.
+     * it failed. The roster lists again then, and after a listing that got no
+     * answer, at most once a minute either way. Resolves when that listing
+     * ends.
      */
-    pulled(workspaceId: string, recovered: boolean): void {
+    pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
-      const retry = !state.reachable && due(state);
-      state.reachable = true;
-      if (recovered || retry) void refresh(workspaceId);
+      state.lastPullMs = nowMs();
+      return (recovered || state.noAnswer !== null) && due(state) ? refresh(workspaceId) : Promise.resolve();
     },
 
     forRun,

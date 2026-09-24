@@ -9,9 +9,9 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 // share dialog asks which steps a new share would stop.
 //
 // Every doubt stops a step. Paths compare two ways for that reason. Deciding
-// who is an editor ignores case and Windows name endings, so a grant spelled
-// differently still makes its holder an editor. Deciding what an editor
-// reaches compares exact paths, so a spelling never grants reach.
+// who is an editor ignores Unicode form, case, and Windows name endings, so a
+// grant spelled differently still makes its holder an editor. Deciding what an
+// editor reaches compares exact paths, so a spelling never grants reach.
 
 /** One grant on the roster, as the reach check reads it. */
 export interface RosterGrant {
@@ -136,8 +136,14 @@ function within(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
 
+// One spelling for every way a filesystem may name the same path: Unicode
+// composed form, full case folding ("ſ" is "s"), and no Windows name endings.
 function looseKey(path: string): string {
-  return path.split("/").map((segment) => stripWindowsAliasSuffix(segment).toLowerCase()).join("/");
+  return path
+    .normalize("NFC")
+    .split("/")
+    .map((segment) => stripWindowsAliasSuffix(segment).toUpperCase().toLowerCase())
+    .join("/");
 }
 
 function canEdit(person: Person, path: string): boolean {
