@@ -1744,3 +1744,81 @@ describe("MarkdownEditor dirty tracking", () => {
     }
   });
 });
+
+describe("MarkdownEditor focus", () => {
+  function mount(value: string) {
+    const ref = createRef<MarkdownEditorHandle>();
+    const view = render(
+      createElement(MarkdownEditor, {
+        ref,
+        value,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/new.md",
+        knownFiles: [],
+      }),
+    );
+    return { ref, view };
+  }
+
+  // jsdom's focus() parks the document selection on the focused element
+  // itself after the focus event. Chromium's Tab leaves no selection at all,
+  // so each case clears it and dispatches the focus event again.
+  function focusByKeyboard(editor: HTMLElement) {
+    editor.focus();
+    document.getSelection()?.removeAllRanges();
+    fireEvent.focus(editor);
+  }
+
+  it("writes a caret into an empty document when Tab focuses it", async () => {
+    const { view } = mount("");
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      focusByKeyboard(editor);
+
+      const paragraph = editor.querySelector("p");
+      const anchor = document.getSelection()?.anchorNode ?? null;
+      expect(paragraph?.contains(anchor)).toBe(true);
+      expect(selectionTextOffset(editor)).toBe(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it("leaves a caret placed by a click where it is", async () => {
+    const { view } = mount("Body text");
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      const text = editor.querySelector("p")?.firstChild;
+      if (!(text instanceof Text)) throw new Error("expected paragraph text");
+      editor.focus();
+      const range = document.createRange();
+      range.setStart(text, 4);
+      range.collapse(true);
+      const selection = document.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+
+      fireEvent.focus(editor);
+
+      expect(selectionTextOffset(editor)).toBe(4);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it("moves focus and the caret at once when the handle focuses the start", async () => {
+    const { ref, view } = mount("First\n\nSecond");
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      screen.getByTestId("markdown-editor").blur();
+
+      act(() => ref.current?.focus("start"));
+
+      expect(document.activeElement).toBe(editor);
+      expect(selectionTextOffset(editor)).toBe(0);
+    } finally {
+      view.unmount();
+    }
+  });
+});

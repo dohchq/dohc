@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { Extension, type Editor } from "@tiptap/core";
+import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
@@ -370,6 +370,18 @@ function renderInlineText(editor: Editor, source: string): string {
   }
 }
 
+/** Focus that arrives by keyboard (Tab) lands on the editor with no DOM
+ *  selection. ProseMirror's own focus handler compares that empty selection
+ *  with the last one it wrote, also empty, finds them equal and writes
+ *  nothing, so typed text has no caret to land at until Enter creates one.
+ *  Write the state selection into the DOM here. A selection already inside
+ *  the editor (a click) stays where the person put it. */
+function placeCaretOnFocus(view: EditorView): void {
+  const selection = view.dom.ownerDocument.getSelection();
+  if (selection?.anchorNode && view.dom.contains(selection.anchorNode)) return;
+  view.focus();
+}
+
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
   function MarkdownEditorInner(
     {
@@ -725,9 +737,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
           handleDOMEvents: {
-            focus: () => {
+            focus: (view) => {
               collaborationHistory?.stopCapturing();
               onFocusRef.current?.();
+              placeCaretOnFocus(view);
               return false;
             },
           },
@@ -975,8 +988,17 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useImperativeHandle(
       ref,
       () => ({
+        // Synchronous on purpose. The page title's Enter handler calls this,
+        // and Tiptap's focus command defers to the next frame, which let the
+        // next character typed land in the title instead of the body.
         focus(position) {
-          editor?.commands.focus(position);
+          if (!editor) return;
+          const { view } = editor;
+          const selection = resolveFocusPosition(view.state.doc, position);
+          if (selection) {
+            view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+          }
+          view.focus();
         },
         getMarkdown() {
           if (!editor) return value;
