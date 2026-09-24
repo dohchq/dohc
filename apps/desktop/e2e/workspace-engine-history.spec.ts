@@ -5,10 +5,13 @@ import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
+  activeWorkspace,
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openHistoryView,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
+  waitForWorkspaceReady,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -94,6 +97,62 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     await expect
       .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
       .toBe("second draft\n");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A person creates a workspace, makes its first document, types, and opens
+// History. The document's editor still holds it when capture first sees the
+// file, and capture used to count that as a failed ingest: History paused,
+// and could not list the document until its tab closed.
+test("History lists the first document of a new workspace while it is open", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    await page.getByRole("button", { name: "Change location" }).click();
+    await page.getByRole("textbox", { name: "Folder name" }).fill("my-notes");
+    await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+    await waitForWorkspaceReady(page);
+    const rootPath = join(temp.rootPath, "my-notes");
+    const workspace = await activeWorkspace(page, rootPath);
+
+    // Every capture health change notifies, and a pause stays reported until
+    // the next health poll, so reading the status on each notice sees it.
+    await page.evaluate((workspaceId) => {
+      const api = window.dohcDesktop;
+      if (!api) throw new Error("Desktop bridge is unavailable");
+      const pauses: string[] = [];
+      Object.assign(window, { historyPauses: pauses });
+      api.onWorkspaceActivity((event) => {
+        if (event.workspaceId !== workspaceId) return;
+        void api.getSyncStatus({ workspaceId }).then((status) => {
+          if (status.historyCaptureFailed) pauses.push(new Date().toISOString());
+        });
+      });
+    }, workspace.workspaceId);
+
+    await page.keyboard.press("Control+n");
+    await page.getByRole("textbox", { name: "File name" }).fill("trip/plan");
+    await page.keyboard.press("Enter");
+    const editor = page.getByTestId("markdown-editor");
+    await editor.click();
+    await page.keyboard.type("Three nights, two of us, one budget.");
+    await expect
+      .poll(() => readFile(join(rootPath, "trip/plan.md"), "utf8").catch(() => ""))
+      .toContain("one budget.");
+
+    await openHistoryView(page);
+    await expect(
+      page.locator('[data-testid="engine-moment-open"][data-moment-path="trip/plan.md"]').first(),
+    ).toContainText("Edited plan.md");
+    await expect(editor).toBeVisible();
+    expect(
+      await page.evaluate(() => (window as unknown as { historyPauses: string[] }).historyPauses),
+    ).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
