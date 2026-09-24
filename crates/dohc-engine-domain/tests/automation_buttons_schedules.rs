@@ -1,15 +1,17 @@
 //! Button presses and schedule steps claim automations without a record
-//! change: a press claims once per press id and joins an unfinished run of
-//! the same button on the same record, and a schedule claims each due time
-//! once behind a mark that only moves forward.
+//! change: a press claims once per press id, joins only its own person's
+//! unfinished run of the same button on the same record, and finds its
+//! claim after it is forgotten; a schedule claims each due time once behind
+//! a mark that only moves forward.
 
 use dohc_engine_domain::{
     AUTOMATION_CLAIM_HISTORY_LIMIT, AUTOMATION_PRESS_RETENTION_MS, AutomationChangeKind,
     AutomationClaim, AutomationClaimState, AutomationPress, AutomationPressed,
-    AutomationScheduleClaim, AutomationScheduleMark, AutomationSettle, AutomationSubscription,
-    AutomationTrigger, ChangeActorKind, DomainError, MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults,
-    claim_automation_schedule, claim_next_pending_automation, list_automation_schedule_marks,
-    press_automation, retry_automation_claim, settle_automation_claim, subscribe_automation,
+    AutomationScheduleClaim, AutomationScheduleClaimed, AutomationScheduleMark, AutomationSettle,
+    AutomationSubscription, AutomationTrigger, ChangeActorKind, DomainError,
+    MAX_AUTOMATION_SCHEDULE_RUNS, NoFaults, claim_automation_schedule,
+    claim_next_pending_automation, list_automation_schedule_marks, press_automation,
+    retry_automation_claim, settle_automation_claim, subscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -19,14 +21,17 @@ const PAY: &str = "collection:Invoices#mark-paid";
 const REPORT: &str = "collection:Invoices#weekday-report";
 const INVOICE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_INVOICE: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+const ADA: &str = "user:ada";
+const BO: &str = "user:bo";
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
     let db = engine_db_path(scratch).expect("engine db path");
     EngineStore::open(&db, 1).expect("open store")
 }
 
-fn press(
+fn press_as(
     store: &mut EngineStore,
+    pressed_by: &str,
     press_id: &str,
     record_id: &str,
     now_ms: i64,
@@ -38,24 +43,33 @@ fn press(
             press_id: press_id.to_owned(),
             automation_id: PAY.to_owned(),
             record_id: record_id.to_owned(),
-            pressed_by: "user:ada".to_owned(),
+            pressed_by: pressed_by.to_owned(),
         },
         now_ms,
         &NoFaults,
     )
 }
 
+fn press(
+    store: &mut EngineStore,
+    press_id: &str,
+    record_id: &str,
+    now_ms: i64,
+) -> Result<AutomationPressed, DomainError> {
+    press_as(store, ADA, press_id, record_id, now_ms)
+}
+
 fn claimed(pressed: AutomationPressed) -> AutomationClaim {
     match pressed {
         AutomationPressed::Claimed(claim) => claim,
-        AutomationPressed::Joined(claim) => panic!("expected a new claim, joined {claim:?}"),
+        other => panic!("expected a new claim, got {other:?}"),
     }
 }
 
 fn joined(pressed: AutomationPressed) -> AutomationClaim {
     match pressed {
         AutomationPressed::Joined(claim) => claim,
-        AutomationPressed::Claimed(claim) => panic!("expected to join, claimed {claim:?}"),
+        other => panic!("expected to join, got {other:?}"),
     }
 }
 
@@ -72,7 +86,7 @@ fn schedule(
     hash: &str,
     run: &[i64],
     through_ms: i64,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+) -> Result<AutomationScheduleClaimed, DomainError> {
     claim_automation_schedule(
         store,
         WS,
@@ -87,6 +101,14 @@ fn schedule(
     )
 }
 
+fn mark(hash: &str, through_ms: i64) -> AutomationScheduleMark {
+    AutomationScheduleMark {
+        automation_id: REPORT.to_owned(),
+        schedule_hash: hash.to_owned(),
+        through_ms,
+    }
+}
+
 fn claim_exists(store: &EngineStore, claim_id: &str) -> bool {
     store
         .read_with(|conn| {
@@ -97,6 +119,16 @@ fn claim_exists(store: &EngineStore, claim_id: &str) -> bool {
             )
         })
         .expect("read claim")
+}
+
+fn press_rows(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM automation_presses", [], |row| {
+                row.get(0)
+            })
+        })
+        .expect("count presses")
 }
 
 #[test]
@@ -116,7 +148,7 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
     assert_eq!(first.depth, 0);
     assert_eq!(first.change.kind, AutomationChangeKind::Button);
     assert_eq!(first.change.actor_kind, Some(ChangeActorKind::Human));
-    assert_eq!(first.change.on_behalf_of.as_deref(), Some("user:ada"));
+    assert_eq!(first.change.on_behalf_of.as_deref(), Some(ADA));
     assert_eq!(first.state, AutomationClaimState::Pending);
 
     // The same press sent again, a double click, and a press in another
@@ -161,12 +193,38 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
             press_id: "press-6".to_owned(),
             automation_id: "plugin:triage".to_owned(),
             record_id: INVOICE.to_owned(),
-            pressed_by: "user:ada".to_owned(),
+            pressed_by: ADA.to_owned(),
         },
         20,
         &NoFaults,
     );
     assert!(matches!(plugin, Err(DomainError::InvalidInput { .. })));
+}
+
+#[test]
+fn another_persons_press_never_joins_a_claim_that_acts_for_someone_else() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    let adas = claimed(press(&mut store, "press-ada", INVOICE, 10).expect("Ada presses"));
+    let presses = press_rows(&store);
+
+    assert_eq!(
+        press_as(&mut store, BO, "press-bo", INVOICE, 11).expect("Bo presses"),
+        AutomationPressed::Busy
+    );
+    assert_eq!(press_rows(&store), presses, "a busy press records nothing");
+    assert!(
+        matches!(
+            press_as(&mut store, BO, "press-ada", INVOICE, 12),
+            Err(DomainError::InvalidInput { .. })
+        ),
+        "Ada's press id is not Bo's"
+    );
+
+    run(&mut store, AutomationSettle::Done, 13);
+    let bos = claimed(press_as(&mut store, BO, "press-bo", INVOICE, 14).expect("Bo again"));
+    assert_ne!(bos.claim_id, adas.claim_id);
+    assert_eq!(bos.change.on_behalf_of.as_deref(), Some(BO));
 }
 
 #[test]
@@ -193,18 +251,23 @@ fn a_failed_press_retries_only_when_its_button_is_idle() {
 }
 
 #[test]
-fn a_remembered_press_keeps_its_claim_past_pruning_for_30_days() {
+fn a_press_finds_its_claim_while_remembered_or_while_its_key_remains() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     let pressed = claimed(press(&mut store, "press-1", INVOICE, 10).expect("press"));
     run(&mut store, AutomationSettle::Done, 11);
 
     // More done claims for the same automation than the history keeps.
+    let mut newest = None;
     for index in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
         let press_id = format!("press-later-{index}");
         claimed(press(&mut store, &press_id, OTHER_INVOICE, 20 + index).expect("later press"));
-        run(&mut store, AutomationSettle::Done, 20 + index);
+        newest = Some((
+            press_id,
+            run(&mut store, AutomationSettle::Done, 20 + index),
+        ));
     }
+    let (newest_press, newest_claim) = newest.expect("a later press");
     assert!(
         claim_exists(&store, &pressed.claim_id),
         "a remembered press keeps its claim"
@@ -212,13 +275,22 @@ fn a_remembered_press_keeps_its_claim_past_pruning_for_30_days() {
     let remembered = joined(press(&mut store, "press-1", INVOICE, 500).expect("resend"));
     assert_eq!(remembered.claim_id, pressed.claim_id);
 
-    // Past the retention, the next press forgets the old ones, and the next
-    // settle prunes their claims.
+    // Past the retention, the next press forgets the old ones. A forgotten
+    // press whose claim remains still finds it, for the same person only.
     let later = 10 + AUTOMATION_PRESS_RETENTION_MS + 1_000;
     claimed(press(&mut store, "press-after", OTHER_INVOICE, later).expect("press"));
-    run(&mut store, AutomationSettle::Done, later);
+    let found = joined(press(&mut store, &newest_press, OTHER_INVOICE, later + 1).expect("resend"));
+    assert_eq!(found.claim_id, newest_claim.claim_id);
+    assert!(matches!(
+        press_as(&mut store, BO, "press-later-99", OTHER_INVOICE, later + 2),
+        Err(DomainError::InvalidInput { .. })
+    ));
+
+    // The next settle prunes the forgotten claims; then the old id presses
+    // anew.
+    run(&mut store, AutomationSettle::Done, later + 3);
     assert!(!claim_exists(&store, &pressed.claim_id));
-    claimed(press(&mut store, "press-1", INVOICE, later + 1).expect("a forgotten press id"));
+    claimed(press(&mut store, "press-1", INVOICE, later + 4).expect("a forgotten press id"));
 }
 
 #[test]
@@ -235,9 +307,16 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
     );
     assert_eq!(
         schedule(&mut store, "weekdays-9", &[], 1_000).expect("start"),
-        Vec::new()
+        AutomationScheduleClaimed {
+            claims: Vec::new(),
+            mark: mark("weekdays-9", 1_000),
+        }
     );
-    for (run, through_ms) in [(&[1_000][..], 2_000), (&[2_500][..], 2_000), (&[][..], 900)] {
+    for (run, through_ms) in [
+        (&[1_000][..], 2_000),
+        (&[2_500][..], 2_000),
+        (&[1_500][..], 900),
+    ] {
         assert!(
             matches!(
                 schedule(&mut store, "weekdays-9", run, through_ms),
@@ -246,6 +325,14 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
             "{run:?} through {through_ms}"
         );
     }
+    // A clock set back runs nothing and answers the stored mark.
+    assert_eq!(
+        schedule(&mut store, "weekdays-9", &[], 900).expect("resync"),
+        AutomationScheduleClaimed {
+            claims: Vec::new(),
+            mark: mark("weekdays-9", 1_000),
+        }
+    );
     let over = (0..=MAX_AUTOMATION_SCHEDULE_RUNS as i64)
         .map(|index| 1_001 + index)
         .collect::<Vec<_>>();
@@ -254,7 +341,9 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
         Err(DomainError::InvalidInput { .. })
     ));
 
-    let claims = schedule(&mut store, "weekdays-9", &[1_500, 2_000], 2_000).expect("run");
+    let stepped = schedule(&mut store, "weekdays-9", &[1_500, 2_000], 2_000).expect("run");
+    assert_eq!(stepped.mark, mark("weekdays-9", 2_000));
+    let claims = stepped.claims;
     assert_eq!(claims.len(), 2);
     assert_eq!(
         claims[0].trigger,
@@ -273,11 +362,7 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
     ));
     assert_eq!(
         list_automation_schedule_marks(&store, WS).expect("marks"),
-        vec![AutomationScheduleMark {
-            automation_id: REPORT.to_owned(),
-            schedule_hash: "weekdays-9".to_owned(),
-            through_ms: 2_000,
-        }]
+        vec![mark("weekdays-9", 2_000)]
     );
 
     // A changed schedule starts over, and a change back cannot claim a due
@@ -289,7 +374,38 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
     schedule(&mut store, "weekdays-10", &[], 1_200).expect("restart");
     schedule(&mut store, "weekdays-9", &[], 1_200).expect("change back");
     assert_eq!(
-        schedule(&mut store, "weekdays-9", &[1_500], 1_600).expect("repeat"),
+        schedule(&mut store, "weekdays-9", &[1_500], 1_600)
+            .expect("repeat")
+            .claims,
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_done_schedule_claim_keeps_its_key_past_the_history() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    schedule(&mut store, "hourly", &[], 0).expect("start");
+    let first_hundred = (1..=100).collect::<Vec<i64>>();
+    let first = schedule(&mut store, "hourly", &first_hundred, 100)
+        .expect("run 100")
+        .claims;
+    schedule(&mut store, "hourly", &[101], 101).expect("run one more");
+    for step in 0..=AUTOMATION_CLAIM_HISTORY_LIMIT {
+        run(&mut store, AutomationSettle::Done, 200 + step);
+    }
+    assert!(
+        claim_exists(&store, &first[0].claim_id),
+        "the oldest schedule claim keeps its key"
+    );
+
+    // A reset mark that reaches the same due time again claims nothing.
+    schedule(&mut store, "daily", &[], 0).expect("change");
+    schedule(&mut store, "hourly", &[], 0).expect("change back");
+    assert_eq!(
+        schedule(&mut store, "hourly", &[1], 1)
+            .expect("repeat")
+            .claims,
         Vec::new()
     );
 }

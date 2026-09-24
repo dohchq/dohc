@@ -497,10 +497,13 @@ impl EngineService {
         Ok(automation_claim_json(&claim))
     }
 
-    /// A person pressed a Button field. Answers the claim that runs the
-    /// press: a new pending claim, which announces itself post-commit to
-    /// wake the executor, or the claim a remembered press or an unfinished
-    /// run of the same button on the same record already holds.
+    /// A person pressed a Button field. Answers `{ busy, claim }`: the claim
+    /// that runs the press, either a new pending claim, which announces
+    /// itself post-commit to wake the executor, or the claim this person's
+    /// earlier press of the same button on the same record holds. `busy` is
+    /// true, with no claim, while the button runs on the record for someone
+    /// else. `pressedBy` must be the person main checked, not a value the
+    /// renderer sent.
     pub(super) async fn automations_press(
         &self,
         ctx: &RequestContext,
@@ -537,13 +540,17 @@ impl EngineService {
                 claim
             }
             AutomationPressed::Joined(claim) => claim,
+            AutomationPressed::Busy => {
+                return Ok(json!({ "busy": true, "claim": null }));
+            }
         };
-        Ok(automation_claim_json(&claim))
+        Ok(json!({ "busy": false, "claim": automation_claim_json(&claim) }))
     }
 
     /// The scheduler claims the due times it runs and moves the schedule's
-    /// mark past the ones it skips, in one transaction. New claims announce
-    /// themselves post-commit.
+    /// mark past the ones it skips, in one transaction. Answers the new
+    /// claims, which announce themselves post-commit, and the mark after the
+    /// step.
     pub(super) async fn automations_claim_schedule(
         &self,
         ctx: &RequestContext,
@@ -553,7 +560,7 @@ impl EngineService {
         let params: AutomationClaimScheduleParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let claims = Self::read_under_ctx(
+        let claimed = Self::read_under_ctx(
             &cancellation,
             "automations.claimSchedule",
             open.actor.automation_claim_schedule(
@@ -570,9 +577,10 @@ impl EngineService {
             ),
         )
         .await?;
-        emit_automation_claimed(&self.events, &open.workspace_id, &claims);
+        emit_automation_claimed(&self.events, &open.workspace_id, &claimed.claims);
         Ok(json!({
-            "claims": claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
+            "claims": claimed.claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
+            "mark": automation_schedule_mark_json(&claimed.mark),
         }))
     }
 

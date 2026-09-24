@@ -1357,7 +1357,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
         "pressedBy": "user:ada",
         "nowMs": 100,
     });
-    let pressed = call(
+    let answer = call(
         &transport,
         &handle,
         &mut id,
@@ -1365,6 +1365,8 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
         press.clone(),
     )
     .await;
+    assert_eq!(answer["busy"], json!(false));
+    let pressed = &answer["claim"];
     assert_eq!(pressed["trigger"], json!({ "key": "press:press-1" }));
     assert_eq!(pressed["recordId"], json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert_eq!(pressed["collectionPath"], json!("Invoices"));
@@ -1384,10 +1386,24 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     assert_eq!(claimed[0]["claimId"], pressed["claimId"]);
 
     let again = call(&transport, &handle, &mut id, "automations.press", press).await;
-    assert_eq!(again["claimId"], pressed["claimId"]);
+    assert_eq!(again["claim"]["claimId"], pressed["claimId"]);
+    let busy = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.press",
+        json!({
+            "pressId": "press-bo",
+            "automationId": PAY,
+            "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pressedBy": "user:bo",
+        }),
+    )
+    .await;
+    assert_eq!(busy, json!({ "busy": true, "claim": null }));
     assert!(
         claimed_events(&mut notices).is_empty(),
-        "a remembered press announces nothing"
+        "a remembered or busy press announces nothing"
     );
     let not_collection = call_error(
         &transport,
@@ -1412,7 +1428,13 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
         json!({ "automationId": REPORT, "scheduleHash": "h1", "run": [], "throughMs": 1_000 }),
     )
     .await;
-    assert_eq!(started, json!({ "claims": [] }));
+    assert_eq!(
+        started,
+        json!({
+            "claims": [],
+            "mark": { "automationId": REPORT, "scheduleHash": "h1", "throughMs": 1_000 },
+        })
+    );
     let refused = call_error(
         &transport,
         &handle,
@@ -1443,6 +1465,7 @@ async fn presses_and_schedule_steps_claim_through_rpc() {
     );
     assert_eq!(ran["claims"][0]["recordId"], Value::Null);
     assert_eq!(ran["claims"][0]["change"]["kind"], json!("schedule"));
+    assert_eq!(ran["mark"]["throughMs"], json!(3_000));
     assert_eq!(claimed_events(&mut notices).len(), 1);
 
     let marks = call(

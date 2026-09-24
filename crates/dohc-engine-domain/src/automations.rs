@@ -1612,9 +1612,12 @@ pub struct AutomationPress {
 pub enum AutomationPressed {
     /// The press inserted a pending claim.
     Claimed(AutomationClaim),
-    /// The press was already recorded, or the automation already had a
-    /// pending or running claim for the record. This is that claim.
+    /// The same person's press already has this claim: the press was sent
+    /// again, or the button was already running for them on the record.
     Joined(AutomationClaim),
+    /// The button is already running on the record for another person.
+    /// Their claim acts for them, so this press gets none.
+    Busy,
 }
 
 /// The Collection path of the Collection automation a button or schedule
@@ -1625,15 +1628,23 @@ fn button_or_schedule_collection(automation_id: &str) -> Result<&str, DomainErro
     })
 }
 
-/// Record one button press and return the claim that runs it, in one
-/// transaction. A press id this computer remembers returns its claim. When
-/// the automation already has a pending or running claim for the record,
-/// the press joins it, so a double click or two windows run once. Otherwise
-/// the press inserts a pending claim keyed `press:<press id>`, at depth 0,
-/// acting for the person who pressed. Presses older than
-/// [`AUTOMATION_PRESS_RETENTION_MS`] are forgotten first. Claim pruning
-/// skips a claim a remembered press names, so a remembered press always
-/// finds its claim.
+/// Record one button press and answer the claim that runs it, in one
+/// transaction. A button claim acts for the one person who pressed, so a
+/// press only ever joins that person's claim:
+///
+/// - A press id this computer remembers, or the key `press:<press id>` of
+///   a claim it still holds, answers that claim.
+/// - When the automation already has a pending or running claim for the
+///   record, the same person's press joins it, so a double click or two
+///   windows run once. Another person's press is
+///   [`AutomationPressed::Busy`] and records nothing.
+/// - Otherwise the press inserts a pending claim keyed `press:<press id>`,
+///   at depth 0, acting for the person who pressed.
+///
+/// A press id that names another person's press, or another button or
+/// record, is refused. Presses older than [`AUTOMATION_PRESS_RETENTION_MS`]
+/// are forgotten first, and claim pruning skips a claim a remembered press
+/// names.
 pub fn press_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -1648,6 +1659,9 @@ pub fn press_automation_in_tx(
         &press.pressed_by,
         "The person who pressed the button is invalid.",
     )?;
+    let another_press = DomainError::InvalidInput {
+        reason: "This press id already names another person's press, or another button or record.",
+    };
     conn.execute(
         "DELETE FROM automation_presses WHERE workspace_id = ?1 AND pressed_at_ms < ?2",
         params![
@@ -1656,20 +1670,21 @@ pub fn press_automation_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    let remembered: Option<(String, String, String)> = conn
+    let remembered: Option<(String, String, String, String)> = conn
         .query_row(
-            "SELECT automation_id, record_id, claim_id FROM automation_presses \
+            "SELECT automation_id, record_id, pressed_by, claim_id FROM automation_presses \
              WHERE workspace_id = ?1 AND press_id = ?2",
             params![workspace_id, press_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    if let Some((automation_id, remembered_record, claim_id)) = remembered {
-        if automation_id != press.automation_id || remembered_record != record_id {
-            return Err(DomainError::InvalidInput {
-                reason: "This press id already names a press of another button or record.",
-            });
+    if let Some((automation_id, remembered_record, remembered_by, claim_id)) = remembered {
+        if automation_id != press.automation_id
+            || remembered_record != record_id
+            || remembered_by != pressed_by
+        {
+            return Err(another_press);
         }
         return claim_by_id(conn, workspace_id, &claim_id)?
             .map(AutomationPressed::Joined)
@@ -1677,27 +1692,51 @@ pub fn press_automation_in_tx(
                 reason: "a remembered button press lost its claim",
             });
     }
-    let active: Option<String> = conn
+    // A press this computer forgot can still have its claim.
+    let key = format!("press:{press_id}");
+    let keyed: Option<String> = conn
         .query_row(
             "SELECT claim_id FROM automation_claims \
-             WHERE workspace_id = ?1 AND automation_id = ?2 AND record_id = ?3 \
-               AND change_kind = 'button' AND state IN ('pending', 'running')",
-            params![workspace_id, press.automation_id, record_id],
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND trigger_key = ?3",
+            params![workspace_id, press.automation_id, key],
             |row| row.get(0),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let pressed = match active {
-        Some(claim_id) => AutomationPressed::Joined(
-            claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
-                reason: "an active button claim vanished under the single writer",
-            })?,
-        ),
-        None => {
+    let active: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT claim_id, on_behalf_of FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 AND record_id = ?3 \
+               AND change_kind = 'button' AND state IN ('pending', 'running')",
+            params![workspace_id, press.automation_id, record_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let existing = |claim_id: &str| -> Result<AutomationClaim, DomainError> {
+        claim_by_id(conn, workspace_id, claim_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "a button claim vanished under the single writer",
+        })
+    };
+    let (claim, inserted) = match (keyed, active) {
+        (Some(claim_id), _) => {
+            let claim = existing(&claim_id)?;
+            if claim.record_id.as_deref() != Some(record_id.as_str())
+                || claim.change.on_behalf_of.as_deref() != Some(pressed_by.as_str())
+            {
+                return Err(another_press);
+            }
+            (claim, false)
+        }
+        (None, Some((claim_id, on_behalf_of))) => {
+            if on_behalf_of.as_deref() != Some(pressed_by.as_str()) {
+                return Ok(AutomationPressed::Busy);
+            }
+            (existing(&claim_id)?, false)
+        }
+        (None, None) => {
             let claimed = ClaimedChange {
-                trigger: AutomationTrigger::Key {
-                    key: format!("press:{press_id}"),
-                },
+                trigger: AutomationTrigger::Key { key },
                 record_id: Some(record_id.as_str()),
                 collection_path,
                 depth: 0,
@@ -1710,8 +1749,6 @@ pub fn press_automation_in_tx(
                 fields: AutomationFieldFacts::default(),
                 chain_stopped: false,
             };
-            // The key is taken only by a press this computer forgot: the
-            // same id sent again more than 30 days later.
             let claim = insert_claims(
                 conn,
                 workspace_id,
@@ -1720,13 +1757,12 @@ pub fn press_automation_in_tx(
                 now_ms,
             )?
             .pop()
-            .ok_or(DomainError::InvalidInput {
-                reason: "This press id was used by an earlier press.",
+            .ok_or(DomainError::StateCorrupt {
+                reason: "a new button press claimed nothing",
             })?;
-            AutomationPressed::Claimed(claim)
+            (claim, true)
         }
     };
-    let (AutomationPressed::Claimed(claim) | AutomationPressed::Joined(claim)) = &pressed;
     conn.execute(
         "INSERT INTO automation_presses \
          (workspace_id, press_id, automation_id, record_id, pressed_by, pressed_at_ms, claim_id) \
@@ -1742,7 +1778,11 @@ pub fn press_automation_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    Ok(pressed)
+    Ok(if inserted {
+        AutomationPressed::Claimed(claim)
+    } else {
+        AutomationPressed::Joined(claim)
+    })
 }
 
 /// How far one schedule has been claimed or skipped.
@@ -1770,19 +1810,30 @@ pub struct AutomationScheduleClaim {
     pub through_ms: i64,
 }
 
+/// What one scheduler step claimed, and the schedule's mark after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationScheduleClaimed {
+    pub claims: Vec<AutomationClaim>,
+    pub mark: AutomationScheduleMark,
+}
+
 /// Claim a schedule's due times and move its mark, in one transaction. Each
 /// due time claims once, keyed `schedule:<due ms>`, with no record, at depth
-/// 0. A time at or before the stored mark is refused, and the mark never
-/// moves back. A new automation, a changed schedule, or a switch-on starts
-/// the mark: when no mark exists for the automation, or the stored mark
-/// counts a different schedule, the call only sets the mark, so it runs
-/// nothing. Returns the claims inserted.
+/// 0. A done schedule claim keeps its key when a settle prunes, so a due
+/// time never claims twice. A time at or before the stored mark is refused,
+/// and the mark never moves back: a step that runs nothing and would move
+/// it back, as after this computer's clock was set back, changes nothing
+/// and answers the stored mark so the scheduler can catch up. A new
+/// automation, a changed schedule, or a switch-on starts the mark: when no
+/// mark exists for the automation, or the stored mark counts a different
+/// schedule, the call only sets the mark, so it runs nothing. Answers the
+/// claims inserted and the mark.
 pub fn claim_automation_schedule_in_tx(
     conn: &Connection,
     workspace_id: &str,
     schedule: &AutomationScheduleClaim,
     now_ms: i64,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+) -> Result<AutomationScheduleClaimed, DomainError> {
     let collection_path = button_or_schedule_collection(&schedule.automation_id)?;
     let schedule_hash =
         normalize_automation_identifier(&schedule.schedule_hash, "Schedule hash is invalid.")?;
@@ -1803,6 +1854,16 @@ pub fn claim_automation_schedule_in_tx(
     let mut inserted = Vec::new();
     match stored {
         Some((hash, through_ms)) if hash == schedule_hash => {
+            if schedule.through_ms < through_ms && schedule.run.is_empty() {
+                return Ok(AutomationScheduleClaimed {
+                    claims: Vec::new(),
+                    mark: AutomationScheduleMark {
+                        automation_id: schedule.automation_id.clone(),
+                        schedule_hash,
+                        through_ms,
+                    },
+                });
+            }
             if schedule.through_ms < through_ms {
                 return Err(DomainError::InvalidInput {
                     reason: "A schedule's mark cannot move back.",
@@ -1863,7 +1924,14 @@ pub fn claim_automation_schedule_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    Ok(inserted)
+    Ok(AutomationScheduleClaimed {
+        claims: inserted,
+        mark: AutomationScheduleMark {
+            automation_id: schedule.automation_id.clone(),
+            schedule_hash,
+            through_ms: schedule.through_ms,
+        },
+    })
 }
 
 /// Every schedule mark in the workspace, ordered by automation id.
@@ -2241,8 +2309,9 @@ pub(crate) fn settle_automation_claim_in_tx(
     // the row's key is what keeps it from claiming twice. A done message
     // claim keeps its key without its message for the same reason: a message
     // stored again after its thread was removed must not run twice. A done
-    // button claim stays while a remembered press names it, so the press
-    // sent again finds it.
+    // schedule claim keeps its key, so a due time a reset mark reaches again
+    // does not run twice. A done button claim stays while a remembered press
+    // names it, so the press sent again finds it.
     let prune = params![
         workspace_id,
         settled.automation_id,
@@ -2258,10 +2327,12 @@ pub(crate) fn settle_automation_claim_in_tx(
 /// Delete an automation's settled record and button claims past its
 /// history, except a button claim a kept press names. The terms
 /// before `claim_id` match `idx_automation_claims_prunable`, so the delete
-/// reads only those claims, not the key rows message claims keep.
+/// never reads the key rows message claims keep. It does read the schedule
+/// claims it keeps, whose key rows last about 30 days.
 pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation_claims \
      WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
        AND trigger_moment_order IS NULL AND change_kind <> 'message' \
+       AND change_kind <> 'schedule' \
        AND NOT EXISTS (SELECT 1 FROM automation_presses p \
          WHERE p.workspace_id = automation_claims.workspace_id \
            AND p.claim_id = automation_claims.claim_id) \
@@ -2477,7 +2548,7 @@ pub fn claim_automation_schedule(
     schedule: &AutomationScheduleClaim,
     now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+) -> Result<AutomationScheduleClaimed, DomainError> {
     committed(store.write_with(faults, |tx| {
         claim_automation_schedule_in_tx(tx, workspace_id, schedule, now_ms)
     })?)
