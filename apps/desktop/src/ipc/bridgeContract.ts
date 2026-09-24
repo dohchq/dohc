@@ -12,7 +12,7 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
-import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionAutomationHolds,
   CollectionAutomationRetry,
@@ -5237,12 +5237,16 @@ export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID
 export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
 
 // Replaces the file's automations with these, over the content the panel
-// read (null when the file did not exist).
+// read (null when the file did not exist). `reformat` is the person's
+// agreement to lose the file's comments and hand formatting.
 export const WriteCollectionAutomationsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   collectionPath: PATH_STRING,
   expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH.nullable(),
-  automations: z.array(z.record(z.string(), z.unknown())).max(50),
+  // The shape is only checked here; main's writer reads its own text back
+  // and refuses anything the file contract would not produce.
+  automations: z.array(z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value))).max(50),
+  reformat: z.boolean(),
 });
 export type WriteCollectionAutomationsPayload = z.infer<typeof WriteCollectionAutomationsPayload>;
 export type WriteCollectionAutomationsResult =
@@ -5250,6 +5254,9 @@ export type WriteCollectionAutomationsResult =
   | { status: "conflict" }
   // The file has entries dohc cannot read; it has to be fixed by hand.
   | { status: "unreadable" }
+  // The writer would lose the file's comments or hand formatting, and the
+  // person has not agreed to that. Nothing was written.
+  | { status: "reformats" }
   | { status: "refused"; diagnostics: AutomationDiagnostic[] }
   | { status: "unavailable" };
 

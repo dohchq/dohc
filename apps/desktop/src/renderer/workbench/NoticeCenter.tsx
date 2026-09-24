@@ -13,6 +13,7 @@ import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import { relativeTime } from "../relativeTime";
 import type { AutomationHoldNotice } from "../shell/useAutomationHolds";
 import type {
   AgentNotification,
@@ -71,20 +72,6 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-// Coarse relative time for the notice ledger. Recomputed on every render;
-// a 30s tick while the panel is open keeps labels honest between updates.
-function relativeTime(thenMs: number): string {
-  const elapsedMs = Math.max(0, Date.now() - thenMs);
-  const deltaMinutes = Math.floor(elapsedMs / 60_000);
-  if (deltaMinutes < 1) return "just now";
-  if (deltaMinutes < 60) return `${deltaMinutes}m ago`;
-  const deltaHours = Math.floor(deltaMinutes / 60);
-  if (deltaHours < 24) return `${deltaHours}h ago`;
-  return new Date(thenMs).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
 
 const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
   finished: CheckCircle2,

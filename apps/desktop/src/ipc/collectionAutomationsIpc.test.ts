@@ -17,6 +17,8 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
+  const reindexed: unknown[] = [];
+  const collectionAutomations = { handleWatcherEvents: (events: unknown) => { reindexed.push(events); } } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -24,7 +26,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) =>
-      await work({ workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace" }, state: { collectionAutomations: {} as CollectionAutomations } }),
+      await work({ workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace" }, state: { collectionAutomations } }),
     sharedViewOf: () => (options.sharedView ? {} : null),
     readText: async () => options.file === undefined ? null : { text: options.file, truncated: false, contentHash: sha256(options.file) },
     createFile,
@@ -34,11 +36,11 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
-      workspaceId: WORKSPACE_ID, collectionPath: "Tasks", ...payload,
+      workspaceId: WORKSPACE_ID, collectionPath: "Tasks", reformat: false, ...payload,
     });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { write, call, createFile, writeText };
+  return { write, call, createFile, writeText, reindexed };
 }
 
 describe("writing automations.yaml from the panel", () => {
@@ -49,6 +51,16 @@ describe("writing automations.yaml from the panel", () => {
     expect(text.initialText).toContain("- id: stamp");
     expect(text.initialText).toContain("Finished on: '=today()'");
     expect(result).toEqual({ status: "written", contentHash: sha256(text.initialText) });
+    expect(f.reindexed).toEqual([[{ operation: "update", path: "Tasks/automations.yaml" }]]);
+  });
+
+  it("asks before it lays out a file that has comments or hand formatting", async () => {
+    const file = "# Tasks\nversion: 1\nautomations: []\n";
+    const f = fixture({ file });
+    await expect(f.write({ expectedContentHash: sha256(file), automations: [stamp] })).resolves.toEqual({ status: "reformats" });
+    expect(f.writeText).not.toHaveBeenCalled();
+    await expect(f.write({ expectedContentHash: sha256(file), automations: [stamp], reformat: true }))
+      .resolves.toMatchObject({ status: "written" });
   });
 
   it("replaces the file only over the content the panel read", async () => {

@@ -2292,14 +2292,25 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
-  // Open automation, from a notice: the automation's Collection opens.
+  // Open automation, from a notice: the automation's Collection opens with
+  // the ⚡ panel on its runs. The page takes the ask once and clears it.
+  const [automationFocus, setAutomationFocus] = useState<
+    { collectionPath: string; automationId: string; seq: number } | null
+  >(null);
   const openAutomation = useCallback(
     (automationId: string) => {
       const target = collectionAutomationOf(automationId);
-      if (target) openCollectionTab(target.collection);
+      if (!target) return;
+      openCollectionTab(target.collection);
+      setAutomationFocus((current) => ({
+        collectionPath: target.collection,
+        automationId,
+        seq: (current?.seq ?? 0) + 1,
+      }));
     },
     [openCollectionTab],
   );
+  const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const openDataCollection = useCallback(
     (datasetId: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
@@ -5338,6 +5349,13 @@ export function DesktopWorkspaceShell(props: {
                     }
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
+                    onOpenFile={(path) => openFile(path)}
+                    onError={reportShellError}
+                    onNotice={showSuccessNotice}
+                    automationFocus={
+                      automationFocus?.collectionPath === groupCollectionPath ? automationFocus : null
+                    }
+                    onAutomationFocused={clearAutomationFocus}
                   />
                 </Suspense>
               ) : (

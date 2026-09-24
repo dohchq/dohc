@@ -23,6 +23,18 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("runs a success notice's undo once and drops the row", () => {
+    const undo = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });
+    act(() => result.current.showSuccessNotice('Deleted "Stamp"', undo));
+    expect(result.current.shellErrors[0]).toMatchObject({ tone: "success", retry: null, action: { label: "Undo" } });
+    const id = result.current.shellErrors[0]!.id;
+
+    act(() => result.current.runShellErrorAction(id));
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
   it("replaces a row that says the same thing or has the same kind", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellError("Could not refresh history.", new Error("a")));

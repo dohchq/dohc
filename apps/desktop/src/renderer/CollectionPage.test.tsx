@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -218,8 +218,19 @@ function makeBridge(
         };
       },
     ),
+    // The header's ⚡ count reads the Collection's automations.
+    listCollectionAutomations: vi.fn(async () => ({ status: "missing" as const })),
   };
 }
+
+// The props a page gets from the shell besides its collection and view.
+const SHELL_PROPS = {
+  onOpenFile: () => undefined,
+  onError: () => undefined,
+  onNotice: () => undefined,
+  automationFocus: null,
+  onAutomationFocused: () => undefined,
+};
 
 // The page plus the ONE writer host the shell mounts; rerenders reuse this
 // element so the host is never doubled or dropped.
@@ -240,6 +251,7 @@ function pageWithHost(
         onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
         onNewRecord={onNewRecord}
         onOpenRecord={onOpenRecord}
+        {...SHELL_PROPS}
       />
       <CollectionFieldWriteHost />
     </>
@@ -290,6 +302,39 @@ describe("CollectionPage", () => {
 
     fireEvent.click(screen.getByTestId("collection-new-record"));
     expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("tasks");
+  });
+
+  it("counts the Collection's automations in the header and docks the ⚡ panel beside the view", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    const automations = { status: "read" as const, contentHash: hashFor(0), automations: [
+      { valid: false as const, id: "a", name: "A", diagnostics: [] },
+      { valid: false as const, id: "b", name: "B", diagnostics: [] },
+    ] };
+    bridge.listCollectionAutomations.mockResolvedValue(automations as never);
+    Object.assign(bridge, {
+      onAutomationFailuresChanged: () => () => undefined,
+      onAutomationHoldsChanged: () => () => undefined,
+    });
+    renderPage(bridge);
+
+    const button = await screen.findByTestId("collection-automations-button");
+    await waitFor(() => expect(button.textContent).toBe("Automations2"));
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(button);
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    const panel = screen.getByTestId("collection-automations-panel");
+    expect(panel.getAttribute("aria-label")).toBe("Automations");
+    fireEvent.click(within(panel).getByRole("button", { name: "Close automations" }));
+    expect(screen.queryByTestId("collection-automations-panel")).toBeNull();
+
+    // Only a change to automations.yaml reads them again while the panel is closed.
+    const reads = bridge.listCollectionAutomations.mock.calls.length;
+    const queries = bridge.queryCollectionRecords.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] }));
+    await waitFor(() => expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries + 1));
+    expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads);
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/automations.yaml"] }));
+    await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads + 1));
   });
 
   it("refreshes when workspace activity touches the collection folder", async () => {
@@ -1203,6 +1248,7 @@ describe("cell write queue", () => {
         onActiveViewChange={() => undefined}
         onNewRecord={() => undefined}
         onOpenRecord={() => undefined}
+        {...SHELL_PROPS}
       />,
     );
     await screen.findByText("Plan");
