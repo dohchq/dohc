@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTOMATION_LIMITS, createAutomationEvaluator } from "./automation.ts";
-import type { AutomationFormula, AutomationScope } from "./automation.ts";
+import type { AutomationFormula, AutomationScope, AutomationTextPart } from "./automation.ts";
 
 const threads = vi.hoisted(() => ({ started: 0, terminated: 0 }));
 vi.mock("node:worker_threads", async importOriginal => {
@@ -16,7 +16,7 @@ const scope: AutomationScope = {
   record: { Name: "Ana Lopez", Status: "Done", Tags: ["trip", "urgent"], Price: 12.5, Quantity: 3, Due: "2026-09-30" },
   previous: { Status: "Doing" },
   trigger: { kind: "field-changed", field: "Status" },
-  results: { total: 37.5 },
+  bindings: { total: 37.5, tasks: [{ id: "record-7", Name: "Book hotel" }, { id: "record-8", Name: "Pack" }] },
   person: { id: "person-1", name: "Ana" },
   now: "2026-09-24T09:30:00.000+08:00",
 };
@@ -118,19 +118,28 @@ describe("formula helpers", () => {
 });
 
 describe("formulas", () => {
-  it("read the record, previous values, trigger, results, and person", async () => {
+  it("read the record, previous values, trigger, person, message, and bound step results", async () => {
     expect(await values([
-      'record.Status == "Done" && previous.Status != "Done"', "trigger.kind", "trigger.field", "results.total", "person.name", "record.Missing",
-    ])).toEqual([true, "field-changed", "Status", 37.5, "Ana", null]);
+      'record.Status == "Done" && previous.Status != "Done"', "trigger.kind", "trigger.field", "person.name", "record.Missing",
+      "total", "tasks.length", "tasks[1].Name", "message",
+    ])).toEqual([true, "field-changed", "Status", "Ana", null, 37.5, 2, "Pack", null]);
     const added = { record: { Name: "Ana" }, trigger: { kind: "record-added" }, person: null, now: scope.now };
-    expect(await evaluator.evaluate(added, [expression("previous.Name"), expression("results"), expression("person")])).toEqual([
-      { ok: true, value: null }, { ok: true, value: {} }, { ok: true, value: null },
+    expect(await evaluator.evaluate(added, [expression("previous.Name"), expression("person"), expression("typeof total")])).toEqual([
+      { ok: true, value: null }, { ok: true, value: null }, { ok: true, value: "undefined" },
+    ]);
+    const shadowing = { ...scope, bindings: { Math: 3, JSON: "text", Object: null } };
+    expect(await evaluator.evaluate(shadowing, [expression("Math + 1"), expression("round(2.5)"), expression("JSON"), expression('join(["a", "b"])')])).toEqual([
+      { ok: true, value: 4 }, { ok: true, value: 3 }, { ok: true, value: "text" }, { ok: true, value: "a, b" },
+    ]);
+    const posted = { trigger: { kind: "group-message", group: "Trip" }, message: { text: "/task Buy tickets" }, person: null, now: scope.now };
+    expect(await evaluator.evaluate(posted, [expression("message.text"), expression("record")])).toEqual([
+      { ok: true, value: "/task Buy tickets" }, { ok: true, value: null },
     ]);
   });
 
   it("cannot change the scope", async () => {
-    expect(await values(['record.Status = "Open"', 'record.Tags.push("x")', "record = {}", 'trigger.kind = "x"', "results.total = 0"]))
-      .toEqual(Array.from({ length: 5 }, () => expect.objectContaining({ code: "runtime", message: expect.stringMatching(/^TypeError: /) })));
+    expect(await values(['record.Status = "Open"', 'record.Tags.push("x")', "record = {}", 'trigger.kind = "x"', "total = 0", 'tasks[0].Name = "x"']))
+      .toEqual(Array.from({ length: 6 }, () => expect.objectContaining({ code: "runtime", message: expect.stringMatching(/^TypeError: /) })));
     expect(await value("record.Status")).toEqual({ ok: true, value: "Done" });
   });
 
@@ -142,16 +151,16 @@ describe("formulas", () => {
       ]);
   });
 
-  it("fill text with values in braces", async () => {
-    const text = (source: string): AutomationFormula => ({ kind: "text", source });
+  it("fill message text with values", async () => {
+    // The file contract splits "Hi {record.Name}!" into these parts.
+    const text = (...parts: Array<string | { expression: string }>): AutomationFormula => ({ kind: "text", parts: parts.map(part =>
+      typeof part === "string" ? { kind: "text", text: part } : { kind: "expression", expression: part.expression }) });
     expect(await evaluator.evaluate(scope, [
-      text("Hi {record.Name}!"), text("Tags: {record.Tags}"), text("{results}"), text("[{record.Missing}]"),
-      text("{{literal}} and }}"), text('{"}" + record.Status}'), text("Due {formatDate(record.Due, \"MMM D\")}"), text("Hi {record.Name"), text("Hi {}"),
+      text("Hi ", { expression: "record.Name" }, "!"), text("Tags: ", { expression: "record.Tags" }), text({ expression: "tasks[0]" }),
+      text("[", { expression: "record.Missing" }, "]"), text("Due ", { expression: 'formatDate(record.Due, "MMM D")' }), text("{", { expression: "}" }),
     ])).toEqual([
-      { ok: true, value: "Hi Ana Lopez!" }, { ok: true, value: "Tags: trip, urgent" }, { ok: true, value: '{"total":37.5}' }, { ok: true, value: "[]" },
-      { ok: true, value: "{literal} and }" }, { ok: true, value: "}Done" }, { ok: true, value: "Due Sep 30" },
-      { ok: false, error: { code: "syntax", message: "SyntaxError: The text has a { without a matching }." } },
-      { ok: false, error: expect.objectContaining({ code: "syntax" }) },
+      { ok: true, value: "Hi Ana Lopez!" }, { ok: true, value: "Tags: trip, urgent" }, { ok: true, value: '{"id":"record-7","Name":"Book hotel"}' },
+      { ok: true, value: "[]" }, { ok: true, value: "Due Sep 30" }, { ok: false, error: expect.objectContaining({ code: "syntax" }) },
     ]);
   });
 
@@ -173,7 +182,12 @@ describe("formulas", () => {
     for (const now of ["2026-09-24T09:30:00", "2026-02-30T09:30:00Z", "2026-09-24T24:00:00Z", "2026-09-24T09:30:00+15:00"]) {
       await expect(evaluator.evaluate({ ...scope, now }, [expression("1")])).rejects.toThrow("`now` with a UTC offset");
     }
-    await expect(evaluator.evaluate(scope, [{ kind: "code" as "expression", source: "1" }])).rejects.toThrow("Unknown formula kind");
+    await expect(evaluator.evaluate(scope, [{ kind: "code" as "expression", source: "1" }])).rejects.toThrow("not an expression or message text");
+    await expect(evaluator.evaluate(scope, [{ kind: "text", parts: [{ kind: "expression", text: "1" } as unknown as AutomationTextPart] }]))
+      .rejects.toThrow("not an expression or message text");
+    for (const name of ["record", "today", "now", "message", "undefined", "not-a-name"]) {
+      await expect(evaluator.evaluate({ ...scope, bindings: { [name]: 1 } }, [expression("1")])).rejects.toThrow(`cannot bind the name "${name}"`);
+    }
     expect(await evaluator.evaluate(scope, [])).toEqual([]);
   });
 });
@@ -188,7 +202,7 @@ describe("code steps", () => {
           { action: "add", collection: "Trip/Tasks", fields: { Name: "Book hotel for " + ctx.person.name } },
           { action: "change", collection: "Trip/Tasks", id: "record-7", fields: { Status: "Open" } },
         ],
-        output: { total: ctx.sum(ctx.record.Price, ctx.results.total), tags: ctx.record.Tags },
+        output: { total: ctx.sum(ctx.record.Price, ctx.total), tags: ctx.record.Tags },
       };`);
     expect(result).toEqual({ ok: true, value: {
       set: { "Finished on": "2026-09-24", Due: "2026-10-01" },
@@ -230,14 +244,19 @@ describe("code steps", () => {
 });
 
 describe("limits", () => {
-  it("stop a runaway formula or code step and keep the worker", async () => {
+  it("stop a runaway formula and keep the worker", async () => {
     const started = threads.started;
     const [loop, next] = await evaluator.evaluate(scope, [expression("(() => { for (;;) {} })()"), expression("1 + 1")]);
     expect(loop).toEqual({ ok: false, error: { code: "timeout", message: expect.stringContaining(`${AUTOMATION_LIMITS.formulaMs} ms`) } });
     expect(next).toEqual({ ok: true, value: 2 });
-    expect(await evaluator.runCode(scope, "for (;;) {}")).toEqual({ ok: false, error: { code: "timeout", message: expect.stringContaining(`${AUTOMATION_LIMITS.codeMs} ms`) } });
     expect(await value("record.Name")).toEqual({ ok: true, value: "Ana Lopez" });
     expect(threads.started).toBe(started);
+  });
+
+  it("stop a runaway code step", async () => {
+    // On a very busy computer the wall-clock watchdog can stop it first; both report a timeout.
+    expect(await evaluator.runCode(scope, "for (;;) {}")).toEqual({ ok: false, error: expect.objectContaining({ code: "timeout" }) });
+    expect(await value("record.Name")).toEqual({ ok: true, value: "Ana Lopez" });
   });
 
   it("do not block the caller's thread", async () => {

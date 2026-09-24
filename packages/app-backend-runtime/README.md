@@ -232,7 +232,7 @@ It returns values and requested changes. It never writes; the executor applies e
 const evaluator = createAutomationEvaluator();
 const [ready, note] = await evaluator.evaluate(scope, [
   { kind: "expression", source: 'record.Status == "Done"' },
-  { kind: "text", source: "Finished {record.Name} on {formatDate(today())}" },
+  { kind: "text", parts: [{ kind: "text", text: "Finished " }, { kind: "expression", expression: "record.Name" }] },
 ]);
 const step = await evaluator.runCode(scope, 'return { set: { "Finished on": ctx.today() } };');
 ```
@@ -250,8 +250,8 @@ Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten
 
 | Limit | Value | Dataset guest |
 |---|---|---|
-| Time for one formula | 100 ms | none |
-| Time for one code step | 1 s | 1 s for one operation |
+| Processor time for one formula | 100 ms | none |
+| Processor time for one code step | 1 s | 1 s of wall time for one operation |
 | Memory for one request | 16 MiB | 16 MiB for one operation |
 | Stack | 256 KiB | 256 KiB |
 | Source of one formula or code step | 64 KiB | 256 KiB |
@@ -259,26 +259,30 @@ Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten
 | Scope, as JSON | 256 KiB | 256 KiB of query results |
 | Formulas in one request | 64 | none |
 
-QuickJS checks its time limit between bytecodes, so native work such as converting a huge BigInt to text can run past it.
-A watchdog replaces the worker when a request runs 2 seconds past its time limits. That request's results are timeout errors.
+The time limits count the worker thread's processor time, so a busy computer slows evaluation without stopping it.
+QuickJS checks them between bytecodes, so native work such as converting a huge BigInt to text can run past them.
+A watchdog replaces the worker when a request runs 2 seconds of wall time past its limits. That request's results are timeout errors.
 
 ### Scope
 
 | Name | Contents |
 |---|---|
-| `record` | The triggering record's field values, by field name |
+| `record` | The triggering record's field values, by field name. It is `null` when the trigger has no record, such as a schedule |
 | `previous` | The field values before the change. It is empty when the trigger has no earlier values, such as a new record or a button |
 | `trigger` | The trigger's `kind` and its facts |
-| `results` | The outputs of earlier steps, by step name |
 | `person` | `{ id, name }` of the person who made the change, or `null` |
+| `message` | The Group message that triggered the run, or `null` |
 | `now` | The host passes the run's time as ISO 8601 with the running computer's UTC offset. Formulas read it through `now()` and `today()` |
 
-Formulas use these names directly. A code step reads them and the helpers from `ctx`, such as `ctx.record` and `ctx.today()`.
+The host also passes `bindings`: earlier step results, each under the name its step binds with `as`.
+A formula reads each one as a name of its own, such as `tasks.length`. A binding cannot use a name in `AUTOMATION_SCOPE_NAMES`.
+Formulas use all these names directly. A code step reads them and the helpers from `ctx`, such as `ctx.record`, `ctx.tasks`, and `ctx.today()`.
 Everything in the scope is frozen, so an assignment fails with a `TypeError`.
 
 An `expression` formula is one JavaScript expression, such as `record.Status == "Done"`.
-A `text` formula is text with expressions in braces, such as `Hi {record.Name}`. A list in braces becomes its items joined with `, `, an object becomes JSON, and an empty value becomes nothing.
-Write `{{` and `}}` for literal braces. A formula without a value, such as a missing field, gives `null`.
+A `text` formula is message text that the file contract has split into text and expression parts.
+Each expression's value is inserted: a list as its items joined with `, `, an object as JSON, and an empty value as nothing.
+A formula without a value, such as a missing field, gives `null`.
 
 ### Helpers
 
@@ -318,7 +322,7 @@ return {
 ```
 
 `set` names fields of the triggering record. `records` adds records to, or changes records in, the Collection at a workspace path.
-`output` is any JSON value; later steps read it from `results`. Returning nothing asks for nothing.
+`output` is any JSON value. A later step reads it by the name this step binds with `as`. Returning nothing asks for nothing.
 The evaluator validates this shape. An unknown key or another shape gives `invalid_result`.
 
 ### Errors
@@ -336,4 +340,4 @@ The message is written for the person who reads the run.
 | `invalid_result` | It gave a function, a promise, a value JSON cannot hold, or a code step result of another shape |
 
 The promise rejects only for executor mistakes and worker failures.
-Executor mistakes include more than 64 formulas, an unknown formula kind, a `now` without a valid UTC offset, and a call after `close`.
+Executor mistakes include more than 64 formulas, a malformed formula, a `now` without a valid UTC offset, a binding under a name the scope owns, and a call after `close`.

@@ -39,6 +39,11 @@ function outcome(reply: string): AutomationOutcome<JsonValue> | undefined {
 }
 
 const subjectOf = (kind: GuestKind) => kind === "code" ? "The code" : "The formula";
+/** This thread's CPU time. A busy computer slows evaluation without using up its limit. */
+const cpuMs = () => {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+};
 
 /**
  * Evaluates one run's formulas, or its code step, in a fresh QuickJS runtime. The run's items share
@@ -55,19 +60,21 @@ function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, items: Array<{ 
     runtime.removeModuleLoader();
     // Preparing the scope gets a formula's time limit; each item then gets its own.
     let limitMs: number = AUTOMATION_LIMITS.formulaMs;
-    let deadline = performance.now() + limitMs;
-    runtime.setInterruptHandler(() => performance.now() >= deadline);
+    let deadline = cpuMs() + limitMs;
+    runtime.setInterruptHandler(() => cpuMs() >= deadline);
     const vm = runtime.newContext();
     try {
       const guest = vm.evalCode(GUEST_SOURCE, "automation.js");
-      if (guest.error) { guest.error.dispose(); throw new Error("The automation guest could not start."); }
-      const scope = vm.newString(scopeJson);
-      const prepared = vm.callFunction(guest.value, vm.undefined, scope);
-      guest.value.dispose(); scope.dispose();
+      let prepared = guest;
+      if (!guest.error) {
+        const scope = vm.newString(scopeJson);
+        prepared = vm.callFunction(guest.value, vm.undefined, scope);
+        guest.value.dispose(); scope.dispose();
+      }
       if (prepared.error) {
         // No authored code has run yet, so only the scope's size or nesting can exhaust the limits.
         prepared.error.dispose();
-        const error = performance.now() >= deadline
+        const error = cpuMs() >= deadline
           ? failure("timeout", `Reading the record and step results took longer than ${limitMs} ms.`)
           : failure("too_large", "The record and step results are too large or too deeply nested to read.");
         return items.map(() => error);
@@ -79,14 +86,14 @@ function evaluate(quickjs: QuickJSWASMModule, scopeJson: string, items: Array<{ 
             return failure("too_large", `${subject} is longer than ${AUTOMATION_LIMITS.sourceBytes / KiB} KiB.`);
           }
           limitMs = kind === "code" ? AUTOMATION_LIMITS.codeMs : AUTOMATION_LIMITS.formulaMs;
-          deadline = performance.now() + limitMs;
+          deadline = cpuMs() + limitMs;
           const args = [vm.newString(kind), vm.newString(source)];
           const result = vm.callFunction(prepared.value, vm.undefined, ...args);
           for (const handle of args) handle.dispose();
           if (result.error) {
             // Only an interrupt or exhausted memory escapes the guest's own error handling.
             result.error.dispose();
-            return performance.now() >= deadline
+            return cpuMs() >= deadline
               ? failure("timeout", `${subject} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`)
               : failure("memory", `${subject} used more memory than it is allowed, so it stopped.`);
           }
@@ -114,7 +121,8 @@ function codeStep(outcome: AutomationOutcome<JsonValue>): AutomationOutcome<Code
 function handle(quickjs: QuickJSWASMModule, request: AutomationWorkerRequest): AutomationWorkerReply {
   const scopeJson = JSON.stringify(request.scope);
   if (request.kind === "code") return { kind: "code", result: codeStep(evaluate(quickjs, scopeJson, [{ kind: "code", source: request.source }])[0]!) };
-  return { kind: "formulas", results: evaluate(quickjs, scopeJson, request.formulas) };
+  const items = request.formulas.map(formula => formula.kind === "text" ? { kind: formula.kind, source: JSON.stringify(formula.parts) } : formula);
+  return { kind: "formulas", results: evaluate(quickjs, scopeJson, items) };
 }
 
 const port = parentPort;

@@ -1,22 +1,28 @@
 type GuestValue = null | boolean | number | string | GuestValue[] | { [key: string]: GuestValue };
+type GuestObject = { [key: string]: GuestValue };
 type GuestScope = {
-  record: { [key: string]: GuestValue };
-  previous?: { [key: string]: GuestValue };
-  trigger: { [key: string]: GuestValue };
-  results?: { [key: string]: GuestValue };
+  record?: GuestObject;
+  previous?: GuestObject;
+  trigger: GuestObject;
   person: GuestValue;
+  message?: GuestObject;
+  bindings?: GuestObject;
   now: string;
 };
+type GuestTextPart = { kind: "text"; text: string } | { kind: "expression"; expression: string };
 
 export type GuestKind = "expression" | "text" | "code";
 
 /**
  * Prepares one run's scope inside a fresh QuickJS context. The returned function evaluates one formula
- * or code step against that scope and returns the outcome as JSON.
+ * or code step against that scope and returns the outcome as JSON. For `text`, `source` is the parts as JSON.
  * The worker sends this function's source text to the guest, so it must not use anything declared outside it.
- * The worker validates `scope.now` before the call.
+ * The client validates `scope.now` and the binding names before the call.
  */
 export function automationGuest(scopeJson: string): (kind: GuestKind, source: string) => string {
+  // Bound step results become globals and can take a built-in's name, so the guest keeps its own references.
+  const global = globalThis;
+  const { Array, Date, Error, Function, JSON, Math, Number, Object, RangeError, String, TypeError } = global;
   const freeze = Object.freeze, isArray = Array.isArray, stringify = JSON.stringify;
   const deepFreeze = <T>(value: T): T => {
     if (value && typeof value === "object") {
@@ -175,9 +181,9 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
       return Number.isFinite(value) ? shift(Math.round(shift(value, places as number)), -(places as number)) : value;
     },
   });
-  const values = {
-    record: deepFreeze(scope.record), previous: deepFreeze(scope.previous ?? {}), trigger: deepFreeze(scope.trigger),
-    results: deepFreeze(scope.results ?? {}), person: deepFreeze(scope.person),
+  const names = {
+    record: deepFreeze(scope.record ?? null), previous: deepFreeze(scope.previous ?? {}), trigger: deepFreeze(scope.trigger),
+    person: deepFreeze(scope.person), message: deepFreeze(scope.message ?? null), ...deepFreeze(scope.bindings ?? {}), ...helpers,
   };
 
   // Formulas of one run share this context. Freezing the global built-ins and their prototypes keeps
@@ -186,39 +192,20 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
   const seal = () => {
     if (sealed) return;
     sealed = true;
-    for (const [name, value] of Object.entries({ ...values, ...helpers })) {
-      Object.defineProperty(globalThis, name, { value, writable: false, enumerable: false, configurable: false });
+    for (const [name, value] of Object.entries(names)) {
+      Object.defineProperty(global, name, { value, writable: false, enumerable: false, configurable: false });
     }
-    for (const name of Object.getOwnPropertyNames(globalThis)) {
-      const value: unknown = (globalThis as Record<string, unknown>)[name];
+    for (const name of Object.getOwnPropertyNames(global)) {
+      const value: unknown = (global as Record<string, unknown>)[name];
       if (typeof value === "function") freeze(value.prototype);
       if (value !== null && (typeof value === "object" || typeof value === "function")) freeze(value);
     }
-    freeze(globalThis);
+    freeze(global);
   };
   const compile = (expression: string) => new Function(`"use strict"; return (${expression}\n);`) as () => unknown;
-  // `{expression}` inserts a value; `{{` and `}}` write a brace.
-  const template = (source: string) => {
-    const parts: Array<string | (() => unknown)> = [];
-    let literal = "";
-    for (let index = 0; index < source.length; index++) {
-      const character = source[index]!;
-      if ((character === "{" || character === "}") && source[index + 1] === character) { literal += character; index++; continue; }
-      if (character !== "{") { literal += character; continue; }
-      let depth = 1, end = index + 1, quote = "";
-      for (; end < source.length && depth > 0; end++) {
-        const next = source[end]!;
-        if (quote) { if (next === "\\") end++; else if (next === quote) quote = ""; }
-        else if (next === '"' || next === "'" || next === "`") quote = next;
-        else if (next === "{") depth++;
-        else if (next === "}") depth--;
-      }
-      if (depth > 0) throw new SyntaxError("The text has a { without a matching }.");
-      parts.push(literal, compile(source.slice(index + 1, end - 1)));
-      literal = "";
-      index = end - 1;
-    }
-    parts.push(literal);
+  // Message text inserts each expression's value: a list as its items, an object as JSON, nothing for an empty value.
+  const messageText = (json: string) => {
+    const parts = (JSON.parse(json) as GuestTextPart[]).map(part => part.kind === "text" ? part.text : compile(part.expression));
     return () => parts.map(part => {
       if (typeof part === "string") return part;
       const value = part();
@@ -253,11 +240,11 @@ export function automationGuest(scopeJson: string): (kind: GuestKind, source: st
     try {
       if (kind === "code") {
         const body = new Function("ctx", `"use strict";\n${source}\n`) as (ctx: unknown) => unknown;
-        const ctx = freeze({ ...values, ...helpers });
+        const ctx = freeze(names);
         run = () => body(ctx);
       } else {
         seal();
-        run = kind === "expression" ? compile(source) : template(source);
+        run = kind === "expression" ? compile(source) : messageText(source);
       }
     } catch (error) {
       return failure(error, "syntax");

@@ -18,23 +18,39 @@ export const AUTOMATION_LIMITS = Object.freeze({
 export type JsonObject = { [key: string]: JsonValue };
 
 /**
- * What a formula or code step can read. `now` is the run's time on the computer that runs
- * the automation, as ISO 8601 with that computer's UTC offset, such as `2026-09-24T09:30:00.000+08:00`.
+ * The names a formula reads without declaring them: the scope's values and the helpers.
+ * A step result cannot be bound to one of them. This matches the automations file contract's list.
+ */
+export const AUTOMATION_SCOPE_NAMES: readonly string[] = Object.freeze([
+  "record", "previous", "trigger", "person", "now", "message",
+  "today", "dateAdd", "dateBetween", "formatDate", "lower", "upper", "trim", "contains", "join", "length", "sum", "min", "max", "round",
+]);
+
+/**
+ * What a formula or code step can read. `bindings` holds earlier step results by the name each step
+ * binds with `as`; formulas read each one as a name of its own. `now` is the run's time on the computer
+ * that runs the automation, as ISO 8601 with that computer's UTC offset, such as `2026-09-24T09:30:00.000+08:00`.
  */
 export interface AutomationScope {
-  record: JsonObject;
+  /** Absent when the trigger has no record, such as a schedule. Formulas then read `null`. */
+  record?: JsonObject;
+  /** Absent when there are no earlier values, such as for a new record. Formulas then read `{}`. */
   previous?: JsonObject;
   trigger: { kind: string; [fact: string]: JsonValue };
-  results?: JsonObject;
   person: { id: string; name: string } | null;
+  /** The Group message that triggered the run. Formulas read `null` for other triggers. */
+  message?: JsonObject;
+  bindings?: JsonObject;
   now: string;
 }
 
-/** `expression` is JavaScript such as `record.Status == "Done"`. `text` holds expressions in braces, such as `Hi {record.Name}`. */
-export interface AutomationFormula {
-  kind: "expression" | "text";
-  source: string;
-}
+/** One part of message text. This matches `AutomationTextPart` from the automations file contract. */
+export type AutomationTextPart = { kind: "text"; text: string } | { kind: "expression"; expression: string };
+
+/** `expression` is JavaScript such as `record.Status == "Done"`. `text` is message text, already split into parts. */
+export type AutomationFormula =
+  | { kind: "expression"; source: string }
+  | { kind: "text"; parts: AutomationTextPart[] };
 
 export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result";
 export interface AutomationError { code: AutomationErrorCode; message: string }

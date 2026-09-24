@@ -1,11 +1,11 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { AUTOMATION_LIMITS } from "./automation-protocol.js";
-import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
+import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
+import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
-export { AUTOMATION_LIMITS } from "./automation-protocol.js";
-export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, CodeStepReturn, JsonObject } from "./automation-protocol.js";
+export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
+export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, CodeStepReturn, JsonObject } from "./automation-protocol.js";
 export type { JsonValue } from "./protocol.js";
 
 /** Time a request gets beyond its evaluation limits before its worker is replaced. */
@@ -36,6 +36,22 @@ function isInstant(value: unknown): boolean {
   return date.getUTCMonth() === month! - 1 && date.getUTCDate() === day && hour! < 24 && minute! < 60 && second! < 60 &&
     offsetMinutes! < 60 && offsetHours! * 60 + offsetMinutes! <= 14 * 60;
 }
+
+/** A binding is read as a name of its own, so it must be an identifier that nothing else in the scope uses. */
+const BINDING_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** JavaScript does not let a global with one of these names change. */
+const FIXED_GLOBALS = ["undefined", "NaN", "Infinity"];
+function scopeProblem(scope: AutomationScope): string | undefined {
+  if (!isInstant(scope.now)) return "The automation scope needs `now` with a UTC offset.";
+  const taken = Object.keys(scope.bindings ?? {}).find(name =>
+    !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name) || FIXED_GLOBALS.includes(name));
+  return taken === undefined ? undefined : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
+}
+
+const isTextPart = (part: AutomationTextPart) =>
+  (part.kind === "text" && typeof part.text === "string") || (part.kind === "expression" && typeof part.expression === "string");
+const isFormula = (formula: AutomationFormula) => formula.kind === "expression" ? typeof formula.source === "string"
+  : formula.kind === "text" && Array.isArray(formula.parts) && formula.parts.every(isTextPart);
 
 /**
  * Evaluates formulas and code steps in a worker thread, off the caller's thread.
@@ -99,7 +115,8 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
 
   function enqueue(request: AutomationWorkerRequest, limitMs: number): Promise<AutomationWorkerReply> {
     if (closed) return Promise.reject(new Error("The automation evaluator is closed."));
-    if (!isInstant(request.scope.now)) return Promise.reject(new Error("The automation scope needs `now` with a UTC offset."));
+    const problem = scopeProblem(request.scope);
+    if (problem) return Promise.reject(new Error(problem));
     const reply = queue.then(() => send(request, limitMs));
     queue = reply.catch(() => undefined);
     return reply;
@@ -108,7 +125,7 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   return {
     async evaluate(scope, formulas) {
       if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
-      if (formulas.some(formula => formula.kind !== "expression" && formula.kind !== "text")) throw new Error("Unknown formula kind.");
+      if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
       if (formulas.length === 0) return [];
       const reply = await enqueue({ kind: "formulas", scope, formulas: [...formulas] }, (formulas.length + 1) * AUTOMATION_LIMITS.formulaMs);
       return (reply as Extract<AutomationWorkerReply, { kind: "formulas" }>).results;
