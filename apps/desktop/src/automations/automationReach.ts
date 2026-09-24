@@ -1,23 +1,50 @@
-import { isSharedWithMePath } from "@dohc/workspace-core";
+import { isSharedWithMePath, stripWindowsAliasSuffix, validateUserMaterializePath } from "@dohc/workspace-core";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import type { RosterGrant } from "./shareRoster";
 
 // The reach check (ADR 0012). An automation belongs to its Collection, and
-// anyone who can edit the Collection can change the automation. So a step may
-// reach only what every one of those editors can reach, and nobody gains
-// access by writing one. This module is the rule, as set arithmetic over the
-// share roster: the executor checks a run's steps before its first write, and
-// the share dialog asks which steps a new share would stop.
+// anyone who can edit its definition can change it. So a step may reach only
+// what every one of those editors can reach, and nobody gains access by
+// writing one. This module is the rule, as set arithmetic over the share
+// roster: the executor checks a run's steps before its first write, and the
+// share dialog asks which steps a new share would stop.
+//
+// Every doubt stops a step. Paths compare two ways for that reason. Deciding
+// who is an editor ignores case and Windows name endings, so a grant spelled
+// differently still makes its holder an editor. Deciding what an editor
+// reaches compares exact paths, so a spelling never grants reach.
+
+/** One grant on the roster, as the reach check reads it. */
+export interface RosterGrant {
+  // A claimed grant names an account. A pending invite names only an email.
+  recipientUserId: string | null;
+  recipientEmail: string | null;
+  // The files the grant covers. A path covers itself and everything beneath
+  // it. A grant with no paths covers a whole saved version, and no files
+  // anyone can change. Null for a grant on a chat alone.
+  files: { paths: readonly string[]; versionId: string | null; access: ShareAccess } | null;
+  // The chat a Group or chat grant covers.
+  channel: { wireId: string; canPost: boolean } | null;
+}
+
+/** Why the owner's computer does not know who can edit the workspace. */
+export type RosterProblem =
+  // No listing: the relay did not answer, or dohc could not ask it.
+  | { kind: "unchecked"; next: string }
+  // The relay listed a grant dohc cannot read.
+  | { kind: "damaged-share"; recipientEmail: string | null }
+  | { kind: "damaged-link" }
+  // The relay answered, but not with a listing dohc can use.
+  | { kind: "unusable-listing" };
 
 /** What this computer knows about who can edit and reach what in a workspace. */
 export type ReachRoster =
-  // The owner's computer. A workspace that does not sync has no grants.
+  // The owner's computer. A workspace that does not sync has no grants, and
+  // its owner is this computer's person, whose account may be unknown.
   | { kind: "owner"; ownerUserId: string | null; grants: readonly RosterGrant[] }
-  // The owner's computer before dohc has listed the grants, or after the
-  // relay listed a grant dohc cannot read.
-  | { kind: "unknown"; cause: "not-listed" | "unreadable" }
+  | { kind: "unknown"; problem: RosterProblem }
   // A collaborator's computer. The relay tells a recipient only about their
-  // own grant, so the other editors are unknown.
+  // own grant, so the other editors are unknown. The recipient's grant bounds
+  // every write here, so steps inside the Collection can run.
   | { kind: "shared-view" };
 
 /** A Collection a step names: its workspace path and the name the UI shows. */
@@ -34,8 +61,9 @@ export interface ReachPerson {
 
 /**
  * One step as the reach check sees it. The file contract (PR #1240) defines
- * the steps; the executor maps each one here with names and people resolved.
- * Steps inside an If count like any other step.
+ * the steps; the executor maps each one here with names and people resolved
+ * and paths as the engine lists them. Steps inside an If count like any
+ * other step.
  */
 export type ReachStep =
   // Set fields, add records, or change found records in `collection`.
@@ -50,6 +78,9 @@ export type ReachStep =
 export interface ReachAutomation {
   id: string;
   collection: ReachCollection;
+  // Workspace paths of the code files its run-file steps read. Whoever can
+  // edit one of them can change what the automation does.
+  codeFiles: readonly string[];
   steps: readonly ReachStep[];
 }
 
@@ -76,24 +107,44 @@ interface Person {
 }
 
 const ALLOWED: StepReach = { allowed: true };
+const SETTINGS = "Settings → Sync and sharing";
 
 function stop(reason: string): StepReach {
   return { allowed: false, reason };
+}
+
+// A path exactly as the engine lists it: relative, no "." or "..", forward
+// slashes, and no name that Windows reads as another name. That last rule
+// applies on every platform, because the workspace can sync to Windows.
+function isCanonical(path: string): boolean {
+  const checked = validateUserMaterializePath(path, { platform: "win32" });
+  return checked.ok && checked.normalized === path &&
+    path.split("/").every((segment) => stripWindowsAliasSuffix(segment) === segment);
+}
+
+// Why dohc cannot use a path a step names, or null.
+function pathProblem(path: string, name: string, role: "source" | "target"): string | null {
+  if (isSharedWithMePath(path)) {
+    return role === "source"
+      ? `${name} came to you through a share, so its automations cannot run.`
+      : `${name} came to you through a share, so automations cannot use it.`;
+  }
+  return isCanonical(path) ? null : `"${path}" is not a path in this workspace.`;
 }
 
 function within(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
 
-function covers(files: NonNullable<RosterGrant["files"]>, path: string): boolean {
-  return files.paths.length === 0 || files.paths.some((granted) => within(path, granted));
+function looseKey(path: string): string {
+  return path.split("/").map((segment) => stripWindowsAliasSuffix(segment).toLowerCase()).join("/");
 }
 
-// A grant pinned to a saved version counts toward who can edit, because the
-// owner can switch this computer to that version. It gives no reach, because
-// the check does not know which version the files are on. Both fail closed.
 function canEdit(person: Person, path: string): boolean {
-  return person.grants.some((grant) => grant.files?.access === "edit" && covers(grant.files, path));
+  const key = looseKey(path);
+  return person.grants.some(
+    (grant) => grant.files?.access === "edit" && grant.files.paths.some((granted) => within(key, looseKey(granted))),
+  );
 }
 
 function reaches(person: Person, path: string, access: "edit" | "view"): boolean {
@@ -102,7 +153,7 @@ function reaches(person: Person, path: string, access: "edit" | "view"): boolean
       grant.files !== null &&
       grant.files.versionId === null &&
       (access === "view" || grant.files.access === "edit") &&
-      covers(grant.files, path),
+      grant.files.paths.some((granted) => within(path, granted)),
   );
 }
 
@@ -136,31 +187,28 @@ function nameOf(person: Person): string {
   return person.email ?? "Someone you shared with";
 }
 
-function checkStep(
-  roster: ReachRoster,
+function problemReason(problem: RosterProblem, collection: ReachCollection): string {
+  switch (problem.kind) {
+    case "unchecked":
+      return `dohc could not check who can edit ${collection.name}. ${problem.next}`;
+    case "damaged-share":
+      return problem.recipientEmail
+        ? `dohc can't read what your share with ${problem.recipientEmail} grants. End it in ${SETTINGS}, then try again.`
+        : `dohc can't read what one of your shares grants. End it in ${SETTINGS}, then try again.`;
+    case "damaged-link":
+      return "dohc can't read what one of your share links grants. End it from Share… on any file, then try again.";
+    case "unusable-listing":
+      return "dohc could not read this workspace's shares from your server. Try again later.";
+  }
+}
+
+function checkOwnerStep(
+  roster: Extract<ReachRoster, { kind: "owner" }>,
   collection: ReachCollection,
   step: ReachStep,
   people: readonly Person[],
   editors: readonly Person[],
 ): StepReach {
-  if (isSharedWithMePath(collection.path)) {
-    return stop(`${collection.name} came to you through a share, so its automations cannot run.`);
-  }
-  const target = step.kind === "change-records" || step.kind === "find-records" ? step.collection : null;
-  if (target && isSharedWithMePath(target.path)) {
-    return stop(`${target.name} came to you through a share, so automations cannot use it.`);
-  }
-  if (target && within(target.path, collection.path)) return ALLOWED;
-  if (roster.kind === "shared-view") {
-    return stop(`In a shared view, automations can use only ${collection.name}.`);
-  }
-  if (roster.kind === "unknown") {
-    return stop(
-      roster.cause === "unreadable"
-        ? "dohc could not read a share in this workspace. End it in Settings → Cloud, then try again."
-        : `dohc has not checked who else can edit ${collection.name}. Connect to your server, then try again.`,
-    );
-  }
   switch (step.kind) {
     case "change-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "edit"));
@@ -182,7 +230,9 @@ function checkStep(
         : stop(`${person?.email ?? step.person.name} cannot view ${collection.name}.`);
     }
     case "personal": {
-      if (step.person.userId !== roster.ownerUserId) {
+      // With no account known, the owner is this computer's person, and the
+      // executor acts as that person.
+      if (roster.ownerUserId !== null && step.person.userId !== roster.ownerUserId) {
         const person = people.find((candidate) => candidate.userId === step.person.userId);
         return stop(`This step acts as ${person?.email ?? step.person.name}, and you can also edit ${collection.name}.`);
       }
@@ -194,9 +244,28 @@ function checkStep(
 
 /** A verdict for each of the automation's steps, in order. */
 export function checkAutomationReach(roster: ReachRoster, automation: ReachAutomation): StepReach[] {
+  const { collection } = automation;
+  const sources = [`${collection.path}/automations.yaml`, ...automation.codeFiles];
+  const sourceProblem =
+    pathProblem(collection.path, collection.name, "source") ??
+    automation.codeFiles.map((path) => pathProblem(path, path, "target")).find((problem) => problem !== null) ??
+    null;
+  if (sourceProblem) return automation.steps.map(() => stop(sourceProblem));
+  // On the owner's computer every step needs the roster, even a step inside
+  // the Collection: someone with Edit on the definition alone is an editor
+  // who cannot edit the Collection's records.
+  if (roster.kind === "unknown") return automation.steps.map(() => stop(problemReason(roster.problem, collection)));
   const people = roster.kind === "owner" ? peopleOf(roster) : [];
-  const editors = people.filter((person) => canEdit(person, automation.collection.path));
-  return automation.steps.map((step) => checkStep(roster, automation.collection, step, people, editors));
+  const editors = people.filter((person) => sources.some((path) => canEdit(person, path)));
+  return automation.steps.map((step) => {
+    const target = step.kind === "change-records" || step.kind === "find-records" ? step.collection : null;
+    const targetProblem = target && pathProblem(target.path, target.name, "target");
+    if (targetProblem) return stop(targetProblem);
+    if (roster.kind === "owner") return checkOwnerStep(roster, collection, step, people, editors);
+    return target && within(target.path, collection.path)
+      ? ALLOWED
+      : stop(`In a shared view, automations can use only ${collection.name}.`);
+  });
 }
 
 /**
@@ -216,10 +285,9 @@ export function shareImpactOf(
     grants: [
       ...roster.grants,
       {
-        grantId: "",
         recipientUserId: known?.recipientUserId ?? null,
         recipientEmail: known?.recipientEmail ?? share.recipientEmail,
-        files: { paths: [...share.paths], versionId: share.versionId, access: share.access },
+        files: { paths: share.paths, versionId: share.versionId, access: share.access },
         channel: null,
       },
     ],

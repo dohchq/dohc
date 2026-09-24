@@ -496,17 +496,28 @@ describe("share roster refresh", () => {
   const grantBody = {grantId: "grant", access: "edit", generation: 2, parentGrantId: null};
   const linkPayload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
 
-  it("refreshes after a new share even when the window moved on while the relay answered", async () => {
-    const h = harness();
-    const response = deferred<unknown>();
-    const started = deferred();
-    h.request.mockImplementation(() => { started.resolve(); return response.promise; });
-    const result = h.invoke(CHANNELS.createRelayShare, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"});
-    await started.promise;
-    h.retireRenderer();
-    response.resolve({shareId: "share", grantId: "grant"});
-    await expect(result).rejects.toThrow();
-    expect(h.sharesChanged).toHaveBeenCalledWith(workspaceId);
+  it.each([
+    [CHANNELS.createRelayShare, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"},
+      {shareId: "share", grantId: "grant"}],
+    [CHANNELS.promoteRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
+      {ok: true, ...grantBody, status: "active", revokedAtMs: null}],
+    [CHANNELS.revokeRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant"},
+      {ok: true, ...grantBody, status: "revoked", revokedAtMs: 5}],
+    [CHANNELS.revokeRelayShareLink, linkPayload, {kind: "success", body: {ok: true}}],
+    [CHANNELS.retuneRelayShareLink, {...linkPayload, access: "view"}, {kind: "success", body: {ok: true, access: "view"}}],
+  ] as const)("refreshes after %s even when the window moved on while the relay answered", async (channel, payload, body) => {
+    for (const invalidate of ["retireRenderer", "retirePhysical", "rotateCredentials"] as const) {
+      const h = harness();
+      const response = deferred<unknown>();
+      const started = deferred();
+      h.request.mockImplementation(() => { started.resolve(); return response.promise; });
+      const result = h.invoke(channel, payload);
+      await started.promise;
+      h[invalidate]();
+      response.resolve(body);
+      await expect(result).rejects.toThrow();
+      expect(h.sharesChanged, invalidate).toHaveBeenCalledWith(workspaceId);
+    }
   });
 
   it("does not refresh when the relay refuses a share", async () => {
@@ -523,18 +534,6 @@ describe("share roster refresh", () => {
     expect(h.sharesChanged).toHaveBeenCalledWith(null);
   });
 
-  it.each([
-    [CHANNELS.promoteRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
-      {ok: true, ...grantBody, status: "active", revokedAtMs: null}],
-    [CHANNELS.revokeRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant"},
-      {ok: true, ...grantBody, status: "revoked", revokedAtMs: 5}],
-  ] as const)("refreshes after %s", async (channel, payload, response) => {
-    const h = harness();
-    h.request.mockResolvedValue(response);
-    await h.invoke(channel, payload);
-    expect(h.sharesChanged).toHaveBeenCalledWith(workspaceId);
-  });
-
   it("refreshes after a link ends or changes level, because its dependents follow it", async () => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: {ok: true}});
@@ -544,10 +543,8 @@ describe("share roster refresh", () => {
     expect(h.sharesChanged.mock.calls).toEqual([[workspaceId], [workspaceId]]);
   });
 
-  it("does not refresh when a link change stops on a changed dependent set, or for a new link", async () => {
+  it("does not refresh for a new link, which has no dependents yet", async () => {
     const h = harness();
-    h.request.mockResolvedValue({kind: "dependents-changed", status: 409, body: {ok: false, code: "dependents_changed", dependents: []}});
-    await h.invoke(CHANNELS.revokeRelayShareLink, linkPayload);
     h.request.mockResolvedValue(linkResult);
     await h.invoke(CHANNELS.createRelayShareLink, linkInput);
     expect(h.sharesChanged).not.toHaveBeenCalled();

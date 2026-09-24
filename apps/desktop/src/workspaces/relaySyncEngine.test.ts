@@ -74,7 +74,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<void>;
-  afterSuccessfulPull?: () => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
   operations?: RelaySyncOperations;
 }) {
   return createRelaySyncEngine({
@@ -213,6 +213,22 @@ describe("relaySyncEngine", () => {
 
     await expect(sync.start()).rejects.toThrow("relay unavailable");
     expect(afterSuccessfulPull).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("tells post-pull work when a pass succeeds after a failed one", async () => {
+    pullMock.mockRejectedValueOnce(new Error("relay unavailable"));
+    const afterSuccessfulPull = vi.fn(async (_pass: { recovered: boolean }) => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    await vi.advanceTimersByTimeAsync(500);
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
 
     errorSpy.mockRestore();
     await sync.stop();

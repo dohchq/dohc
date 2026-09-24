@@ -2,7 +2,7 @@ import { app } from "electron";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { RosterGrant } from "../automations/shareRoster";
+import type { RosterListing } from "../automations/shareRoster";
 import {
   createRegistryStore,
   type JoinedSharedChannel,
@@ -111,9 +111,9 @@ export function acknowledgeWorkspaceAutomationFailure(
 // A new listing of the workspace's grants. See registryStore.setShareRoster.
 export function setWorkspaceShareRoster(
   workspaceId: string,
-  grants: RosterGrant[] | null,
+  listing: RosterListing,
 ): void {
-  store().setShareRoster(workspaceId, grants);
+  store().setShareRoster(workspaceId, listing);
 }
 
 export function setWorkspaceShareView(

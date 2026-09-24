@@ -53,7 +53,9 @@ export interface CloudSyncEngineOptions {
   // gate (including materialization and cursor commit). Follow-up projection
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
-  afterSuccessfulPull?: () => Promise<void>;
+  // `recovered` is true for the first successful pass after a failed one,
+  // which is when the relay answers again.
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -197,7 +199,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     bootstrapPullPending = false;
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull();
+        await options.afterSuccessfulPull({ recovered: consecutiveFailures > 0 });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }

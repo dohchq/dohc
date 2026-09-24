@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import type { RosterGrant, ShareRoster } from "../automations/shareRoster";
+import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
 
@@ -609,13 +609,14 @@ export function createRegistryStore(registryFile: string) {
 
     /**
      * Store a new listing of the workspace's grants. The version rises only
-     * when the grants differ, so an unchanged listing writes nothing.
+     * when the listing differs, so an unchanged listing writes nothing.
      */
-    setShareRoster(workspaceId: string, grants: RosterGrant[] | null): void {
+    setShareRoster(workspaceId: string, listing: RosterListing): void {
       updateWorkspaceEntry(workspaceId, (entry) => {
-        const current = entry.shareRoster;
-        if (current && JSON.stringify(current.grants) === JSON.stringify(grants)) return undefined;
-        return { ...entry, shareRoster: { version: (current?.version ?? 0) + 1, grants } };
+        const stored = entry.shareRoster;
+        // JSON drops the undefined version, leaving only the listing to compare.
+        if (stored && JSON.stringify({ ...stored, version: undefined }) === JSON.stringify(listing)) return undefined;
+        return { ...entry, shareRoster: { ...listing, version: (stored?.version ?? 0) + 1 } };
       });
     },
 

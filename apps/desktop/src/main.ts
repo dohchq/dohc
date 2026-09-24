@@ -1032,13 +1032,27 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 const shareRosters = createShareRosters({
   findWorkspace,
   saveRoster: setWorkspaceShareRoster,
-  listGrants: async (workspace) => {
-    const { credentials } = await remoteForWorkspace(workspace);
-    return listRosterGrants(workspace.workspaceId, (path) =>
-      relayShareJsonWithCredentials<unknown>(credentials, path),
-    );
+  listRoster: async (workspace) => {
+    let credentials: CloudSessionCredentials;
+    try {
+      ({ credentials } = await remoteForWorkspace(workspace));
+    } catch (error) {
+      // Signed out, or signed in to another account or server: the message
+      // says which, and dohc could not ask.
+      return { kind: "unanswered", next: error instanceof Error ? error.message : "Sign in to your server first." };
+    }
+    if (!credentials.relayUrl) {
+      return { kind: "unanswered", next: "Reconnect your sharing server, then try again." };
+    }
+    return listRosterGrants(workspace.workspaceId, async (path) => {
+      const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    });
   },
-  localUserId: () => cachedCredentials?.userId ?? null,
+  localUserId: async () => {
+    await warmCredentialCache().catch(() => undefined);
+    return cachedCredentials?.userId ?? null;
+  },
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
 });
@@ -1759,8 +1773,8 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: () => {
-      shareRosters.pulled(workspace.workspaceId);
+    afterSuccessfulPull: ({ recovered }) => {
+      shareRosters.pulled(workspace.workspaceId, recovered);
       return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
       );

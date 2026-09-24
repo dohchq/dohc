@@ -142,22 +142,25 @@ describe("share roster", () => {
     grantId,
     recipientUserId: "u-ana",
     recipientEmail: "ana@dohc.test",
-    files: { paths: ["Trip"], versionId: null, access: "edit" as const },
-    channel: null,
+    selector: { paths: ["Trip"], versionId: null },
+    access: "edit" as const,
   });
 
-  it("raises the version only when the grants change, and survives a reopen", () => {
+  it("raises the version only when the listing changes, and survives a reopen", () => {
     store.register(personal);
-    store.setShareRoster("ws-1", [grant("g-1")]);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] });
     expect(store.find("ws-1")?.shareRoster).toEqual({ version: 1, grants: [grant("g-1")] });
 
     vi.mocked(renameSync).mockClear();
-    store.setShareRoster("ws-1", [grant("g-1")]);
+    store.setShareRoster("ws-1", { grants: [grant("g-1")] });
     expect(renameSync, "an unchanged listing rewrote the registry").not.toHaveBeenCalled();
     expect(store.find("ws-1")?.shareRoster?.version).toBe(1);
 
-    store.setShareRoster("ws-1", null);
-    store.setShareRoster("ws-1", [grant("g-1"), grant("g-2")]);
+    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } });
+    vi.mocked(renameSync).mockClear();
+    store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } });
+    expect(renameSync, "an unchanged problem rewrote the registry").not.toHaveBeenCalled();
+    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")] });
     expect(store.find("ws-1")?.shareRoster).toEqual({ version: 3, grants: [grant("g-1"), grant("g-2")] });
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.version).toBe(3);
   });
