@@ -314,6 +314,7 @@ import {
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { createOwedRunNotices } from "./agents/owedRunNotices";
 import { isAppImageBoot, resolveDohcMcpCommand } from "./agents/dohcMcpCommand";
 import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
@@ -2854,7 +2855,10 @@ function rememberPendingCliRunMessageLink(
 }
 
 const chatDispatchService = createChatDispatchService({
-  postNotice: (input) => noticeStore().postNotice(input),
+  runNotices: {
+    post: (input) => noticeStore().postNotice(input),
+    owed: createOwedRunNotices(() => join(stateDir(), "owed-run-notices.json")),
+  },
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
