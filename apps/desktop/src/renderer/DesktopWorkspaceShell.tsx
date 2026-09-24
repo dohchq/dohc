@@ -788,12 +788,14 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   } = useShellError(workspaceId);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
     workspaceId,
     workspaceIsReady,
     userSettings: props.userSettings,
     show: showSettingsFileNotice,
+    reportError: showShellError,
   });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
@@ -4390,6 +4392,7 @@ export function DesktopWorkspaceShell(props: {
         details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
+        ...(error.action ? { actionLabel: error.action.label } : {}),
         seen: error.seen,
       })),
     [shellErrors, reportFacts],
@@ -4752,6 +4755,7 @@ export function DesktopWorkspaceShell(props: {
               onRestartToUpdate={openRestartPrompt}
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
+              onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
               onDismissWorkspaceError={dismissShellError}
               onRetryLiveDelivery={retryLiveDelivery}

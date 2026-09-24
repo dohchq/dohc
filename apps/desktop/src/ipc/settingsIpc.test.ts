@@ -10,7 +10,6 @@ import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { createUserSettingsWriteQueue, createZoomMutation } from "../window/windowZoom";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "../window/rendererWorkspaceSessionOwner";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
@@ -29,10 +28,12 @@ const patchPayload = { ...workspacePayload, patch: { agents: { mcpAutoStart: fal
 const uiPayload = { ...workspacePayload, state };
 const settingsRequests = [
   [CHANNELS.getUserSettings, undefined],
+  [CHANNELS.reloadUserSettings, undefined],
   [CHANNELS.setUserSettings, settingsPayload],
   [CHANNELS.resetUserSettings, undefined],
   [CHANNELS.getUserSettingsFilePath, undefined],
   [CHANNELS.openUserSettingsFile, undefined],
+  [CHANNELS.openWorkspaceSettingsFile, workspacePayload],
   [CHANNELS.getWorkspaceSettings, workspacePayload],
   [CHANNELS.setWorkspaceSettings, patchPayload],
   [CHANNELS.resetWorkspaceSettings, workspacePayload],
@@ -80,7 +81,6 @@ async function harness() {
     currentSession: value => sessions.current(value),
     withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
-  const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
   let preferredName: string | undefined = "Before";
   const effects: Array<{ kind: string; value: unknown; persisted: DesktopUserSettings }> = [];
   const persisted = () => JSON.parse(readFileSync(join(stateDirectory, userSettingsStore.USER_SETTINGS_FILE), "utf8")) as DesktopUserSettings;
@@ -102,16 +102,10 @@ async function harness() {
       handlers.set(channel, handler);
     },
     assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
-    stateDir: () => stateDirectory, enqueueUserSettingsWrite, setCachedPreferredName,
+    stateDir: () => stateDirectory, setCachedPreferredName,
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, notifyRenderer, openPath,
-  });
-  const zoom = createZoomMutation({
-    enqueue: enqueueUserSettingsWrite,
-    read: () => userSettingsStore.readCachedUserSettingsFile(stateDirectory),
-    write: (value, base) => userSettingsStore.writeUserSettingsFile(stateDirectory, value, base),
-    apply: applyZoomLevelToWindows,
   });
   capability.registerSettingsIpcHandlers();
   const firstGroup = [...handlers.keys()];
@@ -121,8 +115,8 @@ async function harness() {
     await authorities.close();
   });
   return {
-    handlers, firstGroup, effects, entries, authorities, sessions, first, second, open, zoom,
-    enqueueUserSettingsWrite, setCachedPreferredName, applyZoomLevelToWindows,
+    handlers, firstGroup, effects, entries, authorities, sessions, first, second, open,
+    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -228,9 +222,11 @@ describe("registered settings IPC", () => {
       await expect(next).resolves.toEqual({ settings: nextSettings, source: "stored" });
       await expect(zoom).resolves.toMatchObject({ settings: { appearance: { zoomLevel: -1 } } });
       await expect(reset).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
-      // Reset replaces the file rather than saving into it.
-      expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2, -1]);
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], [undefined, undefined]]);
+      // The zoom step reads the file the save before it wrote; reset replaces
+      // the file rather than saving into it.
+      expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
+      // Every change puts the whole file into effect, the zoom step included.
+      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     } finally {
@@ -245,7 +241,8 @@ describe("registered settings IPC", () => {
     const blocked = join(directory, "not-a-directory");
     await writeFile(blocked, "keep");
     h.setStateDirectory(blocked);
-    await expect(h.invoke(CHANNELS.setUserSettings, settingsPayload)).rejects.toThrow();
+    const named = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam" } };
+    await expect(h.invoke(CHANNELS.setUserSettings, { settings: named, base: DEFAULT_USER_SETTINGS })).rejects.toThrow();
     expect(h.preferredName()).toBe("Before");
     expect(h.effects).toEqual([]);
     expect(h.refreshDispatchTray).not.toHaveBeenCalled();
@@ -260,20 +257,23 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const oldDirectory = h.stateDirectory();
     const reached = deferred(), release = deferred();
-    const earlier = h.enqueueUserSettingsWrite(async () => { reached.resolve(); await release.promise; });
-    let saving: Promise<unknown> | undefined;
+    const realRead = userSettingsStore.readCachedUserSettingsFile;
+    // Holds the queue at the start of the save's turn.
+    vi.spyOn(userSettingsStore, "readCachedUserSettingsFile").mockImplementationOnce(async (dir) => {
+      reached.resolve(); await release.promise; return realRead(dir);
+    });
+    const named = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Queued" } };
+    const saving = h.invoke(CHANNELS.setUserSettings, { settings: named, base: DEFAULT_USER_SETTINGS });
     try {
       await reached.promise;
-      saving = h.invoke(CHANNELS.setUserSettings, settingsPayload);
       h.setStateDirectory(await createTestScratch("settings-ipc-next-user-"));
       release.resolve();
-      await earlier;
       await saving;
       await expect(userSettingsStore.readUserSettingsFile(oldDirectory)).resolves.toMatchObject({ source: "default" });
-      await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+      await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: named, source: "stored" });
     } finally {
       release.resolve();
-      await Promise.allSettled([earlier, saving]);
+      await Promise.allSettled([saving]);
     }
   });
 
@@ -347,6 +347,69 @@ describe("registered settings IPC", () => {
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual(applied);
   });
 
+  it("steps zoom from the file as it is now and puts a hand edit it merged into effect", async () => {
+    const h = await harness();
+    const path = join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE);
+    const dark = { ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const } };
+    await h.invoke(CHANNELS.setUserSettings, { settings: dark, base: DEFAULT_USER_SETTINGS });
+    h.broadcastUserSettings.mockClear();
+    // An edit the watcher has not applied yet: zoom 3 and a name.
+    await writeFile(path, JSON.stringify({
+      appearance: { themeMode: "system", zoomLevel: 3 },
+      profile: { preferredName: "Ada" },
+    }));
+    await expect(h.zoom("in")).resolves.toMatchObject({
+      settings: { appearance: { zoomLevel: 4 }, profile: { preferredName: "Ada" } },
+    });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      appearance: { themeMode: "system", zoomLevel: 4 },
+      profile: { preferredName: "Ada" },
+    });
+    expect(h.preferredName()).toBe("Ada");
+    expect(h.applyZoomLevelToWindows).toHaveBeenLastCalledWith(4);
+    expect(h.broadcastUserSettings).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ settings: expect.objectContaining({ profile: { preferredName: "Ada" } }) }),
+    );
+    // The zoom save already applied the edit; the watcher finds nothing new.
+    await h.reload();
+    expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a zoom step over a file dohc cannot use, and names the way out", async () => {
+    const h = await harness();
+    const path = join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE);
+    await writeFile(path, "{ \"appearance\": ");
+    await expect(h.zoom("in")).rejects.toThrow(
+      `dohc did not save settings. dohc could not use ${path}: it is not valid JSON. Fix the file, or select Reset user in Advanced to replace it.`,
+    );
+    expect(await readFile(path, "utf8")).toBe("{ \"appearance\": ");
+    expect(h.applyZoomLevelToWindows).not.toHaveBeenCalled();
+  });
+
+  it("scans for waiting runner work only when the runner or the agent's name changes", async () => {
+    const h = await harness();
+    const runner = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    await h.invoke(CHANNELS.setUserSettings, { settings: runner, base: DEFAULT_USER_SETTINGS });
+    await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
+    h.scanWorkspace.mockClear();
+    await h.zoom("in");
+    await h.invoke(CHANNELS.setUserSettings, {
+      settings: { ...runner, profile: { ...runner.profile, preferredName: "Sam" } },
+      base: runner,
+    });
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    expect(h.refreshDispatchTray).toHaveBeenCalledTimes(3);
+  });
+
+  it("opens this workspace's settings file through the workspace that asked", async () => {
+    const h = await harness();
+    await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { privacy: { confirmExternalLinks: false } });
+    await h.invoke(CHANNELS.openWorkspaceSettingsFile, workspacePayload);
+    expect(h.openPath).toHaveBeenCalledExactlyOnceWith(join(h.root, ".dohc", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE));
+    await expect(h.invoke(CHANNELS.openWorkspaceSettingsFile, workspacePayload, h.second)).rejects.toThrow("this window changed workspaces");
+    expect(h.openPath).toHaveBeenCalledOnce();
+  });
+
   it("creates the settings file before opening it, and never replaces one that exists", async () => {
     const h = await harness();
     const path = join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE);
@@ -362,7 +425,7 @@ describe("registered settings IPC", () => {
     expect(await readFile(path, "utf8")).toBe("{ \"appearance\": ");
     h.openPath.mockResolvedValueOnce("No application is associated with this file.");
     await expect(h.invoke(CHANNELS.openUserSettingsFile)).rejects.toThrow(
-      `dohc could not open ${path}. No application is associated with this file.`,
+      `dohc could not open ${path}. No application is associated with this file. Open the file in a text editor.`,
     );
   });
 });

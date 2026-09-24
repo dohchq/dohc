@@ -67,7 +67,7 @@ function unreadableSettings(
   };
 }
 
-async function workspaceSettingsPath(rootPath: string): Promise<string> {
+export async function workspaceSettingsPath(rootPath: string): Promise<string> {
   return join(await resolveWorkspaceMetadataDir(rootPath), WORKSPACE_SETTINGS_FILE);
 }
 

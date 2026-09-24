@@ -365,10 +365,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
-import {
-  readCachedUserSettingsFile,
-  writeUserSettingsFile,
-} from "./settings/userSettingsStore";
+import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -704,7 +701,9 @@ const devToolsGranted = devToolsEnabled(process.env, app);
 
 const desktopWindows = createDesktopWindows({
   app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
-  stateDir, readCachedUserSettingsFile, writeUserSettingsFile, createMainWindow,
+  stateDir, readCachedUserSettingsFile, createMainWindow,
+  // Menu clicks arrive after startup, when the settings owner exists.
+  stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
   get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
@@ -721,8 +720,7 @@ const {
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
   bindGuestZoom,
-  enqueueUserSettingsWrite,
-  stepWindowZoom,
+  broadcastUserSettings,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
@@ -3934,12 +3932,25 @@ const quitGuard = createQuitGuard({
   },
 });
 
+// The owner of the user settings file: every save, zoom step, reset, and
+// edit made in the file goes through it and takes effect there.
+const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+  assertTrustedSender, stateDir,
+  setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
+  applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
+  chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
+  broadcastUserSettings,
+  openPath: (path) => shell.openPath(path),
+});
+
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
-    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, exitRounds,
+    rememberChromeTheme, titleBarOverlayOptions,
+    stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
   });
   windowIpc.registerReload();
@@ -4622,26 +4633,9 @@ function registerIpcHandlers(): void {
 
   agentRunsIpc.registerAgentRuns();
 
-  const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, stateDir, enqueueUserSettingsWrite,
-    setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
-    applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
-    chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
-    broadcastUserSettings: (result) => {
-      for (const window of workspaceWindows.allLive()) {
-        window.webContents.send(CHANNELS.userSettingsChanged, result);
-      }
-    },
-    openPath: (path) => shell.openPath(path),
-  });
   settingsIpc.registerSettingsIpcHandlers();
-  // The settings file applies when saved.
-  try {
-    settingsIpc.watchUserSettingsFile();
-  } catch (error) {
-    console.error("[desktop] settings file watch:", error);
-  }
+  // The settings file applies when saved. The watch lasts as long as main.
+  settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
 

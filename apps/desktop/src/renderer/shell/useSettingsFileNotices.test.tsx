@@ -61,6 +61,7 @@ describe("useSettingsFileNotices", () => {
           workspaceIsReady: ready,
           userSettings,
           show: errors.showSettingsFileNotice,
+          reportError: errors.showShellError,
         });
         return { ...errors, onWorkspaceRead };
       },
@@ -89,5 +90,65 @@ describe("useSettingsFileNotices", () => {
     expect(result.current.shellErrors.map((row) => row.kind)).toEqual(["user-settings-file"]);
     rerender({ userSettings: user(), ready: true });
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("opens each file from its row, and Try again reads it again", async () => {
+    const broken: WorkspaceSettingsResult = {
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: "Workspace settings could not be read. dohc is using default settings. Fix /w/.dohc/settings.local.json. Or select Reset workspace in Advanced to replace it.",
+    };
+    const bridge = {
+      getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => broken),
+      openWorkspaceSettingsFile: vi.fn(async () => undefined),
+      openUserSettingsFile: vi.fn(async (): Promise<void> => {
+        throw new Error(
+          "Error invoking remote method 'desktop:open-user-settings-file': Error: dohc could not open /s/dohc-settings.json. No app. Open the file in a text editor.",
+        );
+      }),
+      reloadUserSettings: vi.fn(async () => user([{ key: "accent", reason: "unknown" }])),
+    };
+    vi.stubGlobal("dohcDesktop", bridge);
+    const { result } = renderHook(() => {
+      const errors = useShellError("ws-a");
+      useSettingsFileNotices({
+        workspaceId: "ws-a",
+        workspaceIsReady: true,
+        userSettings: user([{ key: "accent", reason: "unknown" }]),
+        show: errors.showSettingsFileNotice,
+        reportError: errors.showShellError,
+      });
+      return errors;
+    });
+    await waitFor(() => expect(result.current.shellErrors).toHaveLength(2));
+    const row = (kind: string) => result.current.shellErrors.find((error) => error.kind === kind)!;
+    for (const kind of ["user-settings-file", "workspace-settings-file"]) {
+      expect(row(kind).action?.label).toBe("Open settings file");
+      expect(row(kind).retry).not.toBeNull();
+    }
+
+    act(() => result.current.runShellErrorAction(row("workspace-settings-file").id));
+    expect(bridge.openWorkspaceSettingsFile).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+    // Opening keeps the row: the file is still wrong until it is saved.
+    expect(row("workspace-settings-file")).toBeDefined();
+
+    // A failure to open says why and what to do instead.
+    act(() => result.current.runShellErrorAction(row("user-settings-file").id));
+    await waitFor(() =>
+      expect(result.current.shellErrors.map((error) => error.message)).toContain(
+        "dohc could not open /s/dohc-settings.json. No app. Open the file in a text editor.",
+      ));
+
+    // Try again on a file that still says the same thing brings its row back.
+    act(() => result.current.retryShellError(row("user-settings-file").id));
+    await waitFor(() => expect(bridge.reloadUserSettings).toHaveBeenCalledOnce());
+    await waitFor(() => expect(row("user-settings-file")).toBeDefined());
+
+    // The person repairs the workspace file; Try again clears its row.
+    bridge.getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
+    act(() => result.current.retryShellError(row("workspace-settings-file").id));
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(result.current.shellErrors.some((error) => error.kind === "workspace-settings-file")).toBe(false));
   });
 });

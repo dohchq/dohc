@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import {
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
+  settingsDeepEqual,
   type DesktopUserSettingsResult,
 } from "./userSettings";
 import {
@@ -125,10 +126,34 @@ export async function readCachedUserSettingsFile(
   return (await snapshotFor(resolve(dir))).result;
 }
 
+async function textOnDisk(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * Writes `content` over the file. With `expected`, the file must still hold
+ * that text just before the rename; otherwise nothing is written and the
+ * answer is null, so the caller can merge onto what the file holds now.
+ */
 async function commitUserSettings(
   root: string,
   content: Record<string, unknown>,
-): Promise<DesktopUserSettingsResult> {
+): Promise<DesktopUserSettingsResult>;
+async function commitUserSettings(
+  root: string,
+  content: Record<string, unknown>,
+  expected: { text: string | null },
+): Promise<DesktopUserSettingsResult | null>;
+async function commitUserSettings(
+  root: string,
+  content: Record<string, unknown>,
+  expected?: { text: string | null },
+): Promise<DesktopUserSettingsResult | null> {
   await mkdir(root, { recursive: true });
   const path = settingsPath(root);
   const text = `${JSON.stringify(content, null, 2)}\n`;
@@ -136,6 +161,7 @@ async function commitUserSettings(
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(tmp, text);
+    if (expected && (await textOnDisk(path)) !== expected.text) return null;
     await rename(tmp, path);
     snapshots.set(root, Promise.resolve(snapshot));
     return snapshot.result;
@@ -144,25 +170,58 @@ async function commitUserSettings(
   }
 }
 
+// An editor that saves over and over can outrun a merge; dohc stops rather
+// than write over an edit it did not read.
+const SAVE_ATTEMPTS = 5;
+
 /**
- * Saves a change into the file as it is now. Only the settings that differ
- * between `base`, what the caller changed, and `settings` are written. An
- * edit made in the file since the caller read it stays, and so do keys dohc
- * does not know and values it could not use. A file dohc cannot use is
- * refused rather than replaced: it may be a person's edit in progress.
+ * Saves a change into the file as it is now. `change` gets the settings the
+ * file holds and answers the settings to save. Only the settings that differ
+ * are written, so keys dohc does not know, and values it could not use and
+ * did not change, stay as the person wrote them. When the file changes
+ * during the save, the change is merged again onto the new file. A file dohc
+ * cannot use is refused rather than replaced: it may be an edit in progress.
  */
-export async function writeUserSettingsFile(
+export async function updateUserSettingsFile(
+  dir: string,
+  change: (current: DesktopUserSettings) => DesktopUserSettings,
+): Promise<DesktopUserSettingsResult> {
+  const root = resolve(dir);
+  const path = settingsPath(root);
+  for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt += 1) {
+    const onDisk = await loadUserSettings(path);
+    if (onDisk.problem !== null) {
+      throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
+    }
+    const current = onDisk.result.settings;
+    const next = DesktopUserSettings.parse(change(current));
+    if (settingsDeepEqual(next, current)) {
+      snapshots.set(root, Promise.resolve(onDisk));
+      return onDisk.result;
+    }
+    const saved = await commitUserSettings(
+      root,
+      overlaySettings(onDisk.raw ?? current, current, next),
+      { text: onDisk.text },
+    );
+    if (saved) return saved;
+  }
+  throw new Error(`dohc did not save settings because ${path} kept changing. Try again.`);
+}
+
+/**
+ * Saves the settings a caller changed from `base`. Only that difference is
+ * written onto the file as it is now, so an edit made in the file after the
+ * caller read it stays.
+ */
+export function writeUserSettingsFile(
   dir: string,
   settings: DesktopUserSettings,
   base: DesktopUserSettings,
 ): Promise<DesktopUserSettingsResult> {
-  const root = resolve(dir);
   const next = DesktopUserSettings.parse(settings);
-  const onDisk = await loadUserSettings(settingsPath(root));
-  if (onDisk.problem !== null) {
-    throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
-  }
-  return commitUserSettings(root, overlaySettings(onDisk.raw ?? onDisk.result.settings, base, next));
+  return updateUserSettingsFile(dir, (current) =>
+    DesktopUserSettings.parse(overlaySettings(current, base, next)));
 }
 
 /** Replaces the whole file. Reset user settings is the one caller. */

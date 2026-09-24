@@ -1,12 +1,10 @@
 import type { App, BrowserWindow, Dialog, Menu, WebContents } from "electron";
-import { DesktopUserSettingsResult, type WorkspaceSummary } from "../ipc/bridgeContract";
+import type { DesktopUserSettingsResult, WorkspaceSummary } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
 import { buildMenuTemplate } from "./applicationMenu";
 import {
-  createUserSettingsWriteQueue,
   createGuestZoomApplier,
-  createZoomMutation,
   resolvePersistedZoomApplication,
 } from "./windowZoom";
 import {
@@ -14,7 +12,8 @@ import {
   focusShareHandoffWindowWhenReady,
 } from "../shareHandoffIngress";
 import type { createMainWindow as createMainWindowImplementation } from "./createMainWindow";
-import type { readCachedUserSettingsFile as readSettings, writeUserSettingsFile as writeSettings } from "../settings/userSettingsStore";
+import type { ZoomStep } from "../settings/userSettings";
+import type { readCachedUserSettingsFile as readSettings } from "../settings/userSettingsStore";
 import type { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
 
 interface DesktopWindowsDependencies {
@@ -27,7 +26,9 @@ interface DesktopWindowsDependencies {
   currentUpdateState(): { canInstall?: boolean };
   stateDir(): string;
   readCachedUserSettingsFile: typeof readSettings;
-  writeUserSettingsFile: typeof writeSettings;
+  // One zoom step through the settings file owner, which saves it and puts it
+  // into effect.
+  stepWindowZoom(step: ZoomStep): Promise<unknown>;
   createMainWindow: typeof createMainWindowImplementation;
   // Handed to every renderer window's preload (dev-tools grant).
   preloadArguments?: readonly string[];
@@ -46,7 +47,7 @@ interface DesktopWindowsDependencies {
 export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   const {
     app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
-    stateDir, readCachedUserSettingsFile, writeUserSettingsFile, createMainWindow,
+    stateDir, readCachedUserSettingsFile, createMainWindow,
   } = dependencies;
 
   let applicationMenuCanInstallUpdate: boolean | null = null;
@@ -206,9 +207,6 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return quoted;
   }
 
-  // One user-settings write queue for every caller. Full saves and zoom steps
-  // cannot interleave their file mutations.
-  //
   // Tracked workspace windows only, never getAllWindows(): a hidden utility
   // window (the PDF export renderer) must keep its own zoom, or an export
   // mid-render would change layout with the user's keystroke.
@@ -224,22 +222,6 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   }
 
   const bindGuestZoom = createGuestZoomApplier(() => knownZoomLevel);
-
-  const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
-  const mutateWindowZoom = createZoomMutation({
-    enqueue: enqueueUserSettingsWrite,
-    read: () => readCachedUserSettingsFile(stateDir()),
-    write: (settings, base) => writeUserSettingsFile(stateDir(), settings, base),
-    apply: applyZoomLevelToWindows,
-  });
-
-  async function stepWindowZoom(
-    step: Parameters<typeof mutateWindowZoom>[0],
-  ): Promise<DesktopUserSettingsResult> {
-    const result = DesktopUserSettingsResult.parse(await mutateWindowZoom(step));
-    broadcastUserSettings(result);
-    return result;
-  }
 
   function broadcastUserSettings(result: DesktopUserSettingsResult): void {
     for (const window of liveZoomedWindows()) {
@@ -262,15 +244,16 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
             targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
           },
           stepZoom: (step) => {
-            void stepWindowZoom(step).catch((error) => {
+            void dependencies.stepWindowZoom(step).catch((error) => {
               console.error("[desktop] window zoom:", error);
               // The accelerator path has no renderer surface to answer on (the
               // palette and Settings show their own errors), so the refusal —
-              // e.g. an unreadable settings file — must reach the user here.
+              // e.g. an unreadable settings file, named with its way out —
+              // must reach the user here.
               dialog.showErrorBox(
                 "Zoom",
                 error instanceof Error
-                  ? `${error.message} Open Settings to repair or reset it.`
+                  ? error.message
                   : "dohc could not change the window zoom.",
               );
             });
@@ -513,8 +496,6 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     reportActivationFailure,
     applyZoomLevelToWindows,
     bindGuestZoom,
-    enqueueUserSettingsWrite,
-    stepWindowZoom,
     broadcastUserSettings,
     refreshApplicationMenu,
     refreshNativeWorkspaceSurfaces,

@@ -158,7 +158,7 @@ export function DesktopRoot() {
   const appearance = userSettings?.settings.appearance;
   useEffect(() => {
     if (appearance) applyAppearanceSettings(appearance);
-  }, [appearance?.themeMode]);
+  }, [appearance]);
 
   useEffect(
     () =>

@@ -21,6 +21,8 @@ export interface ShellError {
   id: string;
   message: string;
   retry: (() => void) | null;
+  // A step that fixes the cause, offered beside Try again.
+  action?: { label: string; run: () => void };
   kind?: ShellErrorKind;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
@@ -151,14 +153,30 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   // One row per settings file: a newer read replaces it, and a read with
-  // nothing to report clears it.
+  // nothing to report clears it. Try again reads the file again; the action
+  // opens it.
   const showSettingsFileNotice = useCallback(
-    (kind: SettingsFileKind, message: string | null) => {
+    (
+      kind: SettingsFileKind,
+      message: string | null,
+      steps: { retry: () => void; open: () => void },
+    ) => {
       if (message === null) clearKind(kind);
-      else push({ message, retry: null, kind });
+      else {
+        push({
+          message,
+          retry: steps.retry,
+          action: { label: "Open settings file", run: steps.open },
+          kind,
+        });
+      }
     },
     [clearKind, push],
   );
+  // The row stays: the file is still wrong until the person saves it.
+  const runShellErrorAction = useCallback((id: string) => {
+    shellErrorsRef.current.find((error) => error.id === id)?.action?.run();
+  }, []);
   const showSuccessNotice = useCallback(
     (message: string) => push({ message, retry: null, tone: "success" }),
     [push],
@@ -197,5 +215,6 @@ export function useShellError(workspaceId: string) {
     hideShellError,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   };
 }

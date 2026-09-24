@@ -6467,10 +6467,14 @@ export interface DohcDesktopBridge
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
+  // Reads the settings file again, applies it, and answers what is in effect.
+  reloadUserSettings(): Promise<DesktopUserSettingsResult>;
   getUserSettingsFilePath(): Promise<string>;
   // Opens the settings file in the system's editor, creating it first when
   // there is none.
   openUserSettingsFile(): Promise<void>;
+  // Opens this workspace's .dohc/settings.local.json in the system's editor.
+  openWorkspaceSettingsFile(payload: WorkspaceSettingsPayload): Promise<void>;
   getWorkspaceSettings(
     payload: WorkspaceSettingsPayload,
   ): Promise<WorkspaceSettingsResult>;
