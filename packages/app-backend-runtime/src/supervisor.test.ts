@@ -419,16 +419,14 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   expect(opened).toEqual([0,3]);expect(replayed).toEqual([1,2,3]);
 });
 
-it("waits longer before each reopen of a dataset whose worker ran out of CPU",async()=>{
-  let now=1_000_000,failing=true,directory="";
+it("waits longer before each reopen of a dataset whose replay ran out of CPU",async()=>{
+  let now=1_000_000,failing:"applyBatch"|"prepare"|undefined="applyBatch",directory="";
   const replayed:number[]=[];
   const launch=launcher((command,controls)=>{
     if(command.command.kind==="open")directory=command.command.input.directory;
-    if(command.command.kind==="applyBatch") {
-      replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
-      // The worker's CPU budget watch leaves this marker, then ends the worker.
-      if(failing){void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);return;}
-    }
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+    // The worker's CPU budget watch leaves this marker, then ends the worker.
+    if(command.command.kind===failing){void writeFile(join(directory,"cpu-budget-exceeded"),"app 5000").then(controls.stop);return;}
     controls.deliver();
   });
   const f=await fixture();
@@ -438,15 +436,25 @@ it("waits longer before each reopen of a dataset whose worker ran out of CPU",as
   cleanups.push(()=>supervisor.close());
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
-  await expect(supervisor.invoke(read)).rejects.toThrow("The dataset stopped before its work finished. Try again in 5 s.");
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"dataset_reopen_wait",retryAfterMs:5_000,
+    message:"The dataset stopped before its work finished. Try again in 5 s."});
   expect(replayed).toEqual([1]);
   now+=5_000;
   await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
-  await expect(supervisor.invoke(read)).rejects.toThrow("Try again in 10 s.");
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({retryAfterMs:10_000});
   expect(replayed).toEqual([1,1]);
-  now+=10_000;failing=false;
+  // A failure long after the last one starts the wait over.
+  now+=31*60_000;
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({retryAfterMs:5_000});
+  now+=5_000;failing=undefined;
   expect((await supervisor.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);
-  expect(replayed).toEqual([1,1,1]);
+  expect(replayed).toEqual([1,1,1,1]);
+  // An operation that runs out of CPU leaves a cheap reopen, so the next request does not wait.
+  failing="prepare";
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"worker_budget"});
+  failing=undefined;
+  expect((await supervisor.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);
 });
 
 it("serves committed reads and writes while a captured cache is being sealed",async()=>{

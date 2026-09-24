@@ -100,6 +100,19 @@ type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(
 type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const REOPEN_WAIT_MS = 5_000, REOPEN_WAIT_CAP_MS = 30 * 60_000;
+/** A dataset whose reopen ran out of time or CPU refuses to reopen until its wait ends. */
+export class DatasetReopenWaitError extends Error {
+  readonly code = "dataset_reopen_wait";
+  constructor(readonly retryAfterMs: number) {
+    super(`The dataset stopped before its work finished. Try again in ${Math.ceil(retryAfterMs / 1000)} s.`);
+    this.name = "DatasetReopenWaitError";
+  }
+}
+/** Public package entrypoints can contain separate bundled copies of the error class. */
+export function isDatasetReopenWaitError(error: unknown): error is DatasetReopenWaitError {
+  return error instanceof Error && error.name === "DatasetReopenWaitError" && (error as Partial<DatasetReopenWaitError>).code === "dataset_reopen_wait" &&
+    Number.isSafeInteger((error as Partial<DatasetReopenWaitError>).retryAfterMs) && (error as DatasetReopenWaitError).retryAfterMs > 0;
+}
 function copyScope(value:DatasetScope):DatasetScope {
   if(!value||![value.workspaceId,value.datasetId].every(part=>typeof part==="string"&&/^[A-Za-z0-9._:-]{1,128}$/.test(part)))throw new Error("Invalid dataset scope.");
   return {workspaceId:value.workspaceId,datasetId:value.datasetId};
@@ -126,9 +139,17 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const maintenance = new Map<string,{cancel:AbortController;done:Promise<void>}>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
-  // A worker that ran out of time or CPU would repeat the same work when it
-  // reopens, so each such failure in a row doubles the wait before a reopen.
-  const reopenWaits = new Map<string, { failures: number; untilMs: number }>();
+  // A reopen that ran out of time or CPU would repeat the same work, so each
+  // such failure in a row doubles the wait before the next reopen. The count
+  // starts over once the last failure is older than the longest wait.
+  const reopenWaits = new Map<string, { failures: number; failedAtMs: number; untilMs: number }>();
+  function noteReopenFailure(scope: DatasetScope, error: unknown): void {
+    const code = (error as {code?: unknown}).code;
+    if (code !== "worker_budget" && code !== "worker_stalled" && code !== "worker_deadline") return;
+    const key = JSON.stringify(scope), previous = reopenWaits.get(key), at = now();
+    const failures = previous && at - previous.failedAtMs < REOPEN_WAIT_CAP_MS ? previous.failures + 1 : 1;
+    reopenWaits.set(key, { failures, failedAtMs: at, untilMs: at + Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), REOPEN_WAIT_CAP_MS) });
+  }
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
   const now = options.nowMs ?? Date.now;
@@ -300,7 +321,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
     const wait=reopenWaits.get(JSON.stringify(lane.scope));
-    if(wait&&now()<wait.untilMs)throw new Error(`The dataset stopped before its work finished. Try again in ${Math.ceil((wait.untilMs-now())/1000)} s.`);
+    if(wait&&now()<wait.untilMs)throw new DatasetReopenWaitError(wait.untilMs-now());
     let waiting=false;
     const admitWait=()=>{
       if(waiting)return;
@@ -390,15 +411,22 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const current = head(input);
     if (!current.active) throw new Error("Dataset authority was transferred.");
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
+    try {
+      const worker = await reopenAndReplay(lane, input, current.cursor);
+      reopenWaits.delete(JSON.stringify(lane.scope));
+      return worker;
+    } catch (error) { noteReopenFailure(lane.scope, error); throw error; }
+  }
+  async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor): Promise<Worker> {
     const worker = lane.worker ?? await openWorker(lane, input);
-    if (worker.cursor.revision > current.cursor.revision) throw new Error("Dataset materialization is ahead of its journal.");
+    if (worker.cursor.revision > target.revision) throw new Error("Dataset materialization is ahead of its journal.");
     const replayStart = performance.now();
     let replayed = false;
-    while (!sameCursor(worker.cursor, current.cursor)) {
+    while (!sameCursor(worker.cursor, target)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
       if (!page.events.length) throw new Error("Dataset recovery history is incomplete.");
       for (const event of page.events) {
-        if (event.cursor.revision > current.cursor.revision) throw new Error("Dataset head changed during recovery.");
+        if (event.cursor.revision > target.revision) throw new Error("Dataset head changed during recovery.");
       }
       await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})));
       worker.cursor=page.events.at(-1)!.cursor;
@@ -627,10 +655,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     lane.admission={bytes:job.bytes,deadline:job.deadline};
     lane.done = (async () => {
       let released=false;
-      const key=JSON.stringify(lane.scope);
       try {
         const result = await job.work();
-        reopenWaits.delete(key);
         if(options.maintenanceStorage&&lane.worker&&!blockedMaintenance.has(JSON.stringify(lane.scope))&&lane.worker.cursor.revision>=(lane.nextMaterializationRevision??materializationEvents)) {
           job.resolve(result);
           // Capture an immutable cache, then let foreground work continue during its staging.
@@ -640,14 +666,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           })();
           await lane.idleWork;
         } else {released=true;lane.admission=undefined;lane.active=false;pump(lane);job.resolve(result);return;}
-      } catch (error) {
-        const code=(error as {code?:unknown}).code;
-        if(code==="worker_budget"||code==="worker_stalled"||code==="worker_deadline") {
-          const failures=(reopenWaits.get(key)?.failures??0)+1;
-          reopenWaits.set(key,{failures,untilMs:now()+Math.min(REOPEN_WAIT_MS*2**(failures-1),REOPEN_WAIT_CAP_MS)});
-        }
-        job.reject(error);
-      }
+      } catch (error) { job.reject(error); }
       finally {if(!released){lane.admission=undefined;lane.active=false;pump(lane);}}
     })();
   }

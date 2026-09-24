@@ -11,6 +11,7 @@ import { createSyncRelayHandler } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
+import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
@@ -102,6 +103,16 @@ it("creates and manages one dataset through authenticated routes and the public 
   expect(await refusal.json()).toEqual({code: "missing_name", message: "A name is required."});
   expect((await f.http(`${f.path}/binding`, {publicationId, enabled: false})).status).toBe(200);
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
+});
+
+it("tells callers when to retry a dataset that waits to reopen", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  f.host.invoke = async () => { throw new DatasetReopenWaitError(9_500); };
+  const waiting = await f.invoke();
+  expect(waiting.status).toBe(503);
+  expect(waiting.headers.get("retry-after")).toBe("10");
+  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "The dataset stopped before its work finished. Try again in 10 s."});
 });
 
 it("archives and restores a dataset with its rows, app bindings, and retry receipts intact", async () => {
