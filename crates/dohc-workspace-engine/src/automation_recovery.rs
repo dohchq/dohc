@@ -265,7 +265,7 @@ mod tests {
             let (claimed, _) = actor
                 .automation_claim_next(
                     WORKSPACE.to_owned(),
-                    None,
+                    id.to_owned(),
                     OPENED_AT,
                     Arc::new(NoFaults),
                     CancellationToken::new(),

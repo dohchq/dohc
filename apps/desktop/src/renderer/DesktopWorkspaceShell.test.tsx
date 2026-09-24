@@ -9270,6 +9270,7 @@ describe("share changes review", () => {
 describe("automation failure notices", () => {
   const FAILURE = {
     automationId: "hello-plugin/triage",
+    claimId: "atc_failed",
     error: "handler exploded",
     updatedAtMs: 5_000,
     generation: 1,

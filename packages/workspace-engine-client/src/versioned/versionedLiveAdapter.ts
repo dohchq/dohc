@@ -1156,11 +1156,11 @@ export class VersionedLiveAdapter {
   }
 
   /**
-   * Takes the oldest pending claim (pending -> running) with its field
-   * facts, or null; with a prefix, only that executor's automations.
+   * Takes the oldest pending claim in the executor's namespace (pending ->
+   * running) with its field facts, or null.
    */
   async claimNextAutomation(
-    input: AutomationClaimNextParams = {},
+    input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
   }
@@ -1173,8 +1173,9 @@ export class VersionedLiveAdapter {
   }
 
   /**
-   * Queues a failed claim to run again with its facts. A pending or running
-   * claim comes back unchanged; a done or chain-stopped claim is refused.
+   * Queues a failed claim as its next run, with its facts. A pending or
+   * running claim comes back unchanged; a done or chain-stopped claim is
+   * refused.
    */
   async retryAutomationClaim(
     input: AutomationRetryParams,

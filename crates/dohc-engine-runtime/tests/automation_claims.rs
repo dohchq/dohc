@@ -322,15 +322,16 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         claim.change,
         AutomationChange {
             kind: AutomationChangeKind::Changed,
+            author_origin_id: Some("agent-editor".to_owned()),
             actor_kind: Some(ChangeActorKind::Agent),
-            actor_id: Some("agent-editor".to_owned()),
+            on_behalf_of: Some("user:ice".to_owned()),
         },
         "the claim names the change's kind and actor"
     );
     let (served, served_facts) = handle
         .automation_claim_next(
             WS.to_owned(),
-            Some("plugin:".to_owned()),
+            "plugin:".to_owned(),
             250,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -475,7 +476,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     let (collection_claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            Some("collection:".to_owned()),
+            "collection:".to_owned(),
             510,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -492,7 +493,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         handle
             .automation_claim_next(
                 WS.to_owned(),
-                Some("collection:".to_owned()),
+                "collection:".to_owned(),
                 520,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
@@ -616,7 +617,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -630,7 +631,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             210,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -684,7 +685,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             1_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -736,7 +737,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             2_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -767,7 +768,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             200,
             faults.clone(),
             CancellationToken::new(),
@@ -787,7 +788,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -829,7 +830,7 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             200,
             Arc::new(NoFaults),
             cancelled.clone(),
@@ -926,7 +927,13 @@ async fn abandoning_a_claim_request_does_not_cancel_its_admitted_transaction() {
         let gate = Arc::clone(&gate);
         tokio::spawn(async move {
             handle
-                .automation_claim_next(WS.to_owned(), None, 200, gate, CancellationToken::new())
+                .automation_claim_next(
+                    WS.to_owned(),
+                    "plugin:".to_owned(),
+                    200,
+                    gate,
+                    CancellationToken::new(),
+                )
                 .await
         })
     };
@@ -971,7 +978,7 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
-            None,
+            "plugin:".to_owned(),
             200,
             PanicFaults::at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),

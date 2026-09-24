@@ -1,4 +1,5 @@
 use crate::EngineService;
+use crate::events::emit_automation_claimed;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -7,6 +8,7 @@ use dohc_engine_domain::AutomationChangeKind;
 use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
+use dohc_engine_domain::AutomationRetry;
 use dohc_engine_domain::AutomationSettle;
 use dohc_engine_domain::AutomationSubscription;
 use dohc_engine_domain::AutomationTrigger;
@@ -49,8 +51,7 @@ struct AutomationUnsubscribeParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationClaimNextParams {
     now_ms: Option<i64>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    automation_id_prefix: Option<String>,
+    automation_id_prefix: String,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +80,7 @@ struct AutomationListClaimsParams {
 fn automation_failure_json(failure: &AutomationFailure) -> Value {
     json!({
         "automationId": failure.automation_id,
+        "claimId": failure.claim_id,
         "error": failure.error,
         "updatedAtMs": failure.updated_at_ms,
         "generation": failure.generation,
@@ -104,13 +106,13 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
         "depth": claim.depth,
         "change": {
             "kind": claim.change.kind.as_str(),
-            "actor": {
-                "kind": claim.change.actor_kind.map(|kind| kind.as_str()),
-                "id": claim.change.actor_id,
-            },
+            "authorOriginId": claim.change.author_origin_id,
+            "actorKind": claim.change.actor_kind.map(|kind| kind.as_str()),
+            "onBehalfOf": claim.change.on_behalf_of,
         },
         "state": claim.state.as_str(),
         "attempts": claim.attempts,
+        "run": claim.run,
         "createdAtMs": claim.created_at_ms,
         "updatedAtMs": claim.updated_at_ms,
     });
@@ -309,8 +311,10 @@ impl EngineService {
         Ok(automation_claim_json(&claim))
     }
 
-    /// The owner's re-run: a failed claim goes back to pending with the
-    /// facts it already holds.
+    /// The owner's re-run: a failed claim goes back to pending as its next
+    /// run, with the facts it already holds. A requeued claim announces
+    /// itself post-commit like a new one, which wakes the executor and tells
+    /// the failure surface to re-read.
     pub(super) async fn automations_retry(
         &self,
         ctx: &RequestContext,
@@ -320,7 +324,7 @@ impl EngineService {
         let params: AutomationRetryParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let claim = Self::read_under_ctx(
+        let retry = Self::read_under_ctx(
             &cancellation,
             "automations.retry",
             open.actor.automation_retry(
@@ -332,6 +336,17 @@ impl EngineService {
             ),
         )
         .await?;
+        let claim = match retry {
+            AutomationRetry::Requeued(claim) => {
+                emit_automation_claimed(
+                    &self.events,
+                    &open.workspace_id,
+                    std::slice::from_ref(&claim),
+                );
+                claim
+            }
+            AutomationRetry::Unchanged(claim) => claim,
+        };
         Ok(automation_claim_json(&claim))
     }
 }

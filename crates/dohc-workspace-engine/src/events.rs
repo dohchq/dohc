@@ -112,8 +112,8 @@ fn record_event_value(json: Option<&str>) -> Value {
         .unwrap_or_else(|| json!({ "truncated": true, "bytes": json.len() }))
 }
 
-/// Emit `automation.claimed` post-commit for each pending claim a local
-/// apply inserted, in insertion order. The payload is the claim row plus its
+/// Emit `automation.claimed` post-commit for each claim a local apply
+/// inserted or a retry requeued, in order. The payload is the claim row plus its
 /// workspace — enough for the desktop to route the wake-up without a read.
 pub(super) fn emit_automation_claimed(
     events: &EngineEvents,
@@ -245,11 +245,13 @@ mod tests {
                 depth: 1,
                 change: dohc_engine_domain::AutomationChange {
                     kind: dohc_engine_domain::AutomationChangeKind::Changed,
+                    author_origin_id: Some("agent-editor".to_owned()),
                     actor_kind: Some(dohc_engine_domain::ChangeActorKind::Agent),
-                    actor_id: Some("agent-editor".to_owned()),
+                    on_behalf_of: Some("user:ice".to_owned()),
                 },
                 state: dohc_engine_domain::AutomationClaimState::Pending,
                 attempts: 0,
+                run: 1,
                 error: None,
                 created_at_ms: 1_100,
                 updated_at_ms: 1_100,
@@ -263,11 +265,13 @@ mod tests {
                 depth: 0,
                 change: dohc_engine_domain::AutomationChange {
                     kind: dohc_engine_domain::AutomationChangeKind::Added,
+                    author_origin_id: None,
                     actor_kind: None,
-                    actor_id: None,
+                    on_behalf_of: None,
                 },
                 state: dohc_engine_domain::AutomationClaimState::Pending,
                 attempts: 0,
+                run: 1,
                 error: None,
                 created_at_ms: 1_100,
                 updated_at_ms: 1_100,
@@ -298,10 +302,13 @@ mod tests {
                 "depth": 1,
                 "change": {
                     "kind": "changed",
-                    "actor": { "kind": "agent", "id": "agent-editor" },
+                    "authorOriginId": "agent-editor",
+                    "actorKind": "agent",
+                    "onBehalfOf": "user:ice",
                 },
                 "state": "pending",
                 "attempts": 0,
+                "run": 1,
                 "createdAtMs": 1_100,
                 "updatedAtMs": 1_100,
             }),
@@ -314,7 +321,12 @@ mod tests {
         );
         assert_eq!(
             notices[1].payload["change"],
-            json!({ "kind": "added", "actor": { "kind": null, "id": null } }),
+            json!({
+                "kind": "added",
+                "authorOriginId": null,
+                "actorKind": null,
+                "onBehalfOf": null,
+            }),
             "an undeclared actor travels as nulls"
         );
     }

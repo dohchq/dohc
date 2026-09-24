@@ -546,17 +546,20 @@ describe("workspace wire schemas", () => {
 describe("automations wire schemas", () => {
   const summary = {
     claimId: "claim-1",
-    automationId: "hello-plugin/triage",
+    automationId: "plugin:hello-plugin/triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "record-1",
     collectionPath: "tasks",
     depth: 0,
     change: {
       kind: "changed",
-      actor: { kind: "agent", id: "agent-editor" },
+      authorOriginId: "agent-editor",
+      actorKind: "agent",
+      onBehalfOf: "user:ice",
     },
     state: "pending",
     attempts: 1,
+    run: 1,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
   };
@@ -611,7 +614,12 @@ describe("automations wire schemas", () => {
     const failed = {
       ...summary,
       trigger: { historyId: 41 },
-      change: { kind: "added", actor: { kind: null, id: null } },
+      change: {
+        kind: "added",
+        authorOriginId: null,
+        actorKind: null,
+        onBehalfOf: null,
+      },
       state: "failed",
       error: "handler threw",
     };
@@ -640,7 +648,8 @@ describe("automations wire schemas", () => {
 
   it("decodes the failure listing and refuses a row without a generation", () => {
     const failure = {
-      automationId: "hello-plugin/triage",
+      automationId: "plugin:hello-plugin/triage",
+      claimId: "claim-1",
       error: "chain-stopped",
       updatedAtMs: 2_000,
       generation: 3,
@@ -657,7 +666,9 @@ describe("automations wire schemas", () => {
     ).toEqual({ failures: [] });
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
-        failures: [{ automationId: "hello-plugin/triage", error: "x" }],
+        failures: [
+          { automationId: "plugin:hello-plugin/triage", claimId: "claim-1", error: "x" },
+        ],
       }),
     ).toThrow(ProtocolShapeError);
   });
@@ -667,7 +678,8 @@ describe("automations wire schemas", () => {
       { ...claim, state: "paused" },
       { ...claim, trigger: { originId: "origin-a" } },
       { ...claim, change: { ...claim.change, kind: "moved" } },
-      { ...claim, change: { ...claim.change, actor: { kind: "robot", id: null } } },
+      { ...claim, change: { ...claim.change, actorKind: "robot" } },
+      { ...claim, run: undefined },
       {
         ...claim,
         change: {

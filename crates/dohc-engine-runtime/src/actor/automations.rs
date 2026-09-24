@@ -2,7 +2,7 @@ use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
-    AutomationSettle, AutomationSubscription,
+    AutomationRetry, AutomationSettle, AutomationSubscription,
 };
 use dohc_engine_storage::FaultInjector;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl ActorHandle {
     pub async fn automation_claim_next(
         &self,
         workspace_id: String,
-        automation_id_prefix: Option<String>,
+        automation_id_prefix: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -74,7 +74,7 @@ impl ActorHandle {
                 dohc_engine_domain::claim_next_pending_automation(
                     store,
                     &workspace_id,
-                    automation_id_prefix.as_deref(),
+                    &automation_id_prefix,
                     now_ms,
                     faults.as_ref(),
                 )
@@ -118,7 +118,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<AutomationClaim, RuntimeError> {
+    ) -> Result<AutomationRetry, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)

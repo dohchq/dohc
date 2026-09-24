@@ -5112,6 +5112,8 @@ export type ListAutomationFailuresPayload = z.infer<
 
 export const AutomationFailureNotice = z.object({
   automationId: z.string().min(1),
+  // The newest failed claim: the one a Try again re-runs.
+  claimId: z.string().min(1),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),

@@ -174,10 +174,10 @@ async function fixture() {
 }
 
 function claim(): AutomationClaim {
-  return { claimId: "claim", automationId: "plugin/triage", trigger: { originId: "origin", originSeq: 4 },
+  return { claimId: "claim", automationId: "plugin:plugin/triage", trigger: { originId: "origin", originSeq: 4 },
     recordId: "record", collectionPath: "tasks", depth: 2,
-    change: { kind: "changed", actor: { kind: "human", id: null }, fields: [], fieldsOmitted: 0 },
-    state: "running", attempts: 1, createdAtMs: 1, updatedAtMs: 1 };
+    change: { kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+    state: "running", attempts: 1, run: 1, createdAtMs: 1, updatedAtMs: 1 };
 }
 
 describe("desktop plugin SDK authority", () => {
@@ -298,8 +298,8 @@ describe("desktop plugin SDK runtime ownership", () => {
       await f.invoke("collections.setFields", { path: "tasks/one.md", fields: { status: "done" }, author: { depth: 99 }, idempotencyKey: "forged" }, { automationClaimId: "claim" });
       await mkdir(join(f.workspace.rootPath, "tasks"));
       await expect(f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" })).resolves.toEqual({ path: "tasks/new.md", recordId: "created-record" });
-      expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin/triage",
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/${ordinal}` })));
+      expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin:plugin/triage",
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}` })));
       expect(f.documents.map(doc => doc.getMap("frontmatter").toJSON())).toEqual([{ status: "done" }, { title: "Created" }]);
       expect(vi.mocked(f.dependencies.collectionEditContextFor).mock.calls.map(call => call[1])).toEqual(
         vi.mocked(f.dependencies.workerDatabaseReader).mock.calls.slice(1).map(call => call[0]));

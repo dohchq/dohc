@@ -21,7 +21,9 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
-use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
+use dohc_workspace_engine::{
+    AUTOMATION_CLAIMED_EVENT, EngineService, root_binding::write_root_binding,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -152,7 +154,9 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_claims(&scratch);
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let service = Arc::new(EngineService::new());
+    let mut notices = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -183,7 +187,10 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             "automations.unsubscribe",
             json!({ "automationId": "plugin:x", "path": "tasks" }),
         ),
-        ("automations.claimNext", json!({})),
+        (
+            "automations.claimNext",
+            json!({ "automationIdPrefix": "plugin:" }),
+        ),
         ("automations.failures", json!({})),
         (
             "automations.listClaims",
@@ -308,7 +315,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1000 }),
+        json!({ "nowMs": 1000, "automationIdPrefix": "plugin:" }),
     )
     .await;
     assert_eq!(requeued["claimId"], json!("atc_requeue"));
@@ -319,7 +326,9 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         requeued["change"],
         json!({
             "kind": "changed",
-            "actor": { "kind": null, "id": null },
+            "authorOriginId": null,
+            "actorKind": null,
+            "onBehalfOf": null,
             "fields": [],
             "fieldsOmitted": 0,
         })
@@ -348,15 +357,24 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     )
     .await;
     assert_eq!(other_executor, Value::Null);
-    let prefix_error = call_error(
-        &transport,
-        &handle,
-        &mut id,
-        "automations.claimNext",
+    for params in [
         json!({ "automationIdPrefix": "" }),
-    )
-    .await;
-    assert_eq!(prefix_error.code, ErrorCode::InvalidParams);
+        json!({ "nowMs": 1002 }),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "automations.claimNext",
+            params,
+        )
+        .await;
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidParams,
+            "claimNext needs a non-empty prefix"
+        );
+    }
 
     // Drain the two seeded pending claims oldest-first and walk both settle
     // arms. A served claim carries its change's facts.
@@ -371,6 +389,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     assert_eq!(first["automationId"], json!(AUTOMATION));
     assert_eq!(first["state"], json!("running"));
     assert_eq!(first["attempts"], json!(1));
+    assert_eq!(first["run"], json!(1));
     assert_eq!(first["collectionPath"], json!("tasks"));
     assert_eq!(
         first["trigger"],
@@ -381,7 +400,9 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         first["change"],
         json!({
             "kind": "changed",
-            "actor": { "kind": "human", "id": "alice" },
+            "authorOriginId": "alice",
+            "actorKind": "human",
+            "onBehalfOf": null,
             "fields": [{
                 "field": "status",
                 "historyId": 1,
@@ -419,7 +440,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1006 }),
+        json!({ "nowMs": 1006, "automationIdPrefix": "plugin:" }),
     )
     .await;
     assert_eq!(
@@ -447,14 +468,30 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({}),
+        json!({ "automationIdPrefix": "plugin:" }),
     )
     .await;
     assert_eq!(drained, Value::Null, "nothing pending remains");
 
-    // The owner's re-run: the failed claim goes back to pending and runs
-    // again as a new attempt with the same facts. Retrying it while it is
-    // pending changes nothing.
+    // The owner's re-run: the failed claim goes back to pending as run 2
+    // with the same facts, and announces itself so the executor wakes and
+    // the failure surface re-reads. Retrying it while it is pending changes
+    // nothing and announces nothing.
+    let failures = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.failures",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        failures["failures"][0]["claimId"],
+        json!("atc_exhaust"),
+        "a failure row names its newest failed claim: the reaper's, which \
+         ran at open with the real clock"
+    );
+    while notices.try_recv().is_ok() {}
     let retried = call(
         &transport,
         &handle,
@@ -464,7 +501,14 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     )
     .await;
     assert_eq!(retried["state"], json!("pending"));
+    assert_eq!(retried["run"], json!(2));
     assert!(retried.get("error").is_none());
+    let notice = notices.try_recv().expect("the retry announces the claim");
+    assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
+    assert_eq!(notice.payload["workspaceId"], json!(WORKSPACE_ID));
+    assert_eq!(notice.payload["claimId"], second["claimId"]);
+    assert_eq!(notice.payload["state"], json!("pending"));
+    assert_eq!(notice.payload["run"], json!(2));
     let again = call(
         &transport,
         &handle,
@@ -474,19 +518,23 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     )
     .await;
     assert_eq!(again, retried, "a pending claim is returned unchanged");
+    assert!(
+        notices.try_recv().is_err(),
+        "an unchanged retry announces nothing"
+    );
     let rerun = call(
         &transport,
         &handle,
         &mut id,
         "automations.claimNext",
-        json!({ "nowMs": 1010 }),
+        json!({ "nowMs": 1010, "automationIdPrefix": "plugin:" }),
     )
     .await;
     assert_eq!(rerun["claimId"], second["claimId"]);
     assert_eq!(
-        rerun["attempts"],
-        json!(2),
-        "the attempt count keeps rising"
+        (rerun["attempts"].clone(), rerun["run"].clone()),
+        (json!(2), json!(2)),
+        "attempts keep rising, and this is run 2"
     );
     assert_eq!(rerun["change"], second["change"]);
     call(

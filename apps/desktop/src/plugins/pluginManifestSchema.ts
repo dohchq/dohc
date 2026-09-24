@@ -219,14 +219,14 @@ const PluginDriver = z.object({
 
 // An automation subscribes one handler to record changes on a collection
 // path. The origin device's desktop registers each declared automation with
-// the engine under "<plugin name>/<id>" and runs the named handler when a
+// the engine under "plugin:<plugin name>/<id>" and runs the named handler when a
 // change on that path is claimed (ADR 0008). Twenty is a workflow's worth of
 // triggers; a plugin needing more is running a system, not reacting to a
 // collection.
 export const MAX_PLUGIN_AUTOMATIONS = 20;
 
 // The id joins the engine's subscription table and record history as
-// "<plugin name>/<automation id>", so it uses the same typable charset a
+// "plugin:<plugin name>/<automation id>", so it uses the same typable charset a
 // driver id does — and no "/", which separates it from the plugin name.
 const PluginAutomationId = z.string()
   .min(1)

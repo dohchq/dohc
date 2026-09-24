@@ -181,12 +181,11 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   nowMs?: number;
   /**
    * Serve only claims whose automation id starts with this, so each
-   * executor drains its own automations: the plugin executor
-   * "<plugin name>/" per plugin, the Collection executor "collection:"
-   * (its ids are "collection:<collection path>#<automation id>").
-   * Omitted, the oldest pending claim of any automation.
+   * executor drains its own namespace: the plugin executor "plugin:" (ids
+   * "plugin:<plugin name>/<automation id>"), the Collection executor
+   * "collection:" (ids "collection:<collection path>#<automation id>").
    */
-  automationIdPrefix?: string;
+  automationIdPrefix: string;
 };
 
 export type AutomationSettleParams = WorkspaceJsonObject & {
@@ -819,30 +818,40 @@ const automationClaimFields = {
   collectionPath: Schema.NonEmptyString,
   depth: Schema.Int,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
-  /** The attempt a running claim is on; each claimNext adds one. */
+  /**
+   * How many times claimNext served the claim, across every run. A retried
+   * claim that crashes has no requeue left and fails as reclaim-exhausted.
+   */
   attempts: Schema.Int,
+  /**
+   * 1, plus one per automations.retry; a crash requeue keeps it. Executors
+   * key each write on "<claimId>/<run>/<write ordinal>", so a requeued run
+   * repeats its writes under the same keys and a retried run writes anew.
+   */
+  run: Schema.Int,
   createdAtMs: Schema.Int,
   updatedAtMs: Schema.Int,
   error: Schema.optionalKey(Schema.String),
 };
 
 /**
- * The change a claim runs for and who made it: the declared actor kind and
- * the author origin id, each null when the write did not declare it.
+ * The change a claim runs for and who made it, named as record history
+ * names them. Each author field is null when the write did not declare it.
  */
 const automationChangeFields = {
   kind: Schema.Literals(["added", "changed", "removed"]),
-  actor: mutableStruct({
-    kind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
-    id: NullableString,
-  }),
+  authorOriginId: NullableString,
+  actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+  onBehalfOf: NullableString,
 };
 
 /**
- * One side of a changed field, null where the field was absent. A value
- * over 8 KiB of JSON, nested deeper than 16 levels, or past the claim's
- * 64 KiB budget travels as its size; the whole value is in the history row
- * the fact names.
+ * One side of a changed field, null where the field was absent. A present
+ * value travels wrapped as { value }, so a field whose value is null, or an
+ * object shaped like the truncation marker, stays distinct from both. A
+ * value over 8 KiB of JSON, nested deeper than 16 levels, or past the
+ * claim's 64 KiB budget travels as { truncated: true, bytes } instead; the
+ * whole value is in the history row the fact names.
  */
 const AutomationFactValueSchema = Schema.NullOr(
   Schema.Union([
@@ -930,16 +939,18 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
   /**
    * One automation with at least one failed claim. Mirrors AutomationFailure
-   * in crates/dohc-workspace-engine: the newest error and its time, plus a
-   * generation — every failure of the automation's claims, counted even
-   * across a retry, so it only grows and an acknowledgment at generation N
-   * hides the owner's notice exactly until a newer failure passes N.
+   * in crates/dohc-workspace-engine: the newest failed claim, its error and
+   * time, plus a generation — every failure of the automation's claims,
+   * counted even across a retry, so it only grows and an acknowledgment at
+   * generation N hides the owner's notice exactly until a newer failure
+   * passes N.
    */
   [WORKSPACE_METHOD.automationsFailures]: mutableStruct({
     failures: Schema.mutable(
       Schema.Array(
         mutableStruct({
           automationId: Schema.NonEmptyString,
+          claimId: Schema.NonEmptyString,
           error: Schema.String,
           updatedAtMs: Schema.Int,
           generation: Schema.Int,

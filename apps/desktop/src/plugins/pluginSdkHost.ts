@@ -24,14 +24,17 @@ const ABORTED_ERROR_CODE = "DOHC_ABORTED";
  */
 export interface PluginAutomationRunAuthority {
   claimId: string;
-  /** The engine subscription id: "<plugin name>/<automation id>". */
+  /** The engine subscription id: "plugin:<plugin name>/<automation id>". */
   automationId: string;
+  /** The claim's run: 1, plus one per owner retry; a crash requeue keeps it. */
+  run: number;
   onBehalfOf: string;
   depth: number;
   /**
-   * Writes this run has issued so far. Each write's idempotency key is the
-   * claim id plus this ordinal, so a handler that writes twice does not
-   * reuse a key, and a re-run replays the same sequence.
+   * Writes this run has issued so far. Each write's idempotency key is
+   * "<claim id>/<run>/<ordinal>", so a handler that writes twice does not
+   * reuse a key, a crash requeue replays the same keys, and an owner retry
+   * writes under new ones.
    */
   writes: number;
 }
@@ -272,8 +275,9 @@ export async function invokePluginSdkHost(
     // itself (hostContext.writable), so the writes need no gate here — but a
     // write made inside an automation run takes the run's own authority: the
     // automation as author on behalf of the owner, at the chain depth main
-    // derived from the claim, keyed by the claim id plus the run's write
-    // ordinal so a re-run handler's identical write dedupes engine-side.
+    // derived from the claim, keyed by the claim id, its run, and the write
+    // ordinal so a crash-requeued run's identical write dedupes engine-side
+    // and an owner retry writes anew.
     case "collections.setFields":
     case "collections.createRecord": {
       const run = context.automationRun;
@@ -291,7 +295,7 @@ export async function invokePluginSdkHost(
               onBehalfOf: run.onBehalfOf,
               depth: run.depth,
             },
-            collectionWriteIdempotencyKey: `${run.claimId}/${run.writes++}`,
+            collectionWriteIdempotencyKey: `${run.claimId}/${run.run}/${run.writes++}`,
           }
         : hostContext;
       return waitForOperation(

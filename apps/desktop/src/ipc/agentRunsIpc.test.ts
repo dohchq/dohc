@@ -103,7 +103,7 @@ async function harness(shared = false) {
     relayClient: () => { throw new Error("unused relay"); },
     createStores: () => { throw new Error("unused stores"); },
   });
-  const failure = { automationId: "automation-1", error: "Command failed", updatedAtMs: 10, generation: 3 };
+  const failure = { automationId: "automation-1", claimId: "claim-1", error: "Command failed", updatedAtMs: 10, generation: 3 };
   const adapter = { listAutomationFailures: vi.fn<VersionedLiveAdapter["listAutomationFailures"]>(async () => ({ failures: [failure] })) };
   const acknowledge = vi.fn(registry.acknowledgeAutomationFailure);
   const notify = vi.fn((_id: string) => undefined);
