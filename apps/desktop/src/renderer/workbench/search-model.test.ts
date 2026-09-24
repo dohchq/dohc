@@ -3,7 +3,6 @@ import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/brid
 import {
   applyBatch,
   beginSearch,
-  chatPreviewForRow,
   GROUP_PREVIEW_ROWS,
   groupVisibleEntries,
   idleSearchModel,
@@ -163,23 +162,6 @@ describe("windowPreviewForRow (lead-trim so the match survives end-truncation)",
     expect(windowed.text.slice(windowed.matchStart, windowed.matchEnd)).toBe("NEEDLE");
     expect(windowed.matchStart).toBe(PREVIEW_LEAD_CONTEXT_CHARS);
     expect(windowed.matchEnd - windowed.matchStart).toBe(6);
-  });
-});
-
-describe("chatPreviewForRow", () => {
-  it("shows a chat author line without its heading marker", () => {
-    expect(
-      chatPreviewForRow({ preview: "## Nova (agent)", matchStart: 3, matchEnd: 7, surface: "chat" }),
-    ).toEqual({ preview: "Nova (agent)", matchStart: 0, matchEnd: 4 });
-  });
-
-  it("keeps file lines, message text, and a match on the marker as they are", () => {
-    const file = { preview: "## Plan", matchStart: 3, matchEnd: 7, surface: "file" as const };
-    expect(chatPreviewForRow(file)).toBe(file);
-    const message = { preview: "Nova checked the numbers", matchStart: 0, matchEnd: 4, surface: "chat" as const };
-    expect(chatPreviewForRow(message)).toBe(message);
-    const marker = { preview: "## Nova", matchStart: 0, matchEnd: 2, surface: "chat" as const };
-    expect(chatPreviewForRow(marker)).toBe(marker);
   });
 });
 

@@ -164,6 +164,17 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
       .filter({ hasText: "The zeppelin-cadence report is ready." });
     await expect(chatGroup).toBeVisible({ timeout: 20_000 });
     await expect(chatGroup.getByText("Chat", { exact: true })).toBeVisible();
+    // Previews read like the chat: no Markdown heading markers.
+    await expect(chatGroup.getByTestId("search-result-row").first()).toBeVisible();
+    for (const preview of await chatGroup.getByTestId("search-result-row").allTextContents()) {
+      expect(preview).not.toMatch(/^#/);
+    }
+
+    // A search for the author finds the line that names them.
+    await page.getByTestId("search-input").fill("Nova");
+    await expect(
+      page.getByTestId("search-result-row").filter({ hasText: /^Nova \(agent\)$/ }),
+    ).toBeVisible({ timeout: 20_000 });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

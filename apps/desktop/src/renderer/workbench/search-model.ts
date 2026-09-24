@@ -141,30 +141,6 @@ export function visibleFlatEntries(
   return flat;
 }
 
-// --- Chat author lines ---
-//
-// Chat hits are lines of the engine's Markdown projection of a thread, where
-// each message starts with an "## Author" line (thread_projection.rs). Show
-// the author, not the heading syntax. A match inside the marker keeps the
-// raw line, because the marker is what the search found.
-const CHAT_AUTHOR_MARKER = "## ";
-
-export function chatPreviewForRow(entry: {
-  preview: string;
-  matchStart: number;
-  matchEnd: number;
-  surface?: "file" | "chat";
-}): { preview: string; matchStart: number; matchEnd: number } {
-  if (entry.surface !== "chat" || !entry.preview.startsWith(CHAT_AUTHOR_MARKER)) return entry;
-  const cut = CHAT_AUTHOR_MARKER.length;
-  if (entry.matchStart < cut) return entry;
-  return {
-    preview: entry.preview.slice(cut),
-    matchStart: entry.matchStart - cut,
-    matchEnd: entry.matchEnd - cut,
-  };
-}
-
 // --- Preview lead-trim (the rendered row truncates at its END) ---
 //
 // Result rows render in a ~210px panel that fits roughly 28 monospace

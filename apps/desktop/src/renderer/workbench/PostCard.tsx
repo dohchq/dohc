@@ -29,13 +29,27 @@ export interface PostData {
   viewerAuthorId: string;
 }
 
-// An untitled post takes its title from its first line: the engine collapses
-// whitespace and cuts a line over 80 characters to 79 plus "…"
-// (chat_thread_display_title). Such a title repeats the body.
+// The engine's chat_thread_display_title (chats.rs): an untitled post's title
+// is its first line with whitespace runs collapsed, and a line over 80
+// characters becomes its first 79, trimmed, plus "…". Characters are Unicode
+// scalar values, and whitespace is Rust's char::is_whitespace.
+const DERIVED_TITLE_MAX_CHARS = 80;
+const RUST_WHITESPACE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
+
+function derivedTitle(firstLine: string): string {
+  const line = firstLine.split(RUST_WHITESPACE).filter(Boolean).join(" ");
+  const chars = [...line];
+  if (chars.length <= DERIVED_TITLE_MAX_CHARS) return line;
+  // The collapsed line's only whitespace is single spaces.
+  return `${chars.slice(0, DERIVED_TITLE_MAX_CHARS - 1).join("").replace(/ $/, "")}…`;
+}
+
+// Whether a post's title is the one the engine derives from its first line,
+// so it repeats the text. An explicit title that ends in "…" is still a
+// title; only one identical to the derived title repeats the text.
 export function titleRepeatsFirstLine(title: string, firstLine: string): boolean {
-  const line = firstLine.trim().replace(/\s+/g, " ");
-  const shown = title.trim();
-  return shown === line || (shown.endsWith("…") && line.startsWith(shown.slice(0, -1)));
+  const derived = derivedTitle(firstLine);
+  return derived !== "" && title === derived;
 }
 
 // The card shows a post's words once: a derived title gives way to the whole
