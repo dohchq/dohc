@@ -4197,13 +4197,6 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
             (true, true),
         ),
         (
-            "a pulled peer position before bootstrap finishes",
-            false,
-            true,
-            Some("foreign_relay_push_state"),
-            (false, false),
-        ),
-        (
             "a shared channel cursor",
             false,
             true,
@@ -4242,9 +4235,6 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
         if let Some(table) = lane {
             let sql = match table {
                 "sync_relay_push_state" => {
-                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','origin-chat',0)"
-                }
-                "foreign_relay_push_state" => {
                     "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq)                      VALUES ('ws','origin-lane',0)"
                 }
                 "share_view_cursors" => {
@@ -4291,14 +4281,30 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
 /// proposal submit — so `ydoc_recovery` is pinned to the other predicate.
 #[test]
 fn the_ydoc_journal_reads_the_owner_lane_predicate() {
-    for (label, source) in [
-        ("ydoc_apply", include_str!("../ydoc_apply.rs")),
-        ("ydoc_origination", include_str!("../ydoc_origination.rs")),
-        ("conflict_outbox", include_str!("../conflict_outbox.rs")),
-        ("cursor", include_str!("../cursor.rs")),
+    for (label, source, predicate) in [
+        (
+            "ydoc_apply",
+            include_str!("../ydoc_apply.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
+        (
+            "ydoc_origination",
+            include_str!("../ydoc_origination.rs"),
+            "can_originate_local_bases_in_tx",
+        ),
+        (
+            "conflict_outbox",
+            include_str!("../conflict_outbox.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
+        (
+            "cursor",
+            include_str!("../cursor.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
     ] {
         assert!(
-            source.contains("workspace_replicates_with_relay_in_tx"),
+            source.contains(predicate),
             "{label} must ask the OWNER-lane predicate",
         );
         assert!(

@@ -2562,6 +2562,34 @@ mod tests {
     }
 
     #[test]
+    fn existing_relay_cursors_keep_bootstrap_complete_when_upgraded() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-relay-bootstrap-complete")
+            .expect("bootstrap tracking migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("schema before bootstrap tracking");
+        conn.execute(
+            "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
+             VALUES ('ws','42','epoch','stream')",
+            [],
+        )
+        .expect("existing cursor");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let cursor: (String, bool) = conn
+            .query_row(
+                "SELECT cursor,bootstrap_complete FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("upgraded cursor");
+        assert_eq!(cursor, ("42".to_owned(), true));
+    }
+
+    #[test]
     fn a_baseline_only_store_gains_the_groups_columns() {
         let dir = tempdir();
         let path = dir.join("engine.db");

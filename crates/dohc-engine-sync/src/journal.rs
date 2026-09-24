@@ -75,11 +75,10 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// relay still has an identity. Gating anything cloud-shaped on its existence
 /// promotes private local documents.
 ///
-/// A completed initial pull or a local-origin push answers it. A partial pull
-/// can precede remote document bases, so its cursor and foreign-origin push
-/// bookkeeping must not enroll competing local bases. Both lanes run behind
-/// `relay-not-configured`, which the desktop satisfies only for a workspace
-/// the user explicitly enabled cloud sync on
+/// A durable relay position does answer it. `sync_relay_cursors` advances only
+/// when a pull cursor commits and `sync_relay_push_state` only when a push
+/// succeeds; both run behind `relay-not-configured`, which the desktop
+/// satisfies only for a workspace the user explicitly enabled cloud sync on
 /// (`RegistryEntry.remote` plus matching credentials).
 ///
 /// A SHARE lane is deliberately not read here. This predicate answers for the
@@ -94,8 +93,8 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// the user's edit back with it.
 ///
 /// This reads past contact, not current enrolment. A freshly enrolled
-/// workspace answers `false` until its first local push or drained pull commits.
-/// The deferred drain, non-leased apply path, and enrolment backfill retry
+/// workspace answers `false` until its first push or pull commits; the
+/// deferred drain, the non-leased apply path, and the enrolment backfill retry
 /// origination after that. Nothing deletes a position row, so the answer stays
 /// `true` after sign-out or unbind until the engine has a durable, revocable
 /// record of enrolment.
@@ -105,11 +104,8 @@ pub fn workspace_replicates_with_relay_in_tx(
 ) -> Result<bool, SyncError> {
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
-           AND (EXISTS(SELECT 1 FROM sync_relay_cursors \
-                       WHERE workspace_id = ?1 AND bootstrap_complete=1) \
-             OR EXISTS(SELECT 1 FROM sync_relay_push_state p \
-                       JOIN sync_identity i ON i.workspace_id=p.workspace_id AND i.origin_id=p.origin_id \
-                       WHERE p.workspace_id = ?1))",
+           AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
+             OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",
         [workspace_id],
         |row| row.get(0),
     )

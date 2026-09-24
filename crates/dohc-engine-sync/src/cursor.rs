@@ -16,7 +16,7 @@ pub struct RelayCursor {
     pub cursor: i64,
     pub replication_epoch: String,
     pub stream_identity: String,
-    /// The initial pull has drained. Partial cursor commits cannot enroll local work.
+    /// Local bases may originate after the initial pull drains or an earlier local push.
     pub bootstrap_complete: bool,
     /// Local-only ownership token for refusal rows surfaced with this pending
     /// cursor. Persisted relay positions never carry one.
@@ -128,10 +128,8 @@ pub fn commit_relay_cursor(
                     workspace_id,
                     now_ms,
                 )?
-            } else if crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
-                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
             } else {
-                Vec::new()
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
             };
             // Refusals can also be created outside a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
@@ -219,7 +217,7 @@ pub(crate) fn write_pushed_seq(
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            if was_enrolled || !crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
+            if was_enrolled {
                 // Cursor commit owns the recurring scan. A pushed-origin
                 // update must not repeat that full-state work.
                 Ok(Vec::new())

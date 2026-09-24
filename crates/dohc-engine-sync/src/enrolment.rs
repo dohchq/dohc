@@ -72,6 +72,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(Vec::new());
+    }
     let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
         "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \

@@ -1970,15 +1970,20 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 
 #[test]
 fn join_pull_recovers_offline_edits_after_the_operation_limit() {
-    assert_join_pull_recovers_offline_edits(false);
+    assert_join_pull_recovers_offline_edits(false, false);
 }
 
 #[test]
 fn join_pull_recovers_offline_edits_after_the_page_limit() {
-    assert_join_pull_recovers_offline_edits(true);
+    assert_join_pull_recovers_offline_edits(true, false);
 }
 
-fn assert_join_pull_recovers_offline_edits(sparse: bool) {
+#[test]
+fn join_pull_journals_received_document_edits_without_originating_offline_bases() {
+    assert_join_pull_recovers_offline_edits(false, true);
+}
+
+fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: bool) {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
@@ -2011,6 +2016,9 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool) {
     remote.plaintext_insert(0, "remote edit");
     let remote_bytes = remote.encode_full_state();
     let remote_sha = dohc_engine_storage::hex_sha256(&remote_bytes);
+    if edit_between_batches {
+        seed_text_head(&mut engine, "early-doc", "early.md", "remote edit");
+    }
     let limit = if sparse {
         crate::model::MAX_PULL_PAGES_PER_PASS
     } else {
@@ -2041,6 +2049,22 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool) {
             },
         )]
     };
+    if edit_between_batches {
+        *pages[0].1.ops.last_mut().expect("first batch") = envelope(
+            "early-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "early-doc",
+                "path": "early.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_sha,
+                "lineageClaimId": remote_sha,
+                "isBaseState": true,
+            }),
+        );
+    }
     pages.push((
         boundary,
         PullResponse {
@@ -2091,7 +2115,6 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool) {
     assert_eq!(
         engine
             .write_with(&NoFaults, |tx| {
-                assert!(!workspace_replicates_with_relay_in_tx(tx, "ws")?);
                 originate_ydoc_base_in_tx(tx, &key, "joining.md", None, None, 1_202)
             })
             .expect("edit-time origination remains disabled"),
@@ -2099,6 +2122,44 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool) {
     );
     drop(engine);
     let mut engine = EngineStore::open(&path, 1_202).expect("resume bootstrap after restart");
+    if edit_between_batches {
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "early-doc",
+                    crate::ydoc_apply::ResultingHead::Text {
+                        path: "early.md",
+                        text: "edited during join",
+                    },
+                    None,
+                    1_203,
+                )
+            })
+            .expect("edit received document during bootstrap");
+        assert!(
+            list_replication_ops(&engine, "ws", "local", -1, 500)
+                .expect("local journal")
+                .iter()
+                .any(|op| op.op_kind == "ydoc.update"
+                    && op.payload["objectId"] == "early-doc"
+                    && op.payload["isBaseState"] == false),
+            "the edit must be journaled before the join finishes"
+        );
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, 1_204, 100_000_000)
+            .expect("a resumed push-first pass can publish the edit");
+        assert!(
+            !dohc_engine_collab::read_marker(&engine, &key)
+                .expect("offline marker")
+                .expect("present")
+                .lineage_claim_status
+                .has_claimed_base(),
+            "a local push during bootstrap must not originate offline bases"
+        );
+    }
     let second = client
         .pull_chat_workspace(
             &mut engine,
@@ -2146,22 +2207,38 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool) {
         .expect("document");
     assert_eq!(persisted.doc.plaintext_string(), "remote edit");
     assert_eq!(persisted.marker.lineage_claim_id, Some(remote_sha));
-    let texts: Vec<String> = engine
+    let texts: Vec<(String, String)> = engine
         .read_with(|conn| {
             let mut statement = conn.prepare(
-                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-             WHERE s.workspace_id='ws' AND s.version_id='main' ORDER BY b.text",
+                "SELECT s.path,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id!='early-doc' ORDER BY b.text",
             )?;
             statement
-                .query_map([], |row| row.get(0))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()
         })
         .expect("materialized content");
-    assert_eq!(texts, ["offline edit", "remote edit"]);
+    assert_eq!(texts.len(), 2);
+    assert!(texts[0].0.starts_with("joining (recovered "));
+    assert!(texts[0].0.ends_with(".md"));
+    assert_eq!(texts[0].1, "offline edit");
+    assert_eq!(
+        texts[1],
+        ("joining.md".to_owned(), "remote edit".to_owned())
+    );
 }
 
 #[test]
 fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
+    assert_page_ceiling_retains_bootstrap_state(false);
+}
+
+#[test]
+fn creator_partial_pull_keeps_local_base_origination_enabled() {
+    assert_page_ceiling_retains_bootstrap_state(true);
+}
+
+fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut pages = Vec::new();
@@ -2198,6 +2275,11 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     ));
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
+    if creator {
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, 999, 100_000_000)
+            .expect("creator pushes before its first pull");
+    }
     let first = client
         .pull_chat_workspace(
             &mut engine,
@@ -2219,6 +2301,16 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     };
     assert_eq!(fetched, crate::model::MAX_PULL_PAGES_PER_PASS);
     assert_eq!(pending.cursor, resume_cursor);
+    assert_eq!(pending.bootstrap_complete, creator);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults, 1_001)
+        .expect("persist partial pull");
+    assert_eq!(
+        engine
+            .read_with(|conn| crate::ydoc_origination::can_originate_local_bases_in_tx(conn, "ws"))
+            .expect("base origination state"),
+        creator
+    );
     assert!(
         has_more,
         "the page ceiling must explicitly report that the relay is not drained"
