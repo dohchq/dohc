@@ -5167,3 +5167,151 @@ fn deferred_relay_replay_rotates_between_held_origins() {
         "each origin replays from its oldest retained work"
     );
 }
+
+#[test]
+fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let mut conflict = |origin: &str| {
+        let result_text = "resolved after retry";
+        let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![result_sha, result_text.len() as i64, result_text],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed result blob");
+        let result = HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: format!("{origin}-object"),
+            latest_moment_id: format!("{origin}-moment"),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: result_sha.clone(),
+            byte_length: result_text.len() as i64,
+            updated_at_ms: 21,
+        });
+        let built = build_conflict_resolve_v1(ConflictResolveV1 {
+            workspace_id: "ws".to_owned(),
+            conflict_id: format!("{origin}-conflict"),
+            chosen_from: ResolveChoiceV1::Incoming,
+            resolution: ResolutionV1::AppliedIncoming,
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            paths: vec![format!("{origin}.md")],
+            current: HeadV1::Absent { path_ref: 0 },
+            incoming: result.clone(),
+            result,
+            effect_context: EffectContextV1 {
+                recorded_at_ms: 21,
+                metadata: MetadataV1 {
+                    origin: "sync".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                },
+                author: None,
+                current_object_created_at_ms: None,
+                result_object_created_at_ms: Some(20),
+            },
+            effects: vec![EffectV1 {
+                kind: EffectKindV1::Write,
+                moment_id: format!("{origin}-moment"),
+                payload_sha256: String::new(),
+            }],
+            lineage_transition: None,
+        })
+        .expect("retryable parent carrier");
+        let mut parent = envelope(origin, 0, "conflict.resolve", built.value);
+        parent.recorded_at_ms = 21;
+        parent
+    };
+    let mut retained = vec![conflict("a-held")];
+    let released = conflict("b-released");
+    for seq in 1..500 {
+        let mut op = version_create_with_shipped_snapshots(
+            "a-held",
+            &format!("a-version-{seq}"),
+            Vec::new(),
+        );
+        op.origin_seq = seq;
+        retained.push(op);
+    }
+    retained.push(released);
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &retained.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let a_key = dohc_engine_collab::DocKey::new("ws", "main", "a-held-object").unwrap();
+    let b_key = dohc_engine_collab::DocKey::new("ws", "main", "b-released-object").unwrap();
+    let _held = leases.acquire(&a_key).unwrap();
+    let b_lease = leases.acquire(&b_key).unwrap();
+    drop(b_lease);
+    let pages = (1..=2).map(|seq| {
+        let mut op = version_create_with_shipped_snapshots(
+            "b-released",
+            &format!("b-version-{seq}"),
+            Vec::new(),
+        );
+        op.origin_seq = seq;
+        (
+            seq - 1,
+            PullResponse {
+                ops: vec![op],
+                next_cursor: seq,
+                has_more: false,
+            },
+        )
+    });
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+    for pass in 1..=2 {
+        let result = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &leases,
+                1_000 + pass,
+            )
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("completed pass");
+        };
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000 + pass)
+            .unwrap();
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "a-held").unwrap(),
+            -1
+        );
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "b-released").unwrap(),
+            if pass == 1 { -1 } else { 2 },
+            "fetched suffixes must not consume the released origin's replay turn"
+        );
+    }
+    assert!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "b-released.md")
+            .unwrap()
+            .is_some()
+    );
+}
