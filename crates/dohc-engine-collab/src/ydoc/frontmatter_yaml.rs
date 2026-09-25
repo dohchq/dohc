@@ -282,10 +282,10 @@ pub(super) fn source(
 /// canonical entry in place. A key written again since, by any writer, gets
 /// its canonical entry in place without the comments above it, so a deleted
 /// and re-added key never brings back old text. A removed key loses its lines
-/// and comments, and a new key is added after the others. `None` when the
-/// source is too large or unreadable, when no key or comment is left, or when
-/// the result would not read back as the current frontmatter; the caller then
-/// writes canonical frontmatter. `rendered` holds each current key's
+/// and comments, and a new key is added after the others. Empty when no key
+/// or comment is left. `None` when the source is too large or unreadable, or
+/// the candidate cannot preserve the values; callers refuse the edit.
+/// `rendered` holds each current key's
 /// canonical entry. The desktop keeps frontmatter the same way
 /// (`keptFrontmatter` in packages/ydoc-projection/src/frontmatter.ts).
 pub(super) fn kept(
@@ -361,15 +361,26 @@ pub(super) fn kept(
     }
     kept.push_str(lead);
     if kept.is_empty() {
-        return None;
+        return Some(String::new());
     }
     let candidate = format!("{}{kept}{}", block.open, block.closing);
     if candidate.len() > MAX_PROJECTION_BYTES {
         return None;
     }
     let reread = markdown_frontmatter_block(&candidate)?;
-    (only_line_breaks(reread.body) && reads_as_current(&rendered_entries(&reread.value)))
-        .then_some(candidate)
+    let untouched: Vec<_> = rendered
+        .iter()
+        .filter_map(|(key, entry)| {
+            (written.contains(key) && parsed.get(key.as_str()) == Some(&Some(entry.clone())))
+                .then_some(key.as_str())
+        })
+        .collect();
+    (only_line_breaks(reread.body)
+        && reads_as_current(&rendered_entries(&reread.value))
+        && dohc_engine_domain::collections::frontmatter_preserves_yaml_values(
+            source, &candidate, &untouched,
+        ))
+    .then_some(candidate)
 }
 
 /// Each parsed value rendered once, to compare with the current entries.

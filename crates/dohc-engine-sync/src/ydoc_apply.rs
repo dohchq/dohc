@@ -3855,7 +3855,9 @@ mod tests {
         remote
             .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &injected_source)
             .expect("plant source metadata");
-        remote.frontmatter_set("status", "current canonical value");
+        remote
+            .frontmatter_set("status", "current canonical value")
+            .unwrap();
 
         let receiver = dohc_engine_collab::Ydoc::wire();
         receiver
@@ -3887,7 +3889,7 @@ mod tests {
         const ORIGINAL: &str =
             "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
-        const PLANTED: &str = "# bytes the canonical document never represented\n";
+        const PLANTED: &str = "---\nid: 01j00000000000000000000000\n---\n\n# bytes the canonical document never represented\n";
 
         let remote = dohc_engine_collab::Ydoc::wire();
         remote

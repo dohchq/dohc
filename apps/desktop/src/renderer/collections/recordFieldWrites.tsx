@@ -213,9 +213,14 @@ export function CollectionRecordFieldWrite({
       onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
       return;
     }
+    try {
+      setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
+    } catch {
+      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+      return;
+    }
     applied.current = true;
     onApplied?.();
-    setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
   }, [
     docState.opening,
     docState.available,

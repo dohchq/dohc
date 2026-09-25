@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { frontmatterEditsRefused, parseFrontmatter, setFrontmatterValue } from './frontmatter.js'
+import { FRONTMATTER_EDIT_REFUSED_MESSAGE, frontmatterEditsRefused, parseFrontmatter, setFrontmatterValue } from './frontmatter.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import frontmatterFixtures from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
@@ -40,7 +40,7 @@ type Sample = {
   concurrent?: [[string, unknown], [string, unknown]]
   // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean
-  checkImport?: boolean; checkBody?: boolean; editsRefused?: boolean
+  checkImport?: boolean; checkBody?: boolean; editsRefused?: boolean; projectionRefused?: boolean
 }
 // The frontmatter block as written, read with a pattern and not a YAML loader,
 // so a fault both loaders share cannot rewrite the expectation.
@@ -154,14 +154,14 @@ const settleSamples: Sample[] = [
   { name: 'settle-key-added', markdown: WRITTEN_FRONTMATTER, values: { status: 'booked', icon: '🧳' } },
   { name: 'settle-all-keys-removed', markdown: '---\n# note\ntitle: Plan\n---\n\nBody\n', remove: ['title'] },
   { name: 'settle-crlf-key-changed', markdown: '---\r\n# note\r\nz: last\r\ntitle: First\r\n---\r\n\r\nBody\r\n', values: { title: 'Second' } },
-  { name: 'settle-flow-mapping-changed', markdown: '---\n{a: 1, b: .nan}\n---\n\nBody\n', values: { a: 2 } },
-  { name: 'settle-forged-source-body', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom high\n---\n\ninjected body\n' },
+  { name: 'settle-flow-mapping-changed', projectionRefused: true, markdown: '---\n{a: 1, b: .nan}\n---\n\nBody\n', values: { a: 2 } },
+  { name: 'settle-forged-source-body', projectionRefused: true, markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom high\n---\n\ninjected body\n' },
   { name: 'settle-forged-source-value', markdown: '---\npriority: !custom high\n---\n\nBody', source: '---\npriority: !custom foreign\n---\n\n' },
-  { name: 'settle-forged-source-deep', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\ntitle:\n${'- '.repeat(200)}Plan\n---\n\n` },
-  { name: 'settle-forged-source-alias-ladder', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${ALIAS_LADDER}\ntitle: Plan\n---\n\n` },
+  { name: 'settle-forged-source-deep', projectionRefused: true, markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\ntitle:\n${'- '.repeat(200)}Plan\n---\n\n` },
+  { name: 'settle-forged-source-alias-ladder', projectionRefused: true, markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${ALIAS_LADDER}\ntitle: Plan\n---\n\n` },
   { name: 'settle-key-after-keep-block-scalar-changed', markdown: KEEP_BLOCK_SCALAR, values: { c: 2 } },
   // Removing the key under a kept blank line would change the block
-  // scalar's value, so the settle writes canonical frontmatter.
+  // scalar's value if its trailing blank lines were removed.
   { name: 'settle-key-after-keep-block-scalar-removed', markdown: KEEP_BLOCK_SCALAR, remove: ['c'] },
   { name: 'settle-key-renamed', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon' } },
   { name: 'settle-key-renamed-and-key-added', markdown: WRITTEN_FRONTMATTER, remove: ['title'], values: { heading: 'Lisbon', status: 'booked' } },
@@ -177,9 +177,9 @@ const settleSamples: Sample[] = [
   { name: 'settle-key-replaced', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { note: 'x' } },
   { name: 'settle-keep-block-scalar-last-key-added', markdown: '---\nb: |+\n  keeps\n\n---\n\nBody\n', values: { c: 1 } },
   { name: 'settle-keep-block-scalar-changed', markdown: KEEP_BLOCK_SCALAR, values: { b: 'other\n\n' } },
-  { name: 'settle-empty-key-changed', markdown: '---\n: note\ntitle: A\n---\n\nBody\n', values: { title: 'B' } },
-  { name: 'settle-forged-source-tag-directive', markdown: '---\ntitle: Plan\n---\n\nBody', source: '---\n%TAG !e! tag:example.com,2026:\ntitle: !e!x Plan\n---\n\n' },
-  { name: 'settle-forged-source-string-bytes', markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${STRING_BYTE_LADDER}\ntitle: Plan\n---\n\n` },
+  { name: 'settle-empty-key-changed', projectionRefused: true, markdown: '---\n: note\ntitle: A\n---\n\nBody\n', values: { title: 'B' } },
+  { name: 'settle-forged-source-tag-directive', projectionRefused: true, markdown: '---\ntitle: Plan\n---\n\nBody', source: '---\n%TAG !e! tag:example.com,2026:\ntitle: !e!x Plan\n---\n\n' },
+  { name: 'settle-forged-source-string-bytes', projectionRefused: true, markdown: '---\ntitle: Plan\n---\n\nBody', source: `---\n${STRING_BYTE_LADDER}\ntitle: Plan\n---\n\n` },
   { name: 'settle-empty-block-key-added', markdown: '---\n---\n\nBody\n', values: { title: 'Plan' } },
   { name: 'settle-last-key-removed', markdown: '---\nz: 1\ntitle: Plan\n---\n\nBody\n', remove: ['z', 'title'] },
 ]
@@ -208,7 +208,7 @@ const samples: Sample[] = [
   ...numericSamples,
   ...frontmatterFixtures.vectors.map(vector => ({ name: `public-frontmatter-${vector.name}`, markdown: vector.markdown })),
 ]
-type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string; sourceMarkdown?: string; bodyMarkdown?: string; editsRefused?: boolean }
+type Vector = { projectionRefused?: boolean; name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string; sourceMarkdown?: string; bodyMarkdown?: string; editsRefused?: boolean }
 const validate = createLiveMarkdownRegistrationValidator({
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000,
@@ -232,7 +232,10 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
       }
       for (const key of sample.remove ?? []) doc.getMap('frontmatter').delete(key)
       if (sample.edit) doc.getMap('frontmatter').set('priority', 'low')
-      for (const [key, value] of Object.entries(sample.values ?? {})) setFrontmatterValue(doc, key, value)
+      for (const [key, value] of Object.entries(sample.values ?? {})) {
+        if (sample.projectionRefused) doc.getMap('frontmatter').set(key, value)
+        else setFrontmatterValue(doc, key, value)
+      }
       for (const [key, value] of Object.entries(sample.raw ?? {})) doc.getMap('frontmatter').set(key, value)
       if (sample.source !== undefined) doc.getMap('meta').set('dohcFrontmatterSource', sample.source)
       if (sample.typed !== undefined) {
@@ -251,7 +254,8 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
       try {
         Y.applyUpdate(decoded, bytes)
         return {
-          name: sample.name, bytes: [...bytes], markdown: yDocToMarkdown(decoded), registrationAccepted: admitted(bytes),
+          name: sample.name, bytes: [...bytes], markdown: sample.projectionRefused ? '' : yDocToMarkdown(decoded), registrationAccepted: admitted(bytes),
+          ...(sample.projectionRefused ? { projectionRefused: true } : {}),
           ...(sample.checkImport ? { sourceMarkdown: sample.markdown, editsRefused: sample.editsRefused } : {}),
           ...(sample.checkBody ? { bodyMarkdown: sample.markdown } : {}),
           ...(sample.keeps ? { keptFrontmatter: WRITTEN_BLOCK.exec(sample.markdown)![0] } : {}),
@@ -293,7 +297,8 @@ describe('shared bootstrap projections', () => {
     const doc = new Y.Doc()
     try {
       Y.applyUpdate(doc, bytes)
-      expect(yDocToMarkdown(doc)).toBe(vector.markdown)
+      if (vector.projectionRefused) expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+      else expect(yDocToMarkdown(doc)).toBe(vector.markdown)
       if (vector.bodyMarkdown !== undefined) {
         expect(parseFrontmatter(vector.bodyMarkdown, false)).toEqual({ meta: {}, body: vector.bodyMarkdown })
       }
@@ -308,7 +313,7 @@ describe('shared bootstrap projections', () => {
       if (vector.keptFrontmatter !== undefined) expect(vector.markdown.startsWith(vector.keptFrontmatter)).toBe(true)
       if (vector.name === 'negative-zero') expect(Object.is(doc.getMap('frontmatter').get('value'), -0)).toBe(true)
       expect(admitted(bytes)).toBe(vector.registrationAccepted)
-      if (!vector.name.endsWith('changed') && !/^(public-frontmatter-|scalar-|key-|nested-|number-)/.test(vector.name)) expect(vector.registrationAccepted).toBe(true)
+      if (!vector.projectionRefused && !vector.name.endsWith('changed') && !/^(public-frontmatter-|scalar-|key-|nested-|number-)/.test(vector.name)) expect(vector.registrationAccepted).toBe(true)
     } finally { doc.destroy() }
   })
 })

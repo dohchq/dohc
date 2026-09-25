@@ -1,0 +1,7 @@
+[
+  {"name":"anchor removed","markdown":"---\na: &v .nan\nb: *v\n---\n\nBody","key":"a","value":1,"refused":true},
+  {"name":"nested alias loses anchor","markdown":"---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody","key":"a","value":1,"refused":true},
+  {"name":"aliasing key edited","markdown":"---\na: &v .nan\nb: *v\n---\n\nBody","key":"b","value":1,"refused":false,"expected":"---\na: &v .nan\nb: 1\n---\n\nBody"},
+  {"name":"alias changes type after anchor rebinding","markdown":"---\na: &v '.nan'\nb: &v .nan\nc: *v\n---\n\nBody","key":"b","value":1,"refused":true},
+  {"name":"unrelated edit keeps nested alias","markdown":"---\na: &v .nan\nb: {nested: [*v]}\nc: 0\n---\n\nBody","key":"c","value":1,"refused":false,"expected":"---\na: &v .nan\nb: {nested: [*v]}\nc: 1\n---\n\nBody"}
+]

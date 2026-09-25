@@ -253,6 +253,8 @@ mod tests {
         bytes: Vec<u8>,
         markdown: String,
         registration_accepted: bool,
+        #[serde(default)]
+        projection_refused: bool,
         /// The frontmatter block as written, which the settle must keep.
         #[serde(default)]
         kept_frontmatter: Option<String>,
@@ -1031,6 +1033,7 @@ mod tests {
             markdown: source["markdown"].as_str().unwrap().into(),
             registration_accepted: true,
             kept_frontmatter: None,
+            projection_refused: false,
         };
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
         assert!(matches!(
@@ -1042,7 +1045,7 @@ mod tests {
         assert_ne!(text, source["canonical"].as_str().unwrap());
     }
     #[test]
-    fn shared_projections_keep_written_frontmatter_and_change_fallback() {
+    fn shared_projections_keep_written_frontmatter_or_refuse() {
         let mut mismatches = Vec::new();
         for vector in vectors() {
             if !vector.registration_accepted && vector.name.starts_with("public-frontmatter-") {
@@ -1050,6 +1053,17 @@ mod tests {
             }
             let doc = Ydoc::wire();
             doc.apply(&vector.bytes).unwrap();
+            if vector.projection_refused {
+                assert!(
+                    matches!(
+                        doc.project(ContentKind::Richdoc),
+                        Err(CollabError::FrontmatterEditRefused)
+                    ),
+                    "{}",
+                    vector.name
+                );
+                continue;
+            }
             let actual = doc.project(ContentKind::Richdoc).unwrap().content;
             if let Some(kept) = &vector.kept_frontmatter {
                 assert!(
@@ -1094,7 +1108,7 @@ mod tests {
     fn admitted_baselines_commit_atomically_and_replay_after_reopen() {
         for vector in vectors()
             .into_iter()
-            .filter(|vector| vector.registration_accepted)
+            .filter(|vector| vector.registration_accepted && !vector.projection_refused)
         {
             let (dir, mut store, mut cache, owner, handle) = fixture(&vector);
             assert_eq!(
@@ -1178,6 +1192,7 @@ mod tests {
             markdown: String::new(),
             registration_accepted: false,
             kept_frontmatter: None,
+            projection_refused: false,
         };
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&pending);
         assert_eq!(
@@ -1191,6 +1206,7 @@ mod tests {
             markdown: String::new(),
             registration_accepted: false,
             kept_frontmatter: None,
+            projection_refused: false,
         };
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&nonpublic);
         assert!(run(&mut store, &mut cache, &handle, &nonpublic, &NoFaults).is_err());

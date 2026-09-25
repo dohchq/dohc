@@ -208,7 +208,9 @@ describe("setCollectionRecordFields", () => {
     '&root {status: draft, score: .nan}',
     '!custom &root {status: draft, score: .nan}',
     ': note\nstatus: draft\nscore: .nan',
-  ])("refuses unsplittable properties before writing the file: %s", async yaml => {
+    'status: &v .nan\nscore: *v',
+    'status: &v .nan\nscore: {nested: [*v]}',
+  ])("refuses unsafe property candidates before writing the file: %s", async yaml => {
     const root = await createTestScratch("dohc-collection-edits-");
     const file = join(root, "one.md");
     const markdown = `---\n${yaml}\n---\n\nBody`;

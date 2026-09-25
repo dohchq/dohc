@@ -696,7 +696,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         json!({
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
-                .encode(edited.frontmatter_set("id", EDITED_ID)),
+                .encode(edited.frontmatter_set("id", EDITED_ID).unwrap()),
         }),
     )
     .await;
@@ -710,7 +710,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         json!({
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
-                .encode(edited.frontmatter_set("status", "done")),
+                .encode(edited.frontmatter_set("status", "done").unwrap()),
             "actorOriginId": "agent-live-editor",
             "attribution": {
                 "actorKind": "agent",
@@ -971,8 +971,8 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             let remote = Ydoc::wire();
             remote.apply(&initial_update).expect("load shared base");
             vec![
-                remote.frontmatter_set("id", EDITED_ID),
-                remote.frontmatter_set("status", "remote"),
+                remote.frontmatter_set("id", EDITED_ID).unwrap(),
+                remote.frontmatter_set("status", "remote").unwrap(),
             ]
         });
         let object_id = live["objectId"].as_str().expect("object id");
@@ -2543,7 +2543,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     .await;
     let remote = Ydoc::wire();
     remote.apply(&initial_update).expect("load shared base");
-    let update = remote.frontmatter_set("status", "remote");
+    let update = remote.frontmatter_set("status", "remote").unwrap();
     let lineage_claim_id = live["lineageClaimId"]
         .as_str()
         .expect("replicated lineage claim")

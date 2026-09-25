@@ -95,6 +95,8 @@ describe("retained failures", () => {
     '&root {id: rec-1, status: draft, score: .nan}',
     '!!map &root {id: rec-1, status: draft, score: .nan}',
     ': note\nid: rec-1\nstatus: draft\nscore: .nan',
+    'id: rec-1\nstatus: &v .nan\nscore: *v',
+    'id: rec-1\nstatus: &v .nan\nscore: {nested: [*v]}',
   ])("refuses a field write before changing the document: %s", yaml => {
     const markdown = `---\n${yaml}\n---\n\nBody`;
     const doc = markdownToYDoc(markdown);

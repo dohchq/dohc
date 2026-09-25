@@ -5,7 +5,7 @@
 //! outcomes.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
@@ -1221,6 +1221,7 @@ pub fn is_frontmatter_delimiter(line: &str) -> bool {
 
 /// A frontmatter YAML node. An alias shares its anchor's node, so the tree
 /// never copies what an alias names.
+#[derive(PartialEq)]
 enum FrontmatterNode {
     /// `value` and `non_finite` are resolved once, when the scalar is read,
     /// so an alias that repeats a long spelling never resolves it again.
@@ -1229,6 +1230,7 @@ enum FrontmatterNode {
         tag: Option<Tag>,
         value: Value,
         non_finite: bool,
+        is_string: bool,
     },
     Sequence {
         tag: Option<Tag>,
@@ -1704,6 +1706,13 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                     };
                 }
                 let node = Rc::new(FrontmatterNode::Scalar {
+                    is_string: resolved.is_string()
+                        && match tag.as_ref() {
+                            Some(tag) => core_tag_suffix(tag) == Some("str"),
+                            None => {
+                                style != ScalarStyle::Plain || plain_yaml_scalar_is_string(&text)
+                            }
+                        },
                     text: text.into_owned(),
                     tag,
                     value: resolved,
@@ -2026,6 +2035,28 @@ pub fn markdown_frontmatter_block(markdown: &str) -> Option<MarkdownFrontmatterB
         .ok()
         .flatten()
         .map(|(block, _)| block)
+}
+
+/// Untouched entries must keep their resolved YAML nodes, including types
+/// the JSON projection cannot represent and aliases nested inside values.
+pub fn frontmatter_preserves_yaml_values(source: &str, candidate: &str, keys: &[&str]) -> bool {
+    let values = |text: &str| {
+        let (_, root) = frontmatter_block(text).ok()??;
+        let Some(root) = root else {
+            return Some(BTreeMap::new());
+        };
+        let FrontmatterNode::Mapping { entries, .. } = root.as_ref() else {
+            return None;
+        };
+        entries
+            .iter()
+            .map(|(key, value)| Some((frontmatter_node_key(key)?, value.clone())))
+            .collect::<Option<BTreeMap<_, _>>>()
+    };
+    let (Some(before), Some(after)) = (values(source), values(candidate)) else {
+        return false;
+    };
+    keys.iter().all(|key| before.get(*key) == after.get(*key))
 }
 
 struct ParsedMarkdownFrontmatter<'a> {

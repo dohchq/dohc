@@ -34,7 +34,7 @@ fn set_richdoc_frontmatter_and_settle(
             let doc = Ydoc::wire();
             doc.apply(&state.initial_update)
                 .expect("apply existing rich-document state");
-            let update = doc.frontmatter_set(&field, &value);
+            let update = doc.frontmatter_set(&field, &value).unwrap();
             let append = actor
                 .ydoc_record_update(
                     state.key.clone(),

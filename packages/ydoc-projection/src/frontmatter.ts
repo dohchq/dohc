@@ -33,6 +33,8 @@ import {
 } from 'js-yaml'
 
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
+export const FRONTMATTER_EDIT_REFUSED_MESSAGE =
+  "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
 // The opening delimiter line, the YAML lines, the closing delimiter line, and
 // the rest of the document. A delimiter is `---` then only spaces or tabs.
 const FRONTMATTER_RE = /^(---[ \t]*\r?\n)((?:[\s\S]*?\r?\n)?)(---[ \t]*(?:\r?\n|$))([\s\S]*)$/
@@ -443,9 +445,9 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
  * key written again since, by any writer, gets its canonical entry in place
  * without the comments above it, so a deleted and re-added key never brings
  * back old text. A removed key loses its lines and comments, and a new key is
- * added after the others. Undefined when the source is too large or
- * unreadable, when no key or comment is left, or when the result would not
- * read back as `current`; the caller then writes canonical frontmatter. The
+ * added after the others. Empty when no key or comment is left. Undefined
+ * when the source is too large or unreadable, or when the candidate cannot
+ * preserve the values; callers refuse the edit. The
  * engine keeps frontmatter the same way (`kept` in
  * crates/dohc-engine-collab/src/ydoc/frontmatter_yaml.rs).
  */
@@ -500,15 +502,50 @@ export function keptFrontmatter(
       if (!Object.hasOwn(block.value, key)) kept += crlf(rendered.get(key)!)
     }
     kept += lead
-    if (kept === '') return undefined
+    if (kept === '') return ''
     const candidate = `${block.open}${kept}${block.closing}`
     const reread = readFrontmatterBlock(candidate)
+    const untouched = block.keys.filter(key => isWritten(key) && parsed.get(key) === rendered.get(key))
     return reread && /^(?:\r?\n)*$/u.test(reread.rest) && readsAsCurrent(renderedEntries(reread.value))
+      && preservesYamlValues(block, reread, untouched)
       ? candidate
       : undefined
   } catch {
     return undefined
   }
+}
+
+// Compare resolved YAML nodes as well as projected values: `.nan` and
+// `'.nan'` have the same projection, but an alias must not switch between them.
+function preservesYamlValues(before: FrontmatterBlock, after: FrontmatterBlock, keys: string[]): boolean {
+  const values = (block: FrontmatterBlock): Map<string, unknown> => {
+    const root = yaml.eventsToAst(yaml.parseEvents(block.yaml, { maxDepth: PARSER_MAX_DEPTH }), {
+      source: block.yaml, schema: frontmatterLoadSchema,
+    })[0]?.contents
+    if (!root || root.kind !== 'mapping') return new Map()
+    const anchors = new Map<string, unknown>()
+    const resolve = (node: yaml.Node): unknown => {
+      if (node.kind === 'alias') {
+        if (!anchors.has(node.anchor)) throw new Error('unresolved alias')
+        return anchors.get(node.anchor)
+      }
+      const value: unknown = node.kind === 'scalar'
+        ? [node.kind, node.tag, node.value]
+        : [node.kind, node.tag, node.kind === 'sequence'
+            ? node.items.map(resolve)
+            : node.items.map(pair => [resolve(pair.key), resolve(pair.value)])]
+      if (node.anchor) anchors.set(node.anchor, value)
+      return value
+    }
+    return new Map(root.items.map((pair, index) => {
+      resolve(pair.key)
+      return [block.keys[index]!, resolve(pair.value)]
+    }))
+  }
+  const original = values(before)
+  const candidate = values(after)
+  return keys.every(key => original.has(key) && candidate.has(key)
+    && sameFrontmatterValue(original.get(key), candidate.get(key)))
 }
 
 /** The Y.Doc meta key that holds the frontmatter text a document keeps. */
@@ -556,15 +593,58 @@ export function writtenFrontmatterKeys(frontmatter: Y.Map<unknown>, meta: Y.Map<
  * someone else since, stays unmatched and settles without its old comments.
  */
 export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): void {
+  patchFrontmatter(doc, new Map([[key, value]]))
+}
+
+/** Validate a whole property edit before changing any Y.Map item. */
+export function patchFrontmatter(doc: Y.Doc, values: ReadonlyMap<string, unknown>, remove: readonly string[] = []): void {
+  const frontmatter = doc.getMap<unknown>('frontmatter')
+  const meta = doc.getMap<unknown>('meta')
+  const current = nullPrototypeRecord()
+  for (const [key, value] of frontmatter) {
+    current[key] = value !== null && typeof value === 'object'
+      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
+  }
+  for (const key of remove) delete current[key]
+  for (const [key, value] of values) current[key] = value
+  const candidate = frontmatterBlockFor(current, meta.get(FRONTMATTER_SOURCE_META_KEY), '', '\n', writtenFrontmatterKeys(frontmatter, meta))
+  assertRequestedValues(candidate, Object.fromEntries(values))
   doc.transact(() => {
-    const frontmatter = doc.getMap<unknown>('frontmatter')
-    const meta = doc.getMap<unknown>('meta')
-    const before = entryItem(frontmatter, key)
-    frontmatter.set(key, value)
-    const after = entryItem(frontmatter, key)
-    const metaKey = FRONTMATTER_SOURCE_ITEM_META_PREFIX + key
-    if (before !== undefined && after !== undefined && meta.get(metaKey) === before) meta.set(metaKey, after)
+    for (const key of remove) frontmatter.delete(key)
+    for (const [key, value] of values) {
+      const before = entryItem(frontmatter, key)
+      frontmatter.set(key, value)
+      const after = entryItem(frontmatter, key)
+      const metaKey = FRONTMATTER_SOURCE_ITEM_META_PREFIX + key
+      if (before !== undefined && after !== undefined && meta.get(metaKey) === before) meta.set(metaKey, after)
+    }
   })
+}
+
+function assertRequestedValues(candidate: string, requested: Record<string, unknown>): void {
+  if (Object.keys(requested).length === 0) return
+  const expected = readFrontmatterBlock(`---\n${frontmatterYaml(requested)}---\n`)
+  const actual = readFrontmatterBlock(candidate)
+  if (!expected || !actual
+    || !Object.keys(requested).every(key => sameFrontmatterValue(requested[key], actual.value[key]))
+    || !preservesYamlValues(expected, actual, Object.keys(requested))) {
+    throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+  }
+}
+
+function sameFrontmatterValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) && Array.isArray(right)) {
+    if (left.length !== right.length) return false
+    for (let index = 0; index < left.length; index += 1) {
+      if (!Object.hasOwn(left, index) || !Object.hasOwn(right, index)
+        || !sameFrontmatterValue(left[index], right[index])) return false
+    }
+    return true
+  }
+  return isFrontmatterMap(left) && isFrontmatterMap(right)
+    && Object.keys(left).length === Object.keys(right).length
+    && Object.keys(left).every(key => Object.hasOwn(right, key) && sameFrontmatterValue(left[key], right[key]))
 }
 
 /** The text with each renamed entry written under its new name, in place. */
@@ -674,7 +754,7 @@ function entryTextEnd(region: string, keptBlankLines: number): number {
 
 /**
  * The frontmatter block a projection writes before `body`: the kept text of
- * `source` when it still reads as `frontmatter`, canonical YAML otherwise,
+ * `source` when it still reads as `frontmatter`, canonical YAML without a source,
  * and nothing when there are no values to write.
  */
 export function frontmatterBlockFor(
@@ -688,8 +768,9 @@ export function frontmatterBlockFor(
   if (kept !== undefined) {
     // A closing delimiter at the end of the file needs a line break before
     // the body a person adds under it.
-    return body !== '' && !kept.endsWith('\n') ? `${kept}${lineEnding}${lineEnding}` : kept
+    return kept !== '' && body !== '' && !kept.endsWith('\n') ? `${kept}${lineEnding}${lineEnding}` : kept
   }
+  if (typeof source === 'string') throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
   if (Object.keys(frontmatter).length === 0) return ''
   const block = `---\n${frontmatterYaml(frontmatter)}---${body.startsWith('\n') ? '\n' : '\n\n'}`
   return lineEnding === '\n' ? block : block.replaceAll('\n', '\r\n')
@@ -709,5 +790,20 @@ export function writeMarkdownFrontmatter(
   const { body } = parseFrontmatter(markdown, lineEnding === '\r\n')
   const written = markdown.slice(0, markdown.length - body.length)
   const source = written === '' ? undefined : withRenamedEntries(written, frontmatter, renamed)
-  return `${frontmatterBlockFor(frontmatter, source, body, lineEnding)}${body}`
+  const candidate = frontmatterBlockFor(frontmatter, source, body, lineEnding)
+  const original = readFrontmatterBlock(written)
+  const requested = nullPrototypeRecord()
+  const unchanged: string[] = []
+  for (const key of Object.keys(frontmatter)) {
+    if (original && Object.hasOwn(original.value, key)
+      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })
+      && ![...renamed.values()].includes(key)) unchanged.push(key)
+    else requested[key] = frontmatter[key]
+  }
+  assertRequestedValues(candidate, requested)
+  if (original && unchanged.length > 0) {
+    const reread = readFrontmatterBlock(candidate)
+    if (!reread || !preservesYamlValues(original, reread, unchanged)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+  }
+  return `${candidate}${body}`
 }

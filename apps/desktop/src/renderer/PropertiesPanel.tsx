@@ -1,7 +1,7 @@
 import {
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
-  setFrontmatterValue,
+  patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -143,24 +143,24 @@ function applySharedFrontmatterPatch(
   previousEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
 ) {
-  const map = doc.getMap(FRONTMATTER_FIELD);
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
 
-  for (const key of previous.keys()) {
-    if (!next.has(key)) map.delete(key);
-  }
+  const remove = [...previous.keys()].filter(key => !next.has(key));
+  const values = new Map<string, unknown>();
   for (const [key, value] of next) {
     if (!previous.has(key) || !Object.is(previous.get(key), value)) {
-      setFrontmatterValue(doc, key, value);
+      values.set(key, value);
     }
   }
+  patchFrontmatter(doc, values, remove);
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
   const [ydocRevision, setYdocRevision] = useState(0);
+  const [editRefused, setEditRefused] = useState(false);
   const sourceEntries = useMemo(() => {
     if (ydoc) {
       return frontmatterEntriesFromMeta(mapToObject(ydoc.getMap(FRONTMATTER_FIELD)));
@@ -181,6 +181,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   useEffect(() => {
     setEntries(editableEntries(sourceEntries));
+    setEditRefused(false);
   }, [sourceEntries]);
 
   // An unsplittable block cannot change one property without
@@ -192,15 +193,19 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     const previous = editableEntries(sourceEntries);
     setEntries(next);
     if (hasDuplicateKeys(next)) return;
-    if (ydoc) {
-      ydoc.transact(() => {
+    try {
+      if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
-      });
-      return;
+      } else {
+        props.onChange?.(
+          applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
+        );
+      }
+      setEditRefused(false);
+    } catch {
+      setEntries(previous);
+      setEditRefused(true);
     }
-    props.onChange?.(
-      applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
-    );
   }
 
   function setKey(index: number, key: string) {
@@ -229,7 +234,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       aria-label="Properties"
     >
       <div className="dohc-page-properties__inner">
-        {locked ? (
+        {locked || editRefused ? (
           <span
             data-testid="properties-locked"
             className="dohc-page-properties__flag"

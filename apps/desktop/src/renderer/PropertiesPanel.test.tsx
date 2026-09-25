@@ -23,6 +23,22 @@ describe("PropertiesPanel", () => {
     cleanup();
   });
 
+  it.each([false, true])("refuses removing an anchor before mutation (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\n---\n\nBody";
+    const doc = markdownToYDoc(initialBody);
+    const before = Y.encodeStateAsUpdate(doc);
+    const onChange = vi.fn();
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Remove property a"));
+      expect(screen.getByTestId("properties-locked").getAttribute("title")).toContain("without rewriting the others");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      expect(yDocToMarkdown(doc)).toBe(initialBody);
+    } finally { doc.destroy(); }
+  });
+
   it("preserves system fields while editing user properties", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

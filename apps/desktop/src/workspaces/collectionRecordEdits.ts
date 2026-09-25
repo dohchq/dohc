@@ -14,7 +14,7 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import * as Y from "yjs";
 import {
   frontmatterEditsRefused,
-  setFrontmatterValue,
+  patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
 import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../renderer/markdown/frontmatter";
 
@@ -286,9 +286,7 @@ export async function setCollectionRecordFields(
       };
       scratch.on("update", captureUpdate);
       try {
-        scratch.transact(() => {
-          for (const [field, value] of changed) setFrontmatterValue(scratch, field, value);
-        });
+        patchFrontmatter(scratch, new Map(changed));
       } finally {
         scratch.off("update", captureUpdate);
       }

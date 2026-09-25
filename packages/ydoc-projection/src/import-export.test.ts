@@ -18,6 +18,7 @@ import {
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
   loadMarkdownFrontmatter,
@@ -256,10 +257,8 @@ describe('Y.Doc markdown import/export', () => {
           content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] }],
         })
         expect(yDocToMarkdown(restored)).toBe(markdown)
-        // Setting a key replaces the unreadable block with canonical frontmatter.
-        restored.getMap('frontmatter').set('title', 'Plan')
-        const canonical = '---\ntitle: Plan\n---\n\nBody remains.'
-        expect(yDocToMarkdown(restored)).toBe(markdown.includes('\r\n') ? canonical.replaceAll('\n', '\r\n') : canonical)
+        expect(() => setFrontmatterValue(restored, 'title', 'Plan')).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+        expect(yDocToMarkdown(restored)).toBe(markdown)
       } finally {
         restored.destroy()
       }
@@ -446,8 +445,7 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   // A collaborator can write any frontmatter source. One too deep, too large,
-  // or too costly to expand is ignored, and the projection writes canonical
-  // frontmatter.
+  // or too costly to expand refuses projection.
   it.each([
     ['deep block', `---\ntitle:\n${'- '.repeat(500_000)}Plan\n---\n\n`],
     ['deep flow', `---\ntitle: ${'['.repeat(500_000)}Plan${']'.repeat(500_000)}\n---\n\n`],
@@ -455,11 +453,11 @@ describe('Y.Doc markdown import/export', () => {
       Array(10).fill(level === 0 ? 'x' : `*l${level - 1}`).join(', ')
     }]`).join('\n')}\ntitle: Plan\n---\n\n`],
     ['oversized', `---\ntitle: Plan\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`],
-  ])('ignores a hostile frontmatter source: %s', (_name, source) => {
+  ])('refuses a hostile frontmatter source: %s', (_name, source) => {
     const doc = markdownToYDoc('---\ntitle: Plan\n---\n\nBody')
     try {
       doc.getMap('meta').set('dohcFrontmatterSource', source)
-      expect(yDocToMarkdown(doc)).toBe('---\ntitle: Plan\n---\n\nBody')
+      expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
     } finally { doc.destroy() }
   })
 
@@ -554,7 +552,8 @@ describe('Y.Doc markdown import/export', () => {
     const doc = markdownToYDoc('---\npriority: !custom high\n---\n\nReal body')
     doc.getMap('meta').set('dohcFrontmatterSource', prefix)
     try {
-      expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
+      if (prefix.includes('injected body')) expect(() => yDocToMarkdown(doc)).toThrow(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+      else expect(yDocToMarkdown(doc)).toBe('---\npriority: high\n---\n\nReal body')
     } finally { doc.destroy() }
   })
 

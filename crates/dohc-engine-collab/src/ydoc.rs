@@ -980,12 +980,14 @@ impl Ydoc {
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
             let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
-            if let Some(kept) = frontmatter_yaml::kept(&source, &rendered, &written) {
+            {
+                let kept = frontmatter_yaml::kept(&source, &rendered, &written)
+                    .ok_or(CollabError::FrontmatterEditRefused)?;
                 let mut preserved = ProjectionBuffer::new();
                 preserved.push_str(&kept)?;
                 // A closing delimiter at the end of the file needs a line
                 // break before the body a person adds under it.
-                if !body_markdown.is_empty() && !kept.ends_with('\n') {
+                if !kept.is_empty() && !body_markdown.is_empty() && !kept.ends_with('\n') {
                     preserved.push_str(if uses_crlf { "\r\n\r\n" } else { "\n\n" })?;
                 }
                 preserved.push_str(&if uses_crlf {
@@ -1138,14 +1140,99 @@ impl Ydoc {
     }
 
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
-    pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
+    pub fn frontmatter_set(&self, key: &str, value: &str) -> Result<Vec<u8>, CollabError> {
+        self.frontmatter_set_value(key, Value::String(value.to_owned()))
+    }
+
+    /// Validate the candidate projection before changing a frontmatter item.
+    pub fn frontmatter_set_value(&self, key: &str, value: Value) -> Result<Vec<u8>, CollabError> {
+        let mut current = self.frontmatter_json();
+        current
+            .as_object_mut()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .insert(key.to_owned(), value.clone());
+        self.validate_frontmatter_edit(&current, &[key], None)?;
+        Ok(self.write_frontmatter_value(key, &value))
+    }
+
+    fn write_frontmatter_value(&self, key: &str, value: &Value) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.with_delta(|txn| {
             let before = map.entry_id(txn, key);
-            map.insert(txn, key, value);
+            map.insert(txn, key, json_to_any(value));
             carry_frontmatter_source_item(&map, &meta, txn, key, before);
         })
+    }
+
+    fn validate_frontmatter_edit(
+        &self,
+        current: &Value,
+        edited: &[&str],
+        supplied_candidate: Option<&str>,
+    ) -> Result<(), CollabError> {
+        let original = supplied_candidate
+            .map(|_| self.project_richdoc())
+            .transpose()?;
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let rendered = current
+            .as_object()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), project_frontmatter(key, value)?)))
+            .collect::<ProjectionResult<BTreeMap<_, _>>>()?;
+        let expected = format!(
+            "---\n{}---\n",
+            rendered.values().cloned().collect::<String>()
+        );
+        let candidate = if let Some(candidate) = supplied_candidate {
+            candidate.to_owned()
+        } else if let Some(Out::Any(Any::String(source))) =
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY)
+        {
+            let written = written_frontmatter_keys(&map, &meta, &txn);
+            frontmatter_yaml::kept(&source, &rendered, &written)
+                .ok_or(CollabError::FrontmatterEditRefused)?
+        } else {
+            expected.clone()
+        };
+        if candidate.is_empty() && rendered.is_empty() {
+            return Ok(());
+        }
+        let reread = dohc_engine_domain::collections::markdown_frontmatter_block(&candidate)
+            .ok_or(CollabError::FrontmatterEditRefused)?;
+        let reloaded = reread
+            .value
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), project_frontmatter(key, value)?)))
+            .collect::<ProjectionResult<BTreeMap<_, _>>>()?;
+        if reloaded != rendered {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        if let Some(original) = original {
+            let untouched: Vec<_> = rendered
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !edited.contains(key))
+                .collect();
+            if !untouched.is_empty()
+                && !dohc_engine_domain::collections::frontmatter_preserves_yaml_values(
+                    &original, &candidate, &untouched,
+                )
+            {
+                return Err(CollabError::FrontmatterEditRefused);
+            }
+        }
+        if !edited.is_empty()
+            && !dohc_engine_domain::collections::frontmatter_preserves_yaml_values(
+                &expected, &candidate, edited,
+            )
+        {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        Ok(())
     }
 
     /// Set one frontmatter scalar and bind the resulting semantic projection
@@ -1156,8 +1243,21 @@ impl Ydoc {
         value: &str,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
+        if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(CollabError::ProjectionTooLarge {
+                actual: markdown.len(),
+                max: dohc_engine_domain::MAX_TEXT_BYTES,
+            });
+        }
+        let value = Value::String(value.to_owned());
+        let mut current = self.frontmatter_json();
+        current
+            .as_object_mut()
+            .ok_or(CollabError::FrontmatterEditRefused)?
+            .insert(key.to_owned(), value.clone());
+        self.validate_frontmatter_edit(&current, &[key], Some(markdown))?;
         self.stage_source_preserving_edit(markdown, |staged| {
-            let _ = staged.frontmatter_set(key, value);
+            let _ = staged.write_frontmatter_value(key, &value);
             Ok(())
         })
     }
@@ -1221,12 +1321,19 @@ impl Ydoc {
                     .collect(),
             );
             let meta = self.doc.get_or_insert_map(ROOT_META);
+            let mut next = current.clone();
+            next.as_object_mut()?
+                .insert(key.to_owned(), retained.clone());
+            self.validate_frontmatter_edit(&next, &[key], None).ok()?;
             Some(self.with_delta(|txn| {
                 let before = map.entry_id(txn, key);
                 map.insert(txn, key, json_to_any(&retained));
                 carry_frontmatter_source_item(&map, &meta, txn, key, before);
             }))
         } else if value.as_str() == Some(target_record_id) {
+            let mut next = current.clone();
+            next.as_object_mut()?.remove(key);
+            self.validate_frontmatter_edit(&next, &[], None).ok()?;
             Some(self.with_delta(|txn| {
                 map.remove(txn, key);
             }))
@@ -6328,7 +6435,7 @@ fn main() {}
         edited
             .rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("seed floating-point frontmatter key");
-        edited.frontmatter_set("1.5", "changed");
+        edited.frontmatter_set("1.5", "changed").unwrap();
         assert_eq!(
             edited.project(ContentKind::Richdoc).unwrap().content,
             "---\n'1.5': changed\n---\n\nbody text"
@@ -6432,10 +6539,9 @@ fn main() {}
     }
 
     /// A collaborator can write any frontmatter source. One too deep, too
-    /// large, or too costly to expand is ignored, and the settle still writes
-    /// canonical frontmatter.
+    /// large, or too costly to expand must refuse settlement.
     #[test]
-    fn hostile_frontmatter_sources_settle_as_canonical_frontmatter() {
+    fn hostile_frontmatter_sources_refuse_settlement() {
         let ladder = (0..6)
             .map(|level| {
                 let item = if level == 0 {
@@ -6486,10 +6592,10 @@ fn main() {}
                 FRONTMATTER_SOURCE_META_KEY,
                 source.as_str(),
             );
-            assert_eq!(
-                doc.project_richdoc().unwrap(),
-                "---\ntitle: Plan\n---\n\nBody"
-            );
+            assert!(matches!(
+                doc.project_richdoc(),
+                Err(CollabError::FrontmatterEditRefused)
+            ));
             if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
                 assert!(doc
                     .validate_public_baseline(&doc.encode_full_state())
@@ -6545,7 +6651,7 @@ fn main() {}
             .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
             .unwrap();
         write_key_directly(&engine, "wifi", None);
-        engine.frontmatter_set("wifi", "new");
+        engine.frontmatter_set("wifi", "new").unwrap();
         assert_eq!(engine.project_richdoc().unwrap(), expected);
     }
 
@@ -6556,7 +6662,7 @@ fn main() {}
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
             .unwrap();
-        doc.frontmatter_set("budget", "200");
+        doc.frontmatter_set("budget", "200").unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
             "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody"
@@ -6591,8 +6697,8 @@ fn main() {}
             a.project_richdoc().unwrap(),
             "---\nstatus:   open\n---\n\nBody"
         );
-        a.frontmatter_set("owner", "rec_c");
-        a.frontmatter_set("editor", "rec_d");
+        a.frontmatter_set("owner", "rec_c").unwrap();
+        a.frontmatter_set("editor", "rec_d").unwrap();
         assert_eq!(
             a.project_richdoc().unwrap(),
             "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody"
@@ -6617,12 +6723,111 @@ fn main() {}
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
                 .unwrap();
-            doc.frontmatter_set("key1000", "edited");
+            doc.frontmatter_set("key1000", "edited").unwrap();
             let started = std::time::Instant::now();
             let settled = doc.project_richdoc().unwrap();
             println!("settle with {name} frontmatter: {:?}", started.elapsed());
             assert!(settled.contains("key1000: edited"));
         }
+    }
+
+    #[test]
+    fn shared_frontmatter_edit_candidates() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/frontmatter-edits.json"
+        ))
+        .unwrap();
+        for vector in vectors.as_array().unwrap() {
+            let doc = Ydoc::wire();
+            let markdown = vector["markdown"].as_str().unwrap();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .unwrap();
+            let before = doc.encode_full_state();
+            let result =
+                doc.frontmatter_set_value(vector["key"].as_str().unwrap(), vector["value"].clone());
+            if vector["refused"] == true {
+                assert!(
+                    matches!(result, Err(CollabError::FrontmatterEditRefused)),
+                    "{}: {result:?}",
+                    vector["name"]
+                );
+                assert_eq!(doc.encode_full_state(), before, "{}", vector["name"]);
+                assert_eq!(doc.project_richdoc().unwrap(), markdown);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    vector["expected"].as_str().unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supplied_frontmatter_candidate_preserves_values_before_mutation() {
+        let original = "---\n{score: .nan, title: Plan}\n---\n\nBody";
+        for (candidate, accepted) in [
+            (
+                "---\n{score: .nan, title: Plan, id: \"record\"}\n---\n\nBody",
+                true,
+            ),
+            (
+                "---\n{score: '.nan', title: Plan, id: record}\n---\n\nBody",
+                false,
+            ),
+            (
+                "---\n{score: .nan, title: Plan, id: different}\n---\n\nBody",
+                false,
+            ),
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, original)
+                .unwrap();
+            let before = doc.encode_full_state();
+            let result = doc.frontmatter_set_preserving_markdown_source("id", "record", candidate);
+            if accepted {
+                result.unwrap();
+                assert_eq!(doc.project_richdoc().unwrap(), candidate);
+            } else {
+                assert!(matches!(result, Err(CollabError::FrontmatterEditRefused)));
+                assert_eq!(doc.encode_full_state(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn relation_cleanup_refuses_alias_dependencies_before_mutation() {
+        for yaml in [
+            "owner: &v rec_a\ncopy: *v",
+            "owner: &v [rec_a, rec_b]\ncopy: {nested: *v}",
+        ] {
+            let doc = Ydoc::wire();
+            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                .unwrap();
+            let before = doc.encode_full_state();
+            assert!(doc
+                .frontmatter_drop_relation_target("owner", "rec_a", yaml.contains('['))
+                .is_none());
+            assert_eq!(doc.encode_full_state(), before);
+            assert_eq!(doc.project_richdoc().unwrap(), markdown);
+        }
+    }
+
+    #[test]
+    fn requested_string_cannot_keep_a_yaml_number_with_the_same_projection() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            "---\na: &v .nan\nb: *v\n---\n\nBody",
+        )
+        .unwrap();
+        let before = doc.encode_full_state();
+        assert!(matches!(
+            doc.frontmatter_set("b", ".nan"),
+            Err(CollabError::FrontmatterEditRefused)
+        ));
+        assert_eq!(doc.encode_full_state(), before);
     }
 
     #[test]
@@ -6699,17 +6904,15 @@ fn main() {}
                     }
                     assert!(doc.frontmatter_edits_refused(), "{yaml}");
                     let before = doc.encode_full_state();
-                    assert!(
-                        doc.frontmatter_drop_relation_target(key, "rec_a", many)
-                            .is_none()
-                    );
-                    assert!(
-                        doc.frontmatter_drop_relation_target_preserving_markdown_source(
+                    assert!(doc
+                        .frontmatter_drop_relation_target(key, "rec_a", many)
+                        .is_none());
+                    assert!(doc
+                        .frontmatter_drop_relation_target_preserving_markdown_source(
                             key, "rec_a", many
                         )
                         .unwrap()
-                        .is_none()
-                    );
+                        .is_none());
                     assert_eq!(doc.encode_full_state(), before, "{yaml}");
                     let projected = doc.project_richdoc().unwrap();
                     assert_eq!(projected.as_bytes(), markdown.as_bytes());
@@ -6748,7 +6951,7 @@ fn main() {}
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody")
             .unwrap();
         assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody");
-        doc.frontmatter_set("title", "Plan");
+        doc.frontmatter_set("title", "Plan").unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
             "---\ntitle: Plan\n---\n\nBody"
@@ -6786,7 +6989,7 @@ fn main() {}
     }
 
     #[test]
-    fn forged_frontmatter_source_falls_back_to_canonical_projection() {
+    fn forged_frontmatter_source_cannot_inject_body() {
         for prefix in [
             "---\npriority: !custom foreign\n---\n\n",
             "---\npriority: !custom high\n---\n\ninjected body\n",
@@ -6802,10 +7005,17 @@ fn main() {}
                 let mut txn = doc.doc.transact_mut();
                 meta.insert(&mut txn, FRONTMATTER_SOURCE_META_KEY, prefix);
             }
-            assert_eq!(
-                doc.project_richdoc().unwrap(),
-                "---\npriority: high\n---\n\nReal body"
-            );
+            if prefix.contains("injected body") {
+                assert!(matches!(
+                    doc.project_richdoc(),
+                    Err(CollabError::FrontmatterEditRefused)
+                ));
+            } else {
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    "---\npriority: high\n---\n\nReal body"
+                );
+            }
         }
     }
 
@@ -7028,7 +7238,7 @@ fn main() {}
             ("id", "99999999999999999999"),
             ("hex", "0x_1F"),
         ] {
-            doc.frontmatter_set(key, value);
+            doc.frontmatter_set(key, value).unwrap();
         }
 
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
