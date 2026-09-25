@@ -122,13 +122,27 @@ describe("error words", () => {
       mapped: false,
       cause: "Dataset operation expired while waiting for a worker.",
     });
-    expect(readError(acrossIpc(new Error("The dataset worker stopped. Reopen it from the journal."), "desktop:dataset")).words)
-      .toBeNull();
-    // A person's own names and a cause written for them stay.
+    for (const internal of [
+      "The dataset worker stopped. Reopen it from the journal.",
+      "Dataset host is closed.",
+      "Dataset access is not permitted.",
+      "Materialization is truncated.",
+      "Invalid dataset scope.",
+      "Unknown dataset worker directory; inspect it before cleanup: C:\\w\\.dohc\\workers\\a",
+    ]) {
+      expect(readError(acrossIpc(new Error(internal), "desktop:dataset")).words, internal).toBeNull();
+    }
+    // A person's own names and an instruction written for them stay, even
+    // when a field, a folder or a file is named Dataset or Journal.
     for (const [message, channel] of [
       ["Journal.md changed on disk. Open it again.", "desktop:read-workspace-text"],
       ["A Collection named Dataset already exists in Journal.", "desktop:create-collection"],
       ["The server returned an invalid Collection checkpoint.", "desktop:dataset"],
+      [
+        "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
+        "desktop:dataset",
+      ],
+      ["Status uses custom rules. Update dataset/operations.ts, then choose Review source change.", "desktop:dataset"],
     ] as const) {
       expect(readError(acrossIpc(new Error(message), channel)).words, message).toBe(message);
     }

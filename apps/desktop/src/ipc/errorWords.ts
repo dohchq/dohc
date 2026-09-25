@@ -130,12 +130,24 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
 // When nothing else applies and no caller said what failed.
 export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
-// The Collection worker's plain errors name its internals ("Dataset host is
-// closed.", "Reopen it from the journal."). Only replies on the Collection
-// channel are read this way, so a file or Collection named Journal keeps
-// its name everywhere.
+// The Collection host's plain errors that describe its own internals, by the
+// fixed words they start with (app-backend-runtime and localDatasetHost).
+// Only replies on the Collection channel are read this way. Every other
+// message keeps its words, with the field, Collection and file names a
+// person chose.
 const COLLECTION_CHANNEL = "desktop:dataset";
-const WORKER_TEXT = /\bdatasets?\b|\bfrom the journal\b/i;
+const WORKER_TEXT = new RegExp(`^(?:${[
+  String.raw`Dataset (?:host|hosts|worker|workers|operation|operations|materialization|export|recovery|checkpoint|catalog|ownership|maintenance|head|artifacts|migration|approval|cursor|claim|initialization|directory|paths|lifecycle|data grant|app binding) `,
+  String.raw`Dataset (?:authority (?:is|was|checks)|access (?:is not permitted|needs approval)|already exists at|changed (?:after|before|during)|schema changed\.|was permanently deleted\.|is (?:not initialized|archived)\.|revision transition|rules are already approved)`,
+  String.raw`(?:The|Unknown) dataset (?:worker|compiler|ownership|revision changed)`,
+  String.raw`Invalid (?:dataset|checkpoint|migration|pending|recovery|Collection storage|Collection worker) `,
+  String.raw`(?:Unsupported dataset compiler|Compiled dataset operations|TypeScript dataset operations|Initial dataset revision) `,
+  String.raw`(?:A (?:fenced|committed) dataset|Recovery dataset differs|Too many files in dataset operation|This dataset already has a migration preview|A protected file read requires a read-only dataset operation)\b`,
+  String.raw`(?:The Collection copy belongs to another dataset|The operation expired while waiting for the dataset worker)\.`,
+  String.raw`(?:Implicit rowid access|Transfer requires a fenced source dataset|Cursor scope or revision|Idempotency key has|journal write failed)`,
+  String.raw`(?:A newer materialization|Materialization|Checkpoint|Migration checkpoint|Recovery checkpoint|Active checkpoints|Discarding this checkpoint) `,
+  String.raw`Migration preview (?:differs|exceeds|is truncated|checkpoint)`,
+].join("|")})`);
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
 const IPC_PREFIX = /^Error invoking remote method '([^']*)': /;

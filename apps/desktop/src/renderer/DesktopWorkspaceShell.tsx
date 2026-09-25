@@ -796,13 +796,13 @@ export function DesktopWorkspaceShell(props: {
   // the address that failed when the panel it came from has closed.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
-      reportShellError(error.message, new Error(error.message), () => {
+      showShellError(error.message, error.cause, () => {
         if (error.retry?.()) return;
         setCloudRetryServerUrl(error.serverUrl ?? "");
         setCloudOpen(true);
       });
     },
-    [reportShellError],
+    [showShellError],
   );
 
   // The live-document dialog's own reads and actions, straight through to

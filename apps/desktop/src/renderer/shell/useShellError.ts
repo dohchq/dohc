@@ -145,10 +145,10 @@ export function useShellError(workspaceId: string) {
   // A surface that already chose its words passes the error that caused them,
   // so Copy keeps it. Text that arrives raw is read the same way.
   const showShellError = useCallback(
-    (message: string, error?: unknown) => {
+    (message: string, error?: unknown, retry: (() => void) | null = null) => {
       const shown = readError(message);
       const cause = error === undefined ? shown.cause : readError(error).cause;
-      push({ message: shown.words ?? UNKNOWN_ERROR_WORDS, ...(cause ? { cause } : {}), retry: null });
+      push({ message: shown.words ?? UNKNOWN_ERROR_WORDS, ...(cause ? { cause } : {}), retry });
     },
     [push],
   );

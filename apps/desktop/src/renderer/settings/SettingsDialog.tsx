@@ -84,7 +84,7 @@ function StatusPill(props: { state: SaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string) => void;
+  onError?: (message: string, cause?: unknown) => void;
   workspaceId: string;
   workspacePath: string;
   /**
