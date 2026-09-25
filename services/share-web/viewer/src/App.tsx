@@ -151,7 +151,7 @@ export const dohcNavigation = {
 
 type TextPreview =
   | { status: "ready"; text: string }
-  | { status: "too-large" };
+  | { status: "download" };
 
 async function api(
   session: string,
@@ -222,29 +222,58 @@ async function withBoundedRetry(
   }
 }
 
+// Bytes a text file does not contain. NUL marks binary data and BOM-less
+// UTF-16; a high share of other C0 controls marks binary data too. Tab, line
+// breaks, form feed, and escape (terminal colors) are ordinary text.
+function isStrayControlByte(byte: number): boolean {
+  return (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0b &&
+    byte !== 0x0c && byte !== 0x0d && byte !== 0x1b) || byte === 0x7f;
+}
+const MAX_STRAY_CONTROL_SHARE = 0.01;
+
 async function readTextPreview(response: Response): Promise<TextPreview> {
   if (!response.body) return { status: "ready", text: "" };
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const textChunks: string[] = [];
   let bytesRead = 0;
+  let strayControlBytes = 0;
+  const stop = async (): Promise<TextPreview> => {
+    try {
+      await reader.cancel();
+    } catch {
+      // The preview stays a download even if the transport cannot cancel.
+    }
+    return { status: "download" };
+  };
+  // The fatal decoder refuses bytes that are not UTF-8.
+  const decode = (value?: Uint8Array): string | null => {
+    try {
+      return value ? decoder.decode(value, { stream: true }) : decoder.decode();
+    } catch {
+      return null;
+    }
+  };
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        textChunks.push(decoder.decode());
+        const tail = decode();
+        if (tail === null || strayControlBytes > bytesRead * MAX_STRAY_CONTROL_SHARE) {
+          return { status: "download" };
+        }
+        textChunks.push(tail);
         return { status: "ready", text: textChunks.join("") };
       }
       bytesRead += value.byteLength;
-      if (bytesRead > TEXT_PREVIEW_BYTE_CAP) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The preview remains too large even if the transport cannot cancel.
-        }
-        return { status: "too-large" };
+      if (bytesRead > TEXT_PREVIEW_BYTE_CAP) return await stop();
+      for (const byte of value) {
+        if (byte === 0) return await stop();
+        if (isStrayControlByte(byte)) strayControlBytes += 1;
       }
-      textChunks.push(decoder.decode(value, { stream: true }));
+      const text = decode(value);
+      if (text === null) return await stop();
+      textChunks.push(text);
     }
   } finally {
     reader.releaseLock();
@@ -619,7 +648,7 @@ function FileView(props: {
   onStaleBlob: (path: string, blobSha256: string) => Promise<boolean>;
 }) {
   const [previewText, setPreviewText] = useState<string | null>(null);
-  const [previewTooLarge, setPreviewTooLarge] = useState(false);
+  const [previewIsDownload, setPreviewIsDownload] = useState(false);
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
@@ -640,7 +669,7 @@ function FileView(props: {
   useEffect(() => {
     let current = true;
     setPreviewText(null);
-    setPreviewTooLarge(false);
+    setPreviewIsDownload(false);
     setFileStatus("ready");
     if (!rendersTextPreview) return () => { current = false; };
     const abortController = new AbortController();
@@ -653,8 +682,8 @@ function FileView(props: {
         if (!response.ok) throw new ViewResponseError(response.status);
         const preview = await readTextPreview(response);
         if (!current) return;
-        if (preview.status === "too-large") {
-          setPreviewTooLarge(true);
+        if (preview.status === "download") {
+          setPreviewIsDownload(true);
         } else {
           setPreviewText(preview.text);
         }
@@ -696,7 +725,7 @@ function FileView(props: {
     );
   }
   if (rendersMarkdown) {
-    if (previewTooLarge) {
+    if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
     if (previewText === null) return <p className="muted">Loading file</p>;
@@ -714,7 +743,7 @@ function FileView(props: {
     );
   }
   if (rendersExcalidraw) {
-    if (previewTooLarge) {
+    if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
     if (previewText === null) return <p className="muted">Loading file</p>;
@@ -732,7 +761,7 @@ function FileView(props: {
     );
   }
   if (rendersSourceText) {
-    if (previewTooLarge) {
+    if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
     if (previewText === null) return <p className="muted">Loading file</p>;
@@ -1295,6 +1324,9 @@ export function App() {
         <main className="content">
           {selected ? (
             <FileView
+              // A new file starts with empty preview state, so one file's text
+              // never renders under another file's kind.
+              key={`${state.session}\n${selected.path}\n${selected.blobSha256}`}
               session={state.session}
               file={selected}
               files={state.files}
