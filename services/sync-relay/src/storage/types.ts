@@ -740,11 +740,19 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): number | null;
-  currentObjectBlobByteLength(input: {
+  listLinkRevisionLogRows(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): SyncRelayLogRow[];
+  linkRevisionBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
+    revisionRelaySeq: number;
     sha256: string;
     epochLogFloor: number;
   }): number | null;
@@ -924,6 +932,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    aboveRelaySeq?: number;
   }): SyncRelayLogRow[];
   // MU-C4 shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay

@@ -1,5 +1,7 @@
 import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
-import type { SqliteDb, CurrentFileStateSnapshot } from "./types";
+import type { SqliteDb, CurrentFileStateSnapshot, SyncRelayLogRow } from "./types";
+import { LINK_REVISION_SCAN_LIMIT, SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
+import { rowToLogRow } from "./rows";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import type { StorageContext } from "./context";
 
@@ -261,7 +263,7 @@ export function applyCurrentFileOp(
   );
 }
 
-function currentFileSelectorClause(selectorPaths: readonly string[]): {
+function currentFileSelectorClause(selectorPaths: readonly string[], column = "path"): {
   sql: string;
   params: string[];
 } {
@@ -274,7 +276,7 @@ function currentFileSelectorClause(selectorPaths: readonly string[]): {
     // exclusive upper bound, including descendants that start with a
     // supplementary Unicode code point.
     params.push(root, descendantPrefix, `${root}0`);
-    return "(path = ? OR (path >= ? AND path < ?))";
+    return `(${column} = ? OR (${column} >= ? AND ${column} < ?))`;
   });
   return { sql: ` AND (${ranges.join(" OR ")})`, params };
 }
@@ -317,19 +319,108 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
   };
 }
 
-// The bytes of `sha256` when the object is in the share now: its latest moment
-// in this version is the current file at a selected path, set above the epoch
-// floor. A delete, a move out of the selector, or another object taking the
-// path leaves no such row.
-export function currentObjectBlobByteLength(storage: StorageContext, input: {
+// The log rows that produced `sha256` for objects still in the share, newest
+// first: per object, its latest moment with this content above the epoch floor
+// at a selected path, kept only when the object's latest moment in the version
+// is the current file at a selected path. The scan reads at most
+// LINK_REVISION_SCAN_LIMIT moments with this content, so a link request's work
+// does not grow with how often the content recurs. Membership is checked
+// before the result is capped.
+export function listLinkRevisionLogRows(storage: StorageContext, input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): SyncRelayLogRow[] {
+    const revisionSelector = currentFileSelectorClause(input.selectorPaths, "scanned.path");
+    const currentSelector = currentFileSelectorClause(input.selectorPaths, "current_file.path");
+    const latest = (column: "path" | "relay_seq") =>
+      `(SELECT latest.${column}
+        FROM sync_relay_object_moments AS latest
+          INDEXED BY idx_sync_relay_object_moments_latest
+        WHERE latest.workspace_id = ? AND latest.version_id = ?
+          AND latest.object_id = revisions.object_id
+        ORDER BY latest.relay_seq DESC
+        LIMIT 1)`;
+    return storage.db
+      .prepare(
+        `WITH scanned AS MATERIALIZED (
+           SELECT object_id, relay_seq, path
+           FROM sync_relay_object_moments
+             INDEXED BY idx_sync_relay_object_moments_blob_lookup
+           WHERE workspace_id = ? AND version_id = ? AND blob_sha256 = ?
+           LIMIT ?
+         ),
+         revisions AS (
+           SELECT scanned.object_id, MAX(scanned.relay_seq) AS relay_seq
+           FROM scanned
+           WHERE scanned.relay_seq > ?${revisionSelector.sql}
+           GROUP BY scanned.object_id
+         ),
+         placed AS MATERIALIZED (
+           SELECT revisions.relay_seq,
+                  ${latest("path")} AS latest_path,
+                  ${latest("relay_seq")} AS latest_relay_seq
+           FROM revisions
+         )
+         SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM placed
+         JOIN sync_relay_current_files AS current_file
+           ON current_file.workspace_id = ?
+          AND current_file.version_id = ?
+          AND current_file.path = placed.latest_path
+          AND current_file.state_relay_seq = placed.latest_relay_seq
+         JOIN sync_relay_log l ON l.relay_seq = placed.relay_seq
+         WHERE current_file.state_relay_seq > ?${currentSelector.sql}
+         ORDER BY placed.relay_seq DESC
+         LIMIT ?`,
+      )
+      .all(
+        input.workspaceId,
+        input.versionId,
+        input.sha256,
+        LINK_REVISION_SCAN_LIMIT,
+        input.epochLogFloor,
+        ...revisionSelector.params,
+        input.workspaceId,
+        input.versionId,
+        input.workspaceId,
+        input.versionId,
+        input.workspaceId,
+        input.versionId,
+        input.epochLogFloor,
+        ...currentSelector.params,
+        SHARED_BLOB_CANDIDATE_LIMIT,
+      )
+      .map(rowToLogRow);
+  }
+
+// The bytes of `sha256` when the object has stayed in the share since the
+// revision at `revisionRelaySeq`: its latest moment in this version is the
+// current file at a selected path, set above the epoch floor, and none of its
+// later moments deleted it or left the selector. A move out and back in, a
+// delete, or another object taking the path leaves no answer. The check reads
+// at most LINK_REVISION_SCAN_LIMIT later moments and refuses past that.
+export function linkRevisionBlobByteLength(storage: StorageContext, input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
+    revisionRelaySeq: number;
     sha256: string;
     epochLogFloor: number;
   }): number | null {
     const selector = currentFileSelectorClause(input.selectorPaths);
+    const inShare = currentFileSelectorClause(input.selectorPaths, "later_moment.path");
+    const latest = (column: "path" | "relay_seq") =>
+      `(SELECT latest.${column}
+        FROM sync_relay_object_moments AS latest
+          INDEXED BY idx_sync_relay_object_moments_latest
+        WHERE latest.workspace_id = ? AND latest.version_id = ? AND latest.object_id = ?
+        ORDER BY latest.relay_seq DESC
+        LIMIT 1)`;
     const row = storage.db
       .prepare(
         `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
@@ -339,25 +430,44 @@ export function currentObjectBlobByteLength(storage: StorageContext, input: {
           AND blob.sha256 = ?
          WHERE sync_relay_current_files.workspace_id = ?
            AND sync_relay_current_files.version_id = ?
-           AND sync_relay_current_files.state_relay_seq > ?
-           AND (sync_relay_current_files.path, sync_relay_current_files.state_relay_seq) = (
-             SELECT latest.path, latest.relay_seq
-             FROM sync_relay_object_moments latest
-             WHERE latest.workspace_id = ? AND latest.object_id = ? AND latest.version_id = ?
-             ORDER BY latest.relay_seq DESC
-             LIMIT 1
-           )${selector.sql}
+           AND sync_relay_current_files.path = ${latest("path")}
+           AND sync_relay_current_files.state_relay_seq = ${latest("relay_seq")}
+           AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
+           AND (
+             SELECT CASE WHEN COUNT(*) > ? THEN 1
+                         ELSE TOTAL(CASE WHEN later_moment.path IS NOT NULL${inShare.sql} THEN 0 ELSE 1 END)
+                    END
+             FROM (
+               SELECT later.path
+               FROM sync_relay_object_moments AS later
+                 INDEXED BY idx_sync_relay_object_moments_latest
+               WHERE later.workspace_id = ? AND later.version_id = ? AND later.object_id = ?
+                 AND later.relay_seq > ?
+               ORDER BY later.relay_seq DESC
+               LIMIT ?
+             ) AS later_moment
+           ) = 0
          LIMIT 1`,
       )
       .get(
         input.sha256,
         input.workspaceId,
         input.versionId,
-        input.epochLogFloor,
         input.workspaceId,
-        input.objectId,
         input.versionId,
+        input.objectId,
+        input.workspaceId,
+        input.versionId,
+        input.objectId,
+        input.epochLogFloor,
         ...selector.params,
+        LINK_REVISION_SCAN_LIMIT,
+        ...inShare.params,
+        input.workspaceId,
+        input.versionId,
+        input.objectId,
+        input.revisionRelaySeq,
+        LINK_REVISION_SCAN_LIMIT + 1,
       );
     return row && typeof row.byte_length === "string"
       ? Number(row.byte_length)

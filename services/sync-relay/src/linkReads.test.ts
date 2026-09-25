@@ -31,6 +31,7 @@ import {
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
+import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import {
   appendLog,
   closeTestStorages,
@@ -3753,6 +3754,107 @@ describe("relay capability reads", () => {
         await denialBytes(await h(linkRequest(seeded.capability, `/sync/link/blobs/${sha}`))),
       ).toBe(`404:${LINK_REFUSAL_BODY}`);
     }
+  });
+
+  it("withdraws history on a move out and does not restore it on a move back in", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    const replacementSha = await putBlob(h, replacement);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", replacement, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "private/shared.md", replacement, 1_400, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: replacement,
+      }),
+      moment(5, "docs/shared.md", replacement, 1_500, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "private/shared.md",
+        beforeContent: replacement,
+      }),
+    ]);
+
+    const current = await h(linkRequest(seeded.capability, `/sync/link/blobs/${replacementSha}`));
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(replacement);
+    expect(
+      await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`)),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
+  it("finds a revision past more deleted copies than the candidate cap", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    await putBlob(h, replacement);
+    const copies = Array.from({ length: SHARED_BLOB_CANDIDATE_LIMIT }, (_, index) => [
+      moment(4 + index * 2, `docs/copy-${index}.md`, "# shared\n", 2_000 + index, {
+        objectId: `object-copy-${index}`,
+      }),
+      moment(5 + index * 2, `docs/copy-${index}.md`, "# shared\n", 3_000 + index, {
+        objectId: `object-copy-${index}`,
+        operation: "delete",
+        beforePath: `docs/copy-${index}.md`,
+        beforeContent: "# shared\n",
+      }),
+    ]).flat();
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", replacement, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      ...copies,
+    ]);
+
+    const earlier = await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`));
+    expect(earlier.status).toBe(200);
+    expect(await earlier.text()).toBe("# shared\n");
+  });
+
+  it("refuses a revision it would find only past the scan bound", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    await putBlob(h, replacement);
+    // Deleted copies whose object ids sort before object-shared fill the
+    // bounded index scan, so the read refuses instead of scanning further.
+    appendStoredMoments(storage, [
+      moment(3, "docs/shared.md", replacement, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      ...Array.from({ length: LINK_REVISION_SCAN_LIMIT }, (_, index) => [
+        moment(4 + index * 2, `docs/scan-${index}.md`, "# shared\n", 2_000 + index, {
+          objectId: `object-a-${String(index).padStart(5, "0")}`,
+        }),
+        moment(5 + index * 2, `docs/scan-${index}.md`, "# shared\n", 2_000 + index, {
+          objectId: `object-a-${String(index).padStart(5, "0")}`,
+          operation: "delete",
+          beforePath: `docs/scan-${index}.md`,
+          beforeContent: "# shared\n",
+        }),
+      ]).flat(),
+    ]);
+
+    expect(
+      await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`)),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
   it("never serves content a file had before it moved into the share", async () => {

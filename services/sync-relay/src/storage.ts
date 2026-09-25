@@ -900,6 +900,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    aboveRelaySeq?: number;
   }): SyncRelayLogRow[] {
     return objectIndexStorage.listVersionCreateLogRowsByBlob(this, input);
   }
@@ -1077,15 +1078,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }
 
-  currentObjectBlobByteLength(input: {
+  listLinkRevisionLogRows(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): SyncRelayLogRow[] {
+    return currentFilesStorage.listLinkRevisionLogRows(this, input);
+  }
+
+  linkRevisionBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
+    revisionRelaySeq: number;
     sha256: string;
     epochLogFloor: number;
   }): number | null {
-    return currentFilesStorage.currentObjectBlobByteLength(this, input);
+    return currentFilesStorage.linkRevisionBlobByteLength(this, input);
   }
 
   fetchLogPageDescending(input: {

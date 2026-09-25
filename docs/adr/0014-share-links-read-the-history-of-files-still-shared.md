@@ -13,6 +13,7 @@ The relay serves a blob to a link when the blob is a current file of the share, 
 - A log row above the workspace's epoch floor names the blob as the content after a write or rename, or as a fork-snapshot file of a pinned version.
 - The link's share filter admits that row, with the grant's effective selector and version. A snapshot file must sit at a selected path.
 - The row's object is the current file at a selected path now: the object's latest moment in the version set that path's current file, above the epoch floor.
+- The object has stayed in the share since that row: no later moment of the object deleted it or put it outside the selector.
 
 The relay re-checks the capability, its generation, and revocation on every read, as it does for current files. A hash from the log grants nothing by itself.
 
@@ -24,5 +25,7 @@ The relay re-checks the capability, its generation, and revocation on every read
 ## Consequences
 
 - To remove text from a link's reach, the owner deletes the file or moves it out of the share. Editing the text out leaves it in an earlier revision until retention ends. Rotating the link or revoking it withdraws everything.
+- A file moved out of the share and back in serves only revisions from after it came back. The move out withdrew the earlier revisions, and moving the file back does not restore them.
 - Content a file had before it moved into the share stays unreadable. The row that moved it in names a path outside the share, so the filter refuses it.
 - A revision whose moment the relay could not apply to current state is refused, because its object is not the current file at its path.
+- One read examines at most 1,024 moments with the requested content and at most 1,024 later moments of the file. A revision the relay cannot reach within those bounds is refused, so a link's work does not grow with how often content recurs or how often a file is edited.

@@ -97,7 +97,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(String(e)); }
   });
   server.registerTool("dohc_read_file", {
-    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded.",
+    description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files, or an afterBlobSha256 from dohc_list_changes to read an earlier revision of a file still in the share. Markdown may lag the live document. Binary files are base64 encoded. An earlier revision has no contentKind here, so it is returned as UTF-8 when its bytes decode and as base64 otherwise; use the contentKind from dohc_list_changes.",
     inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {

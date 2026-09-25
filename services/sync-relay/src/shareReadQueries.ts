@@ -46,7 +46,8 @@ export function createShareReadQueries(
     | "listObjectMomentLogRowsByBlob"
     | "listVersionCreateLogRowsByBlob"
     | "getBlob"
-    | "currentObjectBlobByteLength"
+    | "linkRevisionBlobByteLength"
+    | "listLinkRevisionLogRows"
   >,
   linkFreshnessPageSize: number,
 ) {
@@ -367,6 +368,8 @@ export function createShareReadQueries(
   // (docs/adr/0014). The revision must be the after-content of a log row above
   // the epoch floor that this link's filter admits, and that row's object must
   // be the current file at a selected path now. The hash alone grants nothing.
+  // Storage returns only rows whose object is still in the share, so deleted
+  // or moved-out objects cannot fill the candidate cap.
   const linkRevisionByteLength = (
     workspaceId: string,
     selector: ShareSelector,
@@ -375,28 +378,31 @@ export function createShareReadQueries(
   ): number | null => {
     const versionId = targetVersionId(selector);
     const candidates = [
-      ...storage.listObjectMomentLogRowsByBlob({
+      ...storage.listLinkRevisionLogRows({
+        workspaceId,
+        versionId,
+        selectorPaths: selector.paths,
+        sha256,
+        epochLogFloor,
+      }),
+      ...storage.listVersionCreateLogRowsByBlob({
         workspaceId,
         versionId,
         sha256,
-        semantics: "historical-log",
-        ...(selector.paths.length > 0 ? { selectorPaths: selector.paths } : {}),
+        aboveRelaySeq: epochLogFloor,
       }),
-      ...storage.listVersionCreateLogRowsByBlob({ workspaceId, versionId, sha256 }),
-    ]
-      .filter((row) => row.relaySeq > epochLogFloor)
-      .sort((left, right) => right.relaySeq - left.relaySeq)
-      .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
+    ];
     const chatResolver = chatResolverFor(workspaceId);
     for (const row of candidates) {
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
       if (!decision.allowed || !decision.blobSha256s.includes(sha256)) continue;
       for (const objectId of revisionObjectIds(selector, row, sha256)) {
-        const byteLength = storage.currentObjectBlobByteLength({
+        const byteLength = storage.linkRevisionBlobByteLength({
           workspaceId,
           versionId,
           selectorPaths: selector.paths,
           objectId,
+          revisionRelaySeq: row.relaySeq,
           sha256,
           epochLogFloor,
         });
