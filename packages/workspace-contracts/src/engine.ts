@@ -110,7 +110,9 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 // principal mapping, never an internal principal or account ID. A named
 // recipient's direct write to a Collection's own files stamps the named
 // variant with the opaque relay user id, never an email. Ordinary edits,
-// reconciliation, and external agent CLIs remain actor-neutral.
+// reconciliation, and external agent CLIs remain actor-neutral. An
+// automation that creates a record stamps the automation variant, so the
+// record's added claim carries the automation and its chain depth.
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
@@ -1510,9 +1512,10 @@ export type ChangeAuthor =
   | { kind: "user"; userId: string }
   | { kind: "agent"; agentId: string; onBehalfOf: string }
   // An automation's write, derived main-side from the claim the executor is
-  // running — never from the plugin's own request. automationId is the
-  // engine subscription id ("<plugin name>/<automation id>"), and depth is
-  // the write's automation-chain depth: one greater than its trigger's.
+  // running, never from a request. automationId is the engine subscription
+  // id ("collection:<collection path>#<automation id>" or
+  // "plugin:<plugin name>/<automation id>"), and depth is the write's
+  // automation-chain depth: one greater than its trigger's.
   | {
       kind: "automation";
       automationId: string;

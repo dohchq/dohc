@@ -74,6 +74,12 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
+      {...(props.automationFailures ? { automationFailures: props.automationFailures } : {})}
+      {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
+      {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
+      {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
+      {...(props.onResetAutomationHolds ? { onResetAutomationHolds: props.onResetAutomationHolds } : {})}
+      {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
     />
   );
 }
@@ -115,6 +121,61 @@ function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotificat
     ...overrides,
   };
 }
+
+describe("automation failure notices", () => {
+  it("sends a Collection automation's failure to its automations.yaml, not to a plugin's source", async () => {
+    renderNotices({
+      automationFailures: [
+        { automationId: "collection:Projects/Tasks#finished-date", claimId: "atc_1", chainStopped: false,
+          error: "ana@dohc.test cannot edit Budget.", updatedAtMs: 5_000, generation: 1 },
+        { automationId: "collection:Projects/Tasks#nudge", claimId: "atc_2", chainStopped: true,
+          error: "chain-stopped", updatedAtMs: 6_000, generation: 2 },
+      ],
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const failed = await screen.findByTestId("notice-automation-failure-collection:Projects/Tasks#finished-date");
+    expect(failed.textContent).toContain('Automation "finished-date" failed');
+    expect(failed.textContent).toContain(
+      "ana@dohc.test cannot edit Budget. Open Projects/Tasks/automations.yaml to fix the automation.",
+    );
+    const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
+    expect(stopped.textContent).toContain('"nudge" did not run. Open Projects/Tasks/automations.yaml to shorten the chain.');
+    expect(document.body.textContent).not.toContain("plugin's source");
+  });
+
+  it("says every automation waits when dohc cannot read the allowed steps, and offers a way back", async () => {
+    const onResetAutomationHolds = vi.fn();
+    const onRevealAutomationHolds = vi.fn();
+    renderNotices({ automationHoldsUnreadable: true, onResetAutomationHolds, onRevealAutomationHolds });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-holds-unreadable");
+    expect(notice.textContent).toContain("Automations are waiting");
+    await userEvent.click(within(notice).getByRole("button", { name: "Reset holds" }));
+    // An action closes the panel, so open it again for the other one.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const again = await screen.findByTestId("notice-automation-holds-unreadable");
+    await userEvent.click(within(again).getByRole("button", { name: "Open folder" }));
+    expect(onResetAutomationHolds).toHaveBeenCalledOnce();
+    expect(onRevealAutomationHolds).toHaveBeenCalledOnce();
+  });
+
+  it("asks once to allow a step that reaches more only because an editor left", async () => {
+    const hold = {
+      automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
+      step: 0, seq: 4, collection: "Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test",
+    };
+    const onAllowAutomationHold = vi.fn();
+    renderNotices({ automationHolds: [hold], onAllowAutomationHold });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-hold-collection:Trip#spend-0");
+    expect(notice.textContent).toContain('Automation "Spend" is waiting');
+    expect(notice.textContent).toContain(
+      "A step in Trip can now change Budget. It stopped before because bob@dohc.test could not. Allow it to run?",
+    );
+    await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
+    expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
+  });
+});
 
 describe("update toast", () => {
   it("shows the machine's message when an update becomes ready, and dismisses", async () => {

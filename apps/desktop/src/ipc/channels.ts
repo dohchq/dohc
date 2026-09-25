@@ -275,6 +275,16 @@ export const CHANNELS = {
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
   noticesChanged: "desktop:notices-changed",
+  // Collection automations: main parses and writes automations.yaml.
+  listCollectionAutomations: "desktop:list-collection-automations",
+  listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  retryCollectionAutomation: "desktop:retry-collection-automation",
+  confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
+  writeCollectionAutomations: "desktop:write-collection-automations",
+  listAutomationHolds: "desktop:list-automation-holds",
+  resetAutomationHolds: "desktop:reset-automation-holds",
+  revealAutomationHolds: "desktop:reveal-automation-holds",
+  automationHoldsChanged: "desktop:automation-holds-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
