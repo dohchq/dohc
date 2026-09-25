@@ -940,34 +940,66 @@ const AutomationClaimSummarySchema = mutableStruct({
   change: mutableStruct(automationChangeFields),
 });
 
+const automationFactFields = {
+  /**
+   * The fields in field-name order. A changed record lists its changed
+   * fields with the history row that recorded each. An added record lists
+   * its values as next, a removed record its last values as previous;
+   * neither has a history row.
+   */
+  fields: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        field: Schema.String,
+        historyId: NullableInt,
+        previous: AutomationFactValueSchema,
+        next: AutomationFactValueSchema,
+      }),
+    ),
+  ),
+  /** Changed fields whose names alone did not fit; read the history. */
+  fieldsOmitted: Schema.Int,
+};
+
+/**
+ * The message a message claim runs for. Mirrors claim_message in
+ * crates/dohc-engine-domain: the body travels whole, or as { truncated:
+ * true, bytes } past the claim's budget, to read through chats.messages.get.
+ * The parent, owner name, and user id are present only when set.
+ */
+const AutomationClaimMessageSchema = mutableStruct({
+  id: Schema.NonEmptyString,
+  threadId: Schema.NonEmptyString,
+  groupId: Schema.NonEmptyString,
+  lane: Schema.Literals(["posts", "chat"]),
+  authorKind: Schema.Literals(["human", "agent", "automation"]),
+  authorDisplayName: Schema.String,
+  createdAtMs: Schema.Int,
+  body: Schema.Union([
+    Schema.String,
+    mutableStruct({ truncated: Schema.Literal(true), bytes: Schema.Int }),
+  ]),
+  parentMessageId: Schema.optionalKey(Schema.NonEmptyString),
+  authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+  authorUserId: Schema.optionalKey(Schema.NonEmptyString),
+});
+
 const AutomationClaimSchema = mutableStruct({
   ...automationClaimFields,
-  change: mutableStruct({
-    ...automationChangeFields,
-    /**
-     * The fields in field-name order. A changed record lists its changed
-     * fields with the history row that recorded each. An added record lists
-     * its values as next, a removed record its last values as previous;
-     * neither has a history row.
-     */
-    fields: Schema.mutable(
-      Schema.Array(
-        mutableStruct({
-          field: Schema.String,
-          historyId: NullableInt,
-          previous: AutomationFactValueSchema,
-          next: AutomationFactValueSchema,
-        }),
-      ),
-    ),
-    /** Changed fields whose names alone did not fit; read the history. */
-    fieldsOmitted: Schema.Int,
-    /**
-     * A message claim's message, its body whole or as { truncated: true,
-     * bytes } to read through chats.messages.get. Other claims have none.
-     */
-    message: Schema.optionalKey(JsonObjectSchema),
-  }),
+  change: Schema.Union([
+    mutableStruct({
+      ...automationChangeFields,
+      kind: Schema.Literals(["added", "changed", "removed", "button", "schedule"]),
+      ...automationFactFields,
+    }),
+    // A message claim always carries its message.
+    mutableStruct({
+      ...automationChangeFields,
+      kind: Schema.Literal("message"),
+      ...automationFactFields,
+      message: AutomationClaimMessageSchema,
+    }),
+  ]),
 });
 
 const AutomationScheduleMarkSchema = mutableStruct({

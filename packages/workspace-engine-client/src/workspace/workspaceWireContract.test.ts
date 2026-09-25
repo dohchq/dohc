@@ -704,19 +704,46 @@ describe("automations wire schemas", () => {
     });
     const pressed = keyed("press:press-1", "button", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
     const due = keyed("schedule:1790000000000", "schedule", null);
-    const message = {
-      ...keyed("message:m1", "message", null),
-      change: {
-        ...keyed("message:m1", "message", null).change,
-        message: { id: "m1", body: { truncated: true, bytes: 70_000 } },
-      },
+    const facts = {
+      id: "m1",
+      threadId: "t1",
+      groupId: "trip",
+      lane: "chat",
+      authorKind: "human",
+      authorDisplayName: "Ada",
+      createdAtMs: 20,
+      body: "/task Buy tickets",
     };
-    for (const served of [pressed, due, message]) {
+    const withMessage = (fields: Record<string, unknown>) => ({
+      ...keyed("message:m1", "message", null),
+      change: { ...keyed("message:m1", "message", null).change, message: fields },
+    });
+    const message = withMessage(facts);
+    const long = withMessage({
+      ...facts,
+      body: { truncated: true, bytes: 70_000 },
+      parentMessageId: "m0",
+      authorOwnerDisplayName: "Ice",
+      authorUserId: "ada",
+    });
+    for (const served of [pressed, due, message, long]) {
       expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, served)).toEqual(served);
     }
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, { ...due, trigger: { key: "" } }),
-    ).toThrow(ProtocolShapeError);
+    const { id: _id, ...withoutId } = facts;
+    for (const malformed of [
+      { ...due, trigger: { key: "" } },
+      keyed("message:m1", "message", null),
+      withMessage({}),
+      withMessage(withoutId),
+      withMessage({ ...facts, authorKind: "robot" }),
+      withMessage({ ...facts, lane: "posts-and-chat" }),
+      withMessage({ ...facts, body: { truncated: false, bytes: 1 } }),
+      withMessage({ ...facts, createdAtMs: "20" }),
+      withMessage({ ...facts, extra: true }),
+      { ...pressed, change: { ...pressed.change, message: facts } },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(ProtocolShapeError);
+    }
   });
 
   it("decodes a press answer: its claim, or busy with none", () => {
