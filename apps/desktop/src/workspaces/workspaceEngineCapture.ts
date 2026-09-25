@@ -816,6 +816,21 @@ function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
   return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
+// Whether applying `replay` would change `target`: an item it lacks, or a
+// deletion it has not applied. The probe keeps deleted content so a deletion
+// the target already holds compares equal.
+function replacementLacks(target: Y.Doc, replay: Uint8Array): boolean {
+  const probe = new Y.Doc({ gc: false });
+  Y.applyUpdate(probe, Y.encodeStateAsUpdate(target));
+  const before = Y.snapshot(probe);
+  Y.applyUpdate(probe, replay);
+  return (
+    probe.store.pendingStructs !== null ||
+    probe.store.pendingDs !== null ||
+    !Y.equalSnapshots(before, Y.snapshot(probe))
+  );
+}
+
 // Whether a claimed lineage holds every item of the history this session
 // recorded. A re-seeded lineage or another object's history starts from other
 // client ids, so it cannot cover what this session recorded.
@@ -1905,22 +1920,26 @@ export function createWorkspaceEngineCapture(
     // generation is stamped here, where it is known, and travels with every
     // settle callback.
     let generations = 0;
-    // Whether the file is behind this session's own edits. Every local update
-    // counts from the moment it is handed to a generation, and a settle
-    // covers the updates counted when it started. The debt is the gap. It
-    // outlives a generation, whose armed settle and retry ladder die with
-    // it, and adoption reads it to settle the replacement. It is counted
-    // from edits rather than from settle failures: a generation can drop
-    // inside its settle delay and report the failure only after adoption
-    // has already looked.
+    // Whether the file is behind this document. Every update counts when it
+    // enters the document, local or remote, since either arms a settle, and
+    // a settle covers the updates counted when it started. The debt is the
+    // gap. It outlives a generation, whose armed settle and retry ladder die
+    // with it, and adoption reads it to settle the replacement. It is
+    // counted from updates rather than from settle failures: a generation
+    // can drop inside its settle delay and report the failure only after
+    // adoption has already looked.
     //
     // A settle refused because the file changed outside dohc, or because a
-    // conflict is open, forgives the debt: settling again would write the
-    // lineage over that change.
-    let localUpdatesCounted = 0;
-    let localUpdatesSettled = 0;
+    // conflict is open, forgives the debt and stops adoption from settling
+    // at all, owed or replayed, until a settle succeeds: a reopened
+    // generation expects whatever head the engine now holds, so it would
+    // write the document over that change.
+    let updatesCounted = 0;
+    let updatesSettled = 0;
+    let settleForgiven = false;
     const settleCovers = new Map<string, number>();
-    const settleOwed = (): boolean => localUpdatesSettled < localUpdatesCounted;
+    const settleOwed = (): boolean =>
+      !settleForgiven && updatesSettled < updatesCounted;
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
@@ -1970,6 +1989,7 @@ export function createWorkspaceEngineCapture(
                 return;
               }
               Y.applyUpdate(canonicalDoc, update);
+              updatesCounted += 1;
               input.onRemoteUpdate(update);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
@@ -1989,7 +2009,7 @@ export function createWorkspaceEngineCapture(
             // failure also goes to onSettleError, which reports it.
             onSessionError: requestReconnect,
             onSettleStart: (token) => {
-              settleCovers.set(`${generation}:${token}`, localUpdatesCounted);
+              settleCovers.set(`${generation}:${token}`, updatesCounted);
               input.onSettleStart(token, generation);
             },
             onSettleError: (error, token) => {
@@ -2001,7 +2021,8 @@ export function createWorkspaceEngineCapture(
                 !isTransientEngineCause(error) &&
                 !hasRefusalInCauseChain(error, isEngineSessionReconnectError)
               ) {
-                localUpdatesSettled = localUpdatesCounted;
+                updatesSettled = updatesCounted;
+                settleForgiven = true;
               }
               input.onSettleError(error, token, generation);
             },
@@ -2010,8 +2031,9 @@ export function createWorkspaceEngineCapture(
               const covered = settleCovers.get(key);
               settleCovers.delete(key);
               if (covered !== undefined) {
-                localUpdatesSettled = Math.max(localUpdatesSettled, covered);
+                updatesSettled = Math.max(updatesSettled, covered);
               }
+              settleForgiven = false;
               return input.onSettled(result, token, generation);
             },
           });
@@ -2087,9 +2109,13 @@ export function createWorkspaceEngineCapture(
           doc,
           Y.encodeStateVector(replacement.doc),
         );
-        replayArmed = replay.byteLength > 2;
-        if (replayArmed) {
-          const journaled = replacement.applyLocalUpdate(replay);
+        // A diff against a state vector still carries the whole delete set,
+        // so its size cannot say whether the replacement lacks anything.
+        if (replacementLacks(replacement.doc, replay)) {
+          replayArmed = !settleForgiven;
+          const journaled = replacement.applyLocalUpdate(replay, {
+            armSettle: replayArmed,
+          });
           onReplayArmed?.();
           await journaled;
           replacementClaimId =
@@ -2347,7 +2373,7 @@ export function createWorkspaceEngineCapture(
           // Counted before any generation arms a settle for it, so a settle
           // that starts afterwards covers it and one that started before
           // does not.
-          localUpdatesCounted += 1;
+          updatesCounted += 1;
           // The renderer has already accepted this update, so the canonical doc
           // — the renderer's truth — records it before anything else may fail.
           // A daemon generation is rebuilt around that text, never instead of

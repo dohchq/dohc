@@ -3704,6 +3704,77 @@ it("a rebind with no pending locked settle settles nothing on its own", async ()
   await capture.stop();
 });
 
+it("replays no deletion history and settles nothing after the file changed outside dohc", async () => {
+  // A deletion the lost generation already recorded still appears in any
+  // diff, because a diff against a state vector carries the whole delete set.
+  // The replacement lacks nothing, so nothing may be journaled into it, and
+  // after a stale-target refusal nothing may settle over the outside change.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-stale-delete-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  let before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(0, "abc");
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").delete(1, 1);
+  await session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  state.settleFailure = new DaemonRefusalError(
+    { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
+    new Error("daemon response"),
+  );
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  state.settleFailure = null;
+  const journaled = state.journal.length;
+
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(state.journal).toHaveLength(journaled);
+  expect(state.settleCalls).toEqual([1]);
+  expect(state.settledContents).toEqual([]);
+
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
+it("pays a locked settle of a remote change on the generation that replaces it", async () => {
+  // A remote change arms a settle like a local one. When that settle meets a
+  // lock and the generation is lost, the replacement must settle it, though
+  // no local edit ever happened.
+  const { capture, state } = await lockedRebindCapture("dohc-ydoc-remote-locked-");
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const peer = new Y.Doc();
+  peer.getText("plainText").insert(0, "from a peer");
+  const update = Y.encodeStateAsUpdate(peer);
+  // The engine holds the peer's change, and this generation delivers it.
+  state.journal.push(update);
+  state.generationOptions[0]!.onRemoteUpdate(update);
+
+  state.locked = true;
+  await expect(session.settleNow()).rejects.toThrow("file-locked");
+  state.locked = false;
+  state.generationOptions[0]!.onSessionError?.(
+    Object.assign(new Error("daemon exited"), { code: "transport-error" }),
+  );
+
+  await expect.poll(() => state.settleCalls, { timeout: 5_000 }).toEqual([1, 2]);
+  await expect.poll(() => state.settledContents, { timeout: 5_000 }).toEqual([
+    "from a peer",
+  ]);
+  await session.close({ settle: false }).catch(() => undefined);
+  await capture.stop();
+});
+
 it("owes no settle for a file that changed outside dohc when the generation is lost", async () => {
   // A settle refused because the file changed outside dohc must not be paid
   // by the replacement. The reopened session has no settled sha, so it

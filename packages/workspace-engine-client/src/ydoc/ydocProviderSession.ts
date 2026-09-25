@@ -133,9 +133,11 @@ export interface EngineYdocProviderSession {
   // daemon deliberately resurrects, and its CRDT rows are the only copy of
   // those edits.
   readonly lineage: "existing" | "absent";
+  // `armSettle: false` journals the update without scheduling a settle, for
+  // a replay the file must not receive until the person edits again.
   applyLocalUpdate(
     update: Uint8Array,
-    options?: ApplyLocalUpdateOptions,
+    options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
   ): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   // `settle: false` alone does not promise the file will be left alone: a
@@ -388,9 +390,10 @@ export async function openEngineYdocProviderSession(
             ),
         );
       }
+      const { armSettle = true, ...recordOptions } = applyOptions ?? {};
       let operation: Promise<unknown>;
       try {
-        operation = session.applyLocalUpdate(update, applyOptions);
+        operation = session.applyLocalUpdate(update, recordOptions);
       } catch (error) {
         rememberLocalEditError(error);
         throw error;
@@ -412,7 +415,7 @@ export async function openEngineYdocProviderSession(
         throw error;
       });
       void journalChain.catch(() => undefined);
-      requestSettle();
+      if (armSettle) requestSettle();
       return journaled;
     },
 
