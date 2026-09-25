@@ -32,7 +32,8 @@ import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceB
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
-import { createDiscussionRoutes } from "./discussionRoutes";
+import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
+import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -290,6 +291,36 @@ export function createSyncRelayHandler({
     historicalSharedBlob,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
+  // A granter's name on the notice a share sends: their display name, or
+  // the email the recipient already sees beside the share.
+  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+    const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
+    if (name !== null) return name;
+    const email = await lookupUserEmail?.(granterUserId);
+    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
+  };
+
+  // Delivers the share notices this person can receive now, before their
+  // pull; only those look up a granter's name, once per granter. A failure
+  // leaves a delivery waiting for the next pull. The share routes do no
+  // delivery work, so sharing takes the same time whether or not the
+  // address has an account.
+  const deliverPendingShareNotices = async (userId: string): Promise<void> => {
+    const labels = new Map<string, Promise<string>>();
+    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+      try {
+        let label = labels.get(granterUserId);
+        if (label === undefined) {
+          label = shareSenderLabel(granterUserId);
+          labels.set(granterUserId, label);
+        }
+        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+      } catch (error) {
+        console.error("[sync-relay] share notice failed", error);
+      }
+    }
+  };
+
   // Claim email invites only after the authenticated account verifies its address.
   const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
     signal?.throwIfAborted();
@@ -371,6 +402,7 @@ export function createSyncRelayHandler({
     nowMs,
     lookupUserDisplayName,
     claimPendingShares,
+    deliverPendingShareNotices,
     noticePostRateLimiter,
   );
 
