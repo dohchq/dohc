@@ -30,6 +30,7 @@ const FULL: CollectionSchema = {
     { name: "Owner", type: "person" },
     { name: "Blocks", type: "relation", collection: "projects/tasks", many: true },
     { name: "Link", type: "url" },
+    { name: "Mark paid", type: "button" },
   ],
   views: [
     {
@@ -37,7 +38,7 @@ const FULL: CollectionSchema = {
       kind: "board",
       groupBy: "Status",
       sort: [{ field: "Due", direction: "asc" }],
-      visibleFields: ["Name", "Status"],
+      visibleFields: ["Name", "Status", "Mark paid"],
       dateField: null,
     },
     {
@@ -52,7 +53,7 @@ const FULL: CollectionSchema = {
 };
 
 describe("serializeCollectionSchema", () => {
-  it("round-trips every v1 field type and view shape as a valid schema", () => {
+  it("round-trips every field type and view shape as a valid schema", () => {
     const parsed = parseCollectionSchema(serializeCollectionSchema(FULL));
     expect(parsed.status).toBe("valid");
     expect(parsed.reasons).toEqual([]);

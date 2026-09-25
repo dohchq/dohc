@@ -53,6 +53,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={onOpenPath}
         onCreateFirstApp={vi.fn()}
       />,
@@ -64,6 +66,38 @@ describe("AppsView", () => {
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
+  it("pins an app to the sidebar and unpins a pinned one, without opening it", async () => {
+    const onOpenPath = vi.fn();
+    const onSetPinned = vi.fn();
+    const user = userEvent.setup();
+    const view = render(
+      <AppsView
+        workspaceId="ws-apps"
+        filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={onSetPinned}
+        onOpenPath={onOpenPath}
+        onCreateFirstApp={vi.fn()}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Pin to sidebar" }));
+    expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", true);
+
+    view.rerender(
+      <AppsView
+        workspaceId="ws-apps"
+        filesSettledRevision={0}
+        pinnedApps={["client-portal"]}
+        onSetPinned={onSetPinned}
+        onOpenPath={onOpenPath}
+        onCreateFirstApp={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Unpin" }));
+    expect(onSetPinned).toHaveBeenLastCalledWith("client-portal", false);
+    expect(onOpenPath).not.toHaveBeenCalled();
+  });
+
   it("reloads detected apps when the settled files revision bumps, including a content-only edit", async () => {
     // filesSettledRevision bumps on every settled workspace file listing,
     // including a content-only edit to an existing file (e.g. dohc.json) —
@@ -73,6 +107,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -84,6 +120,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={1}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -97,6 +135,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -109,6 +149,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={1}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -131,6 +173,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -141,6 +185,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -162,6 +208,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="workspace-a"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -171,6 +219,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="workspace-b"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -195,6 +245,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -212,6 +264,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -229,6 +283,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={onCreateFirstApp}
       />,
@@ -252,6 +308,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-received-share"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={onCreateFirstApp}
         receivedShareWorkspace
@@ -282,6 +340,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -311,6 +371,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,
@@ -331,6 +393,8 @@ describe("AppsView", () => {
       <AppsView
         workspaceId="ws-apps"
         filesSettledRevision={0}
+        pinnedApps={[]}
+        onSetPinned={vi.fn()}
         onOpenPath={vi.fn()}
         onCreateFirstApp={vi.fn()}
       />,

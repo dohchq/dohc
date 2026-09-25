@@ -517,7 +517,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   }
 });
 
-test("protected join rolls back for a missing passphrase, then restores exact secret and binary bytes across restart", async () => {
+test("protected join preserves a failed folder, then restores exact secret and binary bytes in a new folder across restart", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "protected-join-e2e";
@@ -530,6 +530,7 @@ test("protected join rolls back for a missing passphrase, then restores exact se
   );
   const binaryBytes = Buffer.from([0x00, 0xff, 0x80, 0x0a, 0x7f, 0x42]);
   const sourceRoot = join(temp.baseDir, "protected-source");
+  const retryRoot = join(temp.baseDir, "protected-retry");
   let relay: SyncRelayHandle | null = null;
   let sourceWorkspace: Awaited<
     ReturnType<typeof openLiveDaemonWorkspace>
@@ -613,32 +614,37 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     await page.getByTestId("join-workspace-start").click();
 
     // The missing passphrase is discovered at the public IPC boundary. The
-    // attempt must leave neither local files nor a hidden registry entry.
+    // attempt preserves its manifest but releases its registry entry.
     await expect(page.getByTestId("join-sync-passphrase")).toBeVisible();
     await expect(page.getByTestId("join-error")).toHaveText(
-      "This workspace has protected files. Enter the protected-file passphrase to join.",
+      `This workspace has protected files. Enter the protected-file passphrase. Files remain in ${temp.rootPath}. Choose another empty folder to try again.`,
     );
     await expect
       .poll(async () => (await readdir(temp.rootPath)).sort())
-      .toEqual([]);
+      .toContain(".dohc");
+    const retainedManifest = await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8");
     await expect.poll(() => workspaceIsRegistered(page, workspaceId)).toBe(false);
 
     // Retry through the same public button. Successful materialization proves
     // the envelope key was installed before the pull tried to decrypt .env.
     await page.getByTestId("join-sync-passphrase").fill(passphrase);
+    await expect(page.getByTestId("join-workspace-start")).toBeDisabled();
+    await mkdir(retryRoot);
+    await desktop.app.evaluate((_electron, path) => { process.env.DOHC_TEST_PICK_PATH = path; }, retryRoot);
+    await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
       workspaceId,
     );
     await expect
-      .poll(() => fileMatches(join(temp.rootPath, secretPath), secretBytes))
+      .poll(() => fileMatches(join(retryRoot, secretPath), secretBytes))
       .toBe(true);
     await expect
-      .poll(() => fileMatches(join(temp.rootPath, binaryPath), binaryBytes))
+      .poll(() => fileMatches(join(retryRoot, binaryPath), binaryBytes))
       .toBe(true);
     expect(
-      (await readFile(join(temp.rootPath, SECRET_KEY_RELATIVE_PATH))).length,
+      (await readFile(join(retryRoot, SECRET_KEY_RELATIVE_PATH))).length,
     ).toBeGreaterThan(0);
 
     // Relaunch with the same profile and registry. The joined key and both
@@ -648,15 +654,16 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
       workspaceId,
     );
-    expect(await fileMatches(join(temp.rootPath, secretPath), secretBytes)).toBe(
+    expect(await fileMatches(join(retryRoot, secretPath), secretBytes)).toBe(
       true,
     );
-    expect(await fileMatches(join(temp.rootPath, binaryPath), binaryBytes)).toBe(
+    expect(await fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(
       true,
     );
+    expect(await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8")).toBe(retainedManifest);
   } finally {
     await sourceCapture?.stop().catch(() => undefined);
     await sourceWorkspace?.close().catch(() => undefined);
@@ -952,7 +959,9 @@ test("typing continues while enabling sync replaces the open document", async ()
     // The marker was unsaved when the document was replaced. It must be on
     // disk or in a stored set-aside draft, and the notice must offer it.
     const setAsideDrafts = () =>
-      page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts") ?? "");
+      page.evaluate(() => Object.keys(localStorage)
+        .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+        .map(key => localStorage.getItem(key) ?? "").join("\n"));
     await expect
       .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
         timeout: 30_000,
@@ -989,7 +998,9 @@ test("typing continues while enabling sync replaces the open document", async ()
       await openWorkspaceFromFirstRun(restarted, temp);
       expect(
         await restarted.evaluate(
-          () => localStorage.getItem("dohc-set-aside-drafts") ?? "",
+          () => Object.keys(localStorage)
+            .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+            .map(key => localStorage.getItem(key) ?? "").join("\n"),
         ),
       ).toContain("pending-marker");
       await restarted.getByTestId("notice-center-toggle").click();

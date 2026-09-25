@@ -62,7 +62,7 @@ it("reports every announced share refresh under one kind", async () => {
   await act(async () => { await result.current.refreshShareMounts(true); });
 
   expect(reportShellError.mock.calls.map((call) => call[3])).toEqual(["share-refresh", "share-refresh"]);
-  expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), "share-refresh");
+  expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), undefined, "share-refresh");
   vi.unstubAllGlobals();
 });
 

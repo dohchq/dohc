@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { DATASET_MAX_FIELDS, type DatasetDescription, type DatasetField } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, datasetColumnFields, type DatasetColumnField, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { FileCode2, LockKeyhole } from "lucide-react";
@@ -45,16 +45,16 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
   const operations = dataset.operations.filter(operation => operation.tableId === tableId && operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const [operationId, setOperationId] = useState(operations[0]?.operationId ?? "");
   const create = operations.find(operation => operation.operationId === operationId);
-  const allowed = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
+  const allowed = table ? datasetColumnFields(table).filter(field => create?.fieldIds.includes(field.fieldId)) : [];
   const required = allowed.filter(field => field.required && !Object.hasOwn(field, "default"));
   const [selected, setSelected] = useState<string[]>(() => allowed.filter(field => field.type !== "relation" || required.includes(field)).map(field => field.fieldId));
   const [relationChoices, setRelationChoices] = useState<NonNullable<CreateDatasetFormInput["relationChoices"]>>([]);
-  function choiceActions(field: Omit<DatasetField, "sqlColumn">) {
+  function choiceActions(field: Omit<DatasetColumnField, "sqlColumn">) {
     const relation = field.relation;
     if (!relation || relation.datasetId !== dataset.datasetId) return [];
     const target = dataset.tables.find(candidate => candidate.tableId === relation.tableId);
     return dataset.operations.filter(action => action.kind === "read" && action.readOnly && action.access === "link" && action.tableId === relation.tableId && action.fieldIds.includes(relation.fieldId))
-      .flatMap(action => (target?.fields ?? []).filter(label => ["text", "number", "select"].includes(label.type) && action.fieldIds.includes(label.fieldId) &&
+      .flatMap(action => (target ? datasetColumnFields(target) : []).filter(label => ["text", "number", "select"].includes(label.type) && action.fieldIds.includes(label.fieldId) &&
         action.fieldIds.every(id => id === relation.fieldId || id === label.fieldId)).map(label => ({ action, label })));
   }
   const [appRoot, setAppRoot] = useState(`${dataset.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-form`);

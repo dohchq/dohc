@@ -21,7 +21,7 @@ export function useShareMounts(
     retry?: (() => void) | null,
     kind?: ShellErrorKind,
   ) => void,
-  showSuccessNotice: (message: string, kind?: ShellErrorKind) => void,
+  showSuccessNotice: (message: string, undo?: () => void, kind?: ShellErrorKind) => void,
 ) {
   // Share mounts: the registry is loaded once at boot, so the shell owns a
   // live copy of this workspace's mounts — reloaded after every mount /
@@ -107,7 +107,7 @@ export function useShareMounts(
       if (results.some((row) => row.status === "damaged")) {
         reportShellError(summary, null, null, "share-refresh");
       } else {
-        showSuccessNotice(summary, "share-refresh");
+        showSuccessNotice(summary, undefined, "share-refresh");
       }
     },
     [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts],

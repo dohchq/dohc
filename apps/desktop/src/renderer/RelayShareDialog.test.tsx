@@ -253,6 +253,7 @@ function controllable<T>() {
 }
 
 const bridgeMock = {
+  automationShareImpact: vi.fn(),
   createRelayShare: vi.fn(),
   createRelayShareLink: vi.fn(),
   addRelayShareLink: vi.fn(),
@@ -288,6 +289,7 @@ vi.mock("./bridge", () => ({
 
 beforeEach(() => {
   vi.resetAllMocks();
+  bridgeMock.automationShareImpact.mockResolvedValue({ stops: [] });
   bridgeMock.createRelayShare.mockResolvedValue({
     shareId: "share-1",
     shareCode: SHARE_CODE,
@@ -929,6 +931,32 @@ describe("RelayShareDialog", () => {
       paths: ["docs/plan.md", "assets/map.png"],
       access: "view",
     });
+  });
+
+  it("warns before an Edit link that would stop automations, naming anyone who opens it, and makes it on the second Create", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [], supportedLinkAccess: ["view", "comment", "edit"] });
+    bridgeMock.automationShareImpact.mockResolvedValue({
+      stops: [{ automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" }],
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="physical-ws-1" target={{ kind: "paths", paths: ["Trip"] }} onClose={() => {}} />);
+    await showLinkPane(user);
+    const access = screen.getByRole("radiogroup", { name: "Link access" });
+    await user.click(await within(access).findByRole("radio", { name: "Edit" }));
+    const create = screen.getByRole("button", { name: "Create link" });
+    await user.click(create);
+
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledWith({
+      workspaceId: "physical-ws-1", recipientEmail: null, paths: ["Trip"], access: "edit",
+    });
+    expect(bridgeMock.createRelayShareLink).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("share-automation-warning")).textContent).toBe(
+      'This share stops the automation "Spend" in Trip, because anyone who opens this link cannot edit Budget.',
+    );
+    expect(create.textContent).toBe("Create link anyway");
+    await user.click(create);
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({ workspaceId: "physical-ws-1", paths: ["Trip"], access: "edit" });
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(1);
   });
 
   it("creates a version link with the physical workspace and explicit View access", async () => {

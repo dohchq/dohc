@@ -84,14 +84,18 @@ export interface ReachAutomation {
   steps: readonly ReachStep[];
 }
 
-export type StepReach = { allowed: true } | { allowed: false; reason: string };
+// `person` names the editor whose reach stopped the step, when one did.
+export type StepReach = { allowed: true } | { allowed: false; reason: string; person?: string };
 
-/** A share the owner is about to create. */
+/**
+ * A share the owner is about to create. `recipientEmail` is null for a
+ * link: whoever opens it is someone the roster does not list yet.
+ */
 export interface ReachShare {
   paths: readonly string[];
   versionId: string | null;
   access: ShareAccess;
-  recipientEmail: string;
+  recipientEmail: string | null;
 }
 
 export interface StoppedStep {
@@ -109,8 +113,8 @@ interface Person {
 const ALLOWED: StepReach = { allowed: true };
 const SETTINGS = "Settings → Sync and sharing";
 
-function stop(reason: string): StepReach {
-  return { allowed: false, reason };
+function stop(reason: string, person?: string): StepReach {
+  return person === undefined ? { allowed: false, reason } : { allowed: false, reason, person };
 }
 
 // A path exactly as the engine lists it: relative, no "." or "..", forward
@@ -176,9 +180,10 @@ function peopleOf(roster: Extract<ReachRoster, { kind: "owner" }>): Person[] {
   const people = new Map<string, Person>();
   for (const grant of roster.grants) {
     if (grant.recipientUserId !== null && grant.recipientUserId === roster.ownerUserId) continue;
-    const key = grant.recipientUserId === null
-      ? `email:${grant.recipientEmail?.toLowerCase()}`
-      : `user:${grant.recipientUserId}`;
+    // A link about to be made names nobody yet: whoever opens it is one new person.
+    const key = grant.recipientUserId !== null
+      ? `user:${grant.recipientUserId}`
+      : grant.recipientEmail === null ? "link" : `email:${grant.recipientEmail.toLowerCase()}`;
     const person = people.get(key);
     if (person) {
       person.email ??= grant.recipientEmail;
@@ -219,15 +224,15 @@ function checkOwnerStep(
   switch (step.kind) {
     case "change-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "edit"));
-      return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot edit ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "find-records": {
       const blocked = editors.find((person) => !reaches(person, step.collection.path, "view"));
-      return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot view ${step.collection.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "post": {
       const blocked = editors.find((person) => !canPost(person, step.group.channelWireId));
-      return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`) : ALLOWED;
+      return blocked ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked)) : ALLOWED;
     }
     case "notify": {
       if (step.person.userId === roster.ownerUserId) return ALLOWED;
@@ -285,8 +290,8 @@ export function shareImpactOf(
   automations: readonly ReachAutomation[],
 ): StoppedStep[] {
   if (roster.kind !== "owner") return [];
-  const email = share.recipientEmail.toLowerCase();
-  const known = roster.grants.find((grant) => grant.recipientEmail?.toLowerCase() === email);
+  const email = share.recipientEmail?.toLowerCase();
+  const known = email === undefined ? undefined : roster.grants.find((grant) => grant.recipientEmail?.toLowerCase() === email);
   const after: ReachRoster = {
     ...roster,
     grants: [

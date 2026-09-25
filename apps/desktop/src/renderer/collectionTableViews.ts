@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { inputProblem, supportsSort } from "./transactionalCollectionModel";
 import { bridge } from "./bridge";
 
@@ -25,7 +25,7 @@ export function parseTableViews(text:string,datasetId:string,tableId:string):Col
 export function validateTableView(view:CollectionTableView,dataset:DatasetDescription,tableId:string) {
   const table=dataset.tables.find(table=>table.tableId===tableId), read=dataset.operations.find(operation=>operation.tableId===tableId&&operation.kind==="read"&&operation.readOnly);
   if(!table||!read)throw Error("This Collection has no permitted read action.");
-  const fields=table.fields.filter(field=>read.fieldIds.includes(field.fieldId));
+  const fields=datasetColumnFields(table).filter(field=>read.fieldIds.includes(field.fieldId));
   if(view.kind==="board") {
     const field=fields.find(field=>field.fieldId===view.groupBy);
     if(!field||!supportsSort(field))throw Error("Choose a readable field to group this board.");

@@ -45,7 +45,11 @@ export function createLocalDatasetRecovery(options: {
         let prepared: Prepared;
         try { prepared = await options.prepare({ workspaceId:options.workspaceId,transferId:randomUUID(),manifestSha256,stream,signal:options.signal }); }
         finally { source.destroy(); }
-        try { check(); input.signal?.throwIfAborted(); pending.set(prepared.transferId,prepared); }
+        try {
+          check(); input.signal?.throwIfAborted();
+          if (pending.has(prepared.transferId)) await prepared.dispose();
+          else pending.set(prepared.transferId,prepared);
+        }
         catch(error) { await prepared.dispose(); throw error; }
         return {transferId:prepared.transferId,manifestSha256,sourceCursor:prepared.sourceCursor,revision:prepared.revision};
       } finally { await file.close(); }

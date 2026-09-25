@@ -150,6 +150,11 @@ pub fn enroll_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let pending = merged != checkpoint;
+    // The host checkpoint holds changes this computer lacks when merging it
+    // into the local state changes that state.
+    if merged != local_bytes {
+        dohc_engine_storage::count_remote_change_in_tx(tx, workspace)?;
+    }
     if pending && local_bytes.len() as i64 > limits.max_pending_bytes {
         return Err(OwnerOutboxError::Frozen);
     }
