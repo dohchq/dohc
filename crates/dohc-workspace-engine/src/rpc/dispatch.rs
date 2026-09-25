@@ -846,6 +846,18 @@ impl EngineService {
                 self.automations_release(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.press" => {
+                self.automations_press(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.claimSchedule" => {
+                self.automations_claim_schedule(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.scheduleMarks" => {
+                self.automations_schedule_marks(&ctx, request.workspace)
+                    .await?
+            }
             "chats.dispatch.requeueFailedTrigger" => {
                 self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
                     .await?
@@ -1128,10 +1140,13 @@ mod tests {
     async fn listed_methods_are_registered_and_retired_methods_are_rejected() {
         const METHODS: &[&str] = &[
             "automations.claimNext",
+            "automations.claimSchedule",
             "automations.failures",
             "automations.listClaims",
+            "automations.press",
             "automations.release",
             "automations.retry",
+            "automations.scheduleMarks",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
