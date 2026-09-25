@@ -243,6 +243,10 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
     assert.equal(calls().length, 4);
     assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
+    const installed = invoke({ install: false });
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stdout, /reuse desktop/);
+    assert.equal(calls().length, 4, "the canonical verifier can reuse its completed frozen install");
     rmSync(join(root, ".dohc-dev/verification/build.json"));
     const failed = invoke({ failInstall: true });
     assert.notEqual(failed.status, 0);
@@ -251,6 +255,59 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("vendored native edits invalidate preparation and rebuild the engine", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-vendor-"));
+  try {
+    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    mkdirSync(join(root, "vendor/yrs/src"), { recursive: true });
+    const vendor = join(root, "vendor/yrs/src/lib.rs");
+    writeFileSync(vendor, "original native source");
+    execFileSync("git", ["add", "vendor"], { cwd: root });
+    const run = options => {
+      const result = invoke(options);
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
+    };
+    // This fixture has no POSIX CLI launchers.
+    const options = { platform: "win32" };
+    assert.equal(run(options).enginePrepared, true);
+    const original = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
+    writeFileSync(vendor, "changed native source");
+    assert.equal(run({ ...options, statusOnly: true }).enginePrepared, false);
+    assert.equal(run(options).enginePrepared, true);
+    const updated = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
+    assert.notEqual(updated, original);
+    const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.filter(({ command }) => command === "cargo").length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("prepared desktop checks staged compiler bytes only on Windows", () => {
+  for (const platform of ["win32", "linux"]) {
+    const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
+    try {
+      const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
+      for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "launcher", { mode: 0o755 });
+      const run = options => {
+        const result = invoke({ platform, ...options });
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
+      };
+      assert.equal(run().desktopPrepared, true);
+      const compiler = join(root, "apps/desktop/resources/app-compiler");
+      mkdirSync(compiler, { recursive: true });
+      writeFileSync(join(compiler, "built.txt"), "changed compiler");
+      assert.equal(run({ statusOnly: true }).desktopPrepared, platform !== "win32", `${platform} changed compiler`);
+      rmSync(compiler, { recursive: true });
+      assert.equal(run({ statusOnly: true }).desktopPrepared, platform !== "win32", `${platform} missing compiler`);
+      assert.equal(run().desktopPrepared, true);
+      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter").length, platform === "win32" ? 2 : 1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test("verification prepares the engine after Rust without changing gate scope", async (t) => {
@@ -740,10 +797,11 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
   assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), { rust: true, js: true });
-  for (const file of ["packages/app-backend-runtime/src/child.ts", "examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+  assert.deepEqual(selectedGates([".config/nextest.toml"], workflow), { rust: true, js: false });
+  for (const file of ["examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
   }
-  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
+  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "packages/workspace-auth/src/session.ts", "packages/service-http/src/runtime.ts", "packages/app-backend-runtime/src/child.ts", "examples/fundraiser/package.json", "examples/stock-orders/tsconfig.json", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
 });

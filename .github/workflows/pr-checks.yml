@@ -45,6 +45,7 @@ jobs:
               - 'crates/**'
               - 'vendor/**'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -62,8 +63,6 @@ jobs:
               # Native paired-backup proof invokes the production relay fixture.
               - 'services/sync-relay/**'
               - 'packages/app-backend-runtime/**'
-              - 'examples/fundraiser/**'
-              - 'examples/stock-orders/**'
               - 'packages/live-session-contract/**'
               - '**/package.json'
               - '**/tsconfig*.json'
