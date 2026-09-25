@@ -317,6 +317,53 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
   };
 }
 
+// The bytes of `sha256` when the object is in the share now: its latest moment
+// in this version is the current file at a selected path, set above the epoch
+// floor. A delete, a move out of the selector, or another object taking the
+// path leaves no such row.
+export function currentObjectBlobByteLength(storage: StorageContext, input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    objectId: string;
+    sha256: string;
+    epochLogFloor: number;
+  }): number | null {
+    const selector = currentFileSelectorClause(input.selectorPaths);
+    const row = storage.db
+      .prepare(
+        `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
+         FROM sync_relay_current_files
+         JOIN sync_relay_blobs AS blob
+           ON blob.workspace_id = sync_relay_current_files.workspace_id
+          AND blob.sha256 = ?
+         WHERE sync_relay_current_files.workspace_id = ?
+           AND sync_relay_current_files.version_id = ?
+           AND sync_relay_current_files.state_relay_seq > ?
+           AND (sync_relay_current_files.path, sync_relay_current_files.state_relay_seq) = (
+             SELECT latest.path, latest.relay_seq
+             FROM sync_relay_object_moments latest
+             WHERE latest.workspace_id = ? AND latest.object_id = ? AND latest.version_id = ?
+             ORDER BY latest.relay_seq DESC
+             LIMIT 1
+           )${selector.sql}
+         LIMIT 1`,
+      )
+      .get(
+        input.sha256,
+        input.workspaceId,
+        input.versionId,
+        input.epochLogFloor,
+        input.workspaceId,
+        input.objectId,
+        input.versionId,
+        ...selector.params,
+      );
+    return row && typeof row.byte_length === "string"
+      ? Number(row.byte_length)
+      : null;
+  }
+
 // Latest-wins: a rename is a later fact about the same object, and the share
 // must follow the file rather than its history.
 //

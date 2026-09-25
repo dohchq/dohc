@@ -288,6 +288,7 @@ export function createSyncRelayHandler({
     filteredLogPage,
     newestFilteredOpFreshness,
     historicalSharedBlob,
+    linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
 
   // Claim email invites only after the authenticated account verifies its address.
@@ -579,6 +580,7 @@ export function createSyncRelayHandler({
     linkJsonResponse,
     filteredLogPage,
     newestFilteredOpFreshness,
+    linkRevisionByteLength,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     linkLogReadRateLimiter,

@@ -740,6 +740,14 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): number | null;
+  currentObjectBlobByteLength(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    objectId: string;
+    sha256: string;
+    epochLogFloor: number;
+  }): number | null;
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;

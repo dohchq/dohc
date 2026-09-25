@@ -8,9 +8,11 @@ import {
   isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
   targetVersionId,
+  visibleSharePath,
   type AnyShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
+  type ShareSelector,
   type ThreadFileBinding,
 } from "./shareFilter";
 import {
@@ -44,6 +46,7 @@ export function createShareReadQueries(
     | "listObjectMomentLogRowsByBlob"
     | "listVersionCreateLogRowsByBlob"
     | "getBlob"
+    | "currentObjectBlobByteLength"
   >,
   linkFreshnessPageSize: number,
 ) {
@@ -360,10 +363,82 @@ export function createShareReadQueries(
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
 
+  // A share link reads an earlier revision only of a file still in the share
+  // (docs/adr/0014). The revision must be the after-content of a log row above
+  // the epoch floor that this link's filter admits, and that row's object must
+  // be the current file at a selected path now. The hash alone grants nothing.
+  const linkRevisionByteLength = (
+    workspaceId: string,
+    selector: ShareSelector,
+    sha256: string,
+    epochLogFloor: number,
+  ): number | null => {
+    const versionId = targetVersionId(selector);
+    const candidates = [
+      ...storage.listObjectMomentLogRowsByBlob({
+        workspaceId,
+        versionId,
+        sha256,
+        semantics: "historical-log",
+        ...(selector.paths.length > 0 ? { selectorPaths: selector.paths } : {}),
+      }),
+      ...storage.listVersionCreateLogRowsByBlob({ workspaceId, versionId, sha256 }),
+    ]
+      .filter((row) => row.relaySeq > epochLogFloor)
+      .sort((left, right) => right.relaySeq - left.relaySeq)
+      .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
+    const chatResolver = chatResolverFor(workspaceId);
+    for (const row of candidates) {
+      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+      if (!decision.allowed || !decision.blobSha256s.includes(sha256)) continue;
+      for (const objectId of revisionObjectIds(selector, row, sha256)) {
+        const byteLength = storage.currentObjectBlobByteLength({
+          workspaceId,
+          versionId,
+          selectorPaths: selector.paths,
+          objectId,
+          sha256,
+          epochLogFloor,
+        });
+        if (byteLength !== null) return byteLength;
+      }
+    }
+    return null;
+  };
+
   return {
     chatResolverFor,
     filteredLogPage,
     newestFilteredOpFreshness,
     historicalSharedBlob,
+    linkRevisionByteLength,
   };
+}
+
+// The objects whose after-content in an admitted row is `sha256`: the moment's
+// object, or each selected fork-snapshot file with that content.
+function revisionObjectIds(
+  selector: ShareSelector,
+  row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
+  sha256: string,
+): string[] {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(row.payloadJson);
+  } catch {
+    return [];
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const record = payload as Record<string, unknown>;
+  const objectId = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+  if (row.opKind === "moment.append") return objectId(record.objectId) ? [record.objectId] : [];
+  if (row.opKind !== "version.create" || !Array.isArray(record.forkSnapshots)) return [];
+  return record.forkSnapshots.flatMap((raw: unknown) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const snapshot = raw as Record<string, unknown>;
+    return snapshot.blobSha256 === sha256 && objectId(snapshot.objectId) &&
+      typeof snapshot.path === "string" && visibleSharePath(selector, snapshot.path) === snapshot.path
+      ? [snapshot.objectId]
+      : [];
+  });
 }
