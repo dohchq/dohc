@@ -3620,6 +3620,62 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     .await;
     assert_eq!(captured["metadataOrigin"], json!("capture"));
 
+    // The client lost that session and now reopens it: the retained draft
+    // lineage, not a fresh seed. Capture folded that lineage to the ingested
+    // bytes and recorded them as its settled file, so the next keystroke
+    // settles on top of them and never writes the draft back over them.
+    let reopened = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(reopened["seedContent"], Value::Null);
+    let reopened_id = reopened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": reopened_id,
+            "updateBase64": plaintext_update(" and one more key")
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.settle",
+        json!({ "sessionId": reopened_id, "summary": "type" }),
+    )
+    .await;
+    let on_disk = std::fs::read_to_string(scratch.path().join(&path)).expect("file");
+    assert_eq!(settled["content"], json!(on_disk));
+    assert!(
+        on_disk.starts_with(
+            "written by something else
+"
+        ),
+        "the keystroke must land on the ingested bytes: {on_disk:?}"
+    );
+    assert!(
+        !on_disk.contains("typed over the rival"),
+        "the refused draft must not be written over the ingested bytes: {on_disk:?}"
+    );
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.close",
+        json!({ "sessionId": reopened_id, "settle": false }),
+    )
+    .await;
+
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
