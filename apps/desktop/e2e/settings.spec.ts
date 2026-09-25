@@ -63,7 +63,7 @@ test("@settings-smoke opens settings and survives a basic appearance edit", asyn
   }
 });
 
-test("@settings-smoke draws a switch's thumb inside its track, on and off", async () => {
+test("draws a switch's thumb inside its track, on and off", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
 
