@@ -977,6 +977,8 @@ it('never projects a preserved source that holds text the document lacks', () =>
     [codeTable, '| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n'],
     // An unused link reference definition.
     ['Hello\n', 'Hello\n\n[x]: https://h.example "hidden"\n'],
+    // A link with no text.
+    ['Hello\n', 'Hello[](https://h.example "hidden")\n'],
     // A second definition of the same label.
     ['[x]: https://a.example\n', '[x]: https://a.example\n[x]: https://b.example "hidden"\n'],
   ]) {

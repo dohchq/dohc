@@ -389,16 +389,39 @@ const extensions: AnyExtension[] = [
   TableRow,
 ]
 // marked keeps a `def` token only for the first definition of a label and
-// discards a later one without a token. Each later one gets a tag that no
-// reference can name, since a label cannot hold an unescaped `]`, so marked
-// keeps its token too and the line stays as text.
+// discards a later one without a token. Each later one gets a numbered tag
+// that starts with `]`, which no reference can name, since a label cannot
+// start with an unescaped `]`. So marked keeps its token too, and the line
+// stays as text. The count lives with each lexer, so each tag costs one check.
+const repeatedDefinitions = new WeakMap<object, number>()
+//
+// Tiptap applies a link's destination and title to the link's text, so a
+// link with no text, as in `[](https://example.com "title")`, vanishes. The
+// engine's fold keeps it as text, and so does this: the link becomes an
+// `escape` token, which Tiptap keeps as literal text without decoding it.
+const emptyLinkProbe = new Tokenizer()
+emptyLinkProbe.lexer = new Lexer({ ...getDefaults(), tokenizer: emptyLinkProbe })
 const markdownParser = new Marked({
+  extensions: [{
+    name: 'dohcEmptyLink',
+    level: 'inline',
+    start: (src) => {
+      const at = src.indexOf('[](')
+      return at < 0 ? undefined : at
+    },
+    tokenizer: (src) => {
+      if (!src.startsWith('[](')) return undefined
+      const link = emptyLinkProbe.link(src)
+      return link && link.type === 'link' ? { type: 'escape', raw: link.raw, text: link.raw } : undefined
+    },
+  }],
   tokenizer: {
     def(src) {
       const token = Tokenizer.prototype.def.call(this, src)
-      if (!token) return token
-      const links = this.lexer.tokens.links
-      while (Object.hasOwn(links, token.tag)) token.tag += ']'
+      if (!token || !Object.hasOwn(this.lexer.tokens.links, token.tag)) return token
+      const count = (repeatedDefinitions.get(this.lexer) ?? 0) + 1
+      repeatedDefinitions.set(this.lexer, count)
+      token.tag = `]${count}`
       return token
     },
   },

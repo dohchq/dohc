@@ -1776,6 +1776,22 @@ describe('Y.Doc markdown import/export', () => {
     // marked drops a second definition of a label without a token.
     expect(yDocToMarkdown(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')))
       .toBe('\\[x]: https://a.example\n\n\\[x]: https://b.example "kept"')
+    // A link with no text keeps its destination and title as text.
+    expect(yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0])
+      .toEqual({ type: 'paragraph', content: [{ type: 'text', text: 'Hello[](https://h.example "kept")' }] })
+    expect(yDocBodyJSON(markdownToYDoc('[docs](https://example.com)\n')).content?.[0]?.content?.[0])
+      .toMatchObject({ text: 'docs', marks: [{ type: 'link' }] })
+  })
+
+  it('keeps repeated definitions of one label in linear work', () => {
+    const repeats = 10_000
+    const hasOwn = vi.spyOn(Object, 'hasOwn')
+    try {
+      const doc = markdownToYDoc('[x]: /a\n'.repeat(repeats))
+      expect(yDocBodyJSON(doc).content?.length).toBe(repeats)
+      // One check for each definition, with room for the rest of the import.
+      expect(hasOwn.mock.calls.length).toBeLessThan(10 * repeats)
+    } finally { hasOwn.mockRestore() }
     const body = yDocBodyJSON(markdownToYDoc('See [docs][x].\n\n[x]: https://example.com\n'))
     expect(body.content?.[0]?.content?.[1]).toMatchObject({
       text: 'docs',
