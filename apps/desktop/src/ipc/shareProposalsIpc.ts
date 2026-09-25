@@ -66,8 +66,11 @@ export function registerShareProposalsIpcHandlers<
     work: (operation: Operation) => Promise<Result>): Promise<Result>;
   /** Main's own operation on a workspace, whichever workspace its windows show. */
   withWorkspaceAuthority<Result>(workspaceId: string, work: (operation: WorkspaceOperation) => Promise<Result>): Promise<Result>;
-  /** A direct push no window asked for finished: windows on the share view show it. */
-  reportDirectWrites(workspaceId: string, result: PushShareDirectWritesResult): void;
+  /**
+   * A direct push no window asked for finished: windows on the share view
+   * show it. False when no window shows the view.
+   */
+  reportDirectWrites(workspaceId: string, result: PushShareDirectWritesResult): boolean;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   currentCredentialGeneration(): number;
@@ -549,15 +552,20 @@ export function registerShareProposalsIpcHandlers<
         });
         const writes: DirectWriteRow[] = [];
         try {
-          // A push reads a bounded window; a few passes drain a backlog, up
-          // to what one answer carries. The rest goes with the next push.
-          for (let pass = 0; pass < DIRECT_PUSH_PASSES && writes.length < MAX_DIRECT_WRITE_ROWS; pass += 1) {
+          // A push reads a bounded window; a few passes drain a backlog. An
+          // answer carries a bounded number of rows, so rows past it go to
+          // the windows as answers of their own.
+          for (let pass = 0; pass < DIRECT_PUSH_PASSES; pass += 1) {
             const result = await relay.pushDirectWrites({
               shareId: scope.shareId,
               grantedSelector: scope.grant,
             });
             operation.assert(scope);
             for (const write of result.writes) {
+              if (writes.length === MAX_DIRECT_WRITE_ROWS) {
+                directWrites.report(workspaceId, PushShareDirectWritesResult.parse({ status: "pushed", writes }));
+                writes.length = 0;
+              }
               writes.push(
                 write.result === "stale"
                   ? { result: "stale", paths: write.paths, stalePath: write.stalePath }
@@ -572,12 +580,12 @@ export function registerShareProposalsIpcHandlers<
           }
           return PushShareDirectWritesResult.parse({
             status: "failed",
-            writes: writes.slice(0, MAX_DIRECT_WRITE_ROWS),
+            writes,
             errorMessage: error instanceof Error ? error.message : String(error),
             lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
           });
         }
-        return PushShareDirectWritesResult.parse({ status: "pushed", writes: writes.slice(0, MAX_DIRECT_WRITE_ROWS) });
+        return PushShareDirectWritesResult.parse({ status: "pushed", writes });
       },
     );
   }

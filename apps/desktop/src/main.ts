@@ -566,8 +566,10 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
 }
 
 // A direct push main ran after a save in a share view finished: the windows
-// on that view show its stale and refused writes.
-function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): void {
+// on that view show its stale and refused writes. False when no window
+// shows the view; the push queue then holds the answer until one does.
+function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
+  let shown = false;
   for (const win of BrowserWindow.getAllWindows()) {
     if (
       rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
@@ -576,7 +578,9 @@ function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDir
       continue;
     }
     win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
+    shown = true;
   }
+  return shown;
 }
 
 // Main's queue of direct pushes, once the IPC handlers are registered.

@@ -61,7 +61,7 @@ async function harness() {
   const pushDirect = vi.fn<EngineRelayWorkspaceClient["pushDirectWrites"]>(async () => ({ writes: [], morePending: false }));
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit, pushDirectWrites: pushDirect } as unknown as EngineRelayWorkspaceClient));
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  const reported = vi.fn<Dependencies["reportDirectWrites"]>();
+  const reported = vi.fn<Dependencies["reportDirectWrites"]>(() => true);
   const directWrites = registerShareProposalsIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
@@ -293,17 +293,21 @@ describe("registered share proposal handlers", () => {
     }
   });
 
-  it("bounds one push's answer over all its passes", async () => {
+  it("sends rows past one answer's bound to the windows as an answer of their own", async () => {
     const h = await harness(); h.recipient();
-    const page = (count: number) => ({
-      writes: Array.from({ length: count }, (_, index) => ({ paths: [`docs/c${index}/collection.yaml`], result: "written" as const })),
-      morePending: true,
+    const page = (count: number, morePending = true) => ({
+      writes: Array.from({ length: count }, (_, index) => ({ paths: [`docs/c${index}/collection.yaml`], result: "refused" as const, reason: "" })),
+      morePending,
     });
-    h.pushDirect.mockResolvedValueOnce(page(2_000)).mockResolvedValueOnce(page(501)).mockResolvedValueOnce(page(1));
+    h.pushDirect.mockResolvedValueOnce(page(2_000)).mockResolvedValueOnce(page(501)).mockResolvedValueOnce(page(1, false));
     const result = await h.invoke(CHANNELS.pushShareDirectWrites) as { status: string; writes: unknown[] };
+    expect(h.pushDirect).toHaveBeenCalledTimes(3);
+    expect(h.reported).toHaveBeenCalledTimes(1);
+    const [workspaceId, first] = h.reported.mock.calls[0]!;
+    expect(workspaceId).toBe("workspace");
+    expect(first.status === "pushed" && first.writes).toHaveLength(2_500);
     expect(result.status).toBe("pushed");
-    expect(result.writes).toHaveLength(2_500);
-    expect(h.pushDirect).toHaveBeenCalledTimes(2);
+    expect(result.writes).toHaveLength(2);
   });
 
   it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {
