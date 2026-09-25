@@ -467,7 +467,10 @@ impl ReconcileController {
         {
             return Err(FilesError::StaleReconcilePlan);
         }
-        if plan.ops.is_empty() && result.not_owned_paths.is_empty() {
+        if plan.ops.is_empty()
+            && result.not_owned_paths.is_empty()
+            && result.deferred_paths.is_empty()
+        {
             self.generation = plan.to_generation;
             self.outstanding = false;
             self.deferred_paths = result.deferred_paths.clone();
@@ -537,6 +540,12 @@ impl ReconcileController {
         // is still tracked at content whose head has just been deleted — so a
         // later policy widen would diff clean and never re-ingest it.
         for path in &result.not_owned_paths {
+            next.remove(path);
+        }
+        // A deferred path is not captured. An entry left from an earlier file
+        // at the path would make the next scan call it unchanged whenever the
+        // bytes match that file, and capture would never check them.
+        for path in &result.deferred_paths {
             next.remove(path);
         }
         self.manifest = next;

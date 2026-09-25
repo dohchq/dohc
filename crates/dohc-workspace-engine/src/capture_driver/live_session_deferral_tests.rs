@@ -425,6 +425,19 @@ async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
         "the session, not capture, records it"
     );
 
+    // An agent writes the first file's bytes back before the editor saves.
+    // They match what capture once recorded at the path, but nothing records
+    // them now, so capture stays unsettled.
+    std::fs::write(harness.root.join(NEW_FILE), "First file.\n").expect("outside write");
+    files.handle().request_rescan();
+    assert!(
+        !harness.capture(&files.handle()).await,
+        "the write is not recorded yet"
+    );
+    assert!(harness.status.degraded());
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+
     drop(lease);
     files.handle().request_rescan();
     assert!(harness.capture(&files.handle()).await);
