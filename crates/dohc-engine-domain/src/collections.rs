@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
@@ -43,6 +44,7 @@ pub enum CollectionFieldType {
     Person,
     Relation,
     Url,
+    Button,
 }
 
 impl CollectionFieldType {
@@ -57,6 +59,7 @@ impl CollectionFieldType {
             "person" => Some(Self::Person),
             "relation" => Some(Self::Relation),
             "url" => Some(Self::Url),
+            "button" => Some(Self::Button),
             _ => None,
         }
     }
@@ -96,6 +99,10 @@ pub enum FieldDefinition {
     Url {
         name: String,
     },
+    /// Shows a button on each record. It stores no value.
+    Button {
+        name: String,
+    },
 }
 
 impl FieldDefinition {
@@ -110,7 +117,8 @@ impl FieldDefinition {
             | Self::MultiSelect { name, .. }
             | Self::Person { name }
             | Self::Relation { name, .. }
-            | Self::Url { name } => name,
+            | Self::Url { name }
+            | Self::Button { name } => name,
         }
     }
 }
@@ -219,6 +227,7 @@ reason_code!(CollectionSchemaReasonCode {
     UnknownFieldReference,
     SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
+    UnsupportedFieldReference,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -364,6 +373,7 @@ reason_code!(FieldValueReasonCode {
     EmptyPersonId,
     InvalidRecordId,
     InvalidUrl,
+    ExpectedEmpty,
 });
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -892,7 +902,8 @@ fn parse_fields(
                     CollectionFieldType::Date => FieldDefinition::Date { name },
                     CollectionFieldType::Person => FieldDefinition::Person { name },
                     CollectionFieldType::Url => FieldDefinition::Url { name },
-                    _ => unreachable!("match arm only admits scalar Field types"),
+                    CollectionFieldType::Button => FieldDefinition::Button { name },
+                    _ => unreachable!("match arm only admits scalar and button Field types"),
                 });
             }
         }
@@ -900,10 +911,26 @@ fn parse_fields(
     fields
 }
 
+// A view sorts, groups, and dates by stored values, and a button stores none.
+fn value_field_reason_code(
+    name: &str,
+    field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
+) -> Option<CollectionSchemaReasonCode> {
+    if !field_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnknownFieldReference)
+    } else if button_names.contains(name) {
+        Some(CollectionSchemaReasonCode::UnsupportedFieldReference)
+    } else {
+        None
+    }
+}
+
 fn parse_field_reference(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Option<String> {
     let raw = raw?;
@@ -913,14 +940,10 @@ fn parse_field_reference(
     };
     if value.is_empty() {
         push_reason(reasons, CollectionSchemaReasonCode::EmptyValue, path);
-    } else if field_names.contains(value) {
-        return Some(value.to_owned());
+    } else if let Some(code) = value_field_reason_code(value, field_names, button_names) {
+        push_reason(reasons, code, path);
     } else {
-        push_reason(
-            reasons,
-            CollectionSchemaReasonCode::UnknownFieldReference,
-            path,
-        );
+        return Some(value.to_owned());
     }
     None
 }
@@ -929,6 +952,7 @@ fn parse_sort(
     raw: Option<&YamlOwned>,
     path: &str,
     field_names: &HashSet<&str>,
+    button_names: &HashSet<&str>,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) -> Vec<ViewSort> {
     let Some(raw) = raw else {
@@ -975,16 +999,10 @@ fn parse_sort(
             },
         };
         if let Some(field) = field {
-            if field_names.contains(field.as_str()) {
-                if let Some(direction) = direction {
-                    sort.push(ViewSort { field, direction });
-                }
-            } else {
-                push_reason(
-                    reasons,
-                    CollectionSchemaReasonCode::UnknownFieldReference,
-                    format!("{entry_path}/field"),
-                );
+            if let Some(code) = value_field_reason_code(&field, field_names, button_names) {
+                push_reason(reasons, code, format!("{entry_path}/field"));
+            } else if let Some(direction) = direction {
+                sort.push(ViewSort { field, direction });
             }
         }
     }
@@ -1058,6 +1076,11 @@ fn parse_views(
         return Vec::new();
     };
     let field_names: HashSet<&str> = fields.iter().map(FieldDefinition::name).collect();
+    let button_names: HashSet<&str> = fields
+        .iter()
+        .filter(|field| matches!(field, FieldDefinition::Button { .. }))
+        .map(FieldDefinition::name)
+        .collect();
     let mut view_names = HashSet::new();
     let mut views = Vec::new();
     for (index, view) in sequence.iter().enumerate() {
@@ -1113,12 +1136,14 @@ fn parse_views(
                 mapping_get(view, "groupBy"),
                 &format!("{path}/groupBy"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             sort: parse_sort(
                 mapping_get(view, "sort"),
                 &format!("{path}/sort"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
             visible_fields: parse_visible_fields(
@@ -1131,6 +1156,7 @@ fn parse_views(
                 mapping_get(view, "dateField"),
                 &format!("{path}/dateField"),
                 &field_names,
+                &button_names,
                 reasons,
             ),
         });
@@ -5117,6 +5143,86 @@ fn cursor_after_predicate(
     format!("({})", branches.join(" OR "))
 }
 
+// A schema blob never changes, so its button names never go stale. The cache
+// starts over when it holds this many schemas.
+const MAX_CACHED_SCHEMA_BUTTONS: usize = 64;
+static SCHEMA_BUTTONS: LazyLock<Mutex<HashMap<String, Arc<HashSet<String>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// The collection's button field names. A filtered, sorted, or grouped page
+/// asks for them, so they are parsed once per schema blob, not once per page.
+fn collection_button_fields(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Arc<HashSet<String>>, crate::DomainError> {
+    let schema_sha256: String = conn
+        .query_row(
+            "SELECT s.blob_sha256 FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let cache = || {
+        SCHEMA_BUTTONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    };
+    if let Some(buttons) = cache().get(&schema_sha256) {
+        return Ok(Arc::clone(buttons));
+    }
+    let text: String = conn
+        .query_row(
+            "SELECT text FROM blobs WHERE sha256=?1",
+            params![schema_sha256],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let buttons = Arc::new(
+        parse_collection_schema(&text)
+            .schema
+            .fields
+            .into_iter()
+            .filter_map(|field| match field {
+                FieldDefinition::Button { name } => Some(name),
+                _ => None,
+            })
+            .collect::<HashSet<_>>(),
+    );
+    let mut cached = cache();
+    if cached.len() >= MAX_CACHED_SCHEMA_BUTTONS {
+        cached.clear();
+    }
+    cached.insert(schema_sha256, Arc::clone(&buttons));
+    Ok(buttons)
+}
+
+/// A button stores no value, so a query cannot filter, sort, or group by one.
+fn reject_button_field_references(
+    buttons: &HashSet<String>,
+    query: &CollectionQuery,
+) -> Result<(), crate::DomainError> {
+    let is_button = |name: &str| buttons.contains(name);
+    let reason = if query
+        .filter
+        .as_ref()
+        .is_some_and(|filter| is_button(&filter.field))
+    {
+        "collection query cannot filter by a button field"
+    } else if query.sort.iter().any(|sort| is_button(&sort.field)) {
+        "collection query cannot sort by a button field"
+    } else if query.group_by.as_deref().is_some_and(is_button) {
+        "collection query cannot group by a button field"
+    } else {
+        return Ok(());
+    };
+    Err(crate::DomainError::InvalidInput { reason })
+}
+
 /// Filter, sort, group, and optionally resolve relation labels from the active
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
@@ -5156,6 +5262,10 @@ pub fn query_collection_records(
     else {
         return Ok(None);
     };
+    if query.filter.is_some() || !query.sort.is_empty() || query.group_by.is_some() {
+        let buttons = collection_button_fields(conn, workspace_id, &version_id, collection_path)?;
+        reject_button_field_references(&buttons, query)?;
+    }
     register_collection_query_sql(conn)?;
     let mut parameters = vec![
         rusqlite::types::Value::Text(workspace_id.to_owned()),
@@ -5644,6 +5754,7 @@ pub fn validate_field_value(
                 validate_record_id(value, "")
             }
         }
+        FieldDefinition::Button { .. } => flagged(FieldValueReasonCode::ExpectedEmpty, ""),
     }
 }
 
@@ -6130,7 +6241,12 @@ mod tests {
                  CREATE TABLE collections(\
                    workspace_id TEXT, version_id TEXT, collection_path TEXT,\
                    schema_status TEXT NOT NULL, degradation_reasons_json TEXT NOT NULL,\
+                   schema_path TEXT NOT NULL,\
                    PRIMARY KEY (workspace_id, version_id, collection_path));\
+                 CREATE TABLE snapshots(\
+                   workspace_id TEXT, version_id TEXT, path TEXT, blob_sha256 TEXT NOT NULL,\
+                   PRIMARY KEY (workspace_id, version_id, path));\
+                 CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    collection_path TEXT, file_path TEXT, adoption_state TEXT NOT NULL,\
@@ -6139,7 +6255,8 @@ mod tests {
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    field_name TEXT, value_json TEXT NOT NULL,\
                    validation_status TEXT NOT NULL, validation_reason_json TEXT,\
-                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));",
+                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));\
+                 INSERT INTO blobs VALUES ('differential-schema', 'fields: []');",
             )
             .expect("differential schema");
         connection
@@ -6150,10 +6267,17 @@ mod tests {
             .expect("workspace row");
         connection
             .execute(
-                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]')",
+                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]', 'schema.yaml')",
                 [WORKSPACE, COLLECTION],
             )
             .expect("collection row");
+        // A filtered or sorted page reads the schema for its button fields.
+        connection
+            .execute(
+                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema')",
+                [WORKSPACE],
+            )
+            .expect("schema snapshot");
         let pool = differential_value_pool();
         let depth_reason = serde_json::to_string(&FieldValueReason {
             code: FieldValueReasonCode::ValueDepthExceeded,

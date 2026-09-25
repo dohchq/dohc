@@ -180,6 +180,22 @@ describe("workspace wire schemas", () => {
     ).toThrow(ProtocolShapeError);
   });
 
+  it("decodes a button field definition", () => {
+    const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+      path: "invoices",
+      status: "valid",
+      reasons: [],
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "Mark paid", type: "button" }],
+        views: [],
+      },
+      recordCount: 0,
+    });
+    expect(result.schema.fields).toEqual([{ name: "Mark paid", type: "button" }]);
+  });
+
   it("accepts the shared full collection reason-code set", () => {
     for (const code of reasonCodes.schemaReasonCodes) {
       expect(() =>

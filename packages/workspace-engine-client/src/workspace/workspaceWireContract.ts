@@ -642,6 +642,7 @@ const CollectionFieldDefinitionSchema = Schema.Union([
       "date",
       "person",
       "url",
+      "button",
     ]),
   }),
   mutableStruct({
