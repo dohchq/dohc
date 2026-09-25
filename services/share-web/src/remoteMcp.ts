@@ -48,17 +48,17 @@ const linkLogSchema = z.object({
 });
 type LinkLogOp = z.infer<typeof linkLogSchema>["ops"][number];
 
-// One change per logged moment, in the words the local dohc_list_changes uses.
-// The log names a before hash too, but a link reads only files still in the share.
+// One change per logged moment, named like the engine's history: beforeBlobSha256 and afterBlobSha256.
+// The log names earlier content too, but a link reads only files still in the share.
 function linkChange(op: LinkLogOp): Record<string, unknown> | null {
   if (op.opKind === "workspace.init") return null;
   if (op.opKind === "version.create") return {recordedAtMs: op.recordedAtMs, operation: "version", versionId: op.payload.versionId,
     files: op.payload.forkSnapshots.map(file => ({path: file.path, ...(file.blobSha256 ? {blobSha256: file.blobSha256} : {}), contentKind: file.contentKind ?? "text"}))};
-  const {operation, payloadBeforePath: beforePath, payloadAfterPath: afterPath, payloadBeforeBlobSha256: beforeBlobSha256, payloadAfterBlobSha256: blobSha256} = op.payload;
+  const {operation, payloadBeforePath: beforePath, payloadAfterPath: afterPath, payloadBeforeBlobSha256: beforeBlobSha256, payloadAfterBlobSha256: afterBlobSha256} = op.payload;
   const path = operation === "delete" ? beforePath : afterPath;
   if (!path) return null;
   return {recordedAtMs: op.recordedAtMs, operation, path, ...(operation === "rename" && beforePath ? {beforePath} : {}),
-    ...(operation !== "delete" && blobSha256 ? {blobSha256, contentKind: op.payload.payloadAfterContentKind ?? "text"} : {}),
+    ...(operation !== "delete" && afterBlobSha256 ? {afterBlobSha256, contentKind: op.payload.payloadAfterContentKind ?? "text"} : {}),
     ...(beforeBlobSha256 ? {beforeBlobSha256} : {})};
 }
 
@@ -88,7 +88,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     } catch (e) { return error(String(e)); }
   });
   server.registerTool("dohc_list_changes", {
-    description: "List changes to files in this shared link, oldest first. Pass since as nextCursor from this tool or from dohc_list_files to read only later changes. dohc_read_file reads a hash only while its file is still in the share.",
+    description: "List changes to files in this shared link, oldest first. since is a log cursor, not a timestamp: pass nextCursor from this tool or from dohc_list_files to read only later changes. If epochLogFloor is above your since, earlier changes are gone, so start again from dohc_list_files. dohc_read_file reads a hash only while its file is still in the share.",
     inputSchema: z.object({since: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(500).optional()}),
   }, async ({since, limit}) => {
     try {
