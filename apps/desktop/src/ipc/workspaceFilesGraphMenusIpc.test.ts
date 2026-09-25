@@ -75,7 +75,7 @@ async function harness() {
       },
     })),
     shareViewFiles: shareFiles, trashItem: async () => { throw new Error("trash unavailable"); },
-    notifyRenderer: () => undefined, logError: () => undefined,
+    notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
   });
   const openDialog = vi.fn(async () => ({ canceled: true, filePaths: [] as string[] }));
   const saveDialog = vi.fn<() => Promise<{ canceled: boolean; filePath?: string }>>(async () => ({ canceled: true }));

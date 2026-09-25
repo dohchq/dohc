@@ -42,6 +42,7 @@ import {
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
+  ShareDirectWritesPushedEvent,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -528,6 +529,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
   submitShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
+  pushShareDirectWrites: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
+  onShareDirectWritesPushed: (listener) =>
+    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
   listMyShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>

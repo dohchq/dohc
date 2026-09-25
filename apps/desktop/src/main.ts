@@ -99,6 +99,7 @@ import {
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
+  type PushShareDirectWritesResult,
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
@@ -583,6 +584,27 @@ function notifyAutomationHoldsChanged(workspaceId: string): void {
     win.webContents.send(CHANNELS.automationHoldsChanged, { workspaceId });
   }
 }
+
+// A direct push main ran after a save in a share view finished: the windows
+// on that view show its stale and refused writes. False when no window
+// shows the view; the push queue then holds the answer until one does.
+function notifyShareDirectWritesPushed(workspaceId: string, result: PushShareDirectWritesResult): boolean {
+  let shown = false;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.shareDirectWritesPushed, { workspaceId, result });
+    shown = true;
+  }
+  return shown;
+}
+
+// Main's queue of direct pushes, once the IPC handlers are registered.
+let shareDirectWrites: { shareViewEdited(workspaceId: string): void } | null = null;
 
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
@@ -3740,6 +3762,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
   shareViewFiles,
   trashItem: (path) => shell.trashItem(path),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),
 });
 const ensureOwnedProjectionTargetCurrent =
@@ -4678,9 +4701,15 @@ function registerIpcHandlers(): void {
     showItemInFolder: (path) => shell.showItemInFolder(path),
   });
 
-  registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
+    withWorkspaceAuthority: (workspaceId, work) =>
+      workspaceAuthorities.withAuthority(workspaceId, (lease) => work({
+        get workspace() { return canonicalWorkspaceFor(lease); },
+        assertCurrent: () => lease.assertCurrent(),
+      })),
+    reportDirectWrites: notifyShareDirectWritesPushed,
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
     normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,
