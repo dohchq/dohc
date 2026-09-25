@@ -5961,7 +5961,12 @@ mod tests {
                  CREATE TABLE collections(\
                    workspace_id TEXT, version_id TEXT, collection_path TEXT,\
                    schema_status TEXT NOT NULL, degradation_reasons_json TEXT NOT NULL,\
+                   schema_path TEXT NOT NULL,\
                    PRIMARY KEY (workspace_id, version_id, collection_path));\
+                 CREATE TABLE snapshots(\
+                   workspace_id TEXT, version_id TEXT, path TEXT, blob_sha256 TEXT NOT NULL,\
+                   PRIMARY KEY (workspace_id, version_id, path));\
+                 CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, text TEXT NOT NULL);\
                  CREATE TABLE collection_records(\
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    collection_path TEXT, file_path TEXT, adoption_state TEXT NOT NULL,\
@@ -5970,7 +5975,8 @@ mod tests {
                    workspace_id TEXT, version_id TEXT, record_id TEXT,\
                    field_name TEXT, value_json TEXT NOT NULL,\
                    validation_status TEXT NOT NULL, validation_reason_json TEXT,\
-                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));",
+                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));\
+                 INSERT INTO blobs VALUES ('differential-schema', 'fields: []');",
             )
             .expect("differential schema");
         connection
@@ -5981,10 +5987,17 @@ mod tests {
             .expect("workspace row");
         connection
             .execute(
-                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]')",
+                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]', 'schema.yaml')",
                 [WORKSPACE, COLLECTION],
             )
             .expect("collection row");
+        // A filtered or sorted page reads the schema for its button fields.
+        connection
+            .execute(
+                "INSERT INTO snapshots VALUES (?1, 'main', 'schema.yaml', 'differential-schema')",
+                [WORKSPACE],
+            )
+            .expect("schema snapshot");
         let pool = differential_value_pool();
         let depth_reason = serde_json::to_string(&FieldValueReason {
             code: FieldValueReasonCode::ValueDepthExceeded,
