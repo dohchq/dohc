@@ -27,6 +27,11 @@ interface LifecycleApp {
 // that hangs on load cannot keep a bad build from its fix.
 const UPDATE_START_FALLBACK_MS = 10_000;
 
+// A launch counts as finished once the app has run this long after its first
+// window loaded, or when it quits cleanly first. A build that crashes or
+// exits sooner on every start builds up the launch count.
+export const LAUNCH_SETTLED_MS = 30_000;
+
 interface CliServer {
   close(): Promise<void>;
 }
@@ -77,8 +82,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     updateAfterStartupFailure(): Promise<boolean>;
     updateAfterWindowLoadFailure(): Promise<boolean>;
   };
-  // The launch marker: finished once bootstrap completes and the first
-  // window has loaded; handed off when another instance already runs.
+  // The launch marker: finished once the app has run LAUNCH_SETTLED_MS
+  // after bootstrap and the first window load, or at a clean quit; handed
+  // off when another instance already runs.
   launch: {
     finished(): void;
     handedOff(): void;
@@ -111,6 +117,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   app.on("will-quit", (event) => {
     if (quitting) return;
     quitting = true;
+    // Every ordinary quit reaches here, including Update and Restart's.
+    launch.finished();
     event.preventDefault();
     // Release opening-document backoff before producers drain. Accepted Y.Doc
     // writes keep retrying until settlement or the overall shutdown budget.
@@ -249,7 +257,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     workspaces.refreshNativeSurfaces();
     void windowLoaded.then((loaded) => {
       if (!loaded) return;
-      launch.finished();
+      setTimeout(() => launch.finished(), LAUNCH_SETTLED_MS).unref?.();
       if (activatedWorkspace) windows.activate(window, activatedWorkspace);
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.

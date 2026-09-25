@@ -1,10 +1,11 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 
 // The launch marker counts launches of one build in a row that never finished
-// starting. The entry module raises the count before main loads, and main
-// removes the marker once bootstrap completes and the first window has
-// loaded. So a count that survives means the launch before it crashed, hung,
-// or was killed. Another version starts from zero: an update is a new build.
+// starting. The entry module raises the count before main loads. Main
+// removes the marker once the app has run 30 s after its first window
+// loaded, or at a clean quit if that comes first. So a count that survives
+// means the launch before it crashed, hung, or exited within 30 s. Another
+// version starts from zero: an update is a new build.
 //
 // The marker is best effort: a read or write that fails never stops a
 // launch. It is written without fsync, so a power cut can leave a stale

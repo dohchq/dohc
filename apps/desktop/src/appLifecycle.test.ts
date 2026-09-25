@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAppLifecycle } from "./appLifecycle";
+import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createQuitGuard } from "./quitGuard";
+import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
 import { createShareHandoffIntentSlot } from "./shareHandoffIngress";
 import { deferred } from "./testing/deferred";
 
@@ -344,13 +345,50 @@ describe("desktop bootstrap", () => {
     guard.hold();
   });
 
-  it("finishes the launch only once bootstrap completes and the first window has loaded", async () => {
+  it("finishes the launch once the app has run 30 s after its first window loaded", async () => {
+    vi.useFakeTimers();
     const f = fixture();
     await boot(f);
-    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     f.loaded.resolve(true);
-    await vi.waitFor(() => expect(f.dependencies.launch.finished).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS - 1);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
     expect(f.dependencies.launch.handedOff).not.toHaveBeenCalled();
+  });
+
+  it("finishes the launch at a clean quit before 30 s have passed", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    f.app.emit("will-quit", event());
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
+  });
+
+  it("keeps the launch marker when the process dies within 30 s of its first window", async () => {
+    vi.useFakeTimers();
+    const files = new Map<string, string>();
+    const disk: MarkerFileSystem = {
+      readFileSync: (path) => { const content = files.get(path); if (content === undefined) throw new Error("missing"); return content; },
+      writeFileSync: (path, data) => { files.set(path, data); },
+      rmSync: (path) => { files.delete(path); },
+    };
+    const f = fixture((d) => { d.launch.finished = finishLaunch; });
+    beginLaunch("/profile/dohc-launch.json", "1.0.0", disk);
+    try {
+      await boot(f);
+      f.loaded.resolve(true);
+      await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS - 1);
+      // A crash or a native exit here runs no quit event and no timer, so the
+      // next launch reads this count.
+      expect(files.get("/profile/dohc-launch.json")).toBe(JSON.stringify({ version: "1.0.0", unfinished: 1 }));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(files.has("/profile/dohc-launch.json")).toBe(false);
+    } finally { finishLaunch(); }
   });
 
   it.each([true, false])("leaves the launch unfinished when the engine fails (window loaded: %s)", async (windowLoads) => {
