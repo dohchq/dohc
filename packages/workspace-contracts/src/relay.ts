@@ -318,6 +318,26 @@ export interface SubmitShareProposalResult {
   morePending: boolean;
 }
 
+// How one direct write to a Collection's own files ended (ADR 0013).
+// `written`: the relay wrote these paths into the granter's workspace.
+// `stale`: `stalePath` changed since this replica read it;
+// `currentBlobSha256` is the granter's content, or null when the path is
+// taken under another spelling. `refused`: the direct lane does not take this
+// write, for `reason`. A stale or refused write is not sent again, and Send
+// changes still offers it.
+export type DirectWriteReport =
+  | { paths: string[]; result: "written" }
+  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null }
+  | { paths: string[]; result: "refused"; reason: string };
+
+// What one direct push wrote. Empty when nothing was eligible, or the share
+// is below Edit. `morePending`: the scan stopped at its bound, so another
+// push has more to read.
+export interface PushDirectWritesResult {
+  writes: DirectWriteReport[];
+  morePending: boolean;
+}
+
 // One net change to one file, as the GRANTER sees it. The `current*` fields
 // are the granter's own state now, so the reviewer can see the change against
 // what it will actually land on rather than against what the recipient had.
