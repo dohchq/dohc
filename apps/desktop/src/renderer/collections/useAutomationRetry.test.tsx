@@ -3,7 +3,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RetryCollectionAutomationResult } from "../../ipc/bridgeContract";
-import { useAutomationRetry } from "./useAutomationRetry";
+import { PROGRESS_GONE_SENTENCE, useAutomationRetry } from "./useAutomationRetry";
 
 afterEach(() => {
   cleanup();
@@ -58,6 +58,21 @@ describe("Try again for an automation run", () => {
     await act(async () => screen.getByRole("button", { name: "Try again" }).click());
     await act(async () => screen.getByTestId("automation-start-over-confirm").click());
     expect(retryCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-a", startOver: true }));
+    expect(onQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms before starting over a run whose progress dohc no longer has, and never calls it queued", async () => {
+    const retryCollectionAutomation = vi.fn(async (payload: { startOver: boolean }): Promise<RetryCollectionAutomationResult> =>
+      payload.startOver ? { status: "queued" } : { status: "progress-gone" });
+    vi.stubGlobal("dohcDesktop", { retryCollectionAutomation });
+    const onQueued = vi.fn();
+    render(<Retry workspaceId="ws-a" onError={() => undefined} onQueued={onQueued} />);
+
+    await act(async () => screen.getByRole("button", { name: "Try again" }).click());
+    expect(onQueued).not.toHaveBeenCalled();
+    expect(screen.getByTestId("automation-start-over").textContent).toContain(PROGRESS_GONE_SENTENCE);
+    await act(async () => screen.getByTestId("automation-start-over-confirm").click());
+    expect(retryCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ startOver: true }));
     expect(onQueued).toHaveBeenCalledTimes(1);
   });
 });
