@@ -75,6 +75,7 @@ async function world(options: {
   let opens = 0;
   let failOpenAt: number | null = null;
   let holdsChanged = 0;
+  let automationsChanged = 0;
   const wake = () => { for (const waiter of [...waiters]) waiter(); };
   const until = (condition: () => boolean) => new Promise<void>((resolve) => {
     const check = () => { if (condition()) { waiters.delete(check); resolve(); } };
@@ -299,6 +300,7 @@ async function world(options: {
     store,
     onFailuresChanged: () => { failuresChanged.push("changed"); wake(); },
     onHoldsChanged: () => { holdsChanged += 1; wake(); },
+    onAutomationsChanged: () => { automationsChanged += 1; wake(); },
     onError: (context, error) => { errors.push({ context, error }); },
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
   });
@@ -329,6 +331,7 @@ async function world(options: {
   return {
     root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, failuresChanged,
     holdsChanged: () => holdsChanged,
+    automationsChanged: () => automationsChanged,
     rosterCalls: () => rosterCalls,
     prunes: () => prunes,
     resumable,
@@ -1256,6 +1259,9 @@ describe("Collection automations", () => {
     // Nothing overwrote the file dohc could not read.
     expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
 
+    // Every run waits, so no field is marked.
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+
     await expect(w.executor.resetHolds()).resolves.toBe("reset");
     const { holds, unreadable } = w.executor.holdState();
     expect(unreadable).toBe(false);
@@ -1344,5 +1350,75 @@ describe("Collection automations", () => {
     await w.settledClaim(claim);
     expect(claim.state).toBe("done");
     expect(w.failuresChanged).toEqual([]);
+  });
+
+  it("marks each field switched-on automations set, in the Collection they set it, and names them", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: [
+      BUMP,
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status, to: Done}",
+      "    do: [{set: {Count: 0, Finished on: '=today()'}}]",
+      "  - id: idle",
+      "    name: Idle",
+      "    enabled: false",
+      "    when: record-added",
+      "    do: [{set: {Idle: true}}]",
+    ].join("\n") } });
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+    await w.executor.open();
+    expect(w.automationsChanged()).toBe(1);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([
+      { field: "Count", automations: ["Bump", "Stamp"] },
+      { field: "Finished on", automations: ["Stamp"] },
+    ]);
+    await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
+    expect(w.executor.automationName(TASKS)).toBe("Bump");
+
+    // A reload says so once it has read the file again. A broken entry keeps its name.
+    await w.writeAutomations("Tasks", BUMP.replace("name: Bump", "name: Bump the count").replace("{field-changed: Status}", "whenever"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.executor.automationName(TASKS) === "Bump the count");
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+    expect(w.executor.automationName(TASKS)).toBe("Bump the count");
+    expect(w.executor.automationName("collection:Tasks#stamp")).toBeNull();
+  });
+
+  it("marks only what a run would write: no dataset, no missing Collection, no stopped step", async () => {
+    const w = await world({ collections: ["Tasks", "Log", "Ledger"], automations: { Tasks: [
+      BUMP,
+      "  - id: stamp",
+      "    name: Stamp",
+      "    when: {field-changed: Status, to: Done}",
+      "    do: [{set: {Count: 0}}]",
+      "  - id: post",
+      "    name: Post",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Posted: true}}, {add-record: {Amount: 1}, collection: Ledger}]",
+      "  - id: lost",
+      "    name: Lost",
+      "    when: {field-changed: Status}",
+      "    do: [{set: {Lost: true}}, {add-record: {Amount: 1}, collection: Nowhere}]",
+    ].join("\n") } });
+    await writeFile(join(w.root, "Ledger", "dataset.json"), "{}\n");
+    // Ana edits Tasks but not Log, so Bump's step into Log is stopped.
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
+    await w.executor.open();
+    await w.executor.automationsIn("Tasks");
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Stamp"] }]);
+    await expect(w.executor.fieldMarks("Ledger")).resolves.toEqual([]);
+    await expect(w.executor.fieldMarks("Nowhere")).resolves.toEqual([]);
+
+    // Ana's share ends. Bump's step now waits for a current editor, so it
+    // still writes nothing, and the marks hear that the verdict changed.
+    const changes = w.automationsChanged();
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [] });
+    w.executor.rosterChanged();
+    const bumpHold = () => w.executor.holds().find((hold) => hold.automationName === "Bump");
+    await w.until(() => bumpHold() !== undefined && w.automationsChanged() > changes);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Stamp"] }]);
+    await w.executor.confirmReach(bumpHold()!);
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Bump", "Stamp"] }]);
+    await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
   });
 });

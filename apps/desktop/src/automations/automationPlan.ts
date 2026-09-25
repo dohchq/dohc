@@ -302,6 +302,27 @@ export function reachStepsOf(
   return reach;
 }
 
+/**
+ * The fields an automation's steps set, with the Collection each is in:
+ * null for the automation's own Collection, as a step names it. A step that
+ * changes the records a Find or an added record bound sets fields in that
+ * step's Collection.
+ */
+export function fieldWritesOf(automation: Automation): Array<{ collection: string | null; field: string }> {
+  const steps = orderSteps(automation.do);
+  const bindings = bindingsOf(steps);
+  const writes: Array<{ collection: string | null; field: string }> = [];
+  for (const { step } of everyStep(steps)) {
+    if (step.kind === "set") {
+      const collection = step.records === null ? null : (bindings.get(step.records)?.collection ?? null);
+      for (const { field } of step.values) writes.push({ collection, field });
+    } else if (step.kind === "add-record") {
+      for (const { field } of step.values) writes.push({ collection: step.collection, field });
+    }
+  }
+  return writes;
+}
+
 /** The Collection each Find reads, with its query, in step order. */
 export function findsOf(automation: Automation): Array<{ ordinal: number; collection: string | null; query: FindQuery }> {
   const finds: Array<{ ordinal: number; collection: string | null; query: FindQuery }> = [];

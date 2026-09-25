@@ -728,6 +728,7 @@ function makeBaseBridge(
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
+    onCollectionAutomationsChanged: vi.fn(() => () => undefined),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);
     },

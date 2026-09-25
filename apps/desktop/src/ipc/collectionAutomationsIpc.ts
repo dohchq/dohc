@@ -13,6 +13,7 @@ import {
   RevealAutomationHoldsPayload,
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
+  ListCollectionFieldMarksPayload,
   RetryCollectionAutomationPayload,
   WriteCollectionAutomationsPayload,
   type ConfirmCollectionAutomationStepResult,
@@ -21,6 +22,7 @@ import {
   type CreateWorkspaceFilePayload,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
+  type ListCollectionFieldMarksResult,
   type RetryCollectionAutomationResult,
   type WriteCollectionAutomationsResult,
   type WriteWorkspaceTextPayload,
@@ -117,6 +119,16 @@ export function registerCollectionAutomationsIpc<
     await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) => {
       dependencies.showItemInFolder(await operation.state.collectionAutomations.reachVerdictsPath());
     });
+  });
+
+  // A shared view holds no executor, so it has no marks: the owner's
+  // computer runs its automations.
+  registerHandler(CHANNELS.listCollectionFieldMarks, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListCollectionFieldMarksPayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionFieldMarksResult> =>
+      ({ marks: dependencies.sharedViewOf(input.workspaceId) ? [] : await operation.state.collectionAutomations.fieldMarks(input.collectionPath) }));
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {

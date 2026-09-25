@@ -90,7 +90,7 @@ import {
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
@@ -186,6 +186,7 @@ import {
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
 import { CollectionAutomations } from "./automations/collectionAutomations";
+import { parseCollectionAutomationId } from "./automations/automationPlan";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -579,9 +580,19 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
 // A Collection automation step started or stopped waiting for a current
 // editor: the windows on that workspace re-list the hold notices.
 function notifyAutomationHoldsChanged(workspaceId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.automationHoldsChanged);
+}
+
+// The automations main read from a workspace changed: the windows on that
+// workspace re-read the ⚡ field marks.
+function notifyCollectionAutomationsChanged(workspaceId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
+}
+
+function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
-    win.webContents.send(CHANNELS.automationHoldsChanged, { workspaceId });
+    win.webContents.send(channel, { workspaceId });
   }
 }
 
@@ -1172,6 +1183,19 @@ const automationEvaluator = createAutomationFormulaEvaluator(() =>
 // The Collection automation executor of an open workspace, or undefined.
 function collectionAutomationsOf(workspaceId: string): CollectionAutomations | undefined {
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
+}
+
+// A Collection automation that wrote a moment, as History shows it: its
+// name from the workspace's automations.yaml as this computer read it, or
+// its id when the file no longer has it, and the Collection it belongs to.
+// Any other automation, such as a plugin's, keeps the moment's origin label.
+function automationAuthor(workspaceId: string, automationId: string): { name: string; collection: string } | null {
+  const parsed = parseCollectionAutomationId(automationId);
+  if (parsed === null) return null;
+  return {
+    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
+    collection: posix.basename(parsed.collectionPath),
+  };
 }
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared
@@ -3260,6 +3284,7 @@ function createCollectionAutomationsFor(
     store: createAutomationRunStore(rootPath),
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
+    onAutomationsChanged: () => notifyCollectionAutomationsChanged(workspaceId),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
   });
@@ -4282,7 +4307,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", automationAuthor, notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
