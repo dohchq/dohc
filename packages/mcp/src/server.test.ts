@@ -197,6 +197,20 @@ describe("MCP tool results", () => {
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.structuredContent, null, 2) }]);
   });
 
+  it("forwards a file path to list one file's history", async () => {
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        requests.push(request.args);
+        return { changes: [], count: 0, totalAvailable: 0, hasMore: false, cursorMs: 0 };
+      },
+    });
+    const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
+  });
+
   it("reports authorization refusals as tool errors", async () => {
     const { client } = await connectedToolNames({
       root: "/workspace", home: "/home",

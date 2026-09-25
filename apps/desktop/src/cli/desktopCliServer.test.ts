@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,13 +6,17 @@ import * as Y from "yjs";
 import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { executeCli } from "@dohc/cli";
+import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { createDesktopCliServer } from "./desktopCliServer";
+import { handleCliRequestLine } from "./cliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createChatWrites } from "../workspaces/chatWrites";
 import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
+import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 
 function deferred() {
@@ -169,7 +173,8 @@ describe("desktop CLI workspace context", () => {
   });
 
   it("filters protected and objectless moments and preserves optional metadata", async () => {
-    const f = fixture();
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-history-"));
+    const f = fixture(root);
     const moment: WorkspaceEngineMomentSummary = {
       id: "moment", versionId: "version", objectId: "object", path: "notes.md",
       recordedAtMs: 20, operation: "write", metadata: { origin: "api" },
@@ -189,12 +194,76 @@ describe("desktop CLI workspace context", () => {
     expect(f.capture.listMoments).toHaveBeenCalledWith({ limit: 4 });
     await context.listMoments({ limit: 4, objectId: "object-plan" });
     expect(f.capture.listMoments).toHaveBeenLastCalledWith({ limit: 4, objectId: "object-plan" });
-    const detail = { id: "detail" } as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
+    const detail = { id: "detail", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
     f.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: detail })
       .mockResolvedValueOnce({ protected: true, moment: { id: "secret" } } as never).mockResolvedValueOnce(null);
     expect(await context.readMoment("visible")).toBe(detail);
     expect(await context.readMoment("protected")).toBeNull();
     expect(await context.readMoment("absent")).toBeNull();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("stops showing history the workspace's current policy no longer tracks, to the CLI and the MCP", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-history-"));
+    try {
+      await mkdir(join(root, ".dohc"));
+      const f = fixture(root);
+      const summary = (id: string, path: string): WorkspaceEngineMomentSummary => ({
+        id, versionId: "main", objectId: `object-${id}`, path, recordedAtMs: 20, operation: "write",
+        metadata: { origin: "local-file" }, momentOrder: 1, protected: false, contentKind: "text", byteLength: 4,
+      });
+      const snapshot = (path: string, text: string) => ({ path, contentKind: "text" as const, sha256: "sha", byteLength: text.length, text });
+      const detail = (id: string, operation: VersionedTextMoment["operation"], payload: VersionedTextMoment["payload"]): VersionedTextMoment => ({
+        id, workspaceId: "workspace", versionId: "main", objectId: `object-${id}`, path: payload.after.path,
+        recordedAtMs: 20, operation, payload, metadata: { origin: "local-file" },
+      });
+      const details: Record<string, VersionedTextMoment> = {
+        journal: detail("journal", "write", { before: null, after: snapshot("private/journal.md", "dear diary") }),
+        moved: detail("moved", "rename", { before: snapshot("private/moved.md", "was private"), after: snapshot("notes/moved.md", "was private") }),
+        notes: detail("notes", "write", { before: null, after: snapshot("notes.md", "plain") }),
+      };
+      f.capture.listMoments.mockResolvedValue({
+        moments: [summary("notes", "notes.md"), summary("journal", "private/journal.md"),
+          { ...summary("moved", "notes/moved.md"), operation: "rename" }],
+        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      });
+      f.capture.readMoment.mockImplementation(async (id) => ({ protected: false, moment: details[id]! }));
+      await f.create().startDesktopCliServer();
+      const token = "a".repeat(64);
+      const send = async (request: CliRequestWithoutToken) => {
+        const response = cliTransportResponseSchema.parse(JSON.parse(
+          await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())) as unknown);
+        if (!response.ok) throw new Error(response.error);
+        return response.result;
+      };
+      const cli = (...argv: string[]) => executeCli({ argv, cwd: root, env: {}, request: send });
+      // The MCP's dohc_list_changes and dohc_read_change send these as the agent.
+      const mcp = <Verb extends "moments" | "moment">(verb: Verb, args: Record<string, unknown>) =>
+        send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
+
+      expect((await cli("history", "show", "journal")).stdout).toBe("dear diary");
+      expect(await mcp("moment", { id: "journal" })).toMatchObject({ ok: true });
+
+      await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');
+      expect(await cli("history", "show", "journal")).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: change not found: journal\n" });
+      expect(await cli("history", "show", "moved")).toMatchObject({ exitCode: 1, stderr: "dohc: change not found: moved\n" });
+      expect((await cli("history", "show", "notes")).stdout).toBe("plain");
+      // A list row names only the path after the change; show also checks the path before it.
+      expect((await cli("history", "list")).stdout).toBe([
+        `moved · ${new Date(20).toISOString()} · rename · notes/moved.md`,
+        `notes · ${new Date(20).toISOString()} · write · notes.md`,
+      ].join("\n") + "\n");
+      expect(await mcp("moment", { id: "journal" })).toEqual({ ok: false, reason: "change not found: journal" });
+      expect(await mcp("moment", { id: "moved" })).toEqual({ ok: false, reason: "change not found: moved" });
+      expect(await mcp("moments", {})).toMatchObject({ changes: [{ id: "moved" }, { id: "notes" }], count: 2 });
+
+      // A policy file dohc cannot read hides all history, as it blocks search.
+      await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
+      expect(await mcp("moments", {})).toMatchObject({ changes: [], count: 0 });
+      expect(await mcp("moment", { id: "notes" })).toMatchObject({ ok: false });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("uses the registered workspace for collection reads and forwards history cursors exactly", async () => {

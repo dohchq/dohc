@@ -228,7 +228,10 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         });
     return {
       exitCode: 0,
-      stdout: output ? `${output.replace(/\n$/, "")}\n` : "",
+      // A change's text prints byte for byte, so `history show > file` restores it.
+      stdout: command.verb === "moment" && !command.json
+        ? output
+        : output ? `${output.replace(/\n$/, "")}\n` : "",
       stderr: "",
     };
   } catch (error) {

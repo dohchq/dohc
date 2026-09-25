@@ -34,6 +34,7 @@ import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
+import { historyPathAdmission, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 
 // With no editor open, the file holds the document's settled text.
@@ -274,10 +275,11 @@ export function createDesktopCliServer<State>(
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
         const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
+        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
-              !moment.protected && Boolean(moment.objectId),
+              !moment.protected && Boolean(moment.objectId) && admitted(moment.path),
           )
           .map((moment) => ({
             id: moment.id,
@@ -298,7 +300,11 @@ export function createDesktopCliServer<State>(
       },
       readMoment: async (momentId) => {
         const detail = await capture.readMoment(momentId);
-        return detail && !detail.protected ? detail.moment : null;
+        if (!detail || detail.protected) return null;
+        const { moment } = detail;
+        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
+        const paths = [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])];
+        return paths.every(admitted) ? moment : null;
       },
     };
   }

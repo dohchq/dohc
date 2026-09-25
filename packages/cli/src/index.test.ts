@@ -298,6 +298,10 @@ describe("executeCli", () => {
     });
     expect((await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: show })).stdout).toBe("# Plan\n");
 
+    // Text prints byte for byte, so a redirect reproduces a file with no final newline.
+    const bare = { ...detail, change: { ...detail.change, after: { path: "notes/plan.md", text: "abc" } } };
+    expect((await executeCli({ argv: ["history", "show", "moment-2"], env: {}, request: async () => bare })).stdout).toBe("abc");
+
     const created = { ...detail, change: { ...detail.change, before: null } };
     expect(await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: async () => created })).toEqual({
       exitCode: 1,
