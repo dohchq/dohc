@@ -4786,7 +4786,7 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
         object_id: "retry-object".to_owned(),
         latest_moment_id: "retry-result-moment".to_owned(),
         content_kind: HeadContentKindV1::Text,
-        blob_sha256: result_sha,
+        blob_sha256: result_sha.clone(),
         byte_length: result_text.len() as i64,
         updated_at_ms: 21,
     });
@@ -4838,48 +4838,254 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
     later.recorded_at_ms = 24;
     let mut page = vec![parent, child, same_origin_later];
     for sequence in 0..497 {
-        let mut op = version_create_with_shipped_snapshots("unrelated", &format!("independent-{sequence}"), Vec::new());
+        let mut op = version_create_with_shipped_snapshots(
+            "unrelated",
+            &format!("independent-{sequence}"),
+            Vec::new(),
+        );
         op.origin_seq = sequence;
         page.push(op);
     }
     let client = RelaySyncClient::new(PagedRelay::new([
-        (0, PullResponse { ops: page, next_cursor: 500, has_more: true }),
-        (500, PullResponse { ops: vec![later], next_cursor: 501, has_more: false }),
-        (501, PullResponse { ops: Vec::new(), next_cursor: 501, has_more: false }),
+        (
+            0,
+            PullResponse {
+                ops: page,
+                next_cursor: 500,
+                has_more: true,
+            },
+        ),
+        (
+            500,
+            PullResponse {
+                ops: vec![later],
+                next_cursor: 501,
+                has_more: false,
+            },
+        ),
+        (
+            501,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: 501,
+                has_more: false,
+            },
+        ),
     ]));
     let leases = dohc_engine_collab::LeaseRegistry::new();
     let key = dohc_engine_collab::DocKey::new("ws", "main", "retry-object").unwrap();
     let held = leases.acquire(&key).unwrap();
     for expected_cursor in [500, 501] {
-        let outcome = client.pull_chat_workspace(&mut engine,
-            &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_000)
+        let outcome = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &leases,
+                1_000,
+            )
             .expect("a held conflict must not block unrelated pages");
-        let SyncPassOutcome::Complete { pending_cursor: Some(cursor), .. } = outcome else { panic!("durable cursor"); };
+        let SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } = outcome
+        else {
+            panic!("durable cursor");
+        };
         assert_eq!(cursor.cursor, expected_cursor);
-        client.commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000).unwrap();
-        assert_eq!(read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(), -1,
-            "retention is not application acknowledgement");
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
+            .unwrap();
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
+            -1,
+            "retention is not application acknowledgement"
+        );
     }
-    assert_eq!(read_replication_acked_seq(&engine, "ws", "later-peer").unwrap(), 0);
-    assert!(VersionedTextStore::new(&mut engine).read_text("ws", "main", "retry.md").unwrap().is_none());
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "later-peer").unwrap(),
+        0
+    );
+    assert!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .read_with(|conn| conn.execute("DELETE FROM blobs WHERE sha256=?1", [&result_sha]))
+            .is_err(),
+        "held work pins its hydrated blob before advancing the fetch cursor"
+    );
     drop(held);
     drop(engine);
     let mut engine = EngineStore::open(&path, 1_001).unwrap();
     // Interrupt after application but before the disk report's cursor commits.
-    let outcome = client.pull_chat_workspace(&mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_001).unwrap();
-    let SyncPassOutcome::Complete { changed_paths, .. } = outcome else { panic!("replay"); };
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_001,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(stale_cursor),
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("replay");
+    };
     assert!(changed_paths.iter().any(|change| change.path == "retry.md"));
     drop(engine);
     let mut engine = EngineStore::open(&path, 1_002).unwrap();
-    let outcome = client.pull_chat_workspace(&mut engine,
-        &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_002).unwrap();
-    let SyncPassOutcome::Complete { pending_cursor: Some(cursor), changed_paths, .. } = outcome else { panic!("report replay"); };
-    assert!(changed_paths.iter().any(|change| change.path == "retry.md"), "uncommitted disk report survives restart");
-    client.commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_002).unwrap();
-    assert_eq!(read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(), 2);
-    assert_eq!(VersionedTextStore::new(&mut engine).read_text("ws", "main", "retry.md").unwrap().unwrap().text, result_text);
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_002,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("report replay");
+    };
+    assert!(
+        changed_paths.iter().any(|change| change.path == "retry.md"),
+        "uncommitted disk report survives restart"
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &stale_cursor, &NoFaults, 1_002)
+        .unwrap();
+    let pending: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        pending, 3,
+        "a stale report cannot remove the newer report's work"
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_002)
+        .unwrap();
+    let pending: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(pending, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
+        2
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        result_text
+    );
     let count: i64 = engine.read_with(|conn| conn.query_row(
         "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='retry-result-moment'", [], |row| row.get(0))).unwrap();
     assert_eq!(count, 1, "conflict effect applies exactly once");
+}
+
+#[test]
+fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overflow() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let first = version_create_with_shipped_snapshots("held", "first", Vec::new());
+    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "held").unwrap(),
+        -1
+    );
+    let mut divergent = first.clone();
+    divergent.recorded_at_ms += 1;
+    assert!(crate::deferred::check_redelivery(&engine, &[divergent]).is_err());
+    let mut next = version_create_with_shipped_snapshots("held", "second", Vec::new());
+    next.origin_seq = 2;
+    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    let mut other_identity = identity.clone();
+    other_identity.replication_epoch = "another-epoch".to_owned();
+    assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
+    other_identity = identity.clone();
+    other_identity.stream_identity = "another-stream".to_owned();
+    assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    next.origin_seq = 1;
+    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    let (pending, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(
+        pending,
+        vec![first],
+        "limit overflow rolls back the entire new retention"
+    );
+    assert!(read_relay_cursor(&engine, "ws").unwrap().is_none());
+}
+
+#[test]
+fn deferred_relay_replay_rotates_between_held_origins() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let mut ops = Vec::new();
+    for seq in 0..501 {
+        let mut op =
+            version_create_with_shipped_snapshots("a-held", &format!("version-{seq}"), Vec::new());
+        op.origin_seq = seq;
+        ops.push(op);
+    }
+    ops.push(version_create_with_shipped_snapshots(
+        "b-held",
+        "other",
+        Vec::new(),
+    ));
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &ops.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    let (first, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(first.len(), 500);
+    assert!(first.iter().all(|op| op.origin_id == "a-held"));
+    let mut report = None;
+    assert!(
+        !crate::deferred::claim_report(&mut engine, "ws", &first, &[], &mut report, &NoFaults)
+            .unwrap(),
+        "held work must not trigger an immediate busy loop"
+    );
+    assert!(report.is_none());
+    let (second, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(second[0].origin_id, "b-held");
+    assert_eq!(
+        second[1].origin_seq, 0,
+        "each origin replays from its oldest retained work"
+    );
 }

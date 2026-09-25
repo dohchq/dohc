@@ -2130,6 +2130,37 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
+const V2_RELAY_DEFERRED_OPS_DDL: &str = "\
+CREATE TABLE relay_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES sync_identity(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK(origin_seq >= 0),
+    replication_epoch TEXT NOT NULL,
+    stream_identity TEXT NOT NULL,
+    envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+    retained_bytes INTEGER NOT NULL CHECK(retained_bytes > 0),
+    checked_sequence INTEGER NOT NULL DEFAULT 0 CHECK(checked_sequence >= 0),
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+CREATE TABLE relay_deferred_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    is_text INTEGER NOT NULL CHECK(is_text IN (0,1)),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK ((is_text=1 AND text_sha256 IS NOT NULL AND text_sha256=sha256 AND binary_sha256 IS NULL)
+        OR (is_text=0 AND binary_sha256 IS NOT NULL AND binary_sha256=sha256 AND text_sha256 IS NULL)),
+    PRIMARY KEY(workspace_id,origin_id,origin_seq,sha256,is_text),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq)
+        REFERENCES relay_deferred_ops(workspace_id,origin_id,origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_relay_deferred_text_blob ON relay_deferred_blobs(text_sha256);
+CREATE INDEX idx_relay_deferred_binary_blob ON relay_deferred_blobs(binary_sha256);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2172,6 +2203,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 6,
         id: "v2-relay-bootstrap-complete",
         sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 7,
+        id: "v2-relay-deferred-ops",
+        sql: V2_RELAY_DEFERRED_OPS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2417,6 +2454,10 @@ mod tests {
             (
                 "v2-relay-bootstrap-complete",
                 "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
+            (
+                "v2-relay-deferred-ops",
+                "1290cb517b2ca2e246daa474eb9e3ed8ba2446ba64b59f68fd00b016f3492407",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

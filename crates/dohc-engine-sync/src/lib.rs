@@ -14,6 +14,7 @@ mod conflict_apply;
 mod conflict_outbox;
 mod conflict_resolve_v1;
 mod cursor;
+mod deferred;
 mod enrolment;
 mod error;
 mod file_search;
