@@ -1,4 +1,5 @@
 import { AgentBadge } from "./AgentBadge";
+import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
@@ -563,6 +564,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {isSystem ? "dohc" : chatAuthorLabel(comment)}
             </span>
             {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {comment.authorKind === "automation" && !isSystem ? (
+              <AutomationBadge
+                testIdPrefix="chats-comment"
+                author={comment}
+                viewerAuthorId={reactionControls.viewerAuthorId}
+                onOpenPath={props.onOpenPath}
+              />
+            ) : null}
             <time
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
@@ -712,6 +721,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {chatAuthorLabel(openingMessage)}
               </span>
               {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+              {openingMessage.authorKind === "automation" ? (
+                <AutomationBadge
+                  testIdPrefix="chats-message"
+                  author={openingMessage}
+                  viewerAuthorId={reactionControls.viewerAuthorId}
+                  onOpenPath={props.onOpenPath}
+                />
+              ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">
               <span className="truncate font-mono text-[11px]">
