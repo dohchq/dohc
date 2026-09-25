@@ -71,7 +71,10 @@ export function DevPanel(props: { workspaceId?: string }) {
       const result = await bridge().getUserSettings();
       const appearance = { ...result.settings.appearance, ...patch };
       applyAppearanceSettings(appearance);
-      await bridge().setUserSettings({ settings: { ...result.settings, appearance } });
+      await bridge().setUserSettings({
+        settings: { ...result.settings, appearance },
+        base: result.settings,
+      });
     });
   }
 

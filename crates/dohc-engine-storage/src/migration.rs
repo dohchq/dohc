@@ -2099,6 +2099,41 @@ CREATE INDEX owner_pending_settlement_binary_blobs
     ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 ";
 
+/// Collection automations. A subscription names the change kinds it wants
+/// and, for changed records, the fields. A claim carries the kind, author,
+/// and bounded field facts of its change, and its run: 1, plus one per
+/// retry. Rows written before this migration were plugin subscriptions
+/// (added and changed records, any field) and first-run, changed-record
+/// claims without facts. Their automation ids were `<plugin>/<id>`, with no
+/// namespace; they move into `plugin:`, where the plugin executor drains.
+const V2_AUTOMATION_CHANGE_FACTS_DDL: &str = "\
+ALTER TABLE automation_subscriptions ADD COLUMN on_added INTEGER NOT NULL DEFAULT 1
+    CHECK (on_added IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN on_changed INTEGER NOT NULL DEFAULT 1
+    CHECK (on_changed IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN on_removed INTEGER NOT NULL DEFAULT 0
+    CHECK (on_removed IN (0, 1));
+ALTER TABLE automation_subscriptions ADD COLUMN field_names_json TEXT
+    CHECK (field_names_json IS NULL OR json_valid(field_names_json));
+ALTER TABLE automation_claims ADD COLUMN change_kind TEXT NOT NULL DEFAULT 'changed'
+    CHECK (change_kind IN ('added', 'changed', 'removed'));
+ALTER TABLE automation_claims ADD COLUMN author_origin_id TEXT;
+ALTER TABLE automation_claims ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation'));
+ALTER TABLE automation_claims ADD COLUMN on_behalf_of TEXT;
+ALTER TABLE automation_claims ADD COLUMN change_fields_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(change_fields_json));
+ALTER TABLE automation_claims ADD COLUMN change_fields_omitted INTEGER NOT NULL DEFAULT 0
+    CHECK (change_fields_omitted >= 0);
+ALTER TABLE automation_claims ADD COLUMN run INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1);
+UPDATE automation_subscriptions SET automation_id = 'plugin:' || automation_id
+    WHERE instr(automation_id, ':') = 0;
+UPDATE automation_claims SET automation_id = 'plugin:' || automation_id
+    WHERE instr(automation_id, ':') = 0;
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2132,6 +2167,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 4,
         id: "v2-owner-pending-settlements",
         sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: "v2-automation-change-facts",
+        sql: V2_AUTOMATION_CHANGE_FACTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 6,
+        id: "v2-relay-bootstrap-complete",
+        sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
         sets_user_version: None,
     },
 ];
@@ -2408,6 +2455,14 @@ mod tests {
                 "v2-owner-pending-settlements",
                 "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
             ),
+            (
+                "v2-automation-change-facts",
+                "664e71f126144d9f2e90379cf12a84952dd768f765070bfbc62a0e0989a78f9c",
+            ),
+            (
+                "v2-relay-bootstrap-complete",
+                "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2456,10 +2511,127 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 3 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 2
+            }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
+    }
+
+    /// Plugin subscriptions and claims written before the automation facts
+    /// migration keep their meaning: a subscription wants added and changed
+    /// records on any field, a claim is a first-run changed-record claim
+    /// without facts, and both move into the `plugin:` namespace the plugin
+    /// executor drains, keeping each claim's id and trigger. The domain
+    /// tests drain and retry a claim of this shape.
+    #[test]
+    fn automation_rows_from_before_the_change_facts_upgrade_with_their_meaning() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-automation-change-facts")
+            .expect("the change facts migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("store before the change facts");
+        conn.execute_batch(
+            "INSERT INTO automation_subscriptions \
+                 (workspace_id, automation_id, prefix, created_at_ms) \
+                 VALUES ('ws', 'hello/triage', 'tasks', 1); \
+             INSERT INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_history_id, record_id, \
+                  collection_path, depth, state, attempts, error, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'atc_failed', 'hello/triage', 1, 'rec', 'tasks', 0, 'failed', 1, \
+                         'handler threw', 2, 2), \
+                        ('ws', 'atc_pending', 'hello/triage', 2, 'rec', 'tasks', 0, 'pending', 0, \
+                         NULL, 3, 3);",
+        )
+        .expect("seed pre-upgrade automation rows");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+
+        let subscription: (i64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT on_added, on_changed, on_removed, field_names_json \
+                 FROM automation_subscriptions WHERE automation_id = 'plugin:hello/triage'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("upgraded subscription");
+        assert_eq!(subscription, (1, 1, 0, None));
+        let mut statement = conn
+            .prepare(
+                "SELECT claim_id, change_kind, author_origin_id, actor_kind, on_behalf_of, \
+                        change_fields_json, change_fields_omitted, run, automation_id, \
+                        trigger_history_id \
+                 FROM automation_claims ORDER BY claim_id",
+            )
+            .expect("claim query");
+        let claims = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .expect("claims")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("claim rows");
+        for (claim_id, history_id) in [("atc_failed", 1), ("atc_pending", 2)] {
+            assert!(
+                claims.contains(&(
+                    claim_id.to_owned(),
+                    "changed".to_owned(),
+                    None,
+                    None,
+                    None,
+                    "[]".to_owned(),
+                    0,
+                    1,
+                    "plugin:hello/triage".to_owned(),
+                    history_id,
+                )),
+                "{claim_id} upgrades to a first-run changed claim: {claims:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_relay_cursors_keep_bootstrap_complete_when_upgraded() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-relay-bootstrap-complete")
+            .expect("bootstrap tracking migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("schema before bootstrap tracking");
+        conn.execute(
+            "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
+             VALUES ('ws','42','epoch','stream')",
+            [],
+        )
+        .expect("existing cursor");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let cursor: (String, bool) = conn
+            .query_row(
+                "SELECT cursor,bootstrap_complete FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("upgraded cursor");
+        assert_eq!(cursor, ("42".to_owned(), true));
     }
 
     #[test]
@@ -2481,7 +2653,12 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32 - 1
+            }
+        );
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),

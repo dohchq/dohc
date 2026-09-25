@@ -12,9 +12,12 @@ import {
   zoomPercent,
 } from "./userSettings";
 import {
+  ensureUserSettingsFile,
   MAX_USER_SETTINGS_FILE_BYTES,
   readCachedUserSettingsFile,
   readUserSettingsFile,
+  reloadUserSettingsFile,
+  replaceUserSettingsFile,
   USER_SETTINGS_FILE,
   writeUserSettingsFile,
 } from "./userSettingsStore";
@@ -197,7 +200,7 @@ describe("desktop user settings store", () => {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
     };
-    await writeUserSettingsFile(root, settings);
+    await replaceUserSettingsFile(root, settings);
     expect(await readUserSettingsFile(root)).toEqual({
       settings,
       source: "stored",
@@ -216,7 +219,7 @@ describe("desktop user settings store", () => {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "light" as const },
     };
-    await writeUserSettingsFile(root, first);
+    await replaceUserSettingsFile(root, first);
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
 
     await writeFile(
@@ -225,7 +228,7 @@ describe("desktop user settings store", () => {
     );
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
 
-    await writeUserSettingsFile(root, second);
+    await writeUserSettingsFile(root, second, first);
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(second);
   });
 
@@ -290,10 +293,165 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("turns off only an unknown key or a key with a value dohc cannot use", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    await writeFile(
+      join(root, USER_SETTINGS_FILE),
+      JSON.stringify({
+        appearance: { themeMode: "dark", zoomLevel: 9 },
+        editor: { fontSize: 18, lineWrap: "yes" },
+        accentColor: "teal",
+      }),
+    );
+    expect(await readUserSettingsFile(root)).toEqual({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { themeMode: "dark", zoomLevel: 0 },
+        editor: { ...DEFAULT_USER_SETTINGS.editor, fontSize: 18 },
+      },
+      source: "stored",
+      ignored: [
+        { key: "appearance.zoomLevel", reason: "invalid" },
+        { key: "editor.lineWrap", reason: "invalid" },
+        { key: "accentColor", reason: "unknown" },
+      ],
+    });
+  });
+
+  it("keeps keys that depend on each other in any order, and turns off the switch they cannot support", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    // Dispatch needs a command and an agent name, which come after it here.
+    await writeFile(path, JSON.stringify({
+      runner: { enabled: true, timeoutMinutes: 5, command: "agent run" },
+      profile: { agentName: "Nova" },
+    }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { runner: { enabled: true, command: "agent run", timeoutMinutes: 5 } },
+      source: "stored",
+    });
+    await writeFile(path, JSON.stringify({ runner: { enabled: true, command: "agent run" } }));
+    expect(await readUserSettingsFile(root)).toMatchObject({
+      settings: { runner: { enabled: false, command: "agent run" } },
+      ignored: [{ key: "runner.enabled", reason: "invalid" }],
+    });
+  });
+
+  it("saves only what changed, so keys dohc does not use stay in the file", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, JSON.stringify({
+      appearance: { themeMode: "dark" },
+      editor: { fontSize: 99 },
+      accentColor: "teal",
+    }));
+    const current = await readUserSettingsFile(root);
+    const saved = await writeUserSettingsFile(root, {
+      ...current.settings,
+      appearance: { ...current.settings.appearance, zoomLevel: 2 },
+    }, current.settings);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      appearance: { themeMode: "dark", zoomLevel: 2 },
+      editor: { fontSize: 99 },
+      accentColor: "teal",
+    });
+    expect(saved).toEqual({
+      settings: { ...current.settings, appearance: { themeMode: "dark", zoomLevel: 2 } },
+      source: "stored",
+      ignored: [
+        { key: "editor.fontSize", reason: "invalid" },
+        { key: "accentColor", reason: "unknown" },
+      ],
+    });
+    // Changing the setting dohc could not use replaces the bad value.
+    await writeUserSettingsFile(root, {
+      ...saved.settings,
+      editor: { ...saved.settings.editor, fontSize: 16 },
+    }, saved.settings);
+    expect(JSON.parse(await readFile(path, "utf8")).editor).toEqual({ fontSize: 16 });
+  });
+
+  it("keeps an edit made in the file after the caller read it", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    const seen = (await readUserSettingsFile(root)).settings;
+    // The person switches to dark in the file before Settings hears of it.
+    await writeFile(path, JSON.stringify({
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+    }));
+    const saved = await writeUserSettingsFile(root, {
+      ...seen,
+      appearance: { ...seen.appearance, zoomLevel: 1 },
+    }, seen);
+    expect(saved.settings.appearance).toEqual({ themeMode: "dark", zoomLevel: 1 });
+  });
+
+  it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await writeFile(path, "{ \"appearance\": ");
+    await expect(writeUserSettingsFile(root, DEFAULT_USER_SETTINGS, DEFAULT_USER_SETTINGS)).rejects.toThrow(
+      `dohc did not save settings. dohc could not use ${path}: it is not valid JSON. Fix the file, or select Reset user in Advanced to replace it.`,
+    );
+    expect(await readFile(path, "utf8")).toBe("{ \"appearance\": ");
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    expect(await readUserSettingsFile(root)).toEqual({
+      settings: DEFAULT_USER_SETTINGS,
+      source: "stored",
+    });
+  });
+
+  it("reloads a changed file, ignores dohc's own save, and keeps the last settings while the file does not parse", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    const dark = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+    };
+    await writeUserSettingsFile(root, dark, DEFAULT_USER_SETTINGS);
+    expect(await reloadUserSettingsFile(root)).toBeNull();
+
+    await writeFile(path, JSON.stringify({ appearance: { themeMode: "light" } }));
+    expect(await reloadUserSettingsFile(root)).toEqual({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "light" },
+      },
+      source: "stored",
+    });
+    expect(await reloadUserSettingsFile(root)).toBeNull();
+
+    // Half an edit: the light theme stays, and the warning names the file.
+    await writeFile(path, "{ \"appearance\": { \"themeMode\": \"da");
+    const broken = await reloadUserSettingsFile(root);
+    expect(broken).toMatchObject({
+      settings: { appearance: { themeMode: "light" } },
+      source: "recovered",
+      warning: expect.stringContaining(path),
+    });
+    expect(await readCachedUserSettingsFile(root)).toEqual(broken);
+
+    await writeFile(path, JSON.stringify(dark));
+    expect(await reloadUserSettingsFile(root)).toEqual({ settings: dark, source: "stored" });
+  });
+
+  it("creates the settings file with the defaults only when there is none", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = await ensureUserSettingsFile(root);
+    expect(path).toBe(join(root, USER_SETTINGS_FILE));
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(DEFAULT_USER_SETTINGS);
+    expect(await reloadUserSettingsFile(root)).toBeNull();
+    await writeFile(path, "{}");
+    await ensureUserSettingsFile(root);
+    expect(await readFile(path, "utf8")).toBe("{}");
+  });
+
   it("refuses to read a symlinked user settings file", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const outside = await createTestScratch("dohc-user-settings-");
-    await writeUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
     const outsideSettings = join(outside, USER_SETTINGS_FILE);
     await writeFile(
       outsideSettings,

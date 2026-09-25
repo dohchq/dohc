@@ -2,6 +2,7 @@ import { app } from "electron";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { RosterListing } from "../automations/shareRoster";
 import {
   createRegistryStore,
   type JoinedSharedChannel,
@@ -105,6 +106,21 @@ export function acknowledgeWorkspaceAutomationFailure(
   generation: number,
 ): void {
   store().acknowledgeAutomationFailure(workspaceId, automationId, generation);
+}
+
+// A new listing of the workspace's grants. See registryStore.setShareRoster.
+export function setWorkspaceShareRoster(
+  workspaceId: string,
+  listing: RosterListing,
+  pulledAfter: boolean,
+): void {
+  store().setShareRoster(workspaceId, listing, pulledAfter);
+}
+
+// A pull from the relay started after the stored listing. See
+// registryStore.markShareRosterPulled.
+export function markWorkspaceShareRosterPulled(workspaceId: string): void {
+  store().markShareRosterPulled(workspaceId);
 }
 
 export function setWorkspaceShareView(
