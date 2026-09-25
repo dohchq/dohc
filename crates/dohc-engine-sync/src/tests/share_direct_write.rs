@@ -380,8 +380,8 @@ fn a_stale_or_refused_write_is_not_sent_again_and_stays_available_to_send_change
 }
 
 #[test]
-fn a_write_that_fails_in_transit_is_sent_again_under_the_same_submit_id() {
-    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
+fn a_write_whose_answer_was_lost_is_sent_again_as_the_same_request_after_another_edit() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2", "v3"]);
     let schema = "shared/docs/packing/collection.yaml";
     journal_local_moment(
         &mut engine,
@@ -396,9 +396,16 @@ fn a_write_that_fails_in_transit_is_sent_again_under_the_same_submit_id() {
         .push_back(Err(RelayError::HttpStatus(429)));
     let client = RelaySyncClient::new(relay);
 
+    // The relay may have taken the write; its answer never arrived.
     assert_eq!(
         client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
         Err(RelayError::HttpStatus(429)),
+    );
+    // Another edit before the next push does not change the write in flight.
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-2", "object-schema", schema, "v2", "v3"),
+        1_002,
     );
     assert_eq!(push(&client, &mut engine).writes.len(), 1);
     let writes = client
@@ -409,10 +416,249 @@ fn a_write_that_fails_in_transit_is_sent_again_under_the_same_submit_id() {
         .clone();
     assert_eq!(writes.len(), 2);
     assert_eq!(
-        writes[0].submit_id, writes[1].submit_id,
-        "a retry names the write it retries"
+        writes[0], writes[1],
+        "a retry sends the request it recorded, under its submit id"
     );
-    assert_eq!(writes[0].changes, writes[1].changes);
+    // The later edit goes in the next push, based on what was written.
+    assert_eq!(push(&client, &mut engine).writes.len(), 1);
+    let writes = client
+        .transport()
+        .collection_writes
+        .lock()
+        .expect("writes")
+        .clone();
+    assert_eq!(writes.len(), 3);
+    assert_eq!(
+        writes[2].changes[0].based_on_blob_sha256.as_deref(),
+        Some(dohc_engine_storage::hex_sha256(b"v2").as_str()),
+    );
+    assert_ne!(writes[2].submit_id, writes[0].submit_id);
+}
+
+#[test]
+fn a_later_write_that_fails_keeps_an_earlier_one_delivered_and_holds_send_changes() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
+    let first = "shared/docs/one/collection.yaml";
+    let second = "shared/docs/two/collection.yaml";
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-1", "object-one", first, "v1", "v2"),
+        1_001,
+    );
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-2", "object-two", second, "v1", "v2"),
+        1_002,
+    );
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .extend([
+            Ok(ShareCollectionWriteResponse::Written {
+                paths: vec![first.to_owned()],
+            }),
+            Err(RelayError::ServerInternal),
+        ]);
+    let client = RelaySyncClient::new(relay);
+
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::ServerInternal),
+    );
+    // The first write is delivered, and the second is still open: Send
+    // changes offers neither, and stops before the open one.
+    let outcome = propose(&client, &mut engine, "submit-1");
+    assert_eq!(outcome.submitted, 0);
+    assert!(outcome.more_pending);
+
+    // The next push sends only the open write, and reports both.
+    let pushed = push(&client, &mut engine);
+    assert_eq!(
+        pushed
+            .writes
+            .iter()
+            .map(|write| write.paths.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![first.to_owned()], vec![second.to_owned()]],
+    );
+    assert_eq!(
+        written_paths(&client),
+        vec![
+            vec![first.to_owned()],
+            vec![second.to_owned()],
+            vec![second.to_owned()],
+        ]
+    );
+    assert_eq!(propose(&client, &mut engine, "submit-2").submitted, 0);
+}
+
+#[test]
+fn a_refused_edit_after_a_delivered_create_keeps_the_create_delivered() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["rules", "rules two"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    let path = "shared/docs/packing/automations.yaml";
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-1", "object-auto", path, "rules"),
+        1_001,
+    );
+    let relay = PagedShareRelay::new([], []);
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        push(&client, &mut engine).writes[0].result,
+        DirectWriteResult::Written
+    );
+
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-2", "object-auto", path, "rules", "rules two"),
+        1_002,
+    );
+    client
+        .transport()
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Ok(ShareCollectionWriteResponse::Refused {
+            reason: "changes an automation with a personal step".to_owned(),
+        }));
+    assert!(matches!(
+        push(&client, &mut engine).writes[0].result,
+        DirectWriteResult::Refused { .. }
+    ));
+
+    // Deleting the file leaves a delete for Send changes, based on the
+    // content the direct lane delivered.
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "m-3",
+            "object-auto",
+            "delete",
+            Some((path, "rules two")),
+            path,
+            "rules two",
+        ),
+        1_003,
+    );
+    assert_eq!(propose(&client, &mut engine, "submit-1").submitted, 1);
+    let submits = client
+        .transport()
+        .proposal_submits
+        .lock()
+        .expect("submits")
+        .clone();
+    let op = &submits[0].ops[0];
+    assert_eq!(op.operation, "delete");
+    assert_eq!(op.based_on_path.as_deref(), Some(path));
+    assert_eq!(
+        op.based_on_blob_sha256.as_deref(),
+        Some(dohc_engine_storage::hex_sha256(b"rules").as_str()),
+    );
+}
+
+#[test]
+fn a_new_collection_batch_stops_at_its_byte_bound_and_at_a_second_spelling() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["schema", "a", "b", "c"]);
+    let folder = "shared/docs/ideas";
+    let big = |moment: &str, object: &str, name: &str, text: &str| {
+        let mut payload = create_moment(moment, object, &format!("{folder}/{name}"), text);
+        payload["payloadAfterByteLength"] = json!(3 * 1024 * 1024);
+        payload
+    };
+    journal_local_moment(
+        &mut engine,
+        &create_moment(
+            "m-1",
+            "object-schema",
+            &format!("{folder}/collection.yaml"),
+            "schema",
+        ),
+        1_001,
+    );
+    journal_local_moment(&mut engine, &big("m-2", "object-a", "a.md", "a"), 1_002);
+    journal_local_moment(&mut engine, &big("m-3", "object-b", "b.md", "b"), 1_003);
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-4", "object-c", &format!("{folder}/A.MD"), "c"),
+        1_004,
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    push(&client, &mut engine);
+    assert_eq!(
+        written_paths(&client),
+        vec![vec![
+            format!("{folder}/collection.yaml"),
+            format!("{folder}/a.md")
+        ]],
+        "b.md does not fit the batch, and A.MD is a.md on some disks",
+    );
+    propose(&client, &mut engine, "submit-1");
+    let mut proposed = proposed_paths(&client);
+    proposed.sort();
+    assert_eq!(
+        proposed,
+        vec![format!("{folder}/A.MD"), format!("{folder}/b.md")]
+    );
+}
+
+#[test]
+fn a_new_collection_the_scan_bound_cuts_is_sent_whole_by_the_next_push() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["schema", "record"]);
+    let folder = "shared/docs/ideas";
+    journal_local_moment(
+        &mut engine,
+        &create_moment(
+            "m-schema",
+            "object-schema",
+            &format!("{folder}/collection.yaml"),
+            "schema",
+        ),
+        1_001,
+    );
+    // Enough other files that the scan holds its bound before the record.
+    for index in 1..crate::MAX_SHARE_PROPOSAL_OPS {
+        journal_local_moment(
+            &mut engine,
+            &create_moment(
+                &format!("m-bulk-{index}"),
+                &format!("object-bulk-{index}"),
+                &format!("shared/docs/bulk/{index}.txt"),
+                "record",
+            ),
+            1_001,
+        );
+    }
+    journal_local_moment(
+        &mut engine,
+        &create_moment(
+            "m-record",
+            "object-record",
+            &format!("{folder}/a.md"),
+            "record",
+        ),
+        1_002,
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    let first = push(&client, &mut engine);
+    assert!(
+        first.writes.is_empty(),
+        "a Collection the bound cut is not sent in part"
+    );
+    assert!(first.more_pending);
+    let second = push(&client, &mut engine);
+    assert_eq!(
+        written_paths(&client),
+        vec![vec![
+            format!("{folder}/collection.yaml"),
+            format!("{folder}/a.md")
+        ]],
+    );
+    assert!(!second.more_pending);
 }
 
 #[test]

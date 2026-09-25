@@ -2131,22 +2131,34 @@ CREATE INDEX idx_automation_claims_automation
 ";
 
 /// A share recipient's direct writes to a Collection's own files: where the
-/// direct lane last read this replica's journal for a share, and its decision
-/// about each file, so the proposal lane never offers a file it wrote.
+/// direct lane last read this replica's journal for a share, its two
+/// positions for each file, and the writes it planned and has not finished.
 const V2_SHARE_DIRECT_WRITES_DDL: &str = "\
 CREATE TABLE share_direct_write_state (
-    workspace_id TEXT    NOT NULL,
-    share_id     TEXT    NOT NULL,
-    scanned_seq  INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    workspace_id      TEXT    NOT NULL,
+    share_id          TEXT    NOT NULL,
+    scanned_seq       INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    plan_seq          INTEGER CHECK (plan_seq IS NULL OR plan_seq >= -1),
+    plan_more_pending INTEGER NOT NULL DEFAULT 0 CHECK (plan_more_pending IN (0, 1)),
     PRIMARY KEY (workspace_id, share_id)
 ) STRICT;
 CREATE TABLE share_direct_write_marks (
+    workspace_id      TEXT    NOT NULL,
+    share_id          TEXT    NOT NULL,
+    object_id         TEXT    NOT NULL,
+    delivered_through INTEGER NOT NULL CHECK (delivered_through >= -1),
+    decided_through   INTEGER NOT NULL CHECK (decided_through >= delivered_through),
+    PRIMARY KEY (workspace_id, share_id, object_id)
+) STRICT;
+CREATE TABLE share_direct_write_plan (
     workspace_id TEXT    NOT NULL,
     share_id     TEXT    NOT NULL,
-    object_id    TEXT    NOT NULL,
-    through_seq  INTEGER NOT NULL CHECK (through_seq >= 0),
-    delivered    INTEGER NOT NULL CHECK (delivered IN (0, 1)),
-    PRIMARY KEY (workspace_id, share_id, object_id)
+    ordinal      INTEGER NOT NULL CHECK (ordinal >= 0),
+    submit_id    TEXT    NOT NULL,
+    changes_json TEXT    NOT NULL CHECK (json_valid(changes_json)),
+    objects_json TEXT    NOT NULL CHECK (json_valid(objects_json)),
+    result_json  TEXT    CHECK (result_json IS NULL OR json_valid(result_json)),
+    PRIMARY KEY (workspace_id, share_id, ordinal)
 ) STRICT;
 ";
 
@@ -2446,7 +2458,7 @@ mod tests {
             ),
             (
                 "v2-share-direct-writes",
-                "1fd7b6405790c3025639c8474e74e96bcc10bff88e3df6e697ec7d1a023e9365",
+                "8a34d5488c9313ad8f2ad2b84cb5c274ff1e2a9a06b962a14141e9188b399c46",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2733,7 +2745,9 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_MIGRATIONS.last().map_or(0, |last| last.ordinal + 1),
+            ordinal: BASELINE_MIGRATIONS
+                .last()
+                .map_or(0, |last| last.ordinal + 1),
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,

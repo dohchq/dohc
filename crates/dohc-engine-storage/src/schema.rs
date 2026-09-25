@@ -161,6 +161,7 @@ const REQUIRED_TABLES: &[&str] = &[
     // Item 12: the direct lane's position and per-file decisions.
     "share_direct_write_state",
     "share_direct_write_marks",
+    "share_direct_write_plan",
     "chat_conversation_revisions",
     "automation_subscriptions",
     "automation_claims",
