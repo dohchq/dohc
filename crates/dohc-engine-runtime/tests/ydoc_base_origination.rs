@@ -15,7 +15,7 @@
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, MergeTextFileResult,
-    RollbackTextFileMutation, VersionedTextStore, WriteText, get_collection_record,
+    RenameTextFile, RollbackTextFileMutation, VersionedTextStore, WriteText, get_collection_record,
     reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
@@ -1478,6 +1478,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
 
     let mut store = EngineStore::open(&db, 9_350).expect("open store for enrollment");
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 0,
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
@@ -2074,6 +2075,546 @@ async fn redelivering_an_originated_base_is_idempotent() {
         local_ydoc_ops(&db).len(),
         1,
         "redelivery originates nothing further"
+    );
+}
+
+const WS_TWO_DEVICES: &str = "ws-two-devices";
+
+/// The file a device holds before it opens it. Two devices that received the
+/// file from the relay hold the same object and the same head moment.
+fn seed_shared_file(db: &Path, object_id: &str, path: &str, moment_id: &str, text: &str) {
+    let mut store = EngineStore::open(db, 9_111).expect("open store");
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .ensure_main_version(WS_TWO_DEVICES, "main", 1, &NoFaults)
+        .expect("main version");
+    versions
+        .write_text(
+            &WriteText {
+                workspace_id: WS_TWO_DEVICES.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: object_id.to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: moment_id.to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed shared file");
+}
+
+/// Open `path` as the editor does and build the seed it sends: the head's text
+/// under the Yjs client the engine names. The Rust editor stand-in builds
+/// different bytes than the TypeScript editor, but two devices running the
+/// same editor build the same bytes; the e2e two-client test covers the real
+/// editor.
+async fn open_with_seed(
+    handle: &dohc_engine_runtime::ActorHandle,
+    workspace_id: &str,
+    path: &str,
+) -> (DocKey, u32, Vec<u8>) {
+    let state = handle
+        .ydoc_open_state(
+            workspace_id.to_owned(),
+            150,
+            true,
+            None,
+            "main".to_owned(),
+            path.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let client_id = state
+        .seed_client_id
+        .expect("an absent lineage names its seed client");
+    let text = state
+        .seed_content
+        .expect("an absent lineage carries seed content");
+    let doc = Doc::with_options(Options {
+        client_id: yrs::ClientID::new(u64::from(client_id)),
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let root = doc.get_or_insert_text(dohc_engine_collab::ROOT_PLAINTEXT);
+    root.insert(&mut doc.transact_mut(), 0, &text);
+    let seed = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    (state.key, client_id, seed)
+}
+
+/// Record `update` as the editor's next write to `key`.
+async fn record_editor_update(
+    handle: &dohc_engine_runtime::ActorHandle,
+    key: &DocKey,
+    path: &str,
+    update: Vec<u8>,
+    lineage: Option<String>,
+    seeding: bool,
+) -> Option<String> {
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            path.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            None,
+            lineage,
+            seeding,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("record editor update")
+        .lineage_claim_id
+}
+
+/// One device opens the document, seeds it, and types `edit` at the end.
+async fn open_and_type(db: &Path, path: &str, edit: &str) -> DocKey {
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(db, 1).expect("open actor").actor;
+    let (key, _, seed) = open_with_seed(&handle, WS_TWO_DEVICES, path).await;
+    let claim = record_editor_update(&handle, &key, path, seed.clone(), None, true).await;
+    let doc = Ydoc::wire();
+    doc.apply(&seed).expect("apply seed");
+    let end = u32::try_from(doc.plaintext_string().encode_utf16().count()).expect("length");
+    record_editor_update(
+        &handle,
+        &key,
+        path,
+        doc.plaintext_insert(end, edit),
+        claim,
+        false,
+    )
+    .await;
+    supervisor.close(db).expect("close actor");
+    key
+}
+
+/// `ops` as another device receives them from the relay: under `origin`,
+/// renumbered from zero, at `relay_seqs`, each with its blob.
+fn relayed(
+    from: &Path,
+    ops: &[LoggedOp],
+    origin: &str,
+    relay_seqs: &[i64],
+) -> Vec<(ReplicationEnvelope, Vec<u8>)> {
+    let first = ops.first().map_or(0, |op| op.origin_seq);
+    ops.iter()
+        .zip(relay_seqs)
+        .map(|(op, relay_seq)| {
+            (
+                ReplicationEnvelope {
+                    workspace_id: WS_TWO_DEVICES.to_owned(),
+                    origin_id: origin.to_owned(),
+                    origin_seq: op.origin_seq - first,
+                    relay_seq: Some(*relay_seq),
+                    op_kind: op.op_kind.clone(),
+                    payload: op.payload.clone(),
+                    recorded_at_ms: op.recorded_at_ms,
+                },
+                blob_bytes(from, &op.blob_sha()),
+            )
+        })
+        .collect()
+}
+
+fn deliver(
+    to: &mut EngineStore,
+    envelopes: &[(ReplicationEnvelope, Vec<u8>)],
+    leases: &dyn dohc_engine_sync::LeaseProbe,
+) {
+    for (envelope, blob) in envelopes {
+        to.put_binary_blob(blob).expect("copy blob");
+        apply_ydoc_envelope(
+            to,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            envelope,
+            &NoFaults,
+            leases,
+        )
+        .expect("apply relayed op");
+    }
+}
+
+/// The text of every moment recorded for `object_id`, oldest first.
+fn moment_texts(store: &EngineStore, object_id: &str) -> Vec<String> {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT b.text FROM moments m JOIN blobs b ON b.sha256 = m.after_blob_sha256 \
+                 WHERE m.workspace_id = ?1 AND m.object_id = ?2 ORDER BY m.moment_order",
+            )?;
+            let rows = statement
+                .query_map(rusqlite::params![WS_TWO_DEVICES, object_id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .expect("read moment texts")
+}
+
+/// The relay position a device holds for `key`'s base, and the local bases
+/// still waiting to learn theirs.
+fn base_position(store: &EngineStore, key: &DocKey) -> (Option<String>, Option<i64>, i64) {
+    store
+        .read_with(|conn| {
+            let (origin, relay_seq) = conn.query_row(
+                "SELECT base_origin_id, base_relay_seq FROM ydoc_docs \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let candidates = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((origin, relay_seq, candidates))
+        })
+        .expect("read base position")
+}
+
+/// What the pull's repair does before it applies a page: learn where this
+/// device's own base landed on the relay, and drop the pending position.
+fn learn_own_base_position(
+    store: &mut EngineStore,
+    key: &DocKey,
+    own_base: &LoggedOp,
+    relay_seq: i64,
+) {
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_base_coordinate_in_tx(
+                tx,
+                dohc_engine_collab::BaseCoordinateRecord {
+                    key,
+                    lineage_claim_id: &own_base.blob_sha(),
+                    origin_id: &own_base.origin_id,
+                    origin_seq: own_base.origin_seq,
+                    relay_seq: Some(relay_seq),
+                    now_ms: 450,
+                },
+            )?;
+            tx.execute(
+                "DELETE FROM ydoc_base_relay_candidates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(|error| {
+                dohc_engine_collab::CollabError::Storage(StorageError::persist_public(error))
+            })?;
+            Ok::<_, dohc_engine_collab::CollabError>(())
+        })
+        .expect("learn own base position");
+}
+
+fn settle_head(store: &mut EngineStore, key: &DocKey, path: &str) {
+    let doc = dohc_engine_collab::load_persisted(store, key)
+        .expect("load")
+        .expect("lineage")
+        .doc;
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_sync::project_and_write_in_tx(
+                tx,
+                key,
+                path,
+                &doc,
+                ContentKind::Plaintext,
+                "origin-local",
+                99,
+                400,
+                None,
+            )
+        })
+        .expect("settle");
+}
+
+/// Two devices open the same file before either has seen the other's copy,
+/// and each types into it. Both seed the same bytes, so both originate the
+/// same base: each base resumes on the other device, and both edits merge
+/// into one lineage. Nothing is set aside as a losing lineage, and a resumed
+/// base never rolls the file back.
+///
+/// Device A has not pushed its own base when B's arrives, so A's position
+/// comes from B's base and A's pending local position is dropped.
+///
+/// Mutation check: seed one device under another Yjs client and the bases
+/// differ, so one device's edit is dropped. Project the base on a resumed
+/// claim and a file reverts to the bare seed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_devices_that_seed_the_same_file_merge_into_one_lineage() {
+    const PATH: &str = "notes/shared.md";
+    const OBJECT: &str = "shared-object";
+    let (a_scratch, b_scratch) = (
+        ScratchDir::new().expect("scratch a"),
+        ScratchDir::new().expect("scratch b"),
+    );
+    let a = engine_db_path(&a_scratch).expect("db a");
+    let b = engine_db_path(&b_scratch).expect("db b");
+    for db in [&a, &b] {
+        enable_sync(db, WS_TWO_DEVICES);
+        seed_shared_file(db, OBJECT, PATH, "relayed-moment", "seed");
+    }
+    let key = open_and_type(&a, PATH, " from A").await;
+    assert_eq!(open_and_type(&b, PATH, " from B").await, key);
+
+    let (a_ops, b_ops) = (local_ydoc_ops(&a), local_ydoc_ops(&b));
+    assert!(a_ops[0].is_base() && b_ops[0].is_base());
+    assert_eq!(
+        a_ops[0].blob_sha(),
+        b_ops[0].blob_sha(),
+        "both devices originate the same base"
+    );
+    // Relay order: B's base, A's base, B's edit, A's edit. A pulls before it
+    // pushes, so A has not learned where its own base landed.
+    let from_a = relayed(&a, &a_ops, "device-a", &[2, 4]);
+    let from_b = relayed(&b, &b_ops, "device-b", &[1, 3]);
+
+    let mut a_store = EngineStore::open(&a, 9_113).expect("open a");
+    let mut b_store = EngineStore::open(&b, 9_114).expect("open b");
+    // Each device's edit reached its own file before the other's ops arrive.
+    settle_head(&mut a_store, &key, PATH);
+    settle_head(&mut b_store, &key, PATH);
+    assert_eq!(
+        base_position(&a_store, &key).2,
+        1,
+        "A's base awaits its position"
+    );
+
+    // A has the document closed: B's ops apply as they arrive.
+    deliver(&mut a_store, &from_b[..1], &NoLiveLeases);
+    assert_eq!(
+        moment_texts(&a_store, OBJECT).last().map(String::as_str),
+        Some("seed from A"),
+        "a base the lineage already holds changes nothing"
+    );
+    assert_eq!(
+        base_position(&a_store, &key),
+        (Some("device-b".to_owned()), Some(1), 0),
+        "B's base is where the lineage starts, and A's pending position is dropped"
+    );
+    deliver(&mut a_store, &from_b[1..], &NoLiveLeases);
+    // B pushed first, and its pull learns that before applying A's ops.
+    learn_own_base_position(&mut b_store, &key, &b_ops[0], 1);
+    // B has the document open: A's ops wait until B closes it.
+    deliver(&mut b_store, &from_a, &AlwaysLive);
+    assert_eq!(deferred_rows(&b_store, &key), 2);
+    drain_deferred_ydoc_for_key(
+        &mut b_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain B");
+    let (_, b_relay_seq, b_pending) = base_position(&b_store, &key);
+    assert_eq!(
+        (b_relay_seq, b_pending),
+        (Some(1), 0),
+        "both devices place the lineage's base at the same relay position"
+    );
+
+    let text = |store: &EngineStore| {
+        dohc_engine_collab::load_persisted(store, &key)
+            .expect("load")
+            .expect("lineage")
+            .doc
+            .plaintext_string()
+    };
+    let merged = text(&a_store);
+    assert!(
+        ["seed from A from B", "seed from B from A"].contains(&merged.as_str()),
+        "each edit appears once after the seed: {merged:?}"
+    );
+    assert_eq!(text(&b_store), merged, "both devices hold one document");
+    for store in [&a_store, &b_store] {
+        let texts = moment_texts(store, OBJECT);
+        assert_eq!(texts.last(), Some(&merged), "the file carries both edits");
+        assert_eq!(
+            texts.iter().filter(|text| text.as_str() == "seed").count(),
+            1,
+            "no moment rolls the file back to the bare seed: {texts:?}"
+        );
+        let set_aside: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM ydoc_recovery_decisions) \
+                          + (SELECT COUNT(*) FROM path_aliases WHERE path <> ?1)",
+                    [PATH],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count recovered copies");
+        assert_eq!(set_aside, 0, "no edit is set aside as a recovered copy");
+    }
+}
+
+/// A lineage seeded again from a later head gets a new claim, even when the
+/// text is the same. Here a conflict review archives the first lineage, and
+/// the file is then deleted and written again with the same text. The second
+/// lineage must not reuse the first claim: peers would merge the retired
+/// lineage's late edits into it, and archiving it would collide with the
+/// first archive.
+///
+/// Mutation check: derive the seed client from the text alone and both rounds
+/// claim the same base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lineage_seeded_again_from_the_same_text_gets_a_new_claim() {
+    const WS: &str = "ws-reseed-same-text";
+    const PATH: &str = "notes/reseeded.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+
+    let mut seeded = Vec::new();
+    for round in 0..2_i64 {
+        capture_seed(&handle, WS, PATH, 100 + round * 100).await;
+        let (key, client_id, seed) = open_with_seed(&handle, WS, PATH).await;
+        let claim = record_editor_update(&handle, &key, PATH, seed, None, true)
+            .await
+            .expect("a synced workspace claims the seeded base");
+        // A conflict review archives the lineage, then the file is deleted.
+        let mut store = EngineStore::open(&db, 9_130).expect("open store");
+        let state_vector = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load")
+            .expect("lineage")
+            .doc
+            .encode_state_vector();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_collab::archive_active_lineage_in_tx(
+                    tx,
+                    &key,
+                    &claim,
+                    &dohc_engine_storage::hex_sha256(&state_vector),
+                    None,
+                    150 + round * 100,
+                )
+            })
+            .expect("archive the lineage");
+        let candidates: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_base_relay_candidates WHERE workspace_id=?1",
+                    [WS],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count candidates");
+        assert_eq!(
+            candidates, 0,
+            "an archived lineage leaves no pending position"
+        );
+        drop(store);
+        handle
+            .versioned_text_delete(
+                DeleteTextFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: PATH.to_owned(),
+                    moment_id: format!("moment-delete-{round}"),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 160 + round * 100,
+                },
+                scratch.path().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("delete the file");
+        seeded.push((key, client_id, claim));
+    }
+    supervisor.close(&db).expect("close actor");
+
+    let [
+        (first_key, first_client, first_claim),
+        (second_key, second_client, second_claim),
+    ] = <[_; 2]>::try_from(seeded).expect("two rounds");
+    assert_eq!(
+        first_key, second_key,
+        "the recreated file is the same object"
+    );
+    assert_ne!(first_client, second_client);
+    assert_ne!(first_claim, second_claim);
+    let archived: i64 = EngineStore::open(&db, 9_131)
+        .expect("open store")
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(DISTINCT lineage_claim_id) FROM ydoc_inactive_lineages \
+                 WHERE workspace_id=?1",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("count archived lineages");
+    assert_eq!(archived, 2);
+}
+
+/// The file moved on this device before another device's copy of the same
+/// base arrived under the old path. The base resumes and records its relay
+/// position instead of waiting forever for the old path to free up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_base_this_device_holds_resumes_after_the_file_moved() {
+    const OLD: &str = "notes/before.md";
+    const NEW: &str = "notes/after.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS_TWO_DEVICES);
+    seed_shared_file(&db, "moved-object", OLD, "relayed-moment", "seed");
+    let key = open_and_type(&db, OLD, " typed").await;
+    let own_base = local_ydoc_ops(&db).remove(0);
+    assert!(own_base.is_base());
+
+    let mut store = EngineStore::open(&db, 9_132).expect("open store");
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WS_TWO_DEVICES.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: OLD.to_owned(),
+                to_path: NEW.to_owned(),
+                moment_id: "moment-rename".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 500,
+            },
+            &NoFaults,
+        )
+        .expect("rename");
+    // Another device seeded the same head, so its base is this device's base,
+    // sent under the path it had then.
+    let other_copy = relayed(&db, std::slice::from_ref(&own_base), "device-b", &[1]);
+    assert_eq!(other_copy[0].0.payload["path"], OLD);
+    deliver(&mut store, &other_copy, &NoLiveLeases);
+    assert_eq!(
+        base_position(&store, &key),
+        (Some("device-b".to_owned()), Some(1), 0)
     );
 }
 

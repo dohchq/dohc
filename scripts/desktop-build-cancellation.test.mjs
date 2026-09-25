@@ -26,9 +26,9 @@ async function runLauncher(source, args, env, outcome) {
   let error;
   let signaled = false;
   const timer = setTimeout(() => {
-    error = new Error("Desktop Cargo fixture timed out after 15000ms");
+    error = new Error("Desktop Cargo fixture timed out after 20000ms");
     launcher.kill("SIGKILL");
-  }, 15_000);
+  }, 20_000);
   launcher.stdout.on("data", (chunk) => {
     stdout += String(chunk);
     if (process.platform !== "win32" && outcome !== "success" && !signaled && /(?:^|\n)fixture-cargo-ready\r?\n/.test(stdout)) {

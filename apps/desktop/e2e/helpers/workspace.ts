@@ -294,8 +294,8 @@ export async function openWorkspaceFromFirstRun(
   let surface: "shell" | "first-run";
   try {
     surface = await Promise.race([
-      shell.waitFor({ state: "attached", timeout: 10_000 }).then(() => "shell" as const),
-      openFolder.waitFor({ state: "visible", timeout: 10_000 }).then(() => "first-run" as const),
+      shell.waitFor({ state: "attached", timeout: 20_000 }).then(() => "shell" as const),
+      openFolder.waitFor({ state: "visible", timeout: 20_000 }).then(() => "first-run" as const),
     ]);
   } catch (cause) {
     throw new Error(

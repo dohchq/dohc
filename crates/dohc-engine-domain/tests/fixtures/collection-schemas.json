@@ -554,6 +554,78 @@
       }
     },
     {
+      "name": "degraded-colon-relation-target-1-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"C:/projects\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-colon-relation-target-2-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"C:projects\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-colon-relation-target-3-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning/projects:stream\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
       "name": "degraded-c1-relation-target-salvages-siblings",
       "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning\u0085projects\"\n    many: false\n",
       "expected": {

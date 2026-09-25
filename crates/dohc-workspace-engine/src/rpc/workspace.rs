@@ -2244,6 +2244,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
+                    bootstrap_complete: true,
                     cursor: 7,
                     replication_epoch: "epoch".to_owned(),
                     stream_identity: "stream".to_owned(),

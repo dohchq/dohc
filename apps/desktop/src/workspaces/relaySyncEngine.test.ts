@@ -73,8 +73,8 @@ function capture(): WorkspaceEngineCapture {
 function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
-  syncSharedChannels?: () => Promise<void>;
-  afterSuccessfulPull?: () => Promise<void>;
+  syncSharedChannels?: () => Promise<boolean>;
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
   operations?: RelaySyncOperations;
 }) {
   return createRelaySyncEngine({
@@ -218,12 +218,86 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  it("runs the pull-start hook before each pull request, and its end whatever the pull does", async () => {
+    const calls: string[] = [];
+    const pullStarting = vi.fn(() => {
+      calls.push("starting");
+      return () => calls.push("ended");
+    });
+    pullMock.mockImplementationOnce(async () => {
+      calls.push("pull");
+      throw new Error("relay unavailable");
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      pullStarting,
+      operations: mockOperations(),
+      initialBackoffMs: 100,
+    });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    expect(calls).toEqual(["starting", "pull", "ended"]);
+    // The retry's push fails, so it never sends a pull and starts none.
+    pushMock.mockRejectedValueOnce(new Error("offline"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullStarting).toHaveBeenCalledOnce();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("sends no pull request when the pull-start hook refuses, and still pushes", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      pullStarting: () => {
+        throw new Error("could not save the pull mark");
+      },
+      operations: mockOperations(),
+    });
+
+    await expect(sync.start()).rejects.toThrow("could not save the pull mark");
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(pullMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("relay sync failed"),
+      expect.objectContaining({ message: "could not save the pull mark" }),
+    );
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("tells post-pull work when a pass succeeds after a failed one", async () => {
+    pullMock.mockRejectedValueOnce(new Error("relay unavailable"));
+    const afterSuccessfulPull = vi.fn(async (_pass: { recovered: boolean }) => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    await vi.advanceTimersByTimeAsync(500);
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
   it("refreshes shared channels on every pass and contains their failures (MU-C4)", async () => {
     const cap = capture();
     // The callback rejecting must not fail the workspace pass: shared-channel
     // refresh is best-effort (a revoked share can't wedge file sync).
     const syncSharedChannels = vi
-      .fn<() => Promise<void>>()
+      .fn<() => Promise<boolean>>()
       .mockRejectedValue(new Error("shared channel relay down"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sync = engine({ capture: cap, syncSharedChannels });
@@ -536,6 +610,114 @@ describe("relaySyncEngine", () => {
     expect(recoverMock).toHaveBeenCalledTimes(1);
     expect(pullMock).toHaveBeenCalledTimes(2);
     expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("queuePull runs a pass without recording a change and yields to a running, queued, or backing-off pass", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(sync.snapshot().pendingChangeCount).toBe(0);
+
+    // A queued sync is about to pull, so the request adds no pass.
+    sync.queueSync();
+    sync.queuePull();
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+
+    // A running pass pulls, so the request adds no pass either.
+    let release!: () => void;
+    pullMock.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return pullResult();
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    sync.queuePull();
+    release();
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+
+    // A failed pass backs off; the request does not shorten the wait.
+    pullMock.mockRejectedValueOnce(new Error("network"));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    await vi.runAllTimersAsync();
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(5);
+    await sync.stop();
+    errorSpy.mockRestore();
+  });
+
+  it("queuePull pulls within one debounce interval of each poll while local writes keep restarting the debounce", async () => {
+    const cap = capture();
+    const sync = engine({ capture: cap });
+    sync.queueSync();
+    for (let poll = 1; poll <= 3; poll += 1) {
+      sync.queuePull();
+      // A write every 60 ms keeps the 100 ms debounce from ever firing.
+      for (let write = 0; write < 5; write += 1) {
+        sync.queueSync();
+        await vi.advanceTimersByTimeAsync(60);
+      }
+      expect(cap.runRelaySync).toHaveBeenCalledTimes(poll);
+    }
+    // The writes stop, and the debounced pass pushes the rest.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    expect(sync.snapshot().pendingChangeCount).toBe(0);
+    await sync.stop();
+  });
+
+  it("queuePull announces its pass only when it applied ops or changed what the snapshot shows", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const syncSharedChannels = vi.fn<() => Promise<boolean>>(async () => false);
+    const sync = engine({ capture: cap, onChange, syncSharedChannels });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1, applied: 1 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    // The shared-channel pass told the renderer itself, and the renderer read
+    // "Syncing". The end is announced, so the status does not stay there.
+    onChange.mockClear();
+    syncSharedChannels.mockImplementationOnce(async () => {
+      expect(sync.snapshot().syncing).toBe(true);
+      return true;
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(sync.snapshot().syncing).toBe(false);
+
+    // A write mid-pass announced `syncing`, so the end is announced too.
+    onChange.mockClear();
+    let release!: () => void;
+    pullMock.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return pullResult();
+    });
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    sync.queueSync();
+    expect(onChange).toHaveBeenCalledOnce();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().syncing).toBe(false);
+    await sync.stop();
   });
 
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {

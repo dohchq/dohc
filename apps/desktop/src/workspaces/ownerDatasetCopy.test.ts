@@ -57,7 +57,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     denied=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("revoked");
     offline=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow(/unavailable/);
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
-}, 15_000);
+});
 
 it.each(["delete", "status", "closing"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
   const f=fixture(), directory=await mkdtemp(join(tmpdir(),"desktop-deleted-copy-"));

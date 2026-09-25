@@ -78,6 +78,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   };
 
   const api = {
+    platform: "linux" as const,
     async openEngineYDocSession(payload: { sessionId: string }) {
       openCount += 1;
       openedSessionId = payload.sessionId;

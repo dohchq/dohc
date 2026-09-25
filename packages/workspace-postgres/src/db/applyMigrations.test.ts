@@ -32,19 +32,20 @@ const RETIRED_TABLES = [
 // Runs against the live dev Postgres (same requirement as the workspace-auth
 // betterAuth conformance test: `pnpm dev:postgres` first). When no Postgres is
 // reachable the whole suite skips rather than failing, so unit CI without a
-// database stays green.
-async function postgresReachable(): Promise<boolean> {
-  const probe = new pg.Client({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 2000 });
-  try {
-    await probe.connect();
-    await probe.end();
-    return true;
-  } catch {
-    return false;
+// database stays green. DOHC_REQUIRE_POSTGRES turns that skip into a failure.
+// A refused connection fails at once; the timeout covers only a slow answer,
+// and under the full JS gate a 2 s bound timed out against a healthy database.
+const probe = new pg.Client({ connectionString: POSTGRES_URL, connectionTimeoutMillis: 30_000 });
+let pgAvailable = false;
+try {
+  await probe.connect();
+  await probe.end();
+  pgAvailable = true;
+} catch (error) {
+  if (process.env.DOHC_REQUIRE_POSTGRES === "1") {
+    throw new Error(`DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}.`, { cause: error });
   }
 }
-
-const pgAvailable = await postgresReachable();
 
 describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres schema", () => {
   let client: pg.Client;

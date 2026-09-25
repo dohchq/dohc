@@ -4,15 +4,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
-// These tests start real processes; process deadlines remain enforced independently.
-vi.setConfig({testTimeout:30_000});
 const initial={revision:0,digest:hash("initial")};
 const scope={workspaceId:"workspace",datasetId:"dataset",hostEpoch:"epoch-1",approvedRevisionHash:hash("approved")};
 const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);";
@@ -302,7 +300,7 @@ describe("persistent dataset worker",()=>{
       await worker.snapshot(checkpointPath);
       await expect(open({checkpointPath,databaseBytes:16*1024*1024})).rejects.toMatchObject({code:"invalid_checkpoint"});
     });
-  },15_000);
+  });
 
   it("migrates a disposable copy and opens its marker-free checkpoint under a new approved revision",async()=>{
     await fixture(async({root,open})=>{
@@ -394,7 +392,7 @@ describe("persistent dataset worker",()=>{
       }finally{live.close();}
       await expect(readFile(join(root,"timeout.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
     });
-  },15_000);
+  });
 
   it("kills native SQL at its deadline and requires journal recovery instead of silently restarting",async()=>{
     await fixture(async({open})=>{

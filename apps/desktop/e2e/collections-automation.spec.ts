@@ -61,9 +61,9 @@ const CHAIN_A_ID = "rec_chainae2e34567abcdefgh2345";
 const CHAIN_B_ID = "rec_chainbe2e34567abcdefgh2345";
 
 // The engine id the fixture's automations subscribe and write under:
-// "<plugin name>/<automation id>".
-const TRIAGE = "hello-plugin/triage";
-const PING = "hello-plugin/ping";
+// "plugin:<plugin name>/<automation id>".
+const TRIAGE = "plugin:hello-plugin/triage";
+const PING = "plugin:hello-plugin/ping";
 
 const TASKS_SCHEMA_YAML = [
   "name: tasks",
@@ -291,14 +291,14 @@ test("a record change runs its automation on the origin device exactly once, loo
   }
 
   // A's claim table, read through the one claim-consuming RPC: null means
-  // no pending claim exists on A for any key. Safe on A — nothing ever
+  // no pending plugin claim exists on A for any key. Safe on A — nothing ever
   // subscribes automations on A's engine, so this cannot steal work.
   async function claimPendingOnA(): Promise<unknown> {
     return await deviceA!.sessions.run(deviceA!.workspace, async (binding) => {
       const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
         workspaceId,
       });
-      return await adapter.claimNextAutomation();
+      return await adapter.claimNextAutomation({ automationIdPrefix: "plugin:" });
     });
   }
 
@@ -616,13 +616,13 @@ test("a record change runs its automation on the origin device exactly once, loo
       {
         field: "Step",
         next: { value: "step-2" },
-        authorOriginId: "hello-plugin/pong",
+        authorOriginId: "plugin:hello-plugin/pong",
         depth: 2,
       },
       {
         field: "Step",
         next: { value: "step-4" },
-        authorOriginId: "hello-plugin/pong",
+        authorOriginId: "plugin:hello-plugin/pong",
         depth: 4,
       },
     ]);
