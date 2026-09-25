@@ -220,6 +220,10 @@ struct YdocOpenResult {
     head: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_content: Option<String>,
+    /// The Yjs client the client must seed `seed_content` under, so every
+    /// device seeding the same head originates the same base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_client_id: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
 }
@@ -949,6 +953,7 @@ impl EngineService {
                 }
                 state.seed_content
             },
+            seed_client_id: state.seed_client_id,
             artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
                 state
                     .artifact_assets

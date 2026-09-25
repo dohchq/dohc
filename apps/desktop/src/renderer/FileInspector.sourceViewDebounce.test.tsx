@@ -128,11 +128,7 @@ async function openSourceView(doc: Y.Doc) {
   engineDocState = engineState(doc);
   const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
   fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
-  const sourceView = await screen.findByTestId(
-    "markdown-source-view",
-    {},
-    { timeout: 5_000 },
-  );
+  const sourceView = await screen.findByTestId("markdown-source-view");
   await waitFor(() => expect(sourceView.textContent).toContain("Initial paragraph."));
   return view;
 }

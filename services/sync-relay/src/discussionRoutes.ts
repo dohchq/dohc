@@ -42,7 +42,7 @@ type LookupUserDisplayName = (
   userId: string,
 ) => Promise<string | null> | string | null;
 
-async function discussionDisplayName(
+export async function accountDisplayName(
   lookupUserDisplayName:
     | LookupUserDisplayName
     | undefined,
@@ -560,7 +560,7 @@ export function createDiscussionRoutes(
         "read",
         input.workspaceId,
       );
-      const displayName = await discussionDisplayName(
+      const displayName = await accountDisplayName(
         lookupUserDisplayName,
         actor.userId,
       );

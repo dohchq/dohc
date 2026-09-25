@@ -1126,7 +1126,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" | "dependents_changed" => RelayError::Conflict,
+        "conflict" | "dependents_changed" | "notice_list_full" => RelayError::Conflict,
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,
@@ -1135,10 +1135,13 @@ fn expected_relay_error(code: &str) -> RelayError {
         "internal_error" => RelayError::ServerInternal,
         "invalid_channel" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "link_discussion_blocked" | "link_discussion_paused" => RelayError::Forbidden,
+        "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
+            RelayError::Forbidden
+        }
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,
         "not_found" => RelayError::WorkspaceUnavailable,
+        "notice_rate_limited" => RelayError::HttpStatus(429),
         "payload_too_large" => RelayError::PayloadTooLarge,
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,

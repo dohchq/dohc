@@ -266,7 +266,7 @@ test("an agent's MCP field set and record create land live with agent attributio
     expect(statusChange).toBeDefined();
     expect(statusChange?.authorOriginId).toBe("dohc-mcp");
 
-    // --- The agent creates a record through MCP: the engine mints its id,
+    // --- The agent creates a record through MCP: it gets a record id,
     // the open board shows the new card live, and a query returns both.
     const created = await agentCli(temp, "collectionCreateRecord", {
       collectionPath: "tasks",

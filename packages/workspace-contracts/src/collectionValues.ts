@@ -86,7 +86,7 @@ function rustF64Text(value: number): string {
   return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
-function yamlKeyText(value: unknown): string | null {
+export function yamlKeyText(value: unknown): string | null {
   if (typeof value === "number") return rustF64Text(value);
   if (
     typeof value === "string" ||
@@ -198,12 +198,16 @@ function isViewKind(value: string): value is ViewKind {
   return VIEW_KINDS.has(value as ViewKind);
 }
 
-function isWorkspaceRelativeCollectionPath(value: string): boolean {
+// A relative path with forward slashes and no empty, ".", or ".." segment, so
+// it cannot leave the folder it is resolved against. A colon is refused on
+// every host: on Windows, "C:x" names a drive and "a.js:x" a hidden stream.
+export function isNormalizedRelativePath(value: string): boolean {
   if (
     value.length === 0 ||
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.includes("\\") ||
+    value.includes(":") ||
     /[\u0000-\u001f\u007f-\u009f]/u.test(value)
   ) {
     return false;
@@ -326,7 +330,7 @@ function parseFields(
       } else {
         many = field.many;
       }
-      if (collection !== null && !isWorkspaceRelativeCollectionPath(collection)) {
+      if (collection !== null && !isNormalizedRelativePath(collection)) {
         reason(reasons, "invalid-relation-target", `${path}/collection`);
       } else if (collection !== null && many !== null) {
         fields.push({ name, type: "relation", collection, many });

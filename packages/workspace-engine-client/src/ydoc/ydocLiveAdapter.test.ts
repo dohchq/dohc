@@ -341,6 +341,101 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   await expect(owner.applyRemoteUpdate(new Uint8Array([0,0]))).rejects.toThrow("closed");
 });
 
+describe("seeding an absent lineage", () => {
+  const recordedUpdates = (engine: YdocLoopbackEngine, seed: boolean) =>
+    engine.requests.flatMap((request) => {
+      if (request.method !== YDOC_METHOD.recordUpdate) return [];
+      const params = request.params as { seed?: boolean; updateBase64: string };
+      return (params.seed === true) === seed
+        ? [new Uint8Array(Buffer.from(params.updateBase64, "base64"))]
+        : [];
+    });
+  const clientsOf = (update: Uint8Array) =>
+    new Set(Y.decodeUpdate(update).structs.map((struct) => struct.id.client));
+
+  // The seed one device sends when it first opens `content` at `headMomentId`.
+  async function seedFor(
+    contentKind: "plaintext" | "richdoc",
+    content: string,
+    headMomentId: string,
+  ): Promise<Uint8Array> {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: PATH, content, contentKind, headMomentId });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind });
+    await session.close({ settle: false });
+    adapter.dispose();
+    const seeds = recordedUpdates(engine, true);
+    expect(seeds).toHaveLength(1);
+    return seeds[0]!;
+  }
+
+  it.each(["plaintext", "richdoc"] as const)(
+    "sends the same %s seed from every device that opens the same head",
+    async (contentKind) => {
+      const content = "# Shared\n\nStarting together.\n";
+      const first = await seedFor(contentKind, content, "replicated-moment");
+      expect(await seedFor(contentKind, content, "replicated-moment")).toEqual(first);
+      // A later head with the same text, as after a delete and recreate, seeds
+      // under another client, so its lineage never reuses the first claim.
+      const later = await seedFor(contentKind, content, "later-moment");
+      expect(later).not.toEqual(first);
+      expect(clientsOf(later)).not.toEqual(clientsOf(first));
+    },
+  );
+
+  it("authors every edit after the seed under another client", async () => {
+    const engine = seedPlaintextEngine("seed");
+    const adapter = new YdocLiveAdapter(engine);
+    const open = () => adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" });
+    const session = await open();
+    // A synced workspace keeps the lineage when the document closes.
+    engine.markSessionReplicated(session.sessionId);
+    const [seedClient] = clientsOf(recordedUpdates(engine, true)[0]!);
+    // The renderer edits its own doc and forwards each update, undo included.
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, session.initialUpdate);
+    const forwarded: Promise<unknown>[] = [];
+    editor.on("update", (update: Uint8Array, origin: unknown) => {
+      if (origin !== "session") forwarded.push(session.applyLocalUpdate(update));
+    });
+    const undo = new Y.UndoManager(editor.getText("plainText"), { captureTimeout: 0 });
+    editor.getText("plainText").insert(4, " typed");
+    undo.undo();
+    await Promise.all(forwarded);
+    await session.close();
+    const reopened = await open();
+    await reopened.applyLocalTextEdit({ root: "plainText", index: 4, insert: " again" });
+    await reopened.close();
+    adapter.dispose();
+
+    const edits = recordedUpdates(engine, false);
+    expect(edits.length).toBeGreaterThanOrEqual(3);
+    for (const edit of edits) expect(clientsOf(edit)).not.toContain(seedClient);
+    expect(recordedUpdates(engine, true)).toHaveLength(1);
+  });
+
+  it("refuses seed content that comes without a seed client", async () => {
+    const engine = seedPlaintextEngine("seed");
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.open) return response;
+        const { seedClientId: _omitted, ...result } = response.result as Record<string, unknown>;
+        return { id: response.id, result: result as JsonValue };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    await expect(
+      adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" }),
+    ).rejects.toThrow("without a valid seed client id");
+    expect(recordedUpdates(engine, true)).toEqual([]);
+    adapter.dispose();
+  });
+});
+
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
     const engine = new YdocLoopbackEngine();

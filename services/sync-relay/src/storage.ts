@@ -96,6 +96,7 @@ import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
+import * as noticeStorage from "./storage/notices";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -516,6 +517,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+  }
+
+  postNotice(input: noticeStorage.PostNoticeInput): void {
+    noticeStorage.postNotice(this, input);
+  }
+
+  readNoticeChanges(input: noticeStorage.ReadNoticeChangesInput) {
+    return noticeStorage.readNoticeChanges(this, input);
+  }
+
+  markNotices(input: noticeStorage.MarkNoticesInput): void {
+    noticeStorage.markNotices(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {

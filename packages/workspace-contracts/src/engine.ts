@@ -99,8 +99,10 @@ export interface ActorNeutralWriteMetadata {
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
 // stays actor-neutral). Tracked agent runs stamp the agent variant. Relay
 // collection creates stamp the public variant using a grant-scoped public
-// principal mapping, never an internal principal or account ID. Ordinary
-// edits, reconciliation, and external agent CLIs remain actor-neutral.
+// principal mapping, never an internal principal or account ID. A named
+// recipient's direct write to a Collection's own files stamps the named
+// variant with the opaque relay user id, never an email. Ordinary edits,
+// reconciliation, and external agent CLIs remain actor-neutral.
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
@@ -114,7 +116,14 @@ interface PublicMomentAuthor {
   grantId: string;
 }
 
-export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor;
+interface NamedMomentAuthor {
+  kind: "named";
+  userId: string;
+  grantId: string;
+  grantGeneration: number;
+}
+
+export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor | NamedMomentAuthor;
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {

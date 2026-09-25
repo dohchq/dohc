@@ -320,8 +320,9 @@ function declareDohcRootSchema(
   }
 }
 
-function createPlaintextSeedDoc(content: string): Y.Doc {
+function createPlaintextSeedDoc(content: string, clientID: number): Y.Doc {
   const doc = new Y.Doc();
+  doc.clientID = clientID;
   declareDohcRootSchema(doc);
   if (content.length > 0) doc.getText("plainText").insert(0, content);
   return doc;
@@ -1435,10 +1436,22 @@ export class YdocLiveAdapter {
         if (!isWellFormedUtf16(result.seedContent)) {
           throw new IllFormedUtf16EditError();
         }
+        const clientID = result.seedClientId;
+        if (
+          clientID === undefined ||
+          !Number.isInteger(clientID) ||
+          clientID < 1 ||
+          clientID > 0xffff_ffff
+        ) {
+          throw new YdocAdapterError(
+            "response-mismatch",
+            "The engine returned seed content without a valid seed client id.",
+          );
+        }
         const seedDoc =
           result.contentKind === "plaintext"
-            ? createPlaintextSeedDoc(result.seedContent)
-            : markdownToYDoc(result.seedContent);
+            ? createPlaintextSeedDoc(result.seedContent, clientID)
+            : markdownToYDoc(result.seedContent, { clientID });
         try {
           if (result.contentKind === "richdoc") {
             let projection: string | undefined;

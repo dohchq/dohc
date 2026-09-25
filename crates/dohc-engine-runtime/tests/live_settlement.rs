@@ -569,6 +569,7 @@ impl Fixture {
                 &mut store,
                 "workspace",
                 &dohc_engine_sync::RelayCursor {
+                    bootstrap_complete: true,
                     cursor: 0,
                     replication_epoch: "epoch".into(),
                     stream_identity: "stream".into(),
@@ -1197,6 +1198,7 @@ async fn resolve_imported_history_successor(
         &mut store,
         "workspace",
         &dohc_engine_sync::RelayCursor {
+            bootstrap_complete: true,
             cursor: 500,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),

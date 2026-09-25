@@ -78,10 +78,10 @@ pub use scene_lifecycle::{
     scene_asset_delete_moment_id, SceneAssetDeleteAuthority,
 };
 pub use ydoc::{
-    fresh_successor_base, merge_updates, ContentKind, OffsetMode, Projection, SuccessorBase,
-    SuccessorIdentity, SuccessorIdentityInput, Ydoc, LINEAGE_EPOCH_META_KEY, ROOT_BODY,
-    ROOT_FRONTMATTER, ROOT_META, ROOT_PLAINTEXT, ROOT_SCENE_APP_STATE, ROOT_SCENE_ASSETS,
-    ROOT_SCENE_REVISIONS,
+    fresh_successor_base, merge_updates, seed_client_id, ContentKind, OffsetMode, Projection,
+    SuccessorBase, SuccessorIdentity, SuccessorIdentityInput, Ydoc, LINEAGE_EPOCH_META_KEY,
+    ROOT_BODY, ROOT_FRONTMATTER, ROOT_META, ROOT_PLAINTEXT, ROOT_SCENE_APP_STATE,
+    ROOT_SCENE_ASSETS, ROOT_SCENE_REVISIONS,
 };
 
 // The content-addressing primitive is shared with the storage layer so a

@@ -2405,7 +2405,7 @@ describe("workspaceEngineCapture capture-failure notice", () => {
     await activity.stopAll();
     // Not-open workspaces report a clean status too.
     expect(activity.getStatus("never-opened").historyCaptureFailed).toBeUndefined();
-  }, 15_000);
+  });
 });
 
 describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
@@ -2442,7 +2442,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
         { path: "a.md" },
       ]),
     ).toThrow(/not open/i);
-  }, 15_000);
+  });
 });
 
 describe("createDefaultDiskWriter symlink containment", () => {

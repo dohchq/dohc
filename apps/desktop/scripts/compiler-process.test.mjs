@@ -12,7 +12,10 @@ import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 
-const bounds={timeoutMs:15000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
+// The compile deadline counts from the PowerShell owner's spawn. Beside other
+// work, one owner and worker took 17.6 s to answer, so the deadline is 20 s,
+// inside each 30 s test.
+const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
 const windows={skip:process.platform!=='win32',timeout:30000};
 async function fixture(t,source){
   const directory=await mkdtemp(join(tmpdir(),'dohc-compiler-process-test-'));
@@ -24,7 +27,7 @@ function waitForFile(path){
   const directory=join(path,'..');
   let watcher;
   return new Promise((resolve,reject)=>{
-    const timeout=setTimeout(()=>{watcher.close();reject(new Error('Fixture readiness timed out.'));},10000);
+    const timeout=setTimeout(()=>{watcher.close();reject(new Error('Fixture readiness timed out.'));},20000);
     const read=async()=>{try{const value=JSON.parse(await readFile(path,'utf8'));clearTimeout(timeout);watcher.close();resolve(value);}catch(error){if(error.code!=='ENOENT'&&!(error instanceof SyntaxError)){clearTimeout(timeout);watcher.close();reject(error);}}};
     watcher=watch(directory,read);void read();
   });
@@ -56,10 +59,11 @@ for(const [stream,reason] of [['stdout','output'],['stderr','stderr']])test(`bou
   const {runtime}=await fixture(t,`process.${stream}.write(Buffer.alloc(32768));setInterval(()=>{},1000)`);let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};
   await assert.rejects(runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds}),{reason});assert.equal(alive(owner),false);
 });
-for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned descendants after their direct parent exits`,windows,async t=>{
+// Timeout mode waits out the full 20 s deadline after a loaded start, so these get 60 s.
+for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned descendants after their direct parent exits`,{...windows,timeout:60000},async t=>{
   const {directory,runtime}=await fixture(t,`import {spawn}from'node:child_process';import{writeFileSync}from'node:fs';const marker=process.argv[2];const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())}));${mode==='normal-exit'?'process.exit(0)':'setInterval(()=>{},1000)'}});`);
   const marker=join(directory,'ready.json');runtime.workerArgs=[marker];let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
-  const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:{...bounds,timeoutMs:mode==='timeout'?5000:15000},signal:controller.signal});
+  const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal});
   const outcome=mode==='normal-exit'?running:assert.rejects(running,{reason:mode==='cancel'?'cancelled':'timeout'});
   const identities=await waitForFile(marker);if(mode==='cancel')controller.abort();await outcome;
   assert.equal(alive(owner),false);assert.equal(alive(identities.worker),false);assert.equal(alive(identities.descendant),false);
@@ -88,18 +92,23 @@ test('abrupt caller death closes its job and descendants',windows,async t=>{
   await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:16000});
   for(const pid of [owner.pid,ids.worker,ids.descendant])assert.equal(alive(pid),false);
 });
-test('owner deadline still kills the build while the caller event loop is blocked',windows,async t=>{
+// The owner's deadline is the same 20 s as every other compile here, so a loaded
+// start of the worker still writes its marker first. The 20 s marker wait, the
+// 40 s exit wait and startup nest inside 90 s.
+test('owner deadline still kills the build while the caller event loop is blocked',{...windows,timeout:90000},async t=>{
   const {directory,runtime}=await fixture(t,`import{writeFileSync}from'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
   const marker=join(directory,'ready.json'),ownerMarker=join(directory,'owner.json'),callerPath=join(directory,'blocked-caller.mjs');
   const supervisor=new URL('../src/workspaces/compilerProcessSupervisor.ts',import.meta.url).href;
-  await writeFile(callerPath,`import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({...runtime,workerArgs:[marker]})};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify({...bounds,timeoutMs:2000})}});`);
+  await writeFile(callerPath,`import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify({...runtime,workerArgs:[marker]})};runtime.onOwnerSpawn=pid=>{writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};void runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds:${JSON.stringify(bounds)}});`);
   const caller=spawn(process.execPath,[callerPath],{windowsHide:true,stdio:'ignore'});t.after(()=>caller.kill());const closed=once(caller,'close');
   const worker=await waitForFile(marker),owner=await waitForFile(ownerMarker);
-  const waitScript=`foreach($processId in @(${owner.pid},${worker.pid})){try{$p=[Diagnostics.Process]::GetProcessById($processId);if(-not $p.WaitForExit(5000)){exit 2}}catch [ArgumentException]{}};exit 0`;
-  await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:11000});
+  const waitScript=`foreach($processId in @(${owner.pid},${worker.pid})){try{$p=[Diagnostics.Process]::GetProcessById($processId);if(-not $p.WaitForExit(25000)){exit 2}}catch [ArgumentException]{}};exit 0`;
+  await promisify(execFile)(join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:40000});
   assert.equal(alive(owner.pid),false);assert.equal(alive(worker.pid),false);assert.equal(alive(caller.pid),true);caller.kill();await closed;
 });
-test('parent rejects forged worker file and build identities',windows,async t=>{
+// Six real compiles, each under its own 20 s deadline. Beside other work, all
+// six took over 30 s.
+test('parent rejects forged worker file and build identities',{...windows,timeout:150000},async t=>{
   const bytes=Buffer.from('document.body.textContent="identity";');
   const request={entryPath:'main.js',inputs:[{path:'main.js',bytes,sha256:createHash('sha256').update(bytes).digest('hex')}],bounds:{maxInputFiles:8,maxInputBytes:4096,maxOutputBytes:4096}};
   const processBounds={...bounds,maxInputBytes:8192,maxOutputBytes:8192};

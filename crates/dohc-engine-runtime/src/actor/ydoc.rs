@@ -57,6 +57,9 @@ pub struct YdocOpenState {
     pub lineage_originated_here: bool,
     pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
+    /// The Yjs client the seed of `seed_content` must use. Present exactly
+    /// when `seed_content` is; see [`dohc_engine_collab::seed_client_id`].
+    pub seed_client_id: Option<u32>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
     /// Record facts the open's deferred drain committed, in drain order. The
@@ -1672,6 +1675,17 @@ pub(super) fn ydoc_open_state_on_store(
         Vec::new()
     };
     let lineage_originated_here = lineage_originated_here_on_store(store, &key)?;
+    let seed = (content_kind != ContentKind::Scene && !lineage_existing)
+        .then_some(head.as_ref())
+        .flatten();
+    let seed_client_id = seed.map(|snapshot| {
+        dohc_engine_collab::seed_client_id(
+            &key,
+            content_kind,
+            &snapshot.latest_moment_id,
+            &snapshot.blob_sha256,
+        )
+    });
     Ok(YdocOpenState {
         owner_seed_source: head.as_ref().map(|snapshot| {
             dohc_engine_collab::owner_base_source::OwnerSeedSource {
@@ -1688,9 +1702,8 @@ pub(super) fn ydoc_open_state_on_store(
         lineage_claim_id,
         lineage_originated_here,
         restore_generation,
-        seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
-            .then(|| head.map(|snapshot| snapshot.text))
-            .flatten(),
+        seed_content: seed_client_id.and(head).map(|snapshot| snapshot.text),
+        seed_client_id,
         artifact_assets,
         seed_materialization_jobs,
         record_facts,

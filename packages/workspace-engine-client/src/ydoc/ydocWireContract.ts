@@ -136,6 +136,10 @@ const OpenResultSchema = mutableStruct({
   lineage: Schema.Literals(["existing", "absent"]),
   artifactAssets: Schema.optionalKey(Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema))),
   seedContent: Schema.optionalKey(Schema.String),
+  // The Yjs client the seed of seedContent is built under. The engine derives
+  // it from the head it seeds, so every device seeding that head sends the
+  // same bytes and originates the same lineage.
+  seedClientId: Schema.optionalKey(Schema.Int),
   lineageClaimId: Schema.NullOr(Schema.String),
   // Whether this device claimed the lineage from its own unclaimed history.
   lineageOriginatedHere: Schema.Boolean,

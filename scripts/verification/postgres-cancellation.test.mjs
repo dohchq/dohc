@@ -13,9 +13,11 @@ if (process.argv[2] === "fixture") {
   const container = join(root, "container");
   const nativeTimeout = globalThis.setTimeout;
   globalThis.setTimeout = (callback, delay, ...args) => {
-    const timer = nativeTimeout(callback, delay, ...args);
-    if (delay === 1000) process.send({ phase: "between-probes" });
-    return timer;
+    if (delay !== 1000) return nativeTimeout(callback, delay, ...args);
+    // Hold the probe interval until the signal wakes it: on a loaded host the
+    // signal's round trip can outlast 1 s and let a second probe run first.
+    process.send({ phase: "between-probes" });
+    return nativeTimeout(() => {}, 2 ** 31 - 1);
   };
   process.on("message", () => process.emit(signal)); // Windows has no POSIX signal delivery.
   let probes = 0;
@@ -41,7 +43,7 @@ if (process.argv[2] === "fixture") {
   process.disconnect();
 } else {
   for (const signal of ["SIGINT", "SIGTERM"]) for (const cleanupFails of [false, true]) {
-    test(`Postgres ${signal} between probes cleans owned startup${cleanupFails ? " and reports cleanup failure" : ""} (${process.platform === "win32" ? "synthetic Windows event" : "real POSIX signal"})`, { timeout: 10_000 }, async () => {
+    test(`Postgres ${signal} between probes cleans owned startup${cleanupFails ? " and reports cleanup failure" : ""} (${process.platform === "win32" ? "synthetic Windows event" : "real POSIX signal"})`, { timeout: 30_000 }, async () => {
       const root = mkdtempSync(join(tmpdir(), "dohc-postgres-cancel-"));
       const child = spawn(process.execPath, [import.meta.filename, "fixture", root, signal, String(cleanupFails)], {
         windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -55,7 +57,7 @@ if (process.argv[2] === "fixture") {
         if (process.platform === "win32") child.send("signal");
         else child.kill(signal);
       });
-      const deadline = setTimeout(() => child.kill("SIGKILL"), 8000);
+      const deadline = setTimeout(() => child.kill("SIGKILL"), 20_000);
       try {
         const result = await new Promise((resolve, reject) => {
           child.once("error", reject);

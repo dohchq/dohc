@@ -1,15 +1,9 @@
-import type { WatcherEvent } from "@dohc/workspace-core";
-import { join } from "node:path";
 import {
-  AddOfferedPluginPayload,
-  AddOfferedPluginResult,
   GetPluginSettingsPayload,
   InvokePluginCommandPayload,
   InvokePluginCommandResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
-  ListOfferedPluginsPayload,
-  ListOfferedPluginsResult,
   ListPluginsPayload,
   ListPluginsResult,
   OpenPluginPanelPayload,
@@ -33,32 +27,17 @@ import {
   StopPluginWebAppPayload,
   UninstallPluginPayload,
 } from "./bridgeContract";
-import {
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
-  CHANNELS,
-} from "./channels";
+import { CHANNELS } from "./channels";
 import { invokeRegisteredPluginCommand } from "../plugins/pluginCommandInvocation";
 import type { PluginHostCommandAuthority } from "../plugins/pluginHostOwnership";
 import { ensurePluginStarted } from "../plugins/pluginHostStart";
-import {
-  PluginPipeline,
-  type PluginPipelineUninstallResult,
-} from "../plugins/PluginPipeline";
-import { readPluginManifestFile } from "../plugins/pluginManifest";
+import { PluginPipeline } from "../plugins/PluginPipeline";
 import type { PluginHostPanelDeclaration } from "../plugins/PluginHost";
 import {
   loadPluginPanelRegistration,
   loadPluginWebAppRegistration,
   type RegisteredPlugin,
 } from "../plugins/pluginPanelRegistration";
-import {
-  addOfferedPlugin,
-  listOfferedPlugins,
-  readBuiltinPluginOfferManifest,
-  removeAddedOfferedPlugin,
-  type BuiltinPluginOfferManifest,
-  type BuiltinPluginOfferManifestReader,
-} from "../plugins/pluginOffers";
 import {
   assertInstanceBudget,
   requireDeclaredWebApp,
@@ -127,7 +106,6 @@ interface PluginIpcPlatform<
   TWorkspace extends PluginIpcWorkspace,
   TView extends PluginWebAppViewLike,
 > {
-  builtinPluginsRoot(): string;
   createPanelHostLease(
     pipeline: PluginPipeline,
     pluginId: string,
@@ -219,33 +197,6 @@ class StructuredPluginFailure {
   constructor(readonly result: unknown) {}
 }
 
-function createBuiltinPluginOfferManifestCache(
-  read: BuiltinPluginOfferManifestReader,
-): {
-  read: BuiltinPluginOfferManifestReader;
-  invalidate(): void;
-} {
-  const cached = new Map<
-    (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number],
-    Promise<BuiltinPluginOfferManifest>
-  >();
-  return {
-    read(directoryName) {
-      const existing = cached.get(directoryName);
-      if (existing) return existing;
-      const pending = read(directoryName).catch((error: unknown) => {
-        if (cached.get(directoryName) === pending) cached.delete(directoryName);
-        throw error;
-      });
-      cached.set(directoryName, pending);
-      return pending;
-    },
-    invalidate() {
-      cached.clear();
-    },
-  };
-}
-
 function preserveStructuredPluginFailure(
   result: unknown,
   isCurrent: () => boolean,
@@ -306,15 +257,6 @@ export function registerPluginIpcHandlers<
       });
     },
   };
-  // Built-ins come from the app's checked-in dev tree or packaged
-  // extraResources, so their manifests are static for this app session. Keep
-  // workspace path and existing ID checks live. Only packaged manifest reads
-  // are shared across catalog mounts. Plugin writes invalidate explicitly.
-  const builtinOfferManifests = createBuiltinPluginOfferManifestCache(
-    (directoryName) =>
-      readBuiltinPluginOfferManifest(platform.builtinPluginsRoot(), directoryName),
-  );
-
   const createReadableActiveWorkspacePolicy = (
     active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
@@ -406,24 +348,6 @@ export function registerPluginIpcHandlers<
       );
     }
     return directoryName;
-  };
-
-  const packagedBuiltinDisplayName = async (
-    directoryName: string,
-  ): Promise<string | null> => {
-    if (
-      !(BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]).includes(
-        directoryName,
-      )
-    ) {
-      return null;
-    }
-    const manifest = await readPluginManifestFile(
-      join(platform.builtinPluginsRoot(), directoryName),
-    );
-    return manifest.ok
-      ? manifest.manifest.displayName ?? manifest.manifest.name
-      : null;
   };
 
   const activePipeline = async (
@@ -750,76 +674,6 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.listOfferedPlugins, async (_event, payload, active) => {
-    const input = ListOfferedPluginsPayload.parse(payload);
-    try {
-      const { pipeline, workspace } = await activePipeline(active, input.workspaceId);
-      const existingPluginIds = new Set(
-        pipeline.list().map((plugin) => plugin.id),
-      );
-      const offers = await listOfferedPlugins(
-        platform.builtinPluginsRoot(),
-        workspace.rootPath,
-        existingPluginIds,
-        builtinOfferManifests.read,
-      );
-      return ListOfferedPluginsResult.parse({ ok: true, offers });
-    } catch (error) {
-      return ListOfferedPluginsResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
-  registrar.handle(CHANNELS.addOfferedPlugin, async (_event, payload, active) => {
-    const input = AddOfferedPluginPayload.parse(payload);
-    try {
-      const { pipeline, workspace } = await activePipeline(active, input.workspaceId);
-      await pipeline.handleWatcherEvents([
-        { operation: "update", path: "plugins" },
-      ]);
-      const existingPluginIds = new Set(
-        pipeline.list().map((entry) => entry.id),
-      );
-      const added = await addOfferedPlugin({
-        builtinPluginsRoot: platform.builtinPluginsRoot(),
-        workspaceRoot: workspace.rootPath,
-        directoryName: input.directoryName,
-        existingPluginIds,
-      });
-      const rediscoveryEvent: WatcherEvent = {
-        operation: "create",
-        path: `plugins/${input.directoryName}`,
-      };
-      await pipeline.handleWatcherEvents([rediscoveryEvent]);
-      const plugin = pipeline.list().find(
-        (entry) => entry.directoryName === input.directoryName,
-      );
-      const displaced = pipeline.findDirectorySupersededBy(input.directoryName);
-      if (!plugin || !plugin.valid || displaced) {
-        await removeAddedOfferedPlugin({
-          workspaceRoot: workspace.rootPath,
-          directoryName: input.directoryName,
-          identity: added.identity,
-          contentHash: added.contentHash,
-        });
-        await pipeline.handleWatcherEvents([rediscoveryEvent]);
-        throw new Error(
-          plugin
-            ? `Another plugin already claims the id "${input.directoryName}" in this workspace.`
-            : `plugins/${input.directoryName} did not appear after it was added.`,
-        );
-      }
-      return AddOfferedPluginResult.parse({ ok: true, plugin });
-    } catch (error) {
-      return AddOfferedPluginResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
   const pluginAction = (
     channel: string,
     run: (
@@ -845,13 +699,8 @@ export function registerPluginIpcHandlers<
     });
   };
 
-  pluginAction(CHANNELS.installPlugin, async (pipeline, pluginId) => {
-    try {
-      return await pipeline.install(pluginId);
-    } finally {
-      builtinOfferManifests.invalidate();
-    }
-  });
+  pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
+    pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) =>
     surfaces.withPluginSdkGrantSuspensions(workspaceId, (suspend) =>
       pipeline.disable(pluginId, {
@@ -873,16 +722,7 @@ export function registerPluginIpcHandlers<
         input.pluginId,
         input.directoryName,
       );
-      if (!result.ok) return PluginUninstallPreflightResult.parse(result);
-      return PluginUninstallPreflightResult.parse({
-        ...result,
-        preflight: {
-          ...result.preflight,
-          packagedDisplayName: await packagedBuiltinDisplayName(
-            input.directoryName,
-          ),
-        },
-      });
+      return PluginUninstallPreflightResult.parse(result);
     } catch (error) {
       return PluginUninstallPreflightResult.parse({
         ok: false,
@@ -950,24 +790,19 @@ export function registerPluginIpcHandlers<
         active,
         input.workspaceId,
       );
-      let result: PluginPipelineUninstallResult;
-      try {
-        result = await surfaces.withPluginSdkGrantSuspensions(
-          input.workspaceId,
-          (suspend) =>
-            pipeline.uninstall(
-              input.pluginId,
-              input.directoryName,
-              input.confirmationToken,
-              {
-                onWillStopRuntime: (pluginId) =>
-                  suspend({ workspaceId: input.workspaceId, pluginId }),
-              },
-            ),
-        );
-      } finally {
-        builtinOfferManifests.invalidate();
-      }
+      const result = await surfaces.withPluginSdkGrantSuspensions(
+        input.workspaceId,
+        (suspend) =>
+          pipeline.uninstall(
+            input.pluginId,
+            input.directoryName,
+            input.confirmationToken,
+            {
+              onWillStopRuntime: (pluginId) =>
+                suspend({ workspaceId: input.workspaceId, pluginId }),
+            },
+          ),
+      );
       const rendererResult = PluginActionResult.parse(
         result.ok
           ? { ok: true, plugin: result.plugin }

@@ -72,11 +72,13 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
     });
   });
   cleanup.push(async () => {for (const client of server.clients) client.terminate(); await new Promise<void>(resolve => server.close(() => resolve())); doc.destroy(); expect(failures).toEqual([]);});
+  // A loaded gate host can stall the real socket handshake past 1 s. The whole
+  // edit gets 20 s so each 10 s step stays inside it.
   const client = createLinkLiveClient({relayUrl: `http://127.0.0.1:${address.port}`, publicOrigin: "https://share.example.test", exchangeKey: "test-exchange-key-at-least-thirty-two-bytes",
-    limits: {maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000}, browserLimits: limits,
+    limits: {maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 10_000}, browserLimits: limits,
     async resolveMaterial() {return {ok: true, capabilityToken: "A".repeat(43), profileSecret: "B".repeat(43), setCookie: null, currentCapability: async () => "A".repeat(43)};},
     async fetchRelay() {throw Error("Not used");}});
-  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(5000),
+  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(20_000),
     async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32)});}}, "doc.md", {find: "world", replacement: "friend"})};
 }
 
