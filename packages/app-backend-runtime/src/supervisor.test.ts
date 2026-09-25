@@ -669,6 +669,37 @@ it.each(["chunk", "full hash", "missing marker", "wrong marker", "schema"])("fal
   expect(result.result).toEqual([{id:"one",value:"saved"}]);expect(replayed).toEqual([1]);expect(errors).toHaveLength(1);
 });
 
+it("replaces a rejected cache after a costly replay, so the next reopen does not replay again",async()=>{
+  const storage={authorize(){},account(){}};
+  const f=await fixture({materializationEvents:1,maintenanceStorage:storage});
+  await f.invoke({id:"one",value:"saved"});
+  await f.invoke({}, {readOnly:true});
+  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull());
+  const cache=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
+  await f.supervisor.close();
+  // A cache at the head whose contents fail validation at reopen.
+  const path=join(f.directory,"damaged.sqlite");
+  await writeFile(path,f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})!);
+  const damaged=new DatabaseSync(path);damaged.exec("DROP TABLE dohc_applied");damaged.close();
+  const bytes=await readFile(path);
+  let stage=f.journal.stageCheckpoint({scope:f.scope,expectedBytes:bytes.length,sha256:createHash("sha256").update(bytes).digest("hex"),authorize:f.authorize});
+  f.journal.appendCheckpointChunk({stage,index:0,bytes,authorize:f.authorize});
+  stage=f.journal.sealCheckpoint({stage,authorize:f.authorize});
+  f.journal.cacheMaterialization({expected:cache.cursor,checkpoint:stage,authorize:f.authorize,account(){}});
+  const replayed:number[]=[];
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));controls.deliver();
+  });
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  for(let round=0;round<2;round++) {
+    const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,replayCacheMs:0,onMaintenanceError(){}});
+    try {expect((await reopened.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);}
+    finally {await reopened.close();}
+  }
+  expect(replayed).toEqual([1]);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})!.sha256).not.toBe(createHash("sha256").update(bytes).digest("hex"));
+});
+
 it("leaves restart-reclaimable reservations when closing during a snapshot",async()=>{
   let entered!:()=>void;
   const snapshot=new Promise<void>(resolve=>entered=resolve);

@@ -102,7 +102,9 @@ export interface DatasetSupervisorOptions {
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
 type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
-type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
+type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number;
+  /** A cache that failed validation at reopen. It counts as no cache, so a replay replaces it. */
+  rejectedCacheId?: string };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const REOPEN_WAIT_MS = 5_000;
 /** A dataset whose reopen ran out of time or CPU refuses to reopen until its wait ends. */
@@ -204,7 +206,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       authorize();
       const current=options.journal.head(lane.scope,storage.authorize);
       if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed during materialization maintenance.");
-      const previous=options.journal.materialization({scope:lane.scope,authorize});
+      const cached=options.journal.materialization({scope:lane.scope,authorize});
+      const previous=cached&&cached.checkpointId!==lane.rejectedCacheId?cached:null;
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
       if(expected.revision<=after||(!afterCostlyReplay&&expected.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0)))return;
       lane.nextMaterializationRevision=expected.revision+materializationEvents;
@@ -425,6 +428,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           if(directory)await removeDirectory(directory);
           directory=undefined;
           reportMaintenanceError(input.scope,error);
+          lane.rejectedCacheId=cache.checkpointId;
           worker=await restore(false);
         }
       } else worker=await restore(false);
