@@ -817,6 +817,28 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
+    /// `sync.remoteChanges`: how many changes that did not originate on
+    /// this computer the engine has applied to the workspace. A caller
+    /// records the count with a decision and compares it for equality later:
+    /// an unchanged count proves no one else's change arrived in between.
+    /// Restoring a backup can lower it, so it is never compared for order.
+    /// It needs no relay configuration and no finished initial capture.
+    pub(super) async fn sync_remote_changes(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let applied = Self::read_under_ctx(
+            &cancellation,
+            "sync.remoteChanges",
+            open.actor.remote_changes_applied(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({ "applied": applied }))
+    }
+
     pub(super) async fn sync_probe(
         &self,
         ctx: &RequestContext,

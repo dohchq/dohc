@@ -45,6 +45,7 @@ export const WORKSPACE_METHOD = {
   automationsPress: "automations.press",
   automationsClaimSchedule: "automations.claimSchedule",
   automationsScheduleMarks: "automations.scheduleMarks",
+  syncRemoteChanges: "sync.remoteChanges",
 } as const;
 
 /**
@@ -323,6 +324,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsPress]: AutomationPressParams;
   [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
 };
 
 type CollectionMethodResultMap = {
@@ -1091,6 +1093,14 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.automationsScheduleMarks]: mutableStruct({
     marks: Schema.mutable(Schema.Array(AutomationScheduleMarkSchema)),
+  }),
+  /**
+   * How many changes that did not originate on this computer the engine has
+   * applied to the workspace. Compare it for equality only: restoring a
+   * backup can lower it.
+   */
+  [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
+    applied: Schema.Int,
   }),
 } as const;
 
