@@ -1,3 +1,4 @@
+use dohc_engine_domain::{AutomationClaim, AutomationGroupMessage, claim_group_message_in_tx};
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
@@ -551,18 +552,21 @@ fn coordinate_matches(
 /// R10's built-in `chat.*` receiver apply dispatch. Structural rows use
 /// first-authoritative-writer semantics; reaction/decision/follow/feed cells
 /// use deterministic LWW tuples that include the remote origin coordinate.
+/// An applied op returns the Group automation claims its messages took, for
+/// the caller to announce after commit.
 pub fn apply_chat_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
-) -> Result<ApplyOutcome<()>, SyncError> {
+) -> Result<ApplyOutcome<Vec<AutomationClaim>>, SyncError> {
     if !envelope.op_kind.starts_with("chat.") {
         return Err(SyncError::UnsupportedOperation);
     }
     apply_envelope_with(store, envelope, faults, apply_chat_tx).map(|outcome| {
         let mut replay_refusals = Vec::new();
-        let mut outcome = outcome.map(|refusals| {
-            replay_refusals = refusals;
+        let mut outcome = outcome.map(|applied| {
+            replay_refusals = applied.refusals;
+            applied.automation_claims
         });
         outcome.refusals.extend(replay_refusals);
         outcome
@@ -744,36 +748,52 @@ struct AttachmentAdd {
     created_at_ms: i64,
 }
 
+/// What one applied chat op did beyond its own rows: the parked coordinates
+/// its replay refused, and the Group automation claims its messages took.
+pub(crate) struct ChatApply {
+    pub(crate) refusals: Vec<ReplicationRefusal>,
+    pub(crate) automation_claims: Vec<AutomationClaim>,
+}
+
 pub(crate) fn apply_chat_tx(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
-) -> Result<Vec<ReplicationRefusal>, SyncError> {
-    apply_chat_mutation(tx, op)?;
-    let replay_refusals = replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
+) -> Result<ChatApply, SyncError> {
+    let mut automation_claims = apply_chat_mutation(tx, op)?;
+    let replay = replay_ready_pending_chat_coordinates(tx, &op.workspace_id)
         .map_err(|error| map_chat_rule(error, "pending chat coordinate replay failed"))?;
-    Ok(replay_refusals
-        .into_iter()
-        .map(|refusal| ReplicationRefusal {
-            workspace_id: op.workspace_id.clone(),
-            origin_id: refusal.origin_id,
-            origin_seq: refusal.origin_seq,
-            op_kind: refusal.op_kind,
-            reason: RefusalReason::InvalidInput {
-                reason: refusal.reason.to_owned(),
-            },
-        })
-        .collect())
+    automation_claims.extend(replay.automation_claims);
+    Ok(ChatApply {
+        refusals: replay
+            .refusals
+            .into_iter()
+            .map(|refusal| ReplicationRefusal {
+                workspace_id: op.workspace_id.clone(),
+                origin_id: refusal.origin_id,
+                origin_seq: refusal.origin_seq,
+                op_kind: refusal.op_kind,
+                reason: RefusalReason::InvalidInput {
+                    reason: refusal.reason.to_owned(),
+                },
+            })
+            .collect(),
+        automation_claims,
+    })
 }
 
-fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
+fn apply_chat_mutation(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<Vec<AutomationClaim>, SyncError> {
+    let none = |result: Result<(), SyncError>| result.map(|()| Vec::new());
     match op.op_kind.as_str() {
-        "chat.channel.create" => apply_channel(tx, op, decode(&op.payload)?),
-        "chat.thread.create" => apply_thread(tx, op, decode(&op.payload)?),
+        "chat.channel.create" => none(apply_channel(tx, op, decode(&op.payload)?)),
+        "chat.thread.create" => none(apply_thread(tx, op, decode(&op.payload)?)),
         "chat.message.append" => apply_message(tx, op, decode(&op.payload)?),
         "chat.decision.set" | "chat.reaction.set" | "chat.follow.set" | "chat.feed.read.set" => {
-            apply_chat_lww_projection_tx(tx, op)
+            none(apply_chat_lww_projection_tx(tx, op))
         }
-        "chat.attachment.add" => apply_attachment(tx, op, decode(&op.payload)?),
+        "chat.attachment.add" => none(apply_attachment(tx, op, decode(&op.payload)?)),
         _ => Err(SyncError::UnsupportedOperation),
     }
 }
@@ -1405,11 +1425,13 @@ fn resolve_or_create_placeholder(
     Ok(channel_id)
 }
 
+/// Store one replicated message. A new message on this computer is claimed by
+/// the Group automations watching its thread's Group, in this transaction.
 fn apply_message(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     payload: MessageAppend,
-) -> Result<(), SyncError> {
+) -> Result<Vec<AutomationClaim>, SyncError> {
     if payload.message_id.is_empty()
         || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
@@ -1463,7 +1485,8 @@ fn apply_message(
         )
         .map_err(SyncError::corrupt)?;
     if !thread_exists {
-        return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id);
+        return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id)
+            .map(|()| Vec::new());
     }
     let previous: i64 = tx
         .query_row(
@@ -1498,7 +1521,7 @@ fn apply_message(
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {
-        return Ok(());
+        return Ok(Vec::new());
     }
     for handle in parse_mention_handles(&body) {
         tx.execute(
@@ -1565,7 +1588,24 @@ fn apply_message(
     .map_err(|error| map_chat_rule(error, "replicated chat search index maintenance failed"))?;
     bump_chat_conversation_revision(tx, &op.workspace_id, &payload.thread_id)
         .map_err(|error| map_chat_rule(error, "chat conversation revision update failed"))?;
-    Ok(())
+    claim_group_message_in_tx(
+        tx,
+        &op.workspace_id,
+        &AutomationGroupMessage {
+            message_id: &payload.message_id,
+            thread_id: &payload.thread_id,
+            parent_message_id: payload.parent_message_id.as_deref(),
+            author_kind: &payload.author_kind,
+            author_display_name: &author_display_name,
+            author_owner_display_name: owner_name.as_deref(),
+            author_user_id: author_user_id.as_deref(),
+            body: &body,
+            created_at_ms: payload.created_at_ms,
+            automation_id: None,
+            chain_depth: payload.chain_depth,
+        },
+    )
+    .map_err(|error| map_chat_rule(error, "Group automation claim failed"))
 }
 
 fn apply_decision(
