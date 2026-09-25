@@ -204,7 +204,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
-  listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
+  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
   readMoment(momentId: string): Promise<VersionedTextMoment | null>;
   daemonReads: {
     queryChatMessagesGranular(input: {
@@ -846,6 +846,7 @@ async function workspaceRelativePath(
   context: CliWorkspaceContext,
   cwd: string,
   path: string,
+  noun: string,
 ): Promise<string> {
   const absolute = resolve(cwd, path);
   const root = await realpath(resolve(context.rootPath));
@@ -853,21 +854,21 @@ async function workspaceRelativePath(
   try {
     canonical = await realpath(absolute);
     if (!isInside(root, canonical)) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     const realParent = await realpath(dirname(absolute)).catch(() => {
-      throw new CliCommandError(`attachment is not a tracked workspace file: ${path}`);
+      throw new CliCommandError(`${noun} is not a tracked workspace file: ${path}`);
     });
     if (!isInside(root, realParent)) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
     const suppliedName = basename(path);
     const unresolved = join(realParent, basename(absolute));
     if (basename(unresolved) !== suppliedName) {
-      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+      throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
     canonical = unresolved;
   }
@@ -881,7 +882,7 @@ async function resolveAttachments(
 ): Promise<Array<{ objectId: string; pathHint: string }>> {
   return Promise.all(
     paths.map(async (path) => {
-      const pathHint = await workspaceRelativePath(context, cwd, path);
+      const pathHint = await workspaceRelativePath(context, cwd, path, "attachment");
       const objectId = await context.fileObjectIdForPath(pathHint);
       if (!objectId) {
         throw new CliCommandError(
@@ -1734,7 +1735,17 @@ async function dispatch(
         LIST_MOMENTS_HARD_LIMIT,
         Math.max(1, Math.floor(request.args.limit ?? 50)),
       );
-      const moments = await context.listMoments({ limit: LIST_MOMENTS_HARD_LIMIT });
+      // A path narrows the list to that file's own history, across renames.
+      let objectId: string | undefined;
+      if (request.args.path !== undefined) {
+        const path = await workspaceRelativePath(context, request.args.cwd, request.args.path, "file");
+        objectId = (await context.fileObjectIdForPath(path)) ?? undefined;
+        if (!objectId) throw new CliCommandError(`file is not a tracked workspace file: ${request.args.path}`);
+      }
+      const moments = await context.listMoments({
+        limit: LIST_MOMENTS_HARD_LIMIT,
+        ...(objectId ? { objectId } : {}),
+      });
       const selectedMoments = sinceMs === undefined
         ? moments
         : moments.filter((moment) => moment.recordedAtMs > sinceMs);

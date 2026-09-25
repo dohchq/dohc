@@ -187,6 +187,8 @@ describe("desktop CLI workspace context", () => {
       { ...expected, workspaceId: "workspace" }, { ...plainExpected, id: "plain", workspaceId: "workspace" },
     ]);
     expect(f.capture.listMoments).toHaveBeenCalledWith({ limit: 4 });
+    await context.listMoments({ limit: 4, objectId: "object-plan" });
+    expect(f.capture.listMoments).toHaveBeenLastCalledWith({ limit: 4, objectId: "object-plan" });
     const detail = { id: "detail" } as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
     f.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: detail })
       .mockResolvedValueOnce({ protected: true, moment: { id: "secret" } } as never).mockResolvedValueOnce(null);

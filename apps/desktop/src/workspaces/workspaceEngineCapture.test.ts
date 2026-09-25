@@ -347,6 +347,29 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("lists one file's moments in the active version when given its object id", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    for (const [path, text, objectId] of [
+      ["plan.md", "# Plan\n", "object-plan"],
+      ["other.md", "# Other\n", "object-other"],
+      ["plan.md", "# Plan\n\nShip Friday.\n", "object-plan"],
+    ] as const) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text, objectId });
+    }
+    const engine = capture(root, { rustEngineSessions: mockLiveSessions(loopback, requests) });
+
+    const page = await engine.listMoments({ limit: 10, objectId: "object-plan" });
+    expect(page.moments.map((moment) => [moment.path, moment.objectId, moment.protected])).toEqual([
+      ["plan.md", "object-plan", false],
+      ["plan.md", "object-plan", false],
+    ]);
+    expect(page.activeVersionId).toBe("main");
+    expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
+    await engine.stop();
+  });
+
   it("continues draining pending collection adoptions after one adoption fails", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     let listed = false;

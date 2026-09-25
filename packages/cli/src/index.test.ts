@@ -252,6 +252,75 @@ describe("executeCli", () => {
     expect(result.stdout).toContain("msg_one");
   });
 
+  it("lists one file's history and prints the text one change left", async () => {
+    const change = {
+      id: "moment-2",
+      recordedAtMs: Date.UTC(2026, 8, 25, 12),
+      source: "workspace-engine" as const,
+      operation: "write" as const,
+      path: "notes/plan.md",
+      versionId: "main",
+      author: { kind: "agent" as const, agentId: "claude", onBehalfOf: "user:ice" },
+      fileCount: 1 as const,
+    };
+    const list = vi.fn(async () => ({ changes: [change], count: 1, totalAvailable: 3, hasMore: true, cursorMs: change.recordedAtMs }));
+    const listed = await executeCli({ argv: ["history", "list", "plan.md", "--limit", "1"], cwd: "/workspace/notes", env: {}, request: list });
+    expect(list).toHaveBeenCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "moments",
+      args: { cwd: resolve("/workspace/notes"), actor: "human", limit: 1, path: "plan.md" },
+    });
+    expect(listed).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "moment-2 · 2026-09-25T12:00:00.000Z · write · notes/plan.md · agent claude\n2 more; raise --limit to list them\n",
+    });
+
+    const detail = {
+      ok: true as const,
+      change: {
+        ...change,
+        files: [{ path: "notes/plan.md", operation: "write" as const }],
+        before: { path: "notes/plan.md", text: "# Plan\n" },
+        after: { path: "notes/plan.md", text: "# Plan\n\nShip Friday.\n" },
+      },
+    };
+    const show = vi.fn(async () => detail);
+    expect(await executeCli({ argv: ["history", "show", "moment-2"], cwd: "/workspace", env: {}, request: show })).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "# Plan\n\nShip Friday.\n",
+    });
+    expect(show).toHaveBeenCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "moment",
+      args: { cwd: WORKSPACE, actor: "human", id: "moment-2" },
+    });
+    expect((await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: show })).stdout).toBe("# Plan\n");
+
+    const created = { ...detail, change: { ...detail.change, before: null } };
+    expect(await executeCli({ argv: ["history", "show", "moment-2", "--before"], env: {}, request: async () => created })).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: moment-2 created notes/plan.md; it has no text before it\n",
+    });
+    expect(await executeCli({ argv: ["history", "show", "moment-9", "--json"], env: {}, request: async () => ({ ok: false, reason: "change not found: moment-9" }) })).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: change not found: moment-9\n",
+    });
+  });
+
+  it("refuses a history list limit past the desktop's bound before sending", async () => {
+    const send = vi.fn();
+    expect(await executeCli({ argv: ["history", "list", "--limit", "501"], env: {}, request: send })).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: --limit accepts at most 500\n",
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("returns exactly one stderr line and exit 1", async () => {
     const result = await executeCli({
       argv: ["chat", "groups"],

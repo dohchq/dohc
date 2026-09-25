@@ -98,6 +98,7 @@ const momentsArgsSchema = z
     sinceMs: z.number().int().nonnegative().optional(),
     limit: z.number().int().positive().max(500).optional(),
     includeFiles: z.boolean().optional(),
+    path: z.string().min(1).max(4096).optional(),
   })
   .strict();
 const momentArgsSchema = z

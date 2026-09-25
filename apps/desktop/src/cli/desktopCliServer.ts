@@ -272,8 +272,8 @@ export function createDesktopCliServer<State>(
           }),
       },
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
-      listMoments: async ({ limit }) => {
-        const page = await capture.listMoments({ limit });
+      listMoments: async ({ limit, objectId }) => {
+        const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>

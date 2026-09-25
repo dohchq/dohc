@@ -5,6 +5,7 @@ import type {
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
+import { DohcCliError } from "./errors";
 
 type GroupsResult = CliResultByVerb["groups"];
 type ThreadsResult = CliResultByVerb["threads"];
@@ -122,10 +123,36 @@ function renderExport(result: ExportResult): string {
   return result.files.map((file) => `${file.threadId}  ${file.path}`).join("\n");
 }
 
+function renderMoments(result: CliResultByVerb["moments"]): string {
+  const lines = result.changes.map((change) => {
+    const author = change.author?.kind === "agent" ? ` · agent ${change.author.agentId}` : "";
+    const summary = change.summary ? ` · ${lineSafe(change.summary)}` : "";
+    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${author}${summary}`;
+  });
+  if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
+  return lines.join("\n");
+}
+
+function renderMoment(result: CliResultByVerb["moment"], side: "before" | "after"): string {
+  if (!result.ok) throw new DohcCliError(result.reason);
+  const { change } = result;
+  const snapshot = side === "before" ? change.before : change.after;
+  if (side === "before" && snapshot === null) {
+    throw new DohcCliError(`${change.id} created ${change.path}; it has no text before it`);
+  }
+  if (side === "after" && change.operation === "delete") {
+    throw new DohcCliError(`${change.id} deleted ${change.path}; use --before for its last text`);
+  }
+  if (!snapshot || snapshot.contentKind === "binary") {
+    throw new DohcCliError(`${change.path} is binary at ${change.id}; history show prints text only`);
+  }
+  return snapshot.text;
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
-  options: { grepFilesWithMatches?: boolean; grepContext?: number } = {},
+  options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
     case "groups":
@@ -149,6 +176,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       });
     case "export":
       return renderExport(result as CliResultByVerb["export"]);
+    case "moments":
+      return renderMoments(result as CliResultByVerb["moments"]);
+    case "moment":
+      return renderMoment(result as CliResultByVerb["moment"], options.momentSide ?? "after");
     default:
       return JSON.stringify(result, null, 2);
   }
