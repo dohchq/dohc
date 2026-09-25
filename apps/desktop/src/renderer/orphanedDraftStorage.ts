@@ -1,281 +1,151 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { bridge } from "./bridge";
 
-// The durable half of the set-aside recovery store. `orphanedDrafts.ts`
-// holds the copy this app run reads; this holds the copy that survives a quit,
-// a crash, and a forced restart.
-//
-// Renderer-owned storage, not a main-owned file: the capture runs during a
-// render and the close guard decides inside `beforeunload`, and both need a
-// synchronous answer to "is this text already durable?". An IPC round trip
-// gives neither one in time, so the guard would have to warn about text that
-// is already safe — a lie about durability, on every quit.
-//
-// It is app-scoped, not workspace-scoped. A recovery outlives the workspace
-// it came from: the notice center and the close warning already list drafts
-// across workspaces, and a draft's path can belong to a workspace this run
-// never opened. Nothing goes inside the workspace tree — the text is exactly
-// what the capture refused to write there.
-//
-// App-scoped means this desktop profile, and that is the boundary every local
-// store here keeps. The workspace registry in userData lists every workspace
-// whatever cloud account is signed in, and a workspace is a folder the OS user
-// owns. A cloud account is not a local access boundary, so a recovery row does
-// not carry one: scoping these rows to an account would claim a guarantee the
-// registry, the files, and the rest of this profile do not keep.
-//
-// It is PLAINTEXT, which is why the secret floor below decides what may enter
-// it at all.
-
-// Exported so tests can read the raw stored bytes. Asserting through the
-// store's own API would pass a floor that leaked: the question "did this text
-// reach plaintext storage?" can only be answered by looking at storage.
 export const ORPHANED_DRAFT_STORAGE_KEY = "dohc-set-aside-drafts";
-
-// How long an unresolved recovery survives. Housekeeping, not a limit on the
-// user's work: nothing is rejected, and a draft this old has outlived the app
-// run that set it aside, every notice that offered it, and every restart
-// since. Expiry is the only bound — a count or byte cap would delete recovery
-// text the user can still see, and destroying that text is never this store's
-// call (the same rule the in-memory store follows for a deleted path).
+export const ORPHANED_DRAFT_STORAGE_PREFIX = `${ORPHANED_DRAFT_STORAGE_KEY}:`;
 export const ORPHANED_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-
-type StoredOrphanedDraft = {
-  id: number;
-  workspaceId: string;
-  path: string;
-  text: string;
-  capturedAtMs: number;
-};
-
-// The floor: a draft over a secret-classified path never reaches
-// plaintext storage. Only a `tracked` path is eligible — `ignored` is a path
-// the engine floor could not normalize, and a store that cannot classify a
-// path does not get to guess it is safe. Unpersistable drafts keep their
-// in-memory copy, and the close warning is the last line for them.
-//
-// It decides once, when the draft is captured, and the decision only ever
-// tightens. A later rename can take a row out of storage, because re-keying it
-// would write a row under a secret path (`remapStoredDraftPaths`). It never
-// puts one in: writing text the floor already refused would be a new decision,
-// made on a path that was not the path when the text was captured, about bytes
-// nothing has re-read since.
-function isPersistableDraftPath(path: string): boolean {
+type StoredOrphanedDraft = { id: number; workspaceId: string; path: string; text: string; capturedAtMs: number };
+// Numeric handles belong to this renderer. Each durable recovery owns one key,
+// so another window never rewrites an array containing this window's work.
+const keys = new Map<number, string>();
+const expected = new Map<number, string>();
+function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
 }
-
-// An id this store can still count from. Storage is foreign input, and
-// `typeof x === "number"` accepts values that break every use an id has:
-// `1e400` parses to Infinity, which serializes back as JSON null and takes its
-// row's text with it on the launch after; NaN and a fraction never match the
-// dismissal that is supposed to retire them; the top of the safe range leaves
-// no room to allocate above it. Each one is a broken identity, not broken
-// text, so the load pass gives the row a new id instead of dropping it.
-function isUsableDraftId(id: number): boolean {
-  return Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
-}
-
-// A capture time this store can age. Same hole as the id: `1e400` parses to
-// Infinity, reads as not yet expired, and serializes back as JSON null, so the
-// row comes back durable and the launch after that drops it. NaN and anything
-// at or below zero fail the other way — they read as older than the retention
-// window and would take the text with them.
-//
-// The repair is the reading clock, which restarts the window. It over-retains
-// a foreign row by up to 30 days, and that is the direction to be wrong in:
-// expiry here is housekeeping, and the row stays listed and dismissable the
-// whole time. A time in the future is left alone — it is readable, it survives
-// a round trip, and rewriting it on every launch under a skewed clock would
-// churn storage for nothing.
-function isUsableCaptureTime(capturedAtMs: number): boolean {
-  return Number.isFinite(capturedAtMs) && capturedAtMs > 0;
-}
-
-function isStoredDraft(value: unknown): value is StoredOrphanedDraft {
+function valid(value: unknown): value is StoredOrphanedDraft {
   if (typeof value !== "object" || value === null) return false;
-  const row: Record<string, unknown> = value as Record<string, unknown>;
-  return (
-    typeof row.id === "number" &&
-    typeof row.workspaceId === "string" &&
-    typeof row.path === "string" &&
-    typeof row.text === "string" &&
-    typeof row.capturedAtMs === "number"
-  );
+  const row = value as Record<string, unknown>;
+  return typeof row.id === "number" && typeof row.workspaceId === "string" && typeof row.path === "string" &&
+    typeof row.text === "string" && typeof row.capturedAtMs === "number";
+}
+function storedKeys(): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX)) result.push(key);
+  }
+  return result;
+}
+function remove(key: string): void { try { localStorage.removeItem(key); } catch { /* Refused storage remains unavailable. */ } }
+
+// Preserve existing recoveries on upgrade. Deterministic keys let two starting
+// windows resume a partial transfer without creating duplicate copies.
+function importExistingArray(nowMs: number): StoredOrphanedDraft[] {
+  const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
+  if (raw === null) return [];
+  let rows: unknown;
+  try { rows = JSON.parse(raw); } catch { remove(ORPHANED_DRAFT_STORAGE_KEY); return []; }
+  if (!Array.isArray(rows)) { remove(ORPHANED_DRAFT_STORAGE_KEY); return []; }
+  const remaining: StoredOrphanedDraft[] = [];
+  for (const [index, row] of rows.entries()) {
+    if (!valid(row) || !persistable(row.path)) continue;
+    const normalized = { ...row,
+      id: Number.isSafeInteger(row.id) && row.id > 0 && row.id < Number.MAX_SAFE_INTEGER ? row.id : index + 1,
+      capturedAtMs: Number.isFinite(row.capturedAtMs) && row.capturedAtMs > 0 ? row.capturedAtMs : nowMs,
+    };
+    if (nowMs - normalized.capturedAtMs >= ORPHANED_DRAFT_RETENTION_MS) continue;
+    const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}import:${index}`;
+    try {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(normalized));
+    } catch { remaining.push(normalized); }
+  }
+  if (remaining.length === 0) remove(ORPHANED_DRAFT_STORAGE_KEY);
+  return remaining;
 }
 
-// Unreadable storage and unreadable content both answer "no stored
-// recoveries" — a throw here would take down the render that is trying to set
-// a draft aside. They differ in the one way that matters to the caller:
-// unreadable content still occupies the key, so the read reports that it threw
-// bytes away and the load path writes over them. Missing storage discards
-// nothing and must not provoke a write, or every launch would create this key
-// for a user who never set an edit aside.
-type ReadResult = {
-  rows: StoredOrphanedDraft[];
-  discarded: boolean;
-};
-
-function readRows(): ReadResult {
-  let raw: string | null;
-  try {
-    raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
-  } catch {
-    return { rows: [], discarded: false };
-  }
-  if (raw === null) return { rows: [], discarded: false };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { rows: [], discarded: true };
-  }
-  if (!Array.isArray(parsed)) return { rows: [], discarded: true };
-  const rows = parsed.filter(isStoredDraft);
-  return { rows, discarded: rows.length !== parsed.length };
-}
-
-// Returns whether the rows are now on disk. A refusal (the quota is full)
-// leaves the caller's draft in memory only, and the caller reports it as
-// unpersisted rather than claiming a durability it does not have.
-//
-// No rows means no key, not an empty array. One rule, and it is what keeps a
-// write that drops rows from ever asking for space: it either removes the key
-// or replaces it with a subset of what that key already holds.
-function writeRows(rows: readonly StoredOrphanedDraft[]): boolean {
-  try {
-    if (rows.length === 0) {
-      localStorage.removeItem(ORPHANED_DRAFT_STORAGE_KEY);
-    } else {
-      localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, JSON.stringify(rows));
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Every recovery still worth restoring, oldest first. Expired rows go, so does
-// any row this build's floor refuses, and so does anything the read could not
-// parse — dropped here and written out of storage. localStorage is plaintext
-// an older build or another tool can write, so what comes out of it is
-// classified again rather than trusted, and the rewrite triggers on whatever
-// any stage threw away: a value that is not a list of drafts has no path to
-// classify, no capture time to expire, and no notice row to dismiss, so
-// nothing else would ever remove it. A key that was not there discarded
-// nothing and is left alone. Only this pass needs the check — it runs before
-// the root renders, and so before any capture, dismissal, or rename.
-//
-// The floor reads a PATH, not a file. A rename dohc performs re-keys the row
-// and drops it when the new path is secret (`remapStoredDraftPaths`). A rename
-// dohc did not perform — done outside the app, or between two runs — leaves
-// the row on the path it was captured on: nothing in the renderer can tell
-// that rename from a delete, and a delete must keep its draft. The row stays
-// listed in the notice center, where Dismiss deletes it, and expires with the
-// rest.
-//
-// A store that refuses the rewrite keeps its bytes, and there is nothing
-// better to do about it. The rewrite removes the key or replaces it with a
-// subset of what that key holds, so a full quota cannot be what refused it;
-// what is left is a store taking no writes at all, which would refuse a
-// removal just as readily. The refused row is not restored either way, so
-// nothing lists or copies it, and this pass runs again on the next launch.
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
-  const { rows, discarded } = readRows();
-  // A row whose capture time cannot be aged is not expired, it is unreadable —
-  // it goes to the repair below, never to the retention drop.
-  const kept = rows.filter(
-    (row) =>
-      isPersistableDraftPath(row.path) &&
-      (!isUsableCaptureTime(row.capturedAtMs) ||
-        nowMs - row.capturedAtMs < ORPHANED_DRAFT_RETENTION_MS),
-  );
-  // Identity and capture time are the two numbers this store counts on, and
-  // storage is foreign input for both. A row that carries a broken one keeps
-  // its text and gets a working replacement, because the break is in the
-  // bookkeeping, not in what the user typed.
-  //
-  // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
-  // alone, so two rows under one id would let one confirmation delete two
-  // texts — while the confirm says it deletes the only copy, of one edit.
-  // Replacements come from the LOWEST free id rather than above the highest
-  // one: allocating upward from a row that already sits near the top of the
-  // safe range walks out of it, where `+ 1` stops moving and hands the same
-  // id out twice. Every id in the store is claimed first, so a repair never
-  // takes one a later row still holds.
-  const taken = new Set<number>();
-  for (const row of kept) if (isUsableDraftId(row.id)) taken.add(row.id);
+  let untransferred: StoredOrphanedDraft[] = [];
+  try { untransferred = importExistingArray(nowMs); } catch { /* Storage cannot be read. */ }
+  const result: StoredOrphanedDraft[] = [];
   const used = new Set<number>();
-  let freeId = 1;
-  let repaired = false;
-  const unique = kept.map((row) => {
-    const capturedAtMs = isUsableCaptureTime(row.capturedAtMs)
-      ? row.capturedAtMs
-      : nowMs;
-    if (capturedAtMs !== row.capturedAtMs) repaired = true;
-    if (isUsableDraftId(row.id) && !used.has(row.id)) {
-      used.add(row.id);
-      return capturedAtMs === row.capturedAtMs ? row : { ...row, capturedAtMs };
+  try {
+    for (const key of storedKeys()) {
+      let row: unknown;
+      const raw = localStorage.getItem(key);
+      try { row = JSON.parse(raw ?? "null"); } catch { remove(key); continue; }
+      if (!valid(row) || !persistable(row.path)) { remove(key); continue; }
+      const capturedAtMs = Number.isFinite(row.capturedAtMs) && row.capturedAtMs > 0 ? row.capturedAtMs : nowMs;
+      if (nowMs - capturedAtMs >= ORPHANED_DRAFT_RETENTION_MS) { remove(key); continue; }
+      let id = row.id;
+      if (!Number.isSafeInteger(id) || id <= 0 || id >= Number.MAX_SAFE_INTEGER || used.has(id)) {
+        id = 1;
+        while (used.has(id)) id++;
+      }
+      used.add(id);
+      // Repairs are local. Loading a recovery cannot race a replacement by
+      // writing an older snapshot back over its key.
+      const restored = { ...row, id, capturedAtMs };
+      keys.set(id, key);
+      expected.set(id, raw!);
+      result.push(restored);
     }
-    repaired = true;
-    while (taken.has(freeId) || used.has(freeId)) freeId += 1;
-    used.add(freeId);
-    return { ...row, id: freeId, capturedAtMs };
-  });
-  if (discarded || repaired || unique.length !== rows.length) writeRows(unique);
-  return unique;
-}
-
-export function storeDraft(draft: StoredOrphanedDraft): boolean {
-  if (!isPersistableDraftPath(draft.path)) return false;
-  return writeRows([...readRows().rows, draft]);
-}
-
-export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
-  if (!isPersistableDraftPath(draft.path)) return false;
-  const rows = readRows().rows;
-  const found = rows.some((row) => row.id === draft.id);
-  return writeRows(
-    found
-      ? rows.map((row) => (row.id === draft.id ? draft : row))
-      : [...rows, draft],
-  );
-}
-
-export function forgetStoredDraft(id: number): void {
-  const rows = readRows().rows;
-  const kept = rows.filter((row) => row.id !== id);
-  if (kept.length !== rows.length) writeRows(kept);
-}
-
-// A rename re-keys the recovery on disk too, or the notice comes back on a
-// path that no longer exists. Returns the ids that lost their stored copy —
-// a rename onto a secret-classified path takes the text out of plaintext
-// storage at once, and the caller stops calling those drafts durable.
-export function remapStoredDraftPaths(
-  workspaceId: string,
-  project: (path: string) => string | null,
-): ReadonlySet<number> {
-  const rows = readRows().rows;
-  const dropped = new Set<number>();
-  const next: StoredOrphanedDraft[] = [];
-  let changed = false;
-  for (const row of rows) {
-    const projected =
-      row.workspaceId === workspaceId ? project(row.path) : row.path;
-    if (projected === null || projected === row.path) {
-      next.push(row);
-      continue;
+  } catch { /* Storage can be unavailable; capture will retain work in memory. */ }
+  // Quota can prevent splitting an existing array. Keep its text visible and
+  // at risk until it has an independent durable key; never claim a failed transfer.
+  for (const row of untransferred) {
+    let id = row.id;
+    if (used.has(id)) {
+      id = 1;
+      while (used.has(id)) id++;
     }
-    changed = true;
-    if (isPersistableDraftPath(projected)) next.push({ ...row, path: projected });
-    else dropped.add(row.id);
+    used.add(id);
+    result.push({ ...row, id });
   }
-  if (changed) writeRows(next);
+  return result;
+}
+function write(draft: StoredOrphanedDraft, key: string): boolean {
+  if (!persistable(draft.path)) return false;
+  try {
+    const raw = JSON.stringify(draft);
+    localStorage.setItem(key, raw);
+    keys.set(draft.id, key); expected.set(draft.id, raw);
+    return true;
+  } catch { return false; }
+}
+export function storeDraft(draft: StoredOrphanedDraft): boolean {
+  return write(draft, `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
+}
+export function replaceStoredDraft(draft: StoredOrphanedDraft): boolean {
+  return write(draft, keys.get(draft.id) ?? `${ORPHANED_DRAFT_STORAGE_PREFIX}${crypto.randomUUID()}`);
+}
+export function isStoredDraftCurrent(id: number): boolean {
+  const key = keys.get(id), raw = expected.get(id);
+  try { return key !== undefined && raw !== undefined && localStorage.getItem(key) === raw; } catch { return false; }
+}
+export function forgetStoredDraft(id: number): void {
+  const key = keys.get(id);
+  if (key) remove(key);
+  keys.delete(id); expected.delete(id);
+}
+export function remapStoredDraftPaths(workspaceId: string, project: (path: string) => string | null): ReadonlySet<number> {
+  const dropped = new Set<number>();
+  let durableKeys: string[];
+  try { durableKeys = storedKeys(); } catch { return new Set(keys.keys()); }
+  const handles = new Map<string, number[]>();
+  for (const [id, key] of keys) handles.set(key, [...(handles.get(key) ?? []), id]);
+  for (const key of durableKeys) {
+    const ids = handles.get(key) ?? [];
+    try {
+      const raw = localStorage.getItem(key);
+      const row: unknown = JSON.parse(raw ?? "null");
+      if (!valid(row) || row.workspaceId !== workspaceId) continue;
+      const path = project(row.path);
+      if (path === null || path === row.path) continue;
+      if (!persistable(path)) {
+        remove(key);
+        for (const id of ids) { expected.delete(id); dropped.add(id); }
+      } else {
+        const next = JSON.stringify({ ...row, path });
+        localStorage.setItem(key, next);
+        // Only advance handles that still describe the bytes just remapped.
+        // Another window's replacement must not make stale local text durable.
+        for (const id of ids) if (expected.get(id) === raw) expected.set(id, next);
+      }
+    } catch { for (const id of ids) dropped.add(id); }
+  }
   return dropped;
 }
-
-// Test seam, matching `resetOrphanedDrafts`: module state and storage are one
-// store, so a suite that resets one must reset both.
 export function clearStoredDrafts(): void {
-  writeRows([]);
+  try { for (const key of storedKeys()) remove(key); remove(ORPHANED_DRAFT_STORAGE_KEY); } catch { /* Test reset. */ }
+  keys.clear(); expected.clear();
 }
