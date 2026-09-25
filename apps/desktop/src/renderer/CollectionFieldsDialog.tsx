@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { DatasetSchemaChange, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
 import { CollectionMigrationReviewDialog, type CollectionMigrationReviewDialogProps } from "./CollectionMigrationReviewDialog";
@@ -27,16 +27,18 @@ export function CollectionFieldsDialog(props: CollectionFieldsDialogProps) {
 }
 function ScopedFields(props: CollectionFieldsDialogProps) {
   const table = props.dataset.tables.find(table => table.tableId === props.tableId);
+  // Buttons get their own controls. Names stay unique across every field.
+  const columns = table ? datasetColumnFields(table) : [];
   const [kind, setKind] = useState<DatasetSchemaChange["kind"]>("addField"), [name, setName] = useState("");
-  const [fieldId, setFieldId] = useState(table?.fields[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>("text");
+  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>("text");
   const [required, setRequired] = useState(false), [unique, setUnique] = useState(false), [hasDefault, setHasDefault] = useState(false);
   const [defaultText, setDefaultText] = useState(""), [options, setOptions] = useState("");
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
   const [pending, setPending] = useState(false), [invalid, setInvalid] = useState<string | null>(null);
   const lifetime = useRef<AbortController | null>(null), active = useRef(true), locked = useRef(false);
-  const selectedField = table?.fields.find(field => field.fieldId === fieldId);
+  const selectedField = columns.find(field => field.fieldId === fieldId);
   function selectField(id: string) {
-    const field = table?.fields.find(field => field.fieldId === id);
+    const field = columns.find(field => field.fieldId === id);
     setFieldId(id); setName(field?.name ?? ""); setType(field?.type ?? "text"); setRequired(field?.required ?? false);
   }
   useLayoutEffect(() => { active.current = true; return () => { active.current = false; lifetime.current?.abort(); }; }, []);
@@ -85,9 +87,9 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
       const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
       if (next === "changeField") { selectField(fieldId); return; }
       if (next === "addField") { setType("text"); setRequired(false); }
-      setName(next === "renameTable" ? table?.name ?? "" : next === "renameCollection" ? props.dataset.name : next === "renameField" ? table?.fields.find(field => field.fieldId === fieldId)?.name ?? "" : "");
+      setName(next === "renameTable" ? table?.name ?? "" : next === "renameCollection" ? props.dataset.name : next === "renameField" ? columns.find(field => field.fieldId === fieldId)?.name ?? "" : "");
     }}><option value="addField">Add field</option><option value="renameField">Rename field</option><option value="changeField">Change field type or requirement</option><option value="renameTable">Rename table</option><option value="renameCollection">Rename Collection</option></select></label>
-    {(kind === "renameField" || kind === "changeField") && <label className="text-[12px] text-muted">Field<select aria-label="Field" disabled={pending} className={`${selectClass} mt-1 w-full`} value={fieldId} onChange={event => selectField(event.target.value)}>{table?.fields.map(field => <option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select></label>}
+    {(kind === "renameField" || kind === "changeField") && <label className="text-[12px] text-muted">Field<select aria-label="Field" disabled={pending} className={`${selectClass} mt-1 w-full`} value={fieldId} onChange={event => selectField(event.target.value)}>{columns.map(field => <option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select></label>}
     {kind !== "changeField" && <label className="text-[12px] text-muted">Name<input aria-label="Name" autoFocus className={`${inputClass} mt-1`} disabled={pending} value={name} onChange={event => setName(event.target.value)} /></label>}
     {kind === "changeField" && <>
       <label className="text-[12px] text-muted">Type<select aria-label="Type" className={`${selectClass} mt-1 w-full`} disabled={pending} value={type} onChange={event => setType(event.target.value as FieldType)}>

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowRight, Minus, Pencil, Plus } from "lucide-react";
-import type { DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { DatasetMigrationPreviewPage, type DatasetMigrationCandidate } from "@dohc/cli/dataset";
 import { SecondaryButton } from "./ui/controls";
 
@@ -44,7 +44,13 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
     finally { if (alive.current && !controller.signal.aborted) setBusy(false); }
   }
   function tableLabel(sqlName: string) { return props.revision.definition.tables.find(table => table.sqlName === sqlName)?.name ?? props.previousRevision.definition.tables.find(table => table.sqlName === sqlName)?.name ?? sqlName; }
-  function fieldLabel(tableName: string, column: string) { return props.revision.definition.tables.find(table => table.sqlName === tableName)?.fields.find(field => field.sqlColumn === column)?.name ?? props.previousRevision.definition.tables.find(table => table.sqlName === tableName)?.fields.find(field => field.sqlColumn === column)?.name ?? column; }
+  function fieldLabel(tableName: string, column: string) {
+    const named = (definition: DatasetDefinition) => {
+      const table = definition.tables.find(table => table.sqlName === tableName);
+      return table && datasetColumnFields(table).find(field => field.sqlColumn === column)?.name;
+    };
+    return named(props.revision.definition) ?? named(props.previousRevision.definition) ?? column;
+  }
   return <section aria-label="Record changes" className="flex flex-col gap-3 rounded-lg border border-line bg-panel p-3" aria-busy={busy}>
     <h3 className="m-0 text-[12px] font-semibold text-ink">Record changes</h3>
     <div className="overflow-x-auto rounded-md border border-line"><table className="w-full text-left text-[12px]"><thead className="bg-panel-2 text-muted"><tr><th scope="col" className="px-3 py-2 font-medium">Table</th><th scope="col" className="px-3 py-2 font-medium">Before</th><th scope="col" className="px-3 py-2 font-medium">After</th><th scope="col" className="px-3 py-2 font-medium">Changed</th></tr></thead><tbody>{props.preview.tables.map(table => <tr key={table.table} className="border-t border-line"><th scope="row" className="px-3 py-2 font-medium text-ink">{tableLabel(table.table)}</th><td className="px-3 py-2 font-mono text-muted">{table.beforeRows} {table.beforeRows === 1 ? "record" : "records"}</td><td className="px-3 py-2 font-mono text-ink">{table.afterRows} {table.afterRows === 1 ? "record" : "records"}</td><td className="px-3 py-2 font-mono"><span className={table.changedRows ? "rounded bg-panel-2 px-1.5 py-0.5 text-ink" : "text-muted"}>{table.changedRows} {table.changedRows === 1 ? "record" : "records"}</span></td></tr>)}</tbody></table></div>
