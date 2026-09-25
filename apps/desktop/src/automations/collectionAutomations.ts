@@ -21,6 +21,7 @@ import {
   collectionAutomationId,
   COLLECTION_AUTOMATION_PREFIX,
   definitionHash,
+  fieldWritesOf,
   parseCollectionAutomationId,
   reachStepsOf,
   subscriptionFor,
@@ -111,6 +112,11 @@ export interface CollectionAutomationsOptions {
   onFailuresChanged(): void;
   /** A step started or stopped waiting for a current editor: the hold notices re-read. */
   onHoldsChanged(): void;
+  /**
+   * The automations dohc read from the workspace changed, or a step's reach
+   * verdict did: the ⚡ field marks re-read.
+   */
+  onAutomationsChanged(): void;
   onError(context: string, error: unknown): void;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
@@ -144,6 +150,12 @@ export type CollectionAutomationsFile =
   | { status: "missing" }
   | { status: "unreadable"; diagnostic: AutomationDiagnostic }
   | { status: "read"; contentHash: string | null; automations: CollectionAutomationSummary[] };
+
+/** One field that switched-on automations set, with their names in file order. */
+export interface CollectionFieldMark {
+  field: string;
+  automations: string[];
+}
 
 /** A step that waits for a current editor to allow it, for its notice. */
 export interface CollectionAutomationHold {
@@ -305,7 +317,9 @@ export class CollectionAutomations {
       this.publishHolds();
     }).then(
       () => {
-        if (current()) this.rosterChanged();
+        if (!current()) return;
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
       },
       (error: unknown) => {
         // A later open tries again.
@@ -343,7 +357,10 @@ export class CollectionAutomations {
     })
       // A new or changed step gets its verdict now, while the people who
       // could have written it can still edit the Collection.
-      .then(() => this.rosterChanged())
+      .then(() => {
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
+      })
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
@@ -509,6 +526,54 @@ export class CollectionAutomations {
   }
 
   /**
+   * The fields in one Collection that switched-on automations set, from any
+   * Collection's automations. Before the workspace opens its automations
+   * there are none; `onAutomationsChanged` says when to ask again.
+   */
+  async fieldMarks(collectionPath: string): Promise<CollectionFieldMark[]> {
+    if (this.opened === null) return [];
+    await this.opened;
+    // A mark says a run writes the field, so it passes the checks a run
+    // makes before it writes: every Collection a step names is a document
+    // Collection this index knows, and no step's reach verdict stopped it.
+    const datasets = new Map<string, Promise<boolean>>();
+    const isDataset = (path: string) => {
+      const known = datasets.get(path) ?? this.options.pathExists(`${path}/dataset.json`);
+      datasets.set(path, known);
+      return known;
+    };
+    const writable = async (path: string) => this.collections.has(path) && !(await isDataset(path));
+    if (!(await writable(collectionPath))) return [];
+    const marks = new Map<string, Map<string, string>>();
+    for (const { automationId, collectionPath: home, automation } of this.everyAutomation()) {
+      if (!automation.enabled) continue;
+      const writes = fieldWritesOf(automation).filter((write) => (write.collection ?? home) === collectionPath);
+      if (writes.length === 0 || !(await this.canRun(automationId, home, automation, writable))) continue;
+      for (const write of writes) {
+        const names = marks.get(write.field) ?? new Map<string, string>();
+        names.set(automationId, automation.name);
+        marks.set(write.field, names);
+      }
+    }
+    return [...marks].map(([field, names]) => ({ field, automations: [...names.values()] }));
+  }
+
+  /**
+   * The name an automation has in its Collection's file now, even while the
+   * entry cannot be read, or null when the file no longer has it.
+   */
+  automationName(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    const indexed = parsed ? this.files.get(parsed.collectionPath) : undefined;
+    if (!parsed || indexed?.file.status !== "read") return null;
+    for (const entry of indexed.file.entries) {
+      const [id, name] = entry.status === "valid" ? [entry.automation.id, entry.automation.name] : [entry.id, entry.name];
+      if (id === parsed.id && name !== null) return name;
+    }
+    return null;
+  }
+
+  /**
    * A current editor allows a held step. `seq` names the hold they saw, so
    * a verdict that changed since does not take their answer.
    */
@@ -657,6 +722,32 @@ export class CollectionAutomations {
     return entry?.automation ?? null;
   }
 
+  /**
+   * Whether a run would get past the checks it makes before its first write,
+   * as far as this computer knows now: no step's saved reach verdict is
+   * stopped or held, and `writable` accepts every Collection a step names.
+   * Verdicts are saved at every roster listing, and a change to one raises
+   * `onAutomationsChanged`.
+   */
+  private async canRun(
+    automationId: string,
+    collectionPath: string,
+    automation: Automation,
+    writable: (path: string) => Promise<boolean>,
+  ): Promise<boolean> {
+    // Saved verdicts dohc cannot read hold every run until someone resets them.
+    if (this.verdictsUnreadable) return false;
+    const hash = definitionHash(automation);
+    const steps = reachStepsOf(automation, collectionNamed(collectionPath), collectionNamed);
+    for (const [step, reach] of steps.entries()) {
+      // A stopped step fails the run, and a held one waits for a current editor.
+      const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
+      if (verdict === "stopped" || verdict === "held") return false;
+      if ("collection" in reach && !(await writable(reach.collection.path))) return false;
+    }
+    return true;
+  }
+
   /** Every automation dohc can run, whether or not it is switched on. */
   private everyAutomation(): OwnedAutomation[] {
     const automations: OwnedAutomation[] = [];
@@ -699,6 +790,9 @@ export class CollectionAutomations {
           if (hash !== undefined && hash !== verdict.definitionHash) this.verdicts.delete(key);
         }
         await this.options.store.saveReachVerdicts([...this.verdicts.values()]);
+        // A step that stops, waits, or runs again changes which fields its
+        // automation sets.
+        this.options.onAutomationsChanged();
       }
       this.publishHolds();
       return result;

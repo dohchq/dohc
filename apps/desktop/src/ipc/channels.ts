@@ -287,6 +287,8 @@ export const CHANNELS = {
   resetAutomationHolds: "desktop:reset-automation-holds",
   revealAutomationHolds: "desktop:reveal-automation-holds",
   automationHoldsChanged: "desktop:automation-holds-changed",
+  listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
