@@ -38,6 +38,9 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+import { deferred } from "../testing/deferred";
+import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { loadStoredDrafts } from "./orphanedDraftStorage";
 
 setupFileInspectorTests();
 
@@ -155,6 +158,61 @@ describe("markdown editor unmount flush", () => {
     );
     return { user, view };
   }
+
+  it.each([false, true])("captures the latest local Markdown edit when its exit writer stalls (edit after capture: %s)", async (editAfterCapture) => {
+    const held = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    const latest = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    bridgeMock.writeWorkspaceText.mockReturnValueOnce(held.promise).mockReturnValueOnce(latest.promise);
+    const user = userEvent.setup();
+    const onSaveStateChange = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />);
+    await screen.findByTestId("view-markdown");
+    const richEditor = await screen.findByTestId("markdown-editor");
+    expect(richEditor.classList.contains("dohc-code-editor")).toBe(false);
+    await typeInMarkdownEditor(user, richEditor, "Draft!");
+    vi.useFakeTimers();
+    try {
+      let drained = false;
+      const drain = settlePendingEditorDrafts().then(result => { drained = result; });
+      await act(async () => { await Promise.resolve(); });
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledOnce();
+      await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Newest!"));
+      expect(drained).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(EDITOR_WRITE_STALL_MS); });
+      await drain;
+      expect(drained).toBe(true);
+      expect(hasPendingEditorDrafts()).toBe(false);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ path: "a.md", text: expect.stringContaining("Newest!") }),
+      ]);
+      const newestText = editAfterCapture ? "Later!" : "Newest!";
+      if (editAfterCapture) {
+        await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), newestText));
+        expect(hasPendingEditorDrafts()).toBe(true);
+      }
+      await act(async () => { held.resolve({ status: "written", contentHash: "late-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving");
+      expect(screen.getByTestId("markdown-save-state").dataset.state).not.toBe("saved");
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(newestText);
+      expect(screen.getByTestId("markdown-editor").textContent).toContain(newestText);
+      vi.useRealTimers();
+      fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      await act(async () => { latest.resolve({ status: "written", contentHash: "latest-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("Newest!") }),
+      ]);
+    } finally {
+      await act(async () => {
+        held.resolve({ status: "written", contentHash: "late-save" });
+        latest.resolve({ status: "written", contentHash: "latest-save" });
+      });
+      vi.useRealTimers();
+    }
+  });
 
   it("retains the local buffer through StrictMode without a blank committed view", () => {
     const path = "assets/identity.png";
