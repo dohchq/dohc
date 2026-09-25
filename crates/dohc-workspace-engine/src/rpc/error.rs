@@ -170,12 +170,6 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
             return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
         }
-        RuntimeError::Relay(RelayError::OriginDiverged) => {
-            return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
-        }
-        RuntimeError::Relay(RelayError::ShareReadOnly) => {
-            return WireError::new(ErrorCode::InvalidParams, "share-read-only");
-        }
         RuntimeError::Relay(RelayError::ApiVersionTooOld) => {
             return WireError::new(
                 ErrorCode::ProtocolVersionUnsupported,
@@ -187,6 +181,12 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
                 ErrorCode::ProtocolVersionUnsupported,
                 "relay-api-version-too-new",
             );
+        }
+        RuntimeError::Relay(RelayError::OriginDiverged) => {
+            return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
+        }
+        RuntimeError::Relay(RelayError::ShareReadOnly) => {
+            return WireError::new(ErrorCode::InvalidParams, "share-read-only");
         }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(

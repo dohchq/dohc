@@ -1,8 +1,8 @@
 import {
   RelayApiVersionError,
+  type RelayApiUpdate,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
-  type RelayApiUpdate,
   type PullWorkspaceFromRelayResult,
   type MaterializeRelayPullPage,
   type PushWorkspaceToRelayResult,
@@ -107,8 +107,8 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let conflictCount = 0;
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
-  let authExpired = false;
   let updateRequired: RelayApiUpdate | null = null;
+  let authExpired = false;
   let syncFailing = false;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
