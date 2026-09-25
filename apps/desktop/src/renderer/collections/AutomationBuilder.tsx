@@ -331,13 +331,13 @@ function problemsOf(automation: Automation, syntax: ReadonlyMap<string, string>)
 function triggerFor(kind: BuilderTrigger, current: AutomationTrigger, fields: readonly FieldDefinition[]): AutomationTrigger {
   switch (kind) {
     case "field-changed":
-      return current.kind === "field-changed" ? current : { kind, field: fields[0]?.name ?? "", to: null };
+      return current.kind === "field-changed" ? current : { kind, field: fields[0]?.name ?? "", to: null, table: null };
     case "record-changed":
-      return { kind, fields: null };
+      return { kind, fields: null, table: null };
     case "starts-matching":
-      return current.kind === "starts-matching" ? current : { kind, condition: "" };
+      return current.kind === "starts-matching" ? current : { kind, condition: "", table: null };
     default:
-      return { kind };
+      return { kind, table: null };
   }
 }
 
@@ -525,7 +525,7 @@ export function AutomationBuilder(props: {
               fields={props.fields}
               value={trigger.field}
               collection={own}
-              onChange={(field) => setDraft((current) => ({ ...current, when: { kind: "field-changed", field, to: null } }))}
+              onChange={(field) => setDraft((current) => ({ ...current, when: { kind: "field-changed", field, to: null, table: null } }))}
             />
             <Problem text={problem("when/field")} />
             <ValueInput
@@ -544,7 +544,7 @@ export function AutomationBuilder(props: {
               value={trigger.condition}
               spellCheck={false}
               placeholder='record.Status == "Blocked"'
-              onChange={(event) => setDraft((current) => ({ ...current, when: { kind: "starts-matching", condition: event.target.value } }))}
+              onChange={(event) => setDraft((current) => ({ ...current, when: { kind: "starts-matching", condition: event.target.value, table: null } }))}
               className={formulaClass}
             />
             <Problem text={problem("when/condition")} />
@@ -725,7 +725,7 @@ export function AutomationBuilder(props: {
             className="flex items-center gap-1"
             onClick={() => setDraft((current) => ({
               ...current,
-              do: [...current.do, { kind: "set", values: [{ field: "", value: { kind: "literal", value: "" } }], records: null }],
+              do: [...current.do, { kind: "set", values: [{ field: "", value: { kind: "literal", value: "" } }], records: null, operation: null }],
             }))}
           >
             <Plus size={12} aria-hidden />
@@ -736,7 +736,7 @@ export function AutomationBuilder(props: {
             className="flex items-center gap-1"
             onClick={() => setDraft((current) => ({
               ...current,
-              do: [...current.do, { kind: "add-record", values: [], collection: null, as: null }],
+              do: [...current.do, { kind: "add-record", values: [], collection: null, as: null, operation: null }],
             }))}
           >
             <Plus size={12} aria-hidden />

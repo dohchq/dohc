@@ -385,7 +385,7 @@ describe("the builder", () => {
   });
 
   it("edits an automation's conditions as rows and keeps steps it cannot edit", async () => {
-    const find = { kind: "find" as const, condition: 'record.Status == "Doing"', collection: null, as: "open" };
+    const find = { kind: "find" as const, condition: 'record.Status == "Doing"', collection: null, as: "open", operation: null };
     const edited: Automation = { ...stamp, if: 'record.Points == 3', do: [...stamp.do, find] };
     const { written } = makeBridge(read([summary(edited)]));
     const user = userEvent.setup();
@@ -426,8 +426,8 @@ describe("the builder", () => {
   }, 30_000);
 
   it("says when a field is not in the Collection, and offers only Collections a step can reach", async () => {
-    const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null }] };
-    const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null };
+    const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null, operation: null }] };
+    const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null, operation: null };
     makeBridge(read([summary({ ...missing, do: [...missing.do, budget] }, { cannotRun: "Done on is not a field in Tasks." })]));
     const user = userEvent.setup();
     render(<Panel />);

@@ -155,8 +155,8 @@ export function newAutomation(fields: readonly FieldDefinition[]): Automation {
     id: "",
     name: "",
     enabled: true,
-    when: { kind: "field-changed", field: watched?.name ?? "", to: null },
+    when: { kind: "field-changed", field: watched?.name ?? "", to: null, table: null },
     if: null,
-    do: [{ kind: "set", values: [{ field: set?.name ?? "", value: defaultValueFor(set) }], records: null }],
+    do: [{ kind: "set", values: [{ field: set?.name ?? "", value: defaultValueFor(set) }], records: null, operation: null }],
   };
 }
