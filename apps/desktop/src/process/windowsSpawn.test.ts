@@ -7,14 +7,7 @@ import { createTestScratch } from "../workspaces/testTemp";
 
 // Teardown retries rmdir against asynchronously-released Windows handles, so the
 // hook needs room for the backoff.
-//
-// testTimeout matters too, and hookTimeout alone did not cover it: the win32 tests
-// carry their own 10s pid-file deadline and 5s death poll, both sitting inside a 5s
-// test budget — so `expect(grandchildPid).toBeGreaterThan(0)` could never report and
-// you got vitest's generic timeout instead of the real diagnostic. That is exactly
-// the "a deadline longer than its container" mistake this file's sibling fix in
-// presence.integration.test.ts was about.
-vi.setConfig({ hookTimeout: 20_000, testTimeout: 20_000 });
+vi.setConfig({ hookTimeout: 20_000 });
 
 const tempRoots: string[] = [];
 
@@ -224,7 +217,8 @@ describeWin32("real .cmd shim topology (win32)", () => {
 
     const { readFile } = await import("node:fs/promises");
     let grandchildPid = 0;
-    const deadline = Date.now() + 10_000;
+    // Child startup on a loaded gate; stays inside the 30 s test timeout.
+    const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       try {
         grandchildPid = Number((await readFile(pidFile, "utf8")).trim());

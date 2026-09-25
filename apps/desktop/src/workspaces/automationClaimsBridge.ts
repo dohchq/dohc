@@ -14,7 +14,9 @@ import {
  * A pending claim wakes the executor's drain. A claim inserted already
  * failed — the depth cap's `chain-stopped` stop report — is not drainable
  * work, so it instead pokes the owner-visible failure surface to re-read
- * `automations.failures`.
+ * `automations.failures`. A pending claim past its first run is an owner
+ * retry: it wakes the drain and pokes the failure surface, whose failure
+ * it cleared.
  */
 export function bridgeAutomationClaimsToExecutors(
   daemon: { onEvent(handler: (event: Event) => void): () => void },
@@ -27,10 +29,11 @@ export function bridgeAutomationClaimsToExecutors(
     if (typeof payload !== "object" || payload === null) return;
     const workspaceId = (payload as { workspaceId?: unknown }).workspaceId;
     if (typeof workspaceId !== "string" || workspaceId.length === 0) return;
-    if ((payload as { state?: unknown }).state === "failed") {
+    const { state, run } = payload as { state?: unknown; run?: unknown };
+    if (state === "failed" || (typeof run === "number" && run > 1)) {
       onClaimFailed?.(workspaceId);
-      return;
     }
+    if (state === "failed") return;
     executorFor(workspaceId)?.notifyClaimed();
   });
 }

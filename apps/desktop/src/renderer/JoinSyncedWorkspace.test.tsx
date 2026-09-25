@@ -260,6 +260,6 @@ describe("JoinSyncedWorkspace", () => {
 
     await user.click(await screen.findByTestId("cloud-connect-start"));
     // CloudLogin polls every 3s; the completion callback re-checks the gate.
-    await screen.findByTestId("join-sync-code", undefined, { timeout: 6000 });
-  }, 10_000);
+    await screen.findByTestId("join-sync-code");
+  });
 });

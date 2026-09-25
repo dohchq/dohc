@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import * as Y from "yjs";
@@ -197,6 +197,27 @@ describe("PageIdentity", () => {
       input.focus();
       await user.keyboard("{Enter}");
 
+      expect(onEnterBody).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps focus in the title while an IME picks a candidate", () => {
+      const onEnterBody = vi.fn();
+      render(
+        <PageIdentity
+          body={"# Body\n"}
+          onChange={() => {}}
+          filenameStem="note"
+          onEnterBody={onEnterBody}
+        />,
+      );
+
+      const input = screen.getByTestId("page-title");
+      fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
+      fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+      fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+      expect(onEnterBody).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(input, { key: "Enter" });
       expect(onEnterBody).toHaveBeenCalledTimes(1);
     });
   });

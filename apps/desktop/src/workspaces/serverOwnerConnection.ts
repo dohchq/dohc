@@ -52,12 +52,16 @@ export function createServerOwnerConnection(options: {
       if (!session || session.signal.aborted || !eligible(workspace, session.value)) return null;
       const relayUrl = canonicalRelayUrl(session.value.relayUrl ?? "");
       if (!relayUrl) return null;
+      // The operation carries realpath's spelling of the root. The authority operation has just matched
+      // the registry row against its registered spelling, so the session pins that one and compares it exactly.
+      const rootPath = options.workspaces().find(row => row.workspaceId === workspace.workspaceId)?.rootPath;
+      if (rootPath === undefined) return null;
       const signal = AbortSignal.any([lifetime, session.signal]);
       const assertCurrent = () => {
         signal.throwIfAborted();
         const current = options.credentials();
         const registered = options.workspaces().find(row => row.workspaceId === workspace.workspaceId);
-        if (!current || current.value !== session.value || !registered || registered.rootPath !== workspace.rootPath || !eligible(registered, session.value)) {
+        if (!current || current.value !== session.value || !registered || registered.rootPath !== rootPath || !eligible(registered, session.value)) {
           throw new Error("Owner delivery connection changed.");
         }
       };
@@ -66,12 +70,12 @@ export function createServerOwnerConnection(options: {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]); requestSignal.throwIfAborted();
           const priorAttempt = refusalAttempts.get(workspace.workspaceId);
-          if (priorAttempt?.credentials === session.value && priorAttempt.rootPath === workspace.rootPath && priorAttempt.until > Date.now()) return;
+          if (priorAttempt?.credentials === session.value && priorAttempt.rootPath === rootPath && priorAttempt.until > Date.now()) return;
           // The existing serial delivery loop visits one bounded page at most
           // every ten seconds. Failed pages retain the last confirmed state.
-          refusalAttempts.set(workspace.workspaceId, {credentials: session.value, rootPath: workspace.rootPath, until: Date.now() + 10_000});
+          refusalAttempts.set(workspace.workspaceId, {credentials: session.value, rootPath, until: Date.now() + 10_000});
           const saved = refusalScan.get(workspace.workspaceId);
-          const state = saved?.credentials === session.value && saved.rootPath === workspace.rootPath ? saved : undefined;
+          const state = saved?.credentials === session.value && saved.rootPath === rootPath ? saved : undefined;
           const after = state?.after;
           const suffix = after === undefined ? "" : `&after=${encodeURIComponent(after)}`;
           const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host?refusals=1${suffix}`, {
@@ -88,7 +92,7 @@ export function createServerOwnerConnection(options: {
           const next = value.nextCursor === null ? undefined : value.nextCursor;
           const seen = (state?.seen ?? false) || value.refusals.length > 0;
           const published = next === undefined ? seen : seen || (state?.published ?? false);
-          refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath: workspace.rootPath, after: next, seen: next === undefined ? false : seen, published});
+          refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
         },
         async documents(attempt) {

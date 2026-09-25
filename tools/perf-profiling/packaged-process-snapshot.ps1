@@ -19,6 +19,7 @@ $rows = @($processes | Where-Object { $owned.Contains([int]$_.ProcessId) } | For
     parentPid = [int]$_.ParentProcessId
     name = $_.Name
     path = $_.ExecutablePath
+    commandLine = $_.CommandLine
     createdAt = $_.CreationDate.ToUniversalTime().ToString('o')
     cpuMs = ([double]$_.KernelModeTime + [double]$_.UserModeTime) / 10000
     privateBytes = [double]$_.PrivatePageCount

@@ -64,7 +64,7 @@ async function setThemeMode(themeMode: ThemeMode): Promise<void> {
     appearance: { ...result.settings.appearance, themeMode },
   };
   applyAppearance(next.appearance);
-  await window.dohcDesktop?.setUserSettings?.({ settings: next });
+  await window.dohcDesktop?.setUserSettings?.({ settings: next, base: result.settings });
 }
 
 export function toggleTheme(): void {

@@ -14,13 +14,13 @@ export type ParsedCliCommand = ParsedCliBase &
     | { verb: "dataset"; request: DatasetRequest }
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
     | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
-    | { verb: "channels" }
-    | { verb: "threads"; channel: string }
+    | { verb: "groups" }
+    | { verb: "threads"; group: string }
     | { verb: "inbox" }
     | { verb: "show"; target: string; peek: boolean }
     | {
         verb: "post";
-        channel: string;
+        group: string;
         title?: string;
         attachments: string[];
         needsDecision: boolean;
@@ -42,7 +42,7 @@ export type ParsedCliCommand = ParsedCliBase &
     | {
         verb: "grep";
         pattern: string;
-        channel?: string;
+        group?: string;
         thread?: string;
         from?: string;
         since?: string;
@@ -56,7 +56,7 @@ export type ParsedCliCommand = ParsedCliBase &
         verb: "export";
         scope:
           | { kind: "all" }
-          | { kind: "channel"; channel: string }
+          | { kind: "group"; group: string }
           | { kind: "thread"; thread: string };
         outDir: string;
       }
@@ -88,7 +88,7 @@ function stripGlobalFlags(argv: readonly string[]): {
 } {
   const optionsWithValues = new Set([
     "--attach",
-    "--channel",
+    "--group",
     "--choose",
     "--option",
     "--from",
@@ -154,8 +154,8 @@ function parseShow(tokens: readonly string[]): { target: string; peek: boolean }
 }
 
 function parsePost(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { verb: "post" }>, keyof ParsedCliBase | "verb"> {
-  const channel = tokens[0];
-  if (!channel || channel.startsWith("--")) fail("post requires a channel");
+  const group = tokens[0];
+  if (!group || group.startsWith("--")) fail("post requires a group");
   let title: string | undefined;
   const attachments: string[] = [];
   let needsDecision = false;
@@ -186,7 +186,7 @@ function parsePost(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
   const body = bodyParts.join(" ");
   if (!body) fail("post requires a body or '-' for stdin");
   return {
-    channel,
+    group,
     ...(title ? { title } : {}),
     attachments,
     needsDecision: needsDecision || options.length > 0,
@@ -257,7 +257,7 @@ function parseGrep(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
   if (literalPattern && tokens.length > 2) {
     fail(`grep does not accept '${tokens[2]}' after the pattern`);
   }
-  let channel: string | undefined;
+  let group: string | undefined;
   let thread: string | undefined;
   let from: string | undefined;
   let since: string | undefined;
@@ -269,8 +269,8 @@ function parseGrep(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
   for (let index = 1; !literalPattern && index < tokens.length; index += 1) {
     const token = tokens[index]!;
     switch (token) {
-      case "--channel":
-        channel = takeValue(tokens, index, token);
+      case "--group":
+        group = takeValue(tokens, index, token);
         index += 1;
         break;
       case "--thread":
@@ -308,7 +308,7 @@ function parseGrep(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
   }
   return {
     pattern,
-    ...(channel ? { channel } : {}),
+    ...(group ? { group } : {}),
     ...(thread ? { thread } : {}),
     ...(from ? { from } : {}),
     ...(since ? { since } : {}),
@@ -328,8 +328,8 @@ function parseExport(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, 
     let candidate: Extract<ParsedCliCommand, { verb: "export" }>["scope"] | undefined;
     if (token === "--all") {
       candidate = { kind: "all" };
-    } else if (token === "--channel") {
-      candidate = { kind: "channel", channel: takeValue(tokens, index, token) };
+    } else if (token === "--group") {
+      candidate = { kind: "group", group: takeValue(tokens, index, token) };
       index += 1;
     } else if (token === "--thread") {
       candidate = { kind: "thread", thread: takeValue(tokens, index, token) };
@@ -341,7 +341,7 @@ function parseExport(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, 
       fail(`unknown export option '${token}'`);
     }
     if (candidate) {
-      if (scope) fail("export accepts only one of --all, --channel, or --thread");
+      if (scope) fail("export accepts only one of --all, --group, or --thread");
       scope = candidate;
     }
   }
@@ -381,14 +381,14 @@ export function parseCliArguments(
   const actor: CliActor = global.actorFlag || env.DOHC_CHAT_ACTOR === "agent" ? "agent" : "human";
   const base = { actor, json: global.json };
   switch (verb) {
-    case "channels":
+    case "groups":
       noExtraArgs(tokens, verb);
       return { ...base, verb };
     case "threads": {
-      const channel = tokens[0];
-      if (!channel) fail("threads requires a channel");
+      const group = tokens[0];
+      if (!group) fail("threads requires a group");
       noExtraArgs(tokens.slice(1), verb);
-      return { ...base, verb, channel };
+      return { ...base, verb, group };
     }
     case "inbox":
       noExtraArgs(tokens, verb);
