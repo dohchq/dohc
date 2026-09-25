@@ -4,7 +4,7 @@ import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
-import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
+import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, JournalCommit, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import { acquireSupervisorOwnership } from "./worker-ownership.js";
 import { readMigrationPreviewReportPage, type MigrationPreviewReportPage, type MigrationPreviewTableSummary } from "./migration-preview-report.js";
@@ -28,7 +28,11 @@ export interface DatasetInvocation extends DatasetAccess {
   /** Derived by the trusted host. Called again at commit and before disclosure. */
   authorize(): void;
   accountAndAttach?: CommitOperationInput["accountAndAttach"];
+  /** Runs inside the commit transaction. A receipt replay never reaches it. */
+  recordCommit?: (commit: Readonly<DatasetCommit>) => unknown;
 }
+/** A committed change, with each approved table's columns in the order a changeset records them. */
+export interface DatasetCommit extends JournalCommit { columns: Readonly<Record<string, readonly string[]>> }
 export interface DatasetMigration extends DatasetAccess {
   expected: DatasetCursor;
   newTables: string[];
@@ -425,7 +429,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       const committed = options.journal.commitOperation({ expected: worker.cursor, proposalId: prepared.proposalId, operation: input.operation,
         callerKey: input.callerKey, idempotencyKey: input.idempotencyKey, payloadSha256: input.payloadSha256, resultJson,
         changeset: prepared.changeset, changesetSha256: prepared.changesetSha256, attachedFileIds: prepared.attachedFileIds,
-        authorize: () => standing(input), accountAndAttach: input.accountAndAttach });
+        authorize: () => standing(input), accountAndAttach: input.accountAndAttach,
+        recordCommit: input.recordCommit && (commit => input.recordCommit!({ ...commit, columns: prepared.columns })) });
       if (committed.kind === "replayed") {
         await worker.runtime.discard(prepared.proposalId);
         await recover(lane, input);
