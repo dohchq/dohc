@@ -387,8 +387,9 @@ export interface ShareProposalSettlement {
 // A Notice sent to a person lives in that person's notice list on the relay,
 // so it reaches every computer they sign in on. The relay derives who sent
 // it, what kind of sender it shows, and the sender's name. `recipients` says
-// who a kind may be sent to: "self" kinds describe the sender's own work, and
-// "readers" kinds may go to anyone who can read the notice's target path.
+// who a kind may be sent to: "self" kinds describe the sender's own work,
+// "readers" kinds may go to anyone who can read the notice's target path, and
+// "relay" kinds only the relay writes.
 export type NoticeSenderKind = "person" | "agent" | "automation";
 
 export const NOTICE_KINDS = {
@@ -397,12 +398,19 @@ export const NOTICE_KINDS = {
   "schedule-skipped": { senderKind: "automation", recipients: "self" },
   "automation-failed": { senderKind: "automation", recipients: "readers" },
   "automation-notify": { senderKind: "automation", recipients: "readers" },
+  // A share reached you. The relay writes it from the granter when a named
+  // grant becomes active for you.
+  "share-received": { senderKind: "person", recipients: "relay" },
 } as const satisfies Record<string, {
   senderKind: NoticeSenderKind;
-  recipients: "self" | "readers";
+  recipients: "self" | "readers" | "relay";
 }>;
 
 export type NoticeKind = keyof typeof NOTICE_KINDS;
+// The kinds a person or agent may post.
+export type PostableNoticeKind = {
+  [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;
+}[NoticeKind];
 
 // Lengths count code points, as a person counts characters.
 export const NOTICE_TITLE_MAX_CHARS = 120;
@@ -489,7 +497,7 @@ export type NoticeReach =
 export type PostNoticeRequest = NoticeReach & {
   noticeId: string;
   recipientUserId: string;
-  kind: NoticeKind;
+  kind: PostableNoticeKind;
   title: string;
   body: string;
   target: NoticeTarget;

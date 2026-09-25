@@ -22,6 +22,7 @@ import {
   type NoticeTarget,
   type PostNoticeRequest,
   type SyncRelayConnection,
+  type PostableNoticeKind,
 } from "@dohc/workspace-contracts/relay";
 import { NoticeRow, NoticeTargetShape, type NoticeRef } from "../ipc/bridgeContract";
 import { relayRequest } from "../workspaces/relayRequest";
@@ -53,7 +54,7 @@ export interface PostNoticeInput {
   // This computer's workspace id.
   workspaceId: string;
   noticeId: string;
-  kind: NoticeKind;
+  kind: PostableNoticeKind;
   title: string;
   body: string;
   target?: NoticeTarget;
@@ -80,12 +81,16 @@ export interface NoticeStore {
 }
 
 const kindValues = Object.keys(NOTICE_KINDS) as [NoticeKind, ...NoticeKind[]];
+// The kinds this computer may post; the relay writes the others itself.
+const postableKindValues = kindValues.filter(
+  (kind): kind is PostableNoticeKind => NOTICE_KINDS[kind].recipients !== "relay",
+) as [PostableNoticeKind, ...PostableNoticeKind[]];
 // The relay's rules, checked before a notice is kept anywhere.
 const NoticeContent = z.object({
   noticeId: z.string().refine((value) =>
     isNoticeLine(value, NOTICE_POSTED_ID_MAX_CHARS) && !value.startsWith(NOTICE_FROM_PREFIX)),
   workspaceId: z.string().refine((value) => isNoticeLine(value, 256)),
-  kind: z.enum(kindValues),
+  kind: z.enum(postableKindValues),
   title: z.string().refine((value) => isNoticeLine(value, NOTICE_TITLE_MAX_CHARS)),
   body: z.string().refine(isNoticeBody),
   target: z.custom<NoticeTarget>(isNoticeTarget),

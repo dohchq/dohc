@@ -155,6 +155,17 @@ async function titles(computer: Computer): Promise<string[]> {
   return (await computer.store.list()).map((row) => `${row.store}:${row.title}${row.readAtMs === null ? "" : " (read)"}`);
 }
 
+function shareNotice(shareId: string) {
+  return expect.objectContaining({
+    store: "account",
+    noticeId: "from:owner:share-received:grant-0",
+    kind: "share-received",
+    recipientShareId: shareId,
+    target: { share: shareId },
+    readAtMs: null,
+  });
+}
+
 async function file(computer: Computer, name: "local" | "account"): Promise<Record<string, unknown[]>> {
   const names = await readdir(computer.directory);
   const found = names.find((entry) => (name === "local" ? entry === "local.json" : entry.startsWith("account-") && entry.endsWith(".json")));
@@ -339,7 +350,7 @@ describe("notices on one person's computers", () => {
     await desktop.store.sync();
     expect(await desktop.store.list()).toEqual([expect.objectContaining({
       workspaceId: null, recipientShareId: shareId, target: { path: "trip/day-1" },
-    })]);
+    }), shareNotice(shareId)]);
   });
 
   it("keeps your notice on this computer when the relay refuses it", async () => {
@@ -608,13 +619,16 @@ describe("the outbox", () => {
         await laptop.store.sync();
         // The relay stamps a read with its own clock when the mark arrives.
         const readAtMs = answer === "accepts" ? expect.any(Number) : markedAtMs;
+        // A grant revoked before the first pull never delivers its share notice.
+        const expectedNotices = [
+          ...(mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : []),
+          ...(answer === "accepts" ? [shareNotice(shareId)] : []),
+        ];
 
         if (answer === "accepts") {
           const other = await computer(account(server, "ana"));
           await other.store.sync();
-          expect(await other.store.list()).toEqual(
-            mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
-          );
+          expect(await other.store.list()).toEqual(expectedNotices);
         } else {
           const local = (await file(laptop, "local")).rows;
           expect(local).toEqual([expect.objectContaining({
@@ -624,9 +638,7 @@ describe("the outbox", () => {
             dismissedAtMs: mark === "dismissed" ? markedAtMs : null,
           })]);
         }
-        expect(await laptop.store.list()).toEqual(
-          mark === "read" ? [expect.objectContaining({ noticeId: "agent-run:1", readAtMs })] : [],
-        );
+        expect(await laptop.store.list()).toEqual(expectedNotices);
         const outbox = await file(laptop, "account");
         expect([outbox.posts, outbox.marks]).toEqual([[], []]);
       });
@@ -678,12 +690,15 @@ describe("notices for another person", () => {
       senderLabel: "Name owner",
       senderKind: "automation",
       target: { path: "trip/tasks" },
-    })]);
+    }), shareNotice(shareId)]);
     expect(await owner.store.list()).toEqual([]);
 
     await ana.store.mark({ store: "account", noticeId: "from:owner:automation-failed:run-1" }, "read");
     await ana.store.sync();
-    expect(await titles(ana)).toEqual(["account:Stamp the finish date failed (read)"]);
+    expect(await titles(ana)).toEqual([
+      "account:Stamp the finish date failed (read)",
+      "account:Name owner shared trip with you",
+    ]);
 
     await expect(owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }))
       .rejects.toThrow(new NoticeNotSentError("This person can't open what the notice points to."));
@@ -695,7 +710,12 @@ describe("notices for another person", () => {
     // When Ana loses the share, the notice stays and its target goes.
     expect(server.storage.revokeShare(shareId, clock)).toBe(true);
     await ana.store.sync();
-    expect(await ana.store.list()).toEqual([expect.objectContaining({ title: "Stamp the finish date failed", target: null })]);
+    expect(await ana.store.list()).toEqual([
+      expect.objectContaining({ title: "Stamp the finish date failed", target: null }),
+      expect.objectContaining({
+        noticeId: "from:owner:share-received:grant-0", kind: "share-received", target: null, readAtMs: null,
+      }),
+    ]);
   });
 
   it("says when a person's notices are full of unread ones", async () => {
