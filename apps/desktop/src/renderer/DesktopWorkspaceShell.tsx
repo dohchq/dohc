@@ -2797,16 +2797,20 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
 
+  // The Explorer selects and focuses this path once its row renders.
+  const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; path: string } | null>(null);
+  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
   const showPathInExplorer = useCallback(
-    (path: string) => {
+    (path: string, expandPath = false) => {
       mutateWb((state) =>
-        ancestorDirs(path).reduce<WorkbenchState>(
+        [...ancestorDirs(path), ...(expandPath ? [path] : [])].reduce<WorkbenchState>(
           (acc, dir) => setFolderExpanded(acc, dir, true),
           { ...state, activeView: "explorer", sidebarVisible: true },
         ),
       );
+      setExplorerReveal({ workspaceId, path });
     },
-    [mutateWb],
+    [mutateWb, workspaceId],
   );
 
   // Successful explorer moves/deletes re-project every path-keyed slice
@@ -3198,8 +3202,10 @@ export function DesktopWorkspaceShell(props: {
         closeGroupAfterFlush(targetGroupId);
       } else if (command === "copy-path" && path && !isVirtualTabPath(path)) {
         void navigator.clipboard?.writeText(path);
-      } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
-        showPathInExplorer(path);
+      } else if (command === "show-in-explorer" && path) {
+        const appRoot = parseSiteTabPath(path);
+        if (appRoot !== null) showPathInExplorer(appRoot, true);
+        else if (!isVirtualTabPath(path)) showPathInExplorer(path);
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
@@ -4208,6 +4214,8 @@ export function DesktopWorkspaceShell(props: {
         openEditorsHeight={wb.openEditorsHeight}
         onOpenEditorsHeightChange={onOpenEditorsHeightChange}
         createRequest={createRequest}
+        revealPath={explorerReveal?.workspaceId === workspaceId ? explorerReveal.path : null}
+        onRevealed={clearExplorerReveal}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
@@ -5259,6 +5267,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     reportError={reportShellError}
                     siteRoot={groupSiteRoot}
+                    onShowSource={() => showPathInExplorer(groupSiteRoot, true)}
                     sharedView={!!shareView}
                     onShareSite={(target) =>
                       setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
