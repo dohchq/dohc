@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { parseDatasetDefinition, type DatasetField } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, parseDatasetDefinition, type DatasetDefinition, type DatasetField } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
 
 const fieldShape = ({ name: _name, ...field }: DatasetField) => JSON.stringify(field);
+// Tables without their names or buttons. A button has no column, so a change
+// that only adds or removes buttons reverses without SQL.
+const columnShape = (tables: DatasetDefinition["tables"]) =>
+  JSON.stringify(tables.map(table => ({ ...table, name: "", fields: datasetColumnFields(table).map(field => ({ ...field, name: "" })) })));
 
 /** A compensating change starts from today's schema. It never copies yesterday's records or permissions. */
 export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, saved: DatasetHistoryRevision, changed: DatasetHistoryRevision) {
@@ -20,8 +24,7 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
     return before;
   };
   // Arbitrary SQL has no reliable automatic inverse. Preserve later fields; stop rather than discard their values.
-  if (saved.revision.schemaSha256 !== changed.revision.schemaSha256 || JSON.stringify(old.tables.map(table => ({ ...table, name: "", fields: table.fields.map(field => ({ ...field, name: "" })) }))) !==
-      JSON.stringify(after.tables.map(table => ({ ...table, name: "", fields: table.fields.map(field => ({ ...field, name: "" })) })))) {
+  if (saved.revision.schemaSha256 !== changed.revision.schemaSha256 || columnShape(old.tables) !== columnShape(after.tables)) {
     throw new Error("This change altered fields or constraints. Use Fields and names to review a conversion, or review a source migration that preserves current records.");
   }
   for (const table of old.tables) {
@@ -29,12 +32,23 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
     const now = definition.tables.find(item => item.tableId === table.tableId);
     if (!now || now.sqlName !== table.sqlName || now.primaryKey !== table.primaryKey) throw new Error(`The table ${table.name} changed. Review a source migration that preserves its current records.`);
     for (const field of table.fields) {
-      const then = selected.fields.find(item => item.fieldId === field.fieldId)!;
+      const then = selected.fields.find(item => item.fieldId === field.fieldId);
+      // Only a button can be missing: the columns matched above. The change
+      // removed it, so the reversal puts it back unless it is back already.
+      if (!then) {
+        if (now.fields.some(item => item.fieldId === field.fieldId)) continue;
+        if (now.fields.some(item => item.name === field.name)) throw new Error(`Another field in ${now.name} is now named ${field.name}. Rename it in Fields and names, then reverse this change.`);
+        now.fields.push(structuredClone(field));
+        continue;
+      }
       if (field.name === then.name) continue;
       const present = now.fields.find(item => item.fieldId === field.fieldId);
       if (!present || fieldShape(present) !== fieldShape(then)) throw new Error(`The field ${field.name} changed type or constraints. Use Fields and names to review its conversion.`);
       present.name = restoreLabel(field.name, then.name, present.name, field.name);
     }
+    // The buttons the change added go, wherever they are named now.
+    const added = new Set(selected.fields.filter(field => !table.fields.some(item => item.fieldId === field.fieldId)).map(field => field.fieldId));
+    now.fields = now.fields.filter(field => !added.has(field.fieldId));
     now.name = restoreLabel(table.name, selected.name, now.name, table.name);
   }
   const operationShape = (operation: typeof old.operations[number]) => { const { label: _label, access: _access, ...rest } = operation; return JSON.stringify(rest); };

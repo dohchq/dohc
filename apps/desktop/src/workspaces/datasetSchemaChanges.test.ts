@@ -126,6 +126,21 @@ it("adds a button through owner approval without SQL, operation changes, or new 
   expect(added.revision.definition.tables[0]!.fields.map(field => field.name)).toEqual(["ID", "Name", "Email receipt", "Email"]);
 });
 
+it("refuses a button from a shared view before writing any source", async () => {
+  const f = await fixture();
+  const written: string[] = [];
+  const shareView = { shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false,
+    grantedSelector: { paths: ["people"], versionId: null, access: "edit" } };
+  const recipient = createDatasetHandler({ flushSourceCapture: async () => {}, hostForWorkspace: async () => f.host,
+    withWorkspaceOperation: async (_caller, _id, work) => work({ workspace: { workspaceId: "w", shareView }, signal: new AbortController().signal, assertCurrent() {} }),
+    withAdapter: async () => { throw new Error("A shared view has no source to capture."); },
+    createSources: async (_workspace, sources) => { written.push(...Object.keys(sources)); } });
+  await expect(recipient("editor", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: f.revision.revision,
+    revisionSha256: f.revision.revisionSha256, change: { kind: "addButton", tableId: id(2), name: "Send receipt" } })).rejects.toThrow("Open the original workspace to manage this Collection.");
+  expect(written).toEqual([]);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
 it("keeps stable field/table IDs across consecutive add and label changes", async () => {
   const f = await fixture();
   await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "first"));
