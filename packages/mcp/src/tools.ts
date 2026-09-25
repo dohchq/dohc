@@ -1420,7 +1420,7 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
   return requestCli(ctx, "moment", args);
 }
 
-// --- dohc site tools --------------------------------------------------------
+// --- dohc app tools ---------------------------------------------------------
 
 type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
   Record<string, unknown>;
@@ -1462,7 +1462,7 @@ function isIgnoredSitePath(path: string): boolean {
 }
 
 function siteTitleFromPath(root: string): string {
-  const name = basename(root) || "Site";
+  const name = basename(root) || "App";
   return name
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -1470,12 +1470,12 @@ function siteTitleFromPath(root: string): string {
 }
 
 function packageNameFromPath(root: string): string {
-  const name = basename(root) || "site";
+  const name = basename(root) || "app";
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return slug || "site";
+  return slug || "app";
 }
 
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
@@ -1545,7 +1545,7 @@ function siteEntryPathFor(root: string, entry: string): string {
 // hundreds of dependencies, measures in the tens of kilobytes — mirrors
 // desktop's own MAX_METADATA_FILE_BYTES (apps/desktop/src/workspaces/
 // sitePackage.ts), so both detectors bound the same files the same way.
-// detect_sites calls this for every discovered dohc.json/package.json with
+// dohc_detect_apps calls this for every discovered dohc.json/package.json with
 // no per-call concurrency cap; without a size check first, a single very
 // large or sparse metadata file could stall or exhaust the MCP process.
 const MAX_SITE_METADATA_FILE_BYTES = 1024 * 1024;
@@ -1650,7 +1650,7 @@ async function detectSiteAt(
   // workspace-core/src/sites.ts) for the identical malformed input — a
   // dohc.json preview.mode that isn't one of the three valid values must
   // surface the same diagnostic here as it does for the desktop detector,
-  // or test_site can silently pass a config the desktop Apps view flags.
+  // or dohc_test_app can silently pass a config the desktop Apps view flags.
   if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1718,8 +1718,8 @@ async function detectSiteAt(
   // Same safe-relative-path validation as workspace-core's parseBuild — an
   // absolute path, a traversal, or a Windows-alias traversal in
   // build.output gets the same invalid-build-output diagnostic and is
-  // dropped, not returned as an unsafe planned output for build_site/
-  // test_site to act on.
+  // dropped, not returned as an unsafe planned output for dohc_test_app
+  // to act on.
   const rawConfiguredBuildOutput = configString(config?.build, "output");
   const configuredBuildOutput = rawConfiguredBuildOutput
     ? safeRelativeConfigPath(rawConfiguredBuildOutput)
@@ -1740,13 +1740,13 @@ async function detectSiteAt(
   // sites.ts) give a real configured artifact priority over a real
   // conventional one whenever both exist — this has to agree, or an agent
   // building through the configured output sees MCP still reporting (and
-  // test_site/build_site acting on) a stale conventional artifact left
+  // dohc_test_app acting on) a stale conventional artifact left
   // over from an earlier build. So this check is unconditional, and its
   // result overrides whatever the conventional loop already set.
   // Every entry `detectedBuildOutputs` already required a passing isFile()
   // check above; a configured output only joins them once its own check
   // here passes too — so realBuildOutputs never needs a second stat of a
-  // path this function already confirmed. detectSites' own walk used to
+  // path this function already confirmed. detectApps' own walk used to
   // re-stat each of these itself to learn the same thing.
   const realBuildOutputs = [...detectedBuildOutputs];
   if (configuredBuildOutput) {
@@ -1803,7 +1803,7 @@ async function detectSiteAt(
   // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
   // framework config file (vite.config.ts, ...) is "configured", and
   // either one is a high-confidence signal on its own, same as an actual
-  // index.html file — the desktop Apps view and MCP's detect_sites must
+  // index.html file — the desktop Apps view and MCP's dohc_detect_apps must
   // describe the same project the same way.
   const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
@@ -1852,10 +1852,10 @@ async function detectSiteAt(
   };
 }
 
-export async function detectSites(
+export async function detectApps(
   ctx: ToolContext,
   args: { path?: string; maxDepth?: number } = {},
-): Promise<{ ok: true; sites: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
+): Promise<{ ok: true; apps: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
   const start =
     args.path && args.path.trim().length > 0
       ? await safeResolve(ctx, args.path, "read")
@@ -1867,7 +1867,7 @@ export async function detectSites(
   if (!info.isDirectory()) return { ok: false as const, reason: `not a directory: ${args.path ?? "."}` };
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
-  const sites: WorkspaceSite[] = [];
+  const apps: WorkspaceSite[] = [];
   // A directory an already-visited ancestor reported as its own real build
   // artifact (conventional dist/build/out, or an explicitly configured
   // build.output path, single- or multi-segment — either way, backed by an
@@ -1892,7 +1892,7 @@ export async function detectSites(
     if (!knownBuildOutputPaths.has(root)) {
       const detected = await detectSiteAt(ctx, absolute, root);
       if (detected) {
-        sites.push(detected.site);
+        apps.push(detected.site);
         for (const output of detected.realBuildOutputs) {
           knownBuildOutputPaths.add(relativeJoin(root, output));
         }
@@ -1915,28 +1915,28 @@ export async function detectSites(
   }
 
   await walk(start.absolute, start.normalized, 0);
-  sites.sort((a, b) => a.root.localeCompare(b.root));
-  return { ok: true as const, sites, count: sites.length, detector: "mcp-local" };
+  apps.sort((a, b) => a.root.localeCompare(b.root));
+  return { ok: true as const, apps, count: apps.length, detector: "mcp-local" };
 }
 
-export async function createSite(
+export async function createApp(
   ctx: ToolContext,
-  args: { path: string; title?: string; withDohcJson?: boolean },
+  args: { appRoot: string; title?: string; withDohcJson?: boolean },
 ) {
-  const root = await safeResolve(ctx, args.path);
+  const root = await safeResolve(ctx, args.appRoot);
   if (!root.ok) return { ok: false as const, reason: root.reason };
-  if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
+  if (!root.normalized) return { ok: false as const, reason: "appRoot must name a folder" };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
   const existing = await lstat(root.absolute).catch(() => null);
   if (existing && !existing.isDirectory()) {
-    return { ok: false as const, reason: `site path is not a directory: ${root.normalized}` };
+    return { ok: false as const, reason: `appRoot is not a directory: ${root.normalized}` };
   }
   if (existing) {
     const entries = await readdir(root.absolute);
     if (entries.length > 0) {
-      return { ok: false as const, reason: `site folder already exists and is not empty: ${root.normalized}` };
+      return { ok: false as const, reason: `app folder already exists and is not empty: ${root.normalized}` };
     }
   }
 
@@ -1955,7 +1955,7 @@ export async function createSite(
   </head>
   <body>
     <main>
-      <p class="eyebrow">Fresh Site</p>
+      <p class="eyebrow">New app</p>
       <h1>${escapeHtml(title)}</h1>
       <p>A clean local page, ready for the shape of the work.</p>
     </main>
@@ -2079,7 +2079,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
       resolved.normalized !== root.normalized &&
       !resolved.normalized.startsWith(`${root.normalized}/`)
     ) {
-      return { ok: false as const, reason: `not inside site: ${file.path}` };
+      return { ok: false as const, reason: `not inside the app folder: ${file.path}` };
     }
     if (await lstat(resolved.absolute).catch(() => null)) {
       return { ok: false as const, reason: `file already exists: ${resolved.normalized}` };
@@ -2102,25 +2102,25 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     return {
       ok: false as const,
       reason: visibleMutationStarted
-        ? mutationRetainedReason(error, `failed to create site: ${root.normalized}`)
-        : failureReason(error, `failed to create site: ${root.normalized}`),
+        ? mutationRetainedReason(error, `failed to create app: ${root.normalized}`)
+        : failureReason(error, `failed to create app: ${root.normalized}`),
     };
   }
   return {
     ok: true as const,
-    siteRoot: root.normalized,
+    appRoot: root.normalized,
     files: resolvedFiles.map((file) => file.normalized),
     ...RECORDED_BY_ENGINE,
   };
 }
 
-async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
-  const root = await safeResolve(ctx, siteRoot, "read");
+async function resolveAppRoot(ctx: ToolContext, appRoot: string) {
+  const root = await safeResolve(ctx, appRoot, "read");
   if (!root.ok) return root;
-  // Mounted shares (shared-with-me/) are readable, but site tools execute
-  // or mutate the site (test/build/preview/publish) — running
+  // Mounted shares (shared-with-me/) are readable, but app tools execute
+  // or mutate the app (test/build/preview/publish) — running
   // someone else's shared code with workspace access is refused. Copying
-  // the site into the user's own files makes it runnable. The check is the
+  // the app into the user's own files makes it runnable. The check is the
   // shared case-insensitive/alias-normalizing predicate, not a literal
   // compare: normalized paths preserve casing, and "Shared-With-Me/…" names
   // the same directory on case-insensitive filesystems. Both
@@ -2130,30 +2130,30 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   if (isSharedWithMePath(root.realRelative)) {
     return {
       ok: false as const,
-      reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
+      reason: `app root is a mounted share (read-only): ${appRoot} — copy it into your own files to run it`,
     };
   }
   const info = await lstat(root.absolute).catch(() => null);
-  if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
-  if (!info.isDirectory()) return { ok: false as const, reason: `site root is not a directory: ${siteRoot}` };
+  if (!info) return { ok: false as const, reason: `app root not found: ${appRoot}` };
+  if (!info.isDirectory()) return { ok: false as const, reason: `app root is not a directory: ${appRoot}` };
   return root;
 }
 
-export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
-  const root = await resolveSiteRoot(ctx, args.siteRoot);
+export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
+  const root = await resolveAppRoot(ctx, args.appRoot);
   if (!root.ok) return root;
   const detected = await detectSiteAt(ctx, root.absolute, root.normalized);
-  if (!detected) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
-  const { site } = detected;
+  if (!detected) return { ok: false as const, reason: `not a detected app: ${root.normalized}` };
+  const { site: app } = detected;
 
   const checks: SiteCheck[] = [];
   checks.push({
-    name: "detected-site",
+    name: "detected-app",
     ok: true,
     path: root.normalized,
-    message: `${site.kind} site detected with ${site.confidence} confidence.`,
+    message: `${app.kind} app detected with ${app.confidence} confidence.`,
   });
-  for (const diagnostic of site.diagnostics) {
+  for (const diagnostic of app.diagnostics) {
     checks.push({
       name: diagnostic.code,
       ok: diagnostic.severity !== "error",
@@ -2162,26 +2162,26 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
     });
   }
 
-  if (site.entry) {
-    const entry = await safeResolve(ctx, site.entry, "read");
+  if (app.entry) {
+    const entry = await safeResolve(ctx, app.entry, "read");
     const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
     checks.push({
       name: "entry-file",
       ok: exists,
-      path: site.entry,
+      path: app.entry,
       message: exists ? "Entry file exists." : "Entry file is missing.",
     });
-  } else if (!site.scripts.dev && !site.scripts.start && !site.scripts.build) {
+  } else if (!app.scripts.dev && !app.scripts.start && !app.scripts.build) {
     checks.push({
       name: "entry-or-script",
       ok: false,
       path: root.normalized,
-      message: "Site needs an index.html entry or a package script.",
+      message: "App needs an index.html entry or a package script.",
     });
   }
 
   const ok = checks.every((check) => check.ok);
-  return { ok, site, checks };
+  return { ok, app, checks };
 }
 
 // --- dohc_import_data -------------------------------------------------------
