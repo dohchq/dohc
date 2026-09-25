@@ -1618,6 +1618,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
         &mut store,
         "ws",
         &crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),

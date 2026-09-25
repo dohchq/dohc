@@ -101,9 +101,30 @@ Search visible workspace file paths and text contents. Hidden dohc internals, .g
 
 Returns `{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`.
 
+### `dohc_read_document`
+
+Read a Markdown document as it is now, including edits an open editor has not saved to the file yet. Read it before dohc_edit_document: edits match this text.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
+
+### `dohc_edit_document`
+
+Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `find`: `string`
+- `replacement`: `string`. Required.
+- `requestId`: `string`
+
+Returns `{ ok: true, path, changed, warning? } | { ok: false, reason }`.
+
 ### `dohc_write_file`
 
-Write an ordinary workspace file. Markdown and Excalidraw documents must be edited in dohc and are refused here. The desktop watcher captures file history while open, or on the next open.
+Write an ordinary workspace file. Markdown documents change through dohc_edit_document and Excalidraw scenes in dohc; this tool refuses both. The desktop watcher captures file history while open, or on the next open.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -514,7 +535,7 @@ Returns `{ kind: "history-revision", revision, schemaSql, operationSource }`.
 
 Prepare a change that reverses one saved change.
 
-Take targetRevisionSha256 and changedRevisionSha256 from the history entry. Review the result, then approve it with approveMigration.
+Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `history`. Set `changedRevisionSha256` to `entries[].schema.revisionHash` from `history`. Review the result, then approve it with approveMigration.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -553,7 +574,7 @@ Returns `{ kind: "grant-updated" }`.
 
 Remove an explicit data grant.
 
-Take principalKey from permissions.
+Set `principalKey` to `permissions[].principal` from `permissions`.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -594,7 +615,7 @@ Returns `{ kind: "lifecycle-updated", archived, generation, reason? }`.
 
 Review what deleting a Collection affects.
 
-The result lists affected apps and holds the cursor and reviewToken that delete needs.
+The result lists affected apps and holds what delete needs.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -607,7 +628,7 @@ Returns `{ kind: "delete-preview", archived, generation, reason, apps: { appId, 
 
 Permanently delete a Collection and all its data.
 
-This removes the Collection's private data and history. Take expected and reviewToken from deletePreview. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
+Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -632,7 +653,7 @@ Returns `{ kind: "pending-attempts", datasetId, entries: { reference, operation,
 
 Clear the retry of a saved pending response.
 
-Take reference from pendingAttempts. Set acknowledge to true. This cannot be undone.
+Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge to true. This cannot be undone.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -645,7 +666,7 @@ Returns `{ kind: "attempt-reconciled", cleared: true }`.
 
 Cancel an unconfirmed pending response.
 
-Take reference from pendingAttempts. Set acknowledge to true.
+Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge to true.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -682,7 +703,7 @@ Returns `{ kind: "recovery-prepared", recovery: { transferId, manifestSha256, so
 
 Restore a Collection from a prepared archive.
 
-Stop the old host first. Pass the fields from prepareRecovery unchanged, with oldHostStopped set to true.
+Set `workspaceId` to `recovery.sourceCursor.workspaceId` from `prepareRecovery`. Set `datasetId` to `recovery.sourceCursor.datasetId` from `prepareRecovery`. Set `transferId` to `recovery.transferId` from `prepareRecovery`. Set `manifestSha256` to `recovery.manifestSha256` from `prepareRecovery`. Set `sourceCursor` to `recovery.sourceCursor` from `prepareRecovery`. Stop the old host first, then set oldHostStopped to true. Copy only these fields.
 
 - `workspaceId`: `string`. Required.
 - `datasetId`: `UUID`. Required.
@@ -697,7 +718,7 @@ Returns `{ kind: "recovery-claimed", transferId, manifestSha256, sourceCursor: {
 
 Cancel a prepared recovery before it installs.
 
-Take transferId from prepareRecovery.
+Set `transferId` to `recovery.transferId` from `prepareRecovery`.
 
 - `workspaceId`: `string`. Required.
 - `transferId`: `UUID`. Required.
@@ -972,7 +993,7 @@ Returns `{ kind: "cancelled" }`.
 
 Stop a shared publication.
 
-Take expectedAuthorityRevision from list.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
@@ -984,7 +1005,7 @@ Returns `{ kind: "withdrawn", publicationId, authorityRevision }`.
 
 Remove a shared publication's Collection access.
 
-Take expectedAuthorityRevision from list.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
@@ -1098,9 +1119,9 @@ Answers `{ kind: "accepted", acceptanceId, acceptedAtMs, momentId, objectId, pat
 - `files.readInfo(path, options?)` returns `{ text, truncated }`. Reads a text file and says whether the host cut it short. Needs the `files.read` capability.
 - `files.list(path?, listOptions?, options?)` returns `{ path, name?, kind?, size?, modifiedAt? }[]`. Lists files. `listOptions` takes `recursive` and `includeHidden`. Needs the `files.list` capability.
 - `files.write(path, text, writeOptions?, options?)` returns `{ path }`. Writes a text file. `writeOptions.overwrite: false` refuses an existing file. Live Markdown documents are refused. Needs the `files.write` capability.
-- `files.watch(path, listener, options?)` returns a function that stops the watch. Reports settled changes at or below `path`, each `{ path, operation, sha256? }`. `operation` is `update` or `delete`. Needs the `files.watch` capability.
+- `files.watch(path, listener, options?)` returns a function that stops the watch. Reports settled changes at or below `path`. The listener receives `{ event, data: { path, operation, sha256? } }`. Read the file path from `data.path`; `data.operation` is `update` or `delete`. Needs the `files.watch` capability.
 - `workspace.search(query, searchOptions?, options?)` returns `{ path?, title?, excerpt?, score? }[]`. Searches the workspace. `searchOptions` takes `path`, `limit`, and `types`. Needs the `workspace.search` capability.
-- `databases.read({ path, query?, params? }, options?)` returns the host's result. Reads a workspace database, with an optional read-only query. Needs the `databases.read` capability.
+- `databases.read({ path, query?, params? }, options?)` returns the host's database snapshot. The desktop host supports snapshots only and rejects every supplied `query`. Call `databases.read({ path })` without SQL. Needs the `databases.read` capability.
 - `databases.edit({ path, query?, params?, operations? }, options?)` returns the host's result. Changes a workspace database with one query or exactly one operation. Needs the `databases.edit` capability.
 - `ui.open(target, openOptions?, options?)` returns `{ target, position? }`. Opens a workspace path in dohc. `openOptions.position` is `active`, `beside`, or `new-tab`. Needs the `ui.open` capability.
 - `ui.openWebApp(webAppId, instanceKey, options?)` returns the host's result. Opens one instance of the plugin's own web app in a tab. Only a panel can call it. Needs the `ui.open` capability.

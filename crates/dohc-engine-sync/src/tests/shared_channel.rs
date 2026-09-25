@@ -259,6 +259,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 0,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 1,
                     has_more: true,
@@ -268,6 +269,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 1,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 2,
                     has_more: false,
@@ -343,6 +345,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 0,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: vec![rejected],
                     next_cursor: 1,
                     has_more: true,
@@ -352,6 +355,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 1,
                 SharedChannelResponse {
+                    own_origin_id: None,
                     ops: vec![admitted],
                     next_cursor: 2,
                     has_more: false,

@@ -7,6 +7,7 @@ use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_collab::DocKey;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -614,6 +615,18 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
+        // Every terminal page asks, whether or not it applied anything: an
+        // earlier request may have been dropped, and the parked updates are the
+        // debt, which only the editor's resync clears.
+        if matches!(
+            &outcome,
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                has_more: false,
+                ..
+            })
+        ) {
+            self.notify_editors_behind(ctx, &open).await;
+        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -645,6 +658,54 @@ impl EngineService {
             result["pendingCursor"] = issued;
         }
         Ok(result)
+    }
+
+    /// A pull parks every Y.Doc update for a document an editor holds open,
+    /// and only that editor's resync, settle, or close drains it. Ask each open
+    /// editor of this workspace with parked updates it can take to resync, so
+    /// an idle editor shows another device's edits. The request is advisory
+    /// like every event, and the event queue drops it when full. The parked
+    /// updates stay durable until the resync drains them, so the next pull asks
+    /// again, including a pull that applies nothing. A failed check therefore
+    /// does not fail the committed pull.
+    async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        let (session_ids, sessions): (Vec<String>, Vec<(DocKey, String)>) = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                handles.contains(&session.workspace)
+                    && session.owner_draft.is_none()
+                    && session.restore_generation.is_none()
+            })
+            .filter_map(|(session_id, session)| {
+                let lineage_claim_id = session.lineage_claim_id.clone()?;
+                Some((session_id.clone(), (session.key.clone(), lineage_claim_id)))
+            })
+            .unzip();
+        if sessions.is_empty() {
+            return;
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        match open
+            .actor
+            .ydoc_sessions_behind(sessions, cancellation.token())
+            .await
+        {
+            Ok(behind) => {
+                for (session_id, _) in session_ids.iter().zip(behind).filter(|(_, is)| *is) {
+                    self.events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({ "sessionId": session_id, "resyncRequired": true }),
+                    );
+                }
+            }
+            Err(dohc_engine_runtime::RuntimeError::Cancelled) => {}
+            Err(error) => eprintln!("engine: open editor resync check failed: {error}"),
+        }
     }
 
     pub(super) async fn sync_materialize_pending_cursor(
@@ -999,7 +1060,7 @@ impl EngineService {
     /// the same reason `sync.claim` mints its own: the durable row is the
     /// record, so a refresh cannot re-mint an origin and split this replica's
     /// log in two. The origin is a REPLICA id — the relay namespaces this
-    /// recipient's ops as `share:<shareId>:<originId>` — so it must never be
+    /// recipient's ops by share, authenticated member, and replica — so it must never be
     /// a user id, which two devices would share.
     pub(super) async fn share_view_record_identity(
         &self,

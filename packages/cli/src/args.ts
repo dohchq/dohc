@@ -89,7 +89,16 @@ export interface CliVerbSpec {
   required?: readonly string[];
   /** The verb takes text that can start with a dash, so help and errors explain --. */
   freeText?: boolean;
+  /** Request fields copied from an earlier verb's result. */
+  take?: readonly CliFieldSource[];
   parse(input: VerbInput): CliCommandBody;
+}
+
+/** Names the result field of an earlier verb that a request field copies. */
+interface CliFieldSource {
+  field: string;
+  from: string;
+  path: string;
 }
 
 export interface CliCommandSpec {
@@ -355,6 +364,7 @@ interface JsonVerbHelp {
   summary: string;
   notes?: readonly string[];
   required?: readonly string[];
+  take?: readonly CliFieldSource[];
 }
 
 function jsonVerb(
@@ -410,7 +420,11 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   historyRevision: { summary: "Show the saved source of one past revision." },
   prepareHistoryRestore: {
     summary: "Prepare a change that reverses one saved change.",
-    notes: ["Take targetRevisionSha256 and changedRevisionSha256 from the history entry.", migrationApproval],
+    take: [
+      { field: "targetRevisionSha256", from: "history", path: "entries[].schema.previousRevisionHash" },
+      { field: "changedRevisionSha256", from: "history", path: "entries[].schema.revisionHash" },
+    ],
+    notes: [migrationApproval],
   },
   permissions: { summary: "List app bindings and explicit data grants." },
   setGrant: {
@@ -419,31 +433,37 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   },
   removeGrant: {
     summary: "Remove an explicit data grant.",
-    notes: ["Take principalKey from permissions."],
+    take: [{ field: "principalKey", from: "permissions", path: "permissions[].principal" }],
   },
   lifecycle: { summary: "Show a Collection's archive state and its apps." },
   archive: { summary: "Stop a Collection's operations and keep its records." },
   restore: { summary: "Restore an archived Collection under its rules." },
   deletePreview: {
     summary: "Review what deleting a Collection affects.",
-    notes: ["The result lists affected apps and holds the cursor and reviewToken that delete needs."],
+    notes: ["The result lists affected apps and holds what delete needs."],
   },
   delete: {
     summary: "Permanently delete a Collection and all its data.",
+    take: [
+      { field: "expected", from: "deletePreview", path: "cursor" },
+      { field: "reviewToken", from: "deletePreview", path: "reviewToken" },
+    ],
     notes: [
       "This removes the Collection's private data and history.",
-      "Take expected and reviewToken from deletePreview. Set acknowledge to true.",
+      "Set acknowledge to true.",
       "Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.",
     ],
   },
   pendingAttempts: { summary: "List pending responses that still hold a retry." },
   reconcileAttempt: {
     summary: "Clear the retry of a saved pending response.",
-    notes: ["Take reference from pendingAttempts. Set acknowledge to true. This cannot be undone."],
+    take: [{ field: "reference", from: "pendingAttempts", path: "entries[].reference" }],
+    notes: ["Set acknowledge to true. This cannot be undone."],
   },
   cancelAttempt: {
     summary: "Cancel an unconfirmed pending response.",
-    notes: ["Take reference from pendingAttempts. Set acknowledge to true."],
+    take: [{ field: "reference", from: "pendingAttempts", path: "entries[].reference" }],
+    notes: ["Set acknowledge to true."],
   },
   export: {
     summary: "Save a private recovery archive of a Collection.",
@@ -460,11 +480,18 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   },
   claimRecovery: {
     summary: "Restore a Collection from a prepared archive.",
-    notes: ["Stop the old host first. Pass the fields from prepareRecovery unchanged, with oldHostStopped set to true."],
+    take: [
+      { field: "workspaceId", from: "prepareRecovery", path: "recovery.sourceCursor.workspaceId" },
+      { field: "datasetId", from: "prepareRecovery", path: "recovery.sourceCursor.datasetId" },
+      { field: "transferId", from: "prepareRecovery", path: "recovery.transferId" },
+      { field: "manifestSha256", from: "prepareRecovery", path: "recovery.manifestSha256" },
+      { field: "sourceCursor", from: "prepareRecovery", path: "recovery.sourceCursor" },
+    ],
+    notes: ["Stop the old host first, then set oldHostStopped to true. Copy only these fields."],
   },
   discardRecovery: {
     summary: "Cancel a prepared recovery before it installs.",
-    notes: ["Take transferId from prepareRecovery."],
+    take: [{ field: "transferId", from: "prepareRecovery", path: "recovery.transferId" }],
   },
   upload: {
     summary: "Upload a file for a file field.",
@@ -509,6 +536,11 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   },
 };
 
+const publicationFromList: readonly CliFieldSource[] = [
+  { field: "publicationId", from: "list", path: "publications[].publicationId" },
+  { field: "expectedAuthorityRevision", from: "list", path: "publications[].authorityRevision" },
+];
+
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   listLocal: { summary: "List an app's publications on this computer." },
   prepareLocal: {
@@ -531,11 +563,11 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   cancel: { summary: "Discard a prepared app before approval." },
   withdraw: {
     summary: "Stop a shared publication.",
-    notes: ["Take expectedAuthorityRevision from list."],
+    take: publicationFromList,
   },
   revokeCollection: {
     summary: "Remove a shared publication's Collection access.",
-    notes: ["Take expectedAuthorityRevision from list."],
+    take: publicationFromList,
   },
   reviewReactivation: {
     summary: "Prepare a stopped publication to publish again.",

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { OwnerAppPublicationResult } from "./appPublication";
 import { CLI_COMMANDS } from "./args";
+import { DatasetResult } from "./dataset";
 import { executeCli } from "./index";
 
 async function help(...argv: string[]): Promise<string> {
@@ -11,6 +14,33 @@ async function help(...argv: string[]): Promise<string> {
 }
 
 const flat = (text: string) => text.replace(/\s+/g, " ");
+
+/** Whether a path such as entries[].schema.revisionHash names a field of the schema. */
+function hasPath(schema: z.ZodType, path: readonly string[]): boolean {
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) return hasPath(schema.unwrap() as z.ZodType, path);
+  if (schema instanceof z.ZodUnion) return schema.options.some((option) => hasPath(option as z.ZodType, path));
+  const [step, ...rest] = path;
+  if (step === undefined) return true;
+  if (step === "[]") return schema instanceof z.ZodArray && hasPath(schema.element as z.ZodType, rest);
+  return schema instanceof z.ZodObject && Object.hasOwn(schema.shape, step) && hasPath(schema.shape[step] as z.ZodType, rest);
+}
+
+function resultOf(schema: z.ZodDiscriminatedUnion, kind: string): z.ZodType {
+  const option = schema.options.find((candidate) => candidate instanceof z.ZodObject && candidate.shape.kind?.value === kind);
+  if (!option) throw new Error(`no result kind ${kind}`);
+  return option as z.ZodType;
+}
+
+const RESULTS: Record<string, Record<string, z.ZodType>> = {
+  dataset: {
+    history: resultOf(DatasetResult, "history"),
+    permissions: resultOf(DatasetResult, "permissions"),
+    deletePreview: resultOf(DatasetResult, "delete-preview"),
+    pendingAttempts: resultOf(DatasetResult, "pending-attempts"),
+    prepareRecovery: resultOf(DatasetResult, "recovery-prepared"),
+  },
+  app: { list: resultOf(OwnerAppPublicationResult, "listed") },
+};
 
 describe("CLI help", () => {
   it("gives every dispatched verb a line in help and its own flags", async () => {
@@ -32,6 +62,24 @@ describe("CLI help", () => {
         }
       }
     }
+  });
+
+  it("names real fields when a request copies an earlier result", async () => {
+    let sources = 0;
+    for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {
+      for (const [verbName, verb] of Object.entries(command.verbs)) {
+        for (const source of verb.take ?? []) {
+          const label = `${commandName} ${verbName} ${source.field}`;
+          expect(Object.keys(verb.fields ?? {}), label).toContain(source.field);
+          const result = RESULTS[commandName]?.[source.from];
+          expect(result, label).toBeDefined();
+          expect(hasPath(result!, source.path.replace(/\[\]/g, ".[]").split(".")), label).toBe(true);
+          sources += 1;
+        }
+      }
+    }
+    expect(sources).toBeGreaterThan(0);
+    expect(flat(await help("dataset", "delete", "--help"))).toContain("Set expected to cursor from deletePreview.");
   });
 
   it("answers bare commands with help and keeps lines readable", async () => {

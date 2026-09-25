@@ -689,6 +689,44 @@ pub fn drain_deferred_ydoc_for_live_session(
     complete_drain(store, drained, cleanup, faults)
 }
 
+/// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
+/// an open editor bound to `lineage_claim_id`: the replicated lineage is still
+/// the one the editor opened, and the first deferred coordinate in relay order
+/// belongs to it. A queue that starts with another claim waits for the session
+/// to end, so it answers false.
+pub fn live_session_has_drainable_deferred_ydoc(
+    store: &EngineStore,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> Result<bool, SyncError> {
+    let marker = dohc_engine_collab::read_marker(store, key).map_err(map_collab_hard_error)?;
+    if !marker.is_some_and(|marker| {
+        marker.regime == dohc_engine_collab::Regime::Replicated
+            && marker.lineage_claim_id.as_deref() == Some(lineage_claim_id)
+    }) {
+        return Ok(false);
+    }
+    let first: Option<Option<String>> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT deferred.lineage_claim_id \
+             FROM ydoc_deferred_updates AS deferred \
+             JOIN replication_log AS log \
+               ON log.workspace_id = deferred.workspace_id \
+              AND log.origin_id = deferred.origin_id \
+              AND log.origin_seq = deferred.origin_seq \
+             WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2 \
+               AND deferred.object_id = ?3 AND log.op_kind = 'ydoc.update' \
+             ORDER BY deferred.relay_seq,log.origin_id,log.origin_seq \
+             LIMIT 1",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })?;
+    Ok(first.flatten().as_deref() == Some(lineage_claim_id))
+}
+
 #[derive(Clone, Copy)]
 enum DeferredDrainMode<'a> {
     All,

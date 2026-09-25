@@ -2,6 +2,7 @@ import {
   RelayUnauthorizedError,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { relayApiFetch } from "./sharedChannels";
 
 // One authenticated call to the relay, for the surfaces that make them
 // directly rather than through the engine.
@@ -27,7 +28,7 @@ export async function relayRequest(input: {
   const headers = new Headers(input.init?.headers);
   headers.set("authorization", `Bearer ${input.relay.token}`);
   const url = `${input.relay.baseUrl.replace(/\/+$/u, "")}${input.path}`;
-  const response = await (input.relay.fetch ?? fetch)(url, {
+  const response = await (input.relay.fetch ?? relayApiFetch())(url, {
     ...input.init,
     headers,
   });

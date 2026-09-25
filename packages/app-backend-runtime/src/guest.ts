@@ -1,5 +1,8 @@
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { DatabaseSync, constants } from "node:sqlite";
-import { getQuickJS } from "quickjs-emscripten";
+import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC, StaticLifetime } from "quickjs-emscripten";
+import type { JSValue, JSValuePointer, QuickJSHandle, QuickJSWASMModule } from "quickjs-emscripten";
 import { AppBackendRuntimeError, boundedText } from "./protocol.js";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
@@ -28,6 +31,23 @@ export function sqlTokens(sql:string):Array<{value:string;quoted:boolean;literal
     tokens.push({value:value.toLowerCase(),quoted,literal:quote==="'"});
   }
   return tokens;
+}
+/**
+ * Whether SQLite would prepare a statement from `sql`. Node's binding passes the text up to its first NUL, and
+ * SQLite's tokenizer skips whitespace, the UTF-8 byte order mark, comments, and semicolons. Node 24.16's
+ * `node:sqlite` can crash the process after preparing text with no statement, so a caller refuses such text
+ * before `prepare`. This also skips a vertical tab, which SQLite skips only after other whitespace, so it can
+ * refuse text SQLite would reject anyway, but never pass text with no statement.
+ */
+export function hasStatement(sql:string):boolean {
+  const end=sql.indexOf("\0"), text=end<0 ? sql : sql.slice(0,end);
+  for(let index=0;index<text.length;) {
+    if(" \t\n\v\f\r;\uFEFF".includes(text[index])) index++;
+    else if(text.startsWith("--",index)) { const close=text.indexOf("\n",index); if(close<0) return false; index=close+1; }
+    else if(text.startsWith("/*",index)) { const close=text.indexOf("*/",index+2); if(close<0) return false; index=close+2; }
+    else return true;
+  }
+  return false;
 }
 export function insertsImplicitRowid(sql:string, capturedTables:ReadonlySet<string>):boolean {
   // SQLite's authorizer reports INSERT at table granularity, without its column list.
@@ -91,6 +111,49 @@ export function authorize(
   });
 }
 
+const MiB = 1024 * 1024, WASM_PAGE_BYTES = 64 * 1024;
+let quickjsCode: Promise<WebAssembly.Module> | undefined;
+const compiledQuickJS = () => quickjsCode ??= readFile(createRequire(createRequire(import.meta.url).resolve("quickjs-emscripten"))
+  .resolve("@jitl/quickjs-wasmfile-release-sync/wasm")).then(bytes => WebAssembly.compile(bytes));
+
+interface QuickJS { module: QuickJSWASMModule; exhausted(): boolean; room(text: string): boolean }
+interface Allocator { _malloc(bytes: number): number; _free(pointer: number): void }
+
+/**
+ * A QuickJS instance with a new memory, so no operation reads memory that an earlier one freed.
+ * QuickJS's own memory limit cannot count allocations in this build, so the memory's fixed size is the limit.
+ */
+async function newQuickJS(memoryBytes: number): Promise<QuickJS> {
+  const pages = memoryBytes / WASM_PAGE_BYTES, wasmMemory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+  const code = await compiledQuickJS();
+  let exhausted = false, allocator: Allocator | undefined;
+  const emscriptenModule = {
+    // The memory starts at its limit. Emscripten asks to resize it only when an allocation does not fit,
+    // and refuses a resize past 2 GiB without asking the memory, so the resize import records every refusal.
+    instantiateWasm(imports: WebAssembly.Imports, onSuccess: (instance: WebAssembly.Instance) => void) {
+      const glue = imports.a as Record<string, unknown>;
+      const resizes = Object.keys(glue).filter(name => typeof glue[name] === "function" && /\.grow\(/.test(String(glue[name])));
+      if (resizes.length !== 1) throw new Error("QuickJS's memory resize import changed.");
+      glue[resizes[0]] = () => { exhausted = true; return false; };
+      return WebAssembly.instantiate(code, imports).then(instance => { onSuccess(instance); return instance.exports; });
+    },
+    postRun: [(loaded: Allocator) => { allocator = loaded; }],
+  };
+  const module = await newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmMemory, emscriptenModule }));
+  const heap = allocator;
+  if (!heap) throw new Error("QuickJS did not start.");
+  return {
+    module, exhausted: () => exhausted,
+    // The FFI copies a host string into the guest without checking its allocations: first as UTF-8, then as a
+    // guest string of up to twice its length. One free block of three times its size holds both.
+    room(text) {
+      const pointer = heap._malloc(3 * Buffer.byteLength(text) + 4096);
+      if (pointer) heap._free(pointer);
+      return pointer !== 0;
+    },
+  };
+}
+
 // The trusted caller owns the transaction and clears authorization before host metadata writes.
 export async function evaluate(db: DatabaseSync, request: GuestRequest, options: GuestOptions = {}): Promise<{resultJson: string; attachedFileIds: string[]}> {
   if(options.persistentConnection && !persistentRowidTables.has(db)) {
@@ -103,23 +166,51 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
     persistentRowidTables.set(db,tables);
   }
   authorize(db, request, options);
-  const engine = await getQuickJS();
-  const runtime = engine.newRuntime();
-  runtime.setMemoryLimit(request.limits.memoryBytes);
+  return run(await newQuickJS(request.limits.memoryBytes), db, request, options);
+}
+
+function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
+  const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
   runtime.setInterruptHandler(() => performance.now() >= deadline);
+  const memoryLimit = `App operation needed more than its ${request.limits.memoryBytes / MiB} MiB memory limit, so it stopped.`;
+  // A guest exception after the memory filled is the memory limit, unless the deadline stopped the guest.
+  const guestFailure = (message: string) => new Error(exhausted() && performance.now() < deadline ? memoryLimit : message);
   runtime.removeModuleLoader();
   const vm = runtime.newContext();
   let statements = 0;
   let refusal: AppOperationRefusal | undefined;
   const attachedFileIds = new Set<string>();
+  // Made before the guest runs, so a callback can refuse a copy that does not fit without allocating.
+  const limitHandle = vm.newError(memoryLimit), limitError: JSValue = new StaticLifetime(limitHandle.value as JSValuePointer, runtime);
+  // A copy that does not fit, or that QuickJS could not finish, answers with the limit error instead.
+  const copy = (text: string): QuickJSHandle | undefined => {
+    if (!room(text)) return undefined;
+    const value = vm.newString(text);
+    if (value.value === 0) return undefined;
+    if (vm.typeof(value) === "string") return value;
+    value.dispose();
+    return undefined;
+  };
+  const reply = (text: string) => copy(text) ?? { error: limitError };
+  // The error object comes first: making it can grow QuickJS's shape table by more than the message needs.
+  const fail = (message: string) => {
+    const error = vm.newError();
+    if (error.value === 0) return { error: limitError };
+    const text = vm.typeof(error) === "object" ? copy(message) : undefined;
+    if (!text) { error.dispose(); return { error: limitError }; }
+    vm.setProp(error, "message", text);
+    text.dispose();
+    return { error };
+  };
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
       if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
       if (++statements > request.limits.statements || performance.now() >= deadline) throw new Error("App database operation limit exceeded.");
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
+      if (!hasStatement(sql)) throw new Error("SQL statement is empty.");
       if(options.persistentConnection && write && insertsImplicitRowid(sql,persistentRowidTables.get(db)!)) throw new Error("Implicit rowid access is unavailable for journaled datasets.");
       const paramsJson = boundedText(vm.getString(paramsValue), request.limits.inputBytes, "SQL parameters");
       const params: unknown = JSON.parse(paramsJson);
@@ -146,29 +237,31 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
       } finally {
         authorize(db, request, options);
       }
-      return vm.newString(output);
+      return reply(output);
     } catch (error) {
-      return { error: vm.newError(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.") };
+      return fail(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.");
     }
   });
+  // Nothing frees the runtime: the instance and its memory are dropped with the operation. Freeing it would only run
+  // QuickJS's leak assertions, and some of QuickJS's out-of-memory paths fail them.
   try {
     const query = callback(false), execute = callback(true);
     vm.setProp(vm.global, "__query", query);
     vm.setProp(vm.global, "__execute", execute);
     query.dispose(); execute.dispose();
     const refuse = vm.newFunction("refuse", (code, message) => {
-      if (vm.typeof(code) !== "string" || vm.typeof(message) !== "string") return {error: vm.newError("Invalid refusal.")};
+      if (vm.typeof(code) !== "string" || vm.typeof(message) !== "string") return fail("Invalid refusal.");
       const copiedCode = vm.getString(code), copiedMessage = vm.getString(message);
-      if (!/^[a-z][a-z0-9_]{0,63}$/.test(copiedCode) || Buffer.byteLength(copiedMessage) > 1024) return {error:vm.newError("Invalid refusal.")};
+      if (!/^[a-z][a-z0-9_]{0,63}$/.test(copiedCode) || Buffer.byteLength(copiedMessage) > 1024) return fail("Invalid refusal.");
       refusal ??= {code:copiedCode,message:copiedMessage};
-      return {error:vm.newError("App operation refused.")};
+      return fail("App operation refused.");
     });
     const attach = vm.newFunction("attach", fileId => {
-      if (request.readOnly || vm.typeof(fileId) !== "string") return {error:vm.newError("File attachment is unavailable.")};
+      if (request.readOnly || vm.typeof(fileId) !== "string") return fail("File attachment is unavailable.");
       const id=vm.getString(fileId), file=request.files.find(file=>file.fileId===id);
-      if (!file) return {error:vm.newError("Unknown app file.")};
+      if (!file) return fail("Unknown app file.");
       attachedFileIds.add(id);
-      return vm.newString(JSON.stringify(file));
+      return reply(JSON.stringify(file));
     });
     vm.setProp(vm.global,"__refuse",refuse); vm.setProp(vm.global,"__attach",attach);
     refuse.dispose(); attach.dispose();
@@ -200,21 +293,23 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
     removed.dispose();
     try {
       const loaded = vm.evalCode(request.source, "app-backend.js");
-      if (loaded.error) { loaded.error.dispose(); throw new Error("App operation source failed."); }
+      if (loaded.error) { loaded.error.dispose(); throw guestFailure("App operation source failed."); }
       loaded.value.dispose();
       const result = vm.callFunction(invoke, vm.undefined);
       if (refusal) { result.dispose(); throw new AppBackendRuntimeError(refusal); }
       if (result.error) {
         // No guest getters or coercion run while formatting an exception.
         result.error.dispose();
-        throw new Error("App operation failed.");
+        throw guestFailure("App operation failed.");
       }
       try {
         if (vm.typeof(result.value) !== "string") throw new Error("App operation must return JSON.");
         return {resultJson:boundedText(vm.getString(result.value), request.limits.resultBytes, "Operation result"),attachedFileIds:[...attachedFileIds]};
       } finally { result.value.dispose(); }
     } finally { invoke.dispose(); }
-  } finally {
-    vm.dispose(); runtime.dispose();
+  } catch (error) {
+    // A trap or a failed QuickJS assertion ends the operation's instance, and the operation's code caused it.
+    if (error instanceof WebAssembly.RuntimeError) throw guestFailure("App operation failed.");
+    throw error;
   }
 }

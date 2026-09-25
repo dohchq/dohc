@@ -12,7 +12,7 @@ import {
 } from "react";
 import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -21,7 +21,7 @@ import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -120,6 +120,7 @@ import {
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
+import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
@@ -319,6 +320,70 @@ function BubbleButton(props: {
     >
       {props.children}
     </button>
+  );
+}
+
+// The bubble menu's contents. The editor does not re-render React on each
+// transaction, so the toolbar reads the block and marks under the selection
+// from the editor's state; a render-time read showed the previous
+// selection's. selectionFormat keeps that read cheap on every keystroke.
+export function SelectionToolbar(props: {
+  editor: Editor;
+  onOpenLink: (state: LinkMenuState) => void;
+}) {
+  const { editor } = props;
+  const active = useEditorState({
+    editor,
+    selector: ({ editor: current }) => selectionFormat(current.state),
+  });
+  return (
+    <>
+      <TurnIntoMenu editor={editor} activeId={active.block} />
+      <span className="dohc-bubble-menu__divider" aria-hidden="true" />
+      <BubbleButton
+        label="Bold"
+        active={active.bold}
+        onClick={() => editor.chain().focus().toggleBold().run()}
+      >
+        <Bold size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Italic"
+        active={active.italic}
+        onClick={() => editor.chain().focus().toggleItalic().run()}
+      >
+        <Italic size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Underline"
+        active={active.underline}
+        onClick={() => editor.chain().focus().toggleUnderline().run()}
+      >
+        <UnderlineIcon size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Strikethrough"
+        active={active.strike}
+        onClick={() => editor.chain().focus().toggleStrike().run()}
+      >
+        <Strikethrough size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Code"
+        active={active.code}
+        onClick={() => editor.chain().focus().toggleCode().run()}
+      >
+        <Code size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Highlight"
+        active={active.highlight}
+        onClick={() => editor.chain().focus().toggleMark("highlight").run()}
+      >
+        <Highlighter size={14} aria-hidden />
+      </BubbleButton>
+      <LinkBubbleButton editor={editor} active={active.link} onOpen={props.onOpenLink} />
+    </>
   );
 }
 
@@ -1095,56 +1160,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => {
-              const { selection } = instance.state;
-              return selection instanceof TextSelection && !selection.empty;
-            }}
+            shouldShow={({ editor: instance }) =>
+              hasFormattableSelection(instance.state.selection)
+            }
           >
-            <TurnIntoMenu editor={editor} />
-            <span className="dohc-bubble-menu__divider" aria-hidden="true" />
-            <BubbleButton
-              label="Bold"
-              active={editor.isActive("bold")}
-              onClick={() => editor.chain().focus().toggleBold().run()}
-            >
-              <Bold size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Italic"
-              active={editor.isActive("italic")}
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-            >
-              <Italic size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Underline"
-              active={editor.isActive("underline")}
-              onClick={() => editor.chain().focus().toggleUnderline().run()}
-            >
-              <UnderlineIcon size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Strikethrough"
-              active={editor.isActive("strike")}
-              onClick={() => editor.chain().focus().toggleStrike().run()}
-            >
-              <Strikethrough size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Code"
-              active={editor.isActive("code")}
-              onClick={() => editor.chain().focus().toggleCode().run()}
-            >
-              <Code size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Highlight"
-              active={editor.isActive("highlight")}
-              onClick={() => editor.chain().focus().toggleMark("highlight").run()}
-            >
-              <Highlighter size={14} aria-hidden />
-            </BubbleButton>
-            <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
+            <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (

@@ -595,7 +595,7 @@ export function createSyncRelayHandler({
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
-    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes}});
+    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes},discussionActivity});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -827,7 +827,10 @@ export function createSyncRelayHandler({
       }
 
       if (route.route === "log" || route.route === "log-coordinate") {
-        return await respondToWorkspaceReplication(request, route, actor);
+        return await respondToWorkspaceReplication(request, route, actor, undefined, async () => {
+          const current = await resolveActor(request, route.workspaceId);
+          if (current.userId !== actor.userId) throw notFound();
+        });
       }
 
       throw relayError("method_not_allowed");
@@ -840,7 +843,16 @@ export function createSyncRelayHandler({
   });
 }
 
-function parseRoute(request: Request): SyncRelayRoute {
+/** Only recovery imports have an authenticated, bounded streaming body reader. */
+export function isDatasetRecoveryUpload(url: URL, method: string): boolean {
+  if (method !== "POST") return false;
+  try {
+    const route = parseRoute({ url: url.href });
+    return route.route === "dataset" && route.action === "import";
+  } catch { return false; }
+}
+
+function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "link-app-publication"};

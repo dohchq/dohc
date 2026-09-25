@@ -11,6 +11,7 @@ import { Pool } from "pg";
 import { accountEmailDelivery } from "./emailDelivery";
 import { sanitizeAuthHeaders } from "./clientAddress";
 import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
+import { createCrashReportIntake, createPostgresCrashReportStore } from "./crashReports";
 import { createReadinessProbe } from "./readiness";
 import { createRouter, type AuthGateway } from "./routes";
 
@@ -81,12 +82,30 @@ async function handleTestDeviceApprove(request: Request): Promise<Response> {
   return Response.json({ ok: true, email: testEmail });
 }
 
+// Expired crash reports go on a timer, not only when a new report arrives,
+// and whether or not crash reports are on now: a server that stopped taking
+// them still deletes the ones it has. A database without the table has none.
+const crashReportStore = createPostgresCrashReportStore(pool);
+const UNDEFINED_TABLE = "42P01";
+function deleteExpiredCrashReports(): void {
+  crashReportStore.deleteExpired().catch((error: unknown) => {
+    if ((error as { code?: unknown } | null)?.code === UNDEFINED_TABLE) return;
+    console.error("[workspace-api] Deleting expired crash reports failed.");
+  });
+}
+deleteExpiredCrashReports();
+setInterval(deleteExpiredCrashReports, 60 * 60 * 1000).unref();
+
 const router = createRouter({
   auth: gateway,
-  readiness: createReadinessProbe(pool, { emailConfigured: config.emailTransport !== "none" }),
+  readiness: createReadinessProbe(pool, {
+    emailConfigured: config.emailTransport !== "none",
+    crashReports: config.crashReports,
+  }),
   descriptor: config.descriptor,
   emailTransport: config.emailTransport,
   allowedOrigins: config.allowedOrigins,
+  ...(config.crashReports ? { crashReports: createCrashReportIntake({ store: crashReportStore }) } : {}),
   seams: {
     ...(config.testAuthSeam ? { deviceApprove: handleTestDeviceApprove } : {}),
     ...(config.emailTransport === "capture" ? { sentEmails: () => captured } : {}),
@@ -112,6 +131,7 @@ server.listen(config.port, config.bindHost, () => {
   console.log(`[workspace-api] listening on ${config.bindHost}:${config.port} (auth at /api/auth)`);
   console.log(`[workspace-api] email transport: ${config.emailTransport}`);
   if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
+  if (config.crashReports) console.log("[workspace-api] crash reports: on");
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

@@ -394,16 +394,16 @@ export function registerCloudIpcHandlers<
       },
       rollbackLabel: "join",
       cleanupFailureMessage:
-        "Couldn't safely roll back the workspace. Its folder was left in place; restart dohc before retrying.",
+        `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
         if (
           error instanceof Error &&
           /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
         ) {
-          return error;
+          return new Error(`${error.message} Files remain in ${rootPath}. Choose another empty folder to try again.`);
         }
         return new Error(
-          "Couldn't download the workspace. Nothing was added on this machine — check your connection and try again.",
+          `dohc could not download the workspace. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
         );
       },
     });

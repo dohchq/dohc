@@ -58,6 +58,7 @@ Keep app code and Collection views on the same dataset. They do not need separat
 ## Connect the app
 
 Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
+Write each path relative to the app folder, so the folder can move. Start a path with `../` to include a file beside the folder.
 The binding names `datasetId`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
 Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
 No private app database path or backend capability is declared.

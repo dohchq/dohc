@@ -3784,7 +3784,7 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
         .expect("main version");
     seed_text_head(&mut engine, "granter-object", "shared/docs/in.md", "inside");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({
@@ -3828,7 +3828,7 @@ fn a_recipient_thread_create_for_an_untracked_path_is_refused_on_the_owner_lane(
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({
@@ -3972,7 +3972,7 @@ fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
         .expect("main version");
     seed_text_head(&mut engine, "granter-object", "shared/docs/in.md", "inside");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({
@@ -4281,14 +4281,30 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
 /// proposal submit — so `ydoc_recovery` is pinned to the other predicate.
 #[test]
 fn the_ydoc_journal_reads_the_owner_lane_predicate() {
-    for (label, source) in [
-        ("ydoc_apply", include_str!("../ydoc_apply.rs")),
-        ("ydoc_origination", include_str!("../ydoc_origination.rs")),
-        ("conflict_outbox", include_str!("../conflict_outbox.rs")),
-        ("cursor", include_str!("../cursor.rs")),
+    for (label, source, predicate) in [
+        (
+            "ydoc_apply",
+            include_str!("../ydoc_apply.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
+        (
+            "ydoc_origination",
+            include_str!("../ydoc_origination.rs"),
+            "can_originate_local_bases_in_tx",
+        ),
+        (
+            "conflict_outbox",
+            include_str!("../conflict_outbox.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
+        (
+            "cursor",
+            include_str!("../cursor.rs"),
+            "workspace_replicates_with_relay_in_tx",
+        ),
     ] {
         assert!(
-            source.contains("workspace_replicates_with_relay_in_tx"),
+            source.contains(predicate),
             "{label} must ask the OWNER-lane predicate",
         );
         assert!(

@@ -15,10 +15,11 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
-import { errorBody } from "./errors";
+import { errorBody, errorResponse } from "./errors";
+import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
-import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, createSyncRelayHandler, isDatasetRecoveryUpload } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
@@ -352,7 +353,7 @@ const relayHandler = guardRelayResponses(storage, request => {
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
-    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready},
+    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS},
       {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
   }
   if (new URL(request.url).pathname === "/health") {
@@ -365,6 +366,8 @@ const fetchHandler = async (request: Request): Promise<Response> => {
       ...(testAuthSeam ? { presence: presence.stats() } : {}),
     }, { status: storage.unavailable.aborted ? 503 : 200 });
   }
+  const refusal = relayApiVersionRefusal(request.headers);
+  if (refusal) return errorResponse(refusal);
   return relayHandler(request);
 };
 
@@ -418,6 +421,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 
 const server = serveFetchHandler({
   handler: fetchHandler,
+  streamBody: isDatasetRecoveryUpload,
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :

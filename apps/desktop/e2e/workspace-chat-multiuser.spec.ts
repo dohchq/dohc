@@ -85,7 +85,7 @@ async function sharePresence(
   return { status: response.status, peers, raw };
 }
 
-// Discover the live chat-channel grant the owner just created, from the real
+// Discover the live chat grant the owner just created, from the real
 // app's own IPC surface (granted rows carry the shareId + cross-machine
 // channelWireId both sides key on).
 async function grantedShare(

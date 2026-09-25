@@ -17,7 +17,7 @@ import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
-import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
+import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 import type { ShareProposal, ShareProposalOp, SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -279,7 +279,7 @@ export function registerShareProposalsIpcHandlers<
     if (op.operation === "delete" || !op.afterBlobSha256) return null;
     if (op.afterContentKind !== "text") return null;
     try {
-      const response = await (relay.fetch ?? fetch)(
+      const response = await (relay.fetch ?? relayApiFetch())(
         `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/blobs/` +
           encodeURIComponent(op.afterBlobSha256),
         { headers: { authorization: `Bearer ${relay.token}` } },

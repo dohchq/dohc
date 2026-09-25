@@ -83,6 +83,10 @@ jobs:
             # sees the probe file that test writes into the repo root, so an
             # ignore rule can disable that regression test silently.
             js:
+              # Root inputs consumed by the self-host deployment tests and build context.
+              - 'docker-compose.self-host.yml'
+              - '.env.self-host.example'
+              - '.dockerignore'
               # Release helper tests validate packaging workflow behavior.
               - '.github/workflows/desktop-release.yml'
               # packages/mcp's reference test compares this page with its generator.

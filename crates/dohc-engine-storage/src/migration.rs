@@ -31,11 +31,12 @@ pub(crate) struct Migration {
 }
 
 /// Ambient inputs stamped into every ledger row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct MigrationContext {
     pub engine_build: &'static str,
     pub protocol_version: i64,
     pub now_ms: i64,
+    pub initial_root_token: Option<String>,
 }
 
 impl MigrationContext {
@@ -45,6 +46,7 @@ impl MigrationContext {
             engine_build: ENGINE_BUILD,
             protocol_version: ENGINE_STORAGE_PROTOCOL_VERSION,
             now_ms,
+            initial_root_token: None,
         }
     }
 }
@@ -2130,6 +2132,37 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
+const V2_RELAY_DEFERRED_OPS_DDL: &str = "\
+CREATE TABLE relay_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES sync_identity(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK(origin_seq >= 0),
+    replication_epoch TEXT NOT NULL,
+    stream_identity TEXT NOT NULL,
+    envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+    retained_bytes INTEGER NOT NULL CHECK(retained_bytes > 0),
+    checked_sequence INTEGER NOT NULL DEFAULT 0 CHECK(checked_sequence >= 0),
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+CREATE TABLE relay_deferred_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    is_text INTEGER NOT NULL CHECK(is_text IN (0,1)),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK ((is_text=1 AND text_sha256 IS NOT NULL AND text_sha256=sha256 AND binary_sha256 IS NULL)
+        OR (is_text=0 AND binary_sha256 IS NOT NULL AND binary_sha256=sha256 AND text_sha256 IS NULL)),
+    PRIMARY KEY(workspace_id,origin_id,origin_seq,sha256,is_text),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq)
+        REFERENCES relay_deferred_ops(workspace_id,origin_id,origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_relay_deferred_text_blob ON relay_deferred_blobs(text_sha256);
+CREATE INDEX idx_relay_deferred_binary_blob ON relay_deferred_blobs(binary_sha256);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2166,6 +2199,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 5,
         id: "v2-automation-change-facts",
         sql: V2_AUTOMATION_CHANGE_FACTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 6,
+        id: "v2-relay-bootstrap-complete",
+        sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 7,
+        id: "v2-relay-deferred-ops",
+        sql: V2_RELAY_DEFERRED_OPS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2330,6 +2375,13 @@ fn apply_transactional(
             rusqlite::params![ctx.now_ms, ctx.engine_build, ENGINE_SCHEMA_VERSION],
         )
         .map_err(StorageError::migration)?;
+        if let Some(token) = &ctx.initial_root_token {
+            tx.execute(
+                "INSERT INTO shadow_clone (rowid_guard, token) VALUES (1, ?1)",
+                [token],
+            )
+            .map_err(StorageError::migration)?;
+        }
     }
 
     let integrity_ok = quick_check_ok(&tx)?;
@@ -2407,6 +2459,14 @@ mod tests {
             (
                 "v2-automation-change-facts",
                 "664e71f126144d9f2e90379cf12a84952dd768f765070bfbc62a0e0989a78f9c",
+            ),
+            (
+                "v2-relay-bootstrap-complete",
+                "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
+            (
+                "v2-relay-deferred-ops",
+                "1290cb517b2ca2e246daa474eb9e3ed8ba2446ba64b59f68fd00b016f3492407",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2549,6 +2609,34 @@ mod tests {
                 "{claim_id} upgrades to a first-run changed claim: {claims:?}"
             );
         }
+    }
+
+    #[test]
+    fn existing_relay_cursors_keep_bootstrap_complete_when_upgraded() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-relay-bootstrap-complete")
+            .expect("bootstrap tracking migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("schema before bootstrap tracking");
+        conn.execute(
+            "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
+             VALUES ('ws','42','epoch','stream')",
+            [],
+        )
+        .expect("existing cursor");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let cursor: (String, bool) = conn
+            .query_row(
+                "SELECT cursor,bootstrap_complete FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("upgraded cursor");
+        assert_eq!(cursor, ("42".to_owned(), true));
     }
 
     #[test]
@@ -3055,6 +3143,51 @@ mod tests {
             })
             .expect("foreign key check");
         assert_eq!(fk_violations, 0);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn initial_root_binding_survives_both_migration_crash_boundaries() {
+        for point in [
+            FaultPoint::MigrateBeforeLedgerCommit,
+            FaultPoint::MigrateBetweenSteps,
+        ] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut ctx = MigrationContext::current(1_000);
+            ctx.initial_root_token = Some("root-token".to_owned());
+            {
+                let mut conn = open_bare(&path);
+                assert_eq!(
+                    run_migrations(
+                        &mut conn,
+                        BASELINE_MIGRATIONS,
+                        &ctx,
+                        &OneShotCrash::at(point)
+                    )
+                    .unwrap(),
+                    MigrationOutcome::Crashed,
+                );
+            }
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 2_000, "root-token", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            drop(reopened);
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 3_000, "other-root", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            assert!(!reopened.bind_root_token("other-root", &NoFaults).unwrap());
+        }
+    }
+
+    #[test]
+    fn initial_root_binding_never_adopts_an_existing_unbound_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        drop(crate::EngineStore::open(&path, 1_000).unwrap());
+        let mut reopened =
+            crate::EngineStore::open_with_root_token(&path, 2_000, "new-root", None).unwrap();
+        assert!(!reopened.bind_root_token("new-root", &NoFaults).unwrap());
     }
 
     #[cfg(feature = "fault-injection")]

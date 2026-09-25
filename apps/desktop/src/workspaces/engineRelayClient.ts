@@ -1,5 +1,6 @@
 import { runInKeyedLane } from "../keyedLane";
 import {
+  RelayApiVersionError,
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -439,6 +440,10 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
+    if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
+    if (error.message === "relay-api-version-too-new") throw new RelayApiVersionError("server");
+  }
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
@@ -545,7 +550,7 @@ export interface EngineRelayWorkspaceClient {
   //
   // The identity components are minted by the ENGINE, the same way sync.claim
   // mints its own. The origin is a REPLICA id — the relay namespaces this
-  // recipient's ops as `share:<shareId>:<originId>` — so it must never be the
+  // recipient's ops by share, authenticated member, and replica — so it must never be the
   // recipient's user id, which two of their devices would share. Minting it
   // engine-side is also what makes a refresh safe: the durable row is the
   // record, so nothing here has to remember an id between calls.

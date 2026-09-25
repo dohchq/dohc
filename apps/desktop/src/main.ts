@@ -109,6 +109,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import type { CollectionRecordEditContext } from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
@@ -152,7 +153,6 @@ import {
 } from "./window/createMainWindow";
 import {
   createWorkspaceFolder,
-  resetFailedJoinFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import { createFolder } from "./workspaces/workspaceFiles";
@@ -229,6 +229,7 @@ import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { createRelayLogWait } from "./workspaces/relayLogWait";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
 import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
 import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
@@ -925,7 +926,7 @@ function relayShareErrorCopy(
     // One relay code for every chat refusal, and the desktop refuses the
     // general group, the agent lane, and direct-message-as-group before it
     // asks the relay. What remains is a group the relay has not synced yet.
-    case "invalid_channel":
+    case "invalid_chat":
       return "This can't be shared yet. Wait for it to sync, then try again.";
     case "ambiguous_selector":
       return "A group is shared as it is now, not at a version. Share it without choosing a version.";
@@ -1610,14 +1611,6 @@ function removePhysicalWorkspace(
   });
 }
 
-async function cleanupFailedPhysicalWorkspace(
-  workspaceId: string,
-  rootPath: string,
-): Promise<void> {
-  await closeRelayTransportWorkspace(workspaceId);
-  await resetFailedJoinFolder(rootPath);
-}
-
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: createWorkspaceFolder,
@@ -1625,7 +1618,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   remove: removePhysicalWorkspace,
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
-  cleanup: cleanupFailedPhysicalWorkspace,
+  closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
   rollbackComplete: () => {
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
@@ -1840,6 +1833,11 @@ function engineForWorkspace(
     // Recorded durably before each pull request goes out.
     pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
+    // Another device's edits reach this one, and a document open here, while
+    // nobody touches this desktop: the relay answers a held read when the log
+    // changes. The rare pull covers a change that answer missed.
+    waitForChange: createRelayLogWait({ workspaceId: workspace.workspaceId, relay }),
+    idlePullMs: 5 * 60_000,
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
@@ -3202,6 +3200,12 @@ const { startDesktopCliServer } = createDesktopCliServer({
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   withEngineAdapter,
+  // The sessions are created below; the CLI server reaches them only per request.
+  liveDocuments: {
+    readDocument: (input) => engineYDocSessionIpc.readDocument(input),
+    editDocument: (input) => engineYDocSessionIpc.editDocument(input),
+  },
+  documentProjection: createDocumentProjectionWorker(),
   chatWrites,
   startCliServer,
   stateDir,

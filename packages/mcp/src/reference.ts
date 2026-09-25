@@ -14,7 +14,7 @@ import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { OwnerAppResponsesResult, type OwnerAppResponsesRequest } from "@dohc/cli/app-responses";
 import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
-import type { DohcClient } from "@dohc/sdk";
+import type { DohcClient, DohcFileReadResult, DohcFileWatchEvent, DohcSubscriptionEvent } from "@dohc/sdk";
 import { createDohcMcpServer } from "./server";
 
 export const REFERENCE_PATH = "docs/reference/cli-mcp-sdk.md";
@@ -133,6 +133,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_change: { cli: "moment" },
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
+  dohc_read_document: { cli: "documentRead" },
+  dohc_edit_document: { cli: "documentEdit" },
   dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
   dohc_write_file: "`{ ok: true, path, bytes, sha256, recordedBy }`",
   dohc_create_directory: "`{ ok: true, path, recordedBy }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
@@ -198,6 +200,20 @@ type SdkMethodPath<T, Prefix extends string = ""> = {
       : never;
 }[keyof T & string];
 
+export const SDK_FILE_READ_RESULT = z.object({
+  text: z.string(),
+  truncated: z.boolean(),
+}).strict() satisfies z.ZodType<DohcFileReadResult>;
+
+export const SDK_FILE_WATCH_EVENT = z.object({
+  event: z.string(),
+  data: z.object({
+    path: z.string(),
+    operation: z.enum(["update", "delete"]),
+    sha256: z.string().optional(),
+  }),
+}).strict() satisfies z.ZodType<DohcSubscriptionEvent<DohcFileWatchEvent>>;
+
 // The `dohc` client from @dohc/sdk. A method added to the client fails
 // typecheck here until it has an entry.
 export const SDK_METHODS: Record<SdkMethodPath<DohcClient>, { call: string; returns: string; does: string; needs?: string }> = {
@@ -206,12 +222,12 @@ export const SDK_METHODS: Record<SdkMethodPath<DohcClient>, { call: string; retu
   invoke: { call: "invoke(method, params?, options?)", returns: "the host's result", does: "Another name for `request`." },
   subscribe: { call: "subscribe(method, params, listener, options?)", returns: "a function that stops the subscription", does: "Subscribes to host events this SDK has no typed wrapper for." },
   "files.read": { call: "files.read(path, options?)", returns: "the text", does: "Reads a text file. It throws `DOHC_RESPONSE_TRUNCATED` when the host sent only part of the file.", needs: "files.read" },
-  "files.readInfo": { call: "files.readInfo(path, options?)", returns: "`{ text, truncated }`", does: "Reads a text file and says whether the host cut it short.", needs: "files.read" },
+  "files.readInfo": { call: "files.readInfo(path, options?)", returns: `\`${shapeText(jsonSchema(SDK_FILE_READ_RESULT, "output"))}\``, does: "Reads a text file and says whether the host cut it short.", needs: "files.read" },
   "files.list": { call: "files.list(path?, listOptions?, options?)", returns: "`{ path, name?, kind?, size?, modifiedAt? }[]`", does: "Lists files. `listOptions` takes `recursive` and `includeHidden`.", needs: "files.list" },
   "files.write": { call: "files.write(path, text, writeOptions?, options?)", returns: "`{ path }`", does: "Writes a text file. `writeOptions.overwrite: false` refuses an existing file. Live Markdown documents are refused.", needs: "files.write" },
-  "files.watch": { call: "files.watch(path, listener, options?)", returns: "a function that stops the watch", does: "Reports settled changes at or below `path`, each `{ path, operation, sha256? }`. `operation` is `update` or `delete`.", needs: "files.watch" },
+  "files.watch": { call: "files.watch(path, listener, options?)", returns: "a function that stops the watch", does: `Reports settled changes at or below \`path\`. The listener receives \`${shapeText(jsonSchema(SDK_FILE_WATCH_EVENT, "output"))}\`. Read the file path from \`data.path\`; \`data.operation\` is \`update\` or \`delete\`.`, needs: "files.watch" },
   "workspace.search": { call: "workspace.search(query, searchOptions?, options?)", returns: "`{ path?, title?, excerpt?, score? }[]`", does: "Searches the workspace. `searchOptions` takes `path`, `limit`, and `types`.", needs: "workspace.search" },
-  "databases.read": { call: "databases.read({ path, query?, params? }, options?)", returns: "the host's result", does: "Reads a workspace database, with an optional read-only query.", needs: "databases.read" },
+  "databases.read": { call: "databases.read({ path, query?, params? }, options?)", returns: "the host's database snapshot", does: "The desktop host supports snapshots only and rejects every supplied `query`. Call `databases.read({ path })` without SQL.", needs: "databases.read" },
   "databases.edit": { call: "databases.edit({ path, query?, params?, operations? }, options?)", returns: "the host's result", does: "Changes a workspace database with one query or exactly one operation.", needs: "databases.edit" },
   "ui.open": { call: "ui.open(target, openOptions?, options?)", returns: "`{ target, position? }`", does: "Opens a workspace path in dohc. `openOptions.position` is `active`, `beside`, or `new-tab`.", needs: "ui.open" },
   "ui.openWebApp": { call: "ui.openWebApp(webAppId, instanceKey, options?)", returns: "the host's result", does: "Opens one instance of the plugin's own web app in a tab. Only a panel can call it.", needs: "ui.open" },
@@ -412,7 +428,11 @@ function verbReturns(command: string, name: string): string {
 }
 
 function verbSection(command: string, name: string, verb: CliVerbSpec): string {
-  const details = [...(verb.notes ?? []), ...(verb.freeText ? [`Put ${DASH_RULE}.`] : [])];
+  const details = [
+    ...(verb.take ?? []).map((source) => `Set \`${source.field}\` to \`${source.path}\` from \`${source.from}\`.`),
+    ...(verb.notes ?? []),
+    ...(verb.freeText ? [`Put ${DASH_RULE}.`] : []),
+  ];
   return [
     `#### \`dohc ${command} ${name}\``,
     verb.fields ? "" : shellBlock(["dohc", command, name, verb.operands, "[options]"].filter(Boolean).join(" ")),

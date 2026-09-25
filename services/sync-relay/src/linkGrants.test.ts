@@ -2491,7 +2491,7 @@ describe("owner link inventory and impact preconditions", () => {
         shareId: "share-damaged",
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
-        selectorJson: JSON.stringify({ kind: "chat-channel", channelWireId: 42 }),
+        selectorJson: JSON.stringify({ kind: "chat", channelWireId: 42 }),
         createdAtMs: 3_000,
       },
       grant: {
@@ -2593,7 +2593,7 @@ describe("owner link inventory and impact preconditions", () => {
       grantId: "link-damaged",
       selector: null,
       damaged: true,
-      selectorKind: "chat-channel",
+      selectorKind: "chat",
       access: "view",
       generation: 1,
       status: "active",
@@ -5467,7 +5467,7 @@ describe("relay link grants", () => {
         shareId: "share-chat",
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
-        selectorJson: JSON.stringify({ kind: "chat-channel", channelWireId: "general" }),
+        selectorJson: JSON.stringify({ kind: "chat", channelWireId: "general" }),
         createdAtMs: 2_020,
       },
       grant: {
@@ -5790,5 +5790,53 @@ describe("explicit public Edit release", () => {
     expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({versionId: "version-pinned", access: "edit"})))).status).toBe(400);
     expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
     expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({paths: ["docs"], access: "edit"})))).status).toBe(200);
+  });
+});
+
+
+describe("named share origin isolation", () => {
+  it("isolates promoted recipients with equal replica sequences and learned origins", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h, "comment");
+    seedStorageLink(storage, { grantId: "origin-link", access: "comment" });
+    for (const user of ["member-a", "member-b"]) {
+      expect(seedDependentGrant(storage, {
+        shareId: "share-existing", parentGrantId: "origin-link", grantId: user,
+        principalUserId: user, createdAtMs: 2_001,
+      })).toMatchObject({ ok: true });
+      expect((await h(request(OWNER, `/sync/shares/share-existing/grants/${user}/promote`,
+        jsonBody({ workspaceId: WORKSPACE, expectedParentGrantId: "origin-link", expectedParentGeneration: 1 }),
+      ))).status).toBe(200);
+    }
+    const ownerOp = { originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+      payload: { momentId: "origin-file", versionId: "main", objectId: "origin-file", path: "docs/a.md", recordedAtMs: 1,
+        operation: "write", payloadAfterPath: "docs/a.md", payloadAfterBlobSha256: null } };
+    expect((await h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "replica", ops: [ownerOp] })))).status).toBe(200);
+    const append = (user: string, originId: string, seq: number) => h(request(user,
+      "/sync/shares/share-existing/log", jsonBody({ originId, ops: [{
+        originSeq: seq, opKind: "chat.thread.create", recordedAtMs: 2,
+        payload: { threadId: `${user}-${originId}-${seq}`, title: "Question", createdAtMs: 2,
+          linkedAtMs: 2, linkedPath: "docs/a.md" },
+      }] })));
+    for (const user of ["member-a", "member-b"]) {
+      const response = await append(user, "replica", 0);
+      expect(response.status, await response.clone().text()).toBe(200);
+    }
+    const page = await json(await h(request("member-b", "/sync/shares/share-existing/log?since=0")));
+    const rows = page.ops as Array<{ originId: string; payload: { threadId?: string } }>;
+    const originA = rows.find((row) => row.payload.threadId === "member-a-replica-0")!.originId;
+    const originB = rows.find((row) => row.payload.threadId === "member-b-replica-0")!.originId;
+    expect(originA).not.toBe(originB);
+    expect(originA).not.toBe("replica");
+    // A served origin is not a capability to append to its coordinates.
+    const injection = await append("member-b", originA, 1);
+    expect(injection.status).toBe(400);
+    expect((await append("member-a", "replica", 1)).status).toBe(200);
+    expect((await append("member-b", "replica", 1)).status).toBe(200);
+    expect((await append("member-a", "replica", 1)).status).toBe(200);
+    expect((await h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: originA, ops: [ownerOp] })))).status).toBe(400);
+    const ownerRows = storage.fetchLogPage({ workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 100 }).rows;
+    expect(ownerRows.find((row) => row.opKind === "moment.append")?.originId).toBe("replica");
   });
 });

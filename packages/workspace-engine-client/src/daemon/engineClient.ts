@@ -32,6 +32,8 @@ const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
 // frame sniffing.
 const BLOB_CAPABILITY = "blobs";
+// A request can ask for progress only on a session that negotiated this.
+const PROGRESS_CAPABILITY = "progress";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 // Mirrors MIN_NEGOTIABLE_FRAME_BYTES in crates/dohc-engine-protocol/src/limits.rs:
@@ -39,6 +41,8 @@ const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 // less would have its receive cap raised by the ack; refuse it at connect.
 const MIN_REQUESTABLE_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const MAX_ORDINARY_REQUESTS = 1024;
+const MAX_ORDINARY_REQUEST_BYTES = 64 * 1024 * 1024;
 const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
 const MAX_LIVE_UPDATE_BYTES = 20 * 1024 * 1024;
 const PACKED_LIVE_RANGE_BYTES = 16;
@@ -549,7 +553,11 @@ type EngineClientErrorCode =
  * request and refusing it, so anything that models this bound builds the
  * envelope here rather than measuring what it was handed.
  */
-export function requestEnvelope(request: Request, wireId: number): Envelope {
+export function requestEnvelope(
+  request: Request,
+  wireId: number,
+  progress = false,
+): Envelope {
   return {
     type: "request",
     ...request,
@@ -557,6 +565,9 @@ export function requestEnvelope(request: Request, wireId: number): Envelope {
     workspace: request.workspace ?? null,
     deadlineMs: request.deadlineMs ?? null,
     idempotencyKey: request.idempotencyKey ?? null,
+    // Absent unless asked, as the engine encodes it, so a request that does
+    // not ask for progress is unchanged on the wire.
+    ...(progress ? { progress: true } : {}),
   };
 }
 
@@ -596,11 +607,9 @@ export class EngineRequestError extends EngineClientError {
 /**
  * A request the caller deadlined ran out of time before the daemon answered.
  *
- * The code stays `transport-error`, because that is what happened: the request
- * left, and nothing came back. Every caller that rebinds on a dropped transport
- * must keep doing so here. What the class adds is IDENTITY — a caller that set
- * the deadline can tell its own limit firing apart from a socket that died,
- * which a message match cannot do safely.
+ * Expiry can precede transmission. The code remains `transport-error` for
+ * callers that recover by rebinding; this class lets them distinguish their
+ * own deadline from a socket failure without matching message text.
  */
 export class EngineRequestDeadlineError extends EngineClientError {
   readonly requestId: number;
@@ -694,6 +703,14 @@ interface PendingRequest {
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
   readonly restoreOutput?: PrivateLiveOutput;
+  readonly cancelUnsent?: () => boolean;
+  // Present only when the request asked the engine for progress.
+  readonly onProgress?: () => void;
+}
+
+interface PendingWrite {
+  send(): Promise<void> | null;
+  reject(error: unknown): void;
 }
 
 interface PendingBlob {
@@ -945,7 +962,10 @@ export class EngineClient implements EngineTransport {
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
   private inboundFrames = 0;
-  private writeTail: Promise<void> | null = null;
+  private readonly writeQueue = new Set<PendingWrite>();
+  private writing = false;
+  private ordinaryRequests = 0;
+  private ordinaryRequestBytes = 0;
   private readonly writeWaiters = new Set<(error: unknown) => void>();
   private readonly liveConfig: PrivateLiveApplicationConfig | undefined;
   private liveUploadBytes = 0;
@@ -1051,8 +1071,25 @@ export class EngineClient implements EngineTransport {
     return this.readyPromise;
   }
 
-  async sendRequest(request: Request, signal?: AbortSignal): Promise<Response> {
-    return this.sendRequestWithInput(request, undefined, signal);
+  /**
+   * `onProgress` runs each time the engine reports that this request's work
+   * moved. It can run only when `reportsProgress()` is true, and only for a
+   * method whose work reports (today `workspace.open`).
+   */
+  async sendRequest(
+    request: Request,
+    signal?: AbortSignal,
+    onProgress?: () => void,
+  ): Promise<Response> {
+    return this.sendRequestWithInput(request, undefined, signal, undefined, true, onProgress);
+  }
+
+  /** Whether this session negotiated PROGRESS_CAPABILITY with the engine. */
+  reportsProgress(): boolean {
+    return (
+      this.connectOptions.capabilities.includes(PROGRESS_CAPABILITY) &&
+      (this.helloAck?.capabilities.includes(PROGRESS_CAPABILITY) ?? false)
+    );
   }
 
   private async sendRequestWithInput(
@@ -1060,7 +1097,11 @@ export class EngineClient implements EngineTransport {
     writeInput?: (wireId: number) => Promise<void>,
     signal?: AbortSignal,
     restoreOutput?: PrivateLiveOutput,
+    ordinary = false,
+    onProgress?: () => void,
   ): Promise<Response> {
+    const deadlineMs = request.deadlineMs ?? null;
+    const expiresAt = deadlineMs === null ? null : performance.now() + deadlineMs;
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
       const cause = this.closeCause;
@@ -1079,7 +1120,10 @@ export class EngineClient implements EngineTransport {
 
     const wireId = this.nextRequestId++;
     if (restoreOutput) restoreOutput.wireId = wireId;
-    const envelope = requestEnvelope(request, wireId);
+    // A caller that asks on a session without the capability just hears
+    // nothing; the engine would ignore the flag anyway.
+    const progress = onProgress !== undefined && this.reportsProgress();
+    const envelope = requestEnvelope(request, wireId, progress);
     // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
     // `transport-error` — which is a lie twice over: nothing was transported,
@@ -1087,7 +1131,8 @@ export class EngineClient implements EngineTransport {
     // machinery for a failure no reconnect can fix. A request that cannot be
     // framed is the caller’s to fix, so it is refused here, by name, with the
     // limit and the size that was asked for.
-    const encodedRequest = encodedEnvelopeBytes(envelope);
+    const serializedEnvelope = JSON.stringify(envelope);
+    const encodedRequest = Buffer.byteLength(serializedEnvelope, "utf8");
     if (encodedRequest > this.maxFrameBytes) {
       return Promise.reject(
         new EngineClientError(
@@ -1098,24 +1143,39 @@ export class EngineClient implements EngineTransport {
         ),
       );
     }
-    const deadlineMs = request.deadlineMs ?? null;
+    const retainedBytes = encodedRequest + FRAME_HEADER_BYTES;
+    if (ordinary) {
+      if (this.ordinaryRequests >= MAX_ORDINARY_REQUESTS || retainedBytes > MAX_ORDINARY_REQUEST_BYTES - this.ordinaryRequestBytes) {
+        throw new EngineRequestError(request.id, { code: "OVERLOADED", message: "The engine request queue is full.", retry: "afterBackoff" });
+      }
+      this.ordinaryRequests++;
+      this.ordinaryRequestBytes += retainedBytes;
+    }
+    const unsent = !writeInput ? new AbortController() : undefined;
+    let transmitted = false;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
     const cancellationError = () => writeInput
       ? new EngineClientError("closed", "Live application request was cancelled.")
       : signal?.reason;
     let cancellationSent = false;
+    const abandon = (error: EngineClientError, cancel: boolean): void => {
+      const pending = this.pending.get(wireId);
+      this.pending.delete(wireId);
+      if (pending && transmitted) this.abandonedRequestIds.add(wireId);
+      if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      pending?.reject(error);
+      unsent?.abort(error);
+      if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
+    };
+    const expire = (): void => abandon(new EngineRequestDeadlineError(wireId, request.method, deadlineMs!), false);
     const abort = (): void => {
       // Finish reserved input before cancelling so other requests retain valid framing.
       if ((writeInput && !inputComplete) || cancellationSent) return;
       const pending = this.pending.get(wireId);
       if (!pending && !writeInput) return;
       cancellationSent = true;
-      this.pending.delete(wireId);
-      if (pending) this.abandonedRequestIds.add(wireId);
-      if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
-      pending?.reject(cancellationError());
-      void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
+      abandon(cancellationError(), true);
     };
     const response = new Promise<Response>((resolve, reject) => {
       const deadlineTimer =
@@ -1126,11 +1186,9 @@ export class EngineClient implements EngineTransport {
               setImmediate(() => {
                 const pending = this.pending.get(wireId);
                 if (!pending) return;
-                this.pending.delete(wireId);
-                this.abandonedRequestIds.add(wireId);
-                pending.reject(new EngineRequestDeadlineError(wireId,request.method,deadlineMs));
+                expire();
               });
-            }, deadlineMs)
+            }, Math.max(0, expiresAt! - performance.now()))
           : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
@@ -1139,9 +1197,34 @@ export class EngineClient implements EngineTransport {
         reject,
         ...(restoreOutput ? { restoreOutput } : {}),
         ...(deadlineTimer ? { deadlineTimer } : {}),
+        ...(unsent ? { cancelUnsent: () => {
+          if (transmitted) return false;
+          abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }), false);
+          return true;
+        } } : {}),
+        ...(progress ? { onProgress } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
-      writeTask = this.writeEnvelope(envelope).then(async () => {
+      writeTask = this.writeFrame(() => {
+        let payload = serializedEnvelope;
+        if (ordinary && expiresAt !== null) {
+          const remaining = Math.ceil(expiresAt - performance.now());
+          if (remaining <= 0) {
+            expire();
+            throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
+          }
+          const captured = JSON.parse(serializedEnvelope) as Request;
+          captured.deadlineMs = Math.min(deadlineMs!, remaining);
+          payload = JSON.stringify(captured);
+        }
+        const frame = encodeFrame(FrameType.Control, 0, Buffer.from(payload, "utf8"), this.maxFrameBytes);
+        if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
+          expire();
+          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
+        }
+        transmitted = true;
+        return frame;
+      }, unsent?.signal).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
         if (signal?.aborted) abort();
@@ -1174,6 +1257,10 @@ export class EngineClient implements EngineTransport {
       throw error;
     } finally {
       signal?.removeEventListener("abort", abort);
+      if (ordinary) {
+        this.ordinaryRequests--;
+        this.ordinaryRequestBytes -= retainedBytes;
+      }
     }
   }
 
@@ -1542,6 +1629,7 @@ export class EngineClient implements EngineTransport {
       ([, request]) => request.callerId === callerId,
     );
     if (!pending) return;
+    if (pending[1].cancelUnsent?.()) return;
     await this.writeEnvelope({ type: "cancel", id: pending[0] });
   }
 
@@ -1746,6 +1834,9 @@ export class EngineClient implements EngineTransport {
           }
         }
         return;
+      case "progress":
+        this.receiveProgress(envelope.id);
+        return;
       case "blobStart":
         this.receiveBlobStart(envelope);
         return;
@@ -1849,6 +1940,19 @@ export class EngineClient implements EngineTransport {
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
     this.connectTimer = undefined;
     this.readyResolve(this);
+  }
+
+  // Progress only informs a waiting caller. Progress no caller is waiting for,
+  // such as for a request that stopped waiting or never asked, is dropped: it
+  // cannot corrupt any state, so it must not end the transport.
+  private receiveProgress(id: number): void {
+    const onProgress = this.pending.get(id)?.onProgress;
+    if (!onProgress) return;
+    try {
+      onProgress();
+    } catch {
+      // A progress observer cannot interrupt transport dispatch.
+    }
   }
 
   private receiveBlobStart(start: BlobStart): void {
@@ -2145,7 +2249,7 @@ export class EngineClient implements EngineTransport {
     return this.writeFrame(() => frame);
   }
 
-  private writeFrame(encode: () => Buffer): Promise<void> {
+  private writeFrame(encode: () => Buffer, signal?: AbortSignal): Promise<void> {
     let blocked = false;
     const send = (): Promise<void> => {
       if (this.closed) return Promise.reject(this.closeCause);
@@ -2172,21 +2276,51 @@ export class EngineClient implements EngineTransport {
         }
       });
     };
-    const queued = this.writeTail !== null;
-    const write = this.writeTail ? this.writeTail.then(send) : send();
-    if (!queued && !blocked) return write;
-    const tail = write.catch(() => undefined);
-    this.writeTail = tail;
-    void tail.then(() => {
-      if (this.writeTail === tail) this.writeTail = null;
+    if (this.closed) return Promise.reject(this.closeCause);
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise<void>((resolve, reject) => {
+      const removeAbort = (): void => signal?.removeEventListener("abort", abort);
+      const entry: PendingWrite = {
+        send: () => {
+          removeAbort();
+          const completion = send().then(resolve, reject);
+          return blocked ? completion : null;
+        },
+        reject: error => { removeAbort(); reject(error); },
+      };
+      const abort = (): void => {
+        if (this.writeQueue.delete(entry)) entry.reject(signal!.reason);
+      };
+      this.writeQueue.add(entry);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.pumpWrites();
     });
-    return write;
+  }
+
+  private pumpWrites(): void {
+    while (!this.writing && !this.closed) {
+      const entry = this.writeQueue.values().next().value;
+      if (!entry) return;
+      this.writeQueue.delete(entry);
+      this.writing = true;
+      const completion = entry.send();
+      if (completion) {
+        void completion.then(() => {
+          this.writing = false;
+          this.pumpWrites();
+        });
+        return;
+      }
+      this.writing = false;
+    }
   }
 
   private fail(error: EngineClientError, force = false): void {
     if (this.closed) return;
     this.closed = true;
     this.closeCause = error;
+    for (const entry of this.writeQueue) entry.reject(error);
+    this.writeQueue.clear();
     for (const reject of [...this.writeWaiters]) reject(error);
     this.readyState = false;
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);

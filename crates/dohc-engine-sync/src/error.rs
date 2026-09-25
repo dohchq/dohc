@@ -312,6 +312,8 @@ impl RelayError {
             | RelayError::SelfShare
             | RelayError::AmbiguousSelector
             | RelayError::InvalidChannel
+            | RelayError::ApiVersionTooOld
+            | RelayError::ApiVersionTooNew
             | RelayError::MethodNotAllowed
             | RelayError::Forbidden
             | RelayError::ServerInternal
@@ -425,6 +427,12 @@ pub enum RelayError {
     AmbiguousSelector,
     #[error("share channel is invalid")]
     InvalidChannel,
+    /// The relay no longer serves the relay API version this build speaks.
+    #[error("relay needs a newer dohc")]
+    ApiVersionTooOld,
+    /// The relay is older than the relay API version this build speaks.
+    #[error("relay is older than this dohc")]
+    ApiVersionTooNew,
     #[error("relay method is not allowed")]
     MethodNotAllowed,
     #[error("relay forbids this request")]

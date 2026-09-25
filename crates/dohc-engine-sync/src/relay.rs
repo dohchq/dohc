@@ -202,6 +202,7 @@ pub struct SharedChannelRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelResponse {
+    pub own_origin_id: Option<String>,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -1195,6 +1196,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
+        let (queued, mut durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
         if let Some(cursor) = &current {
             if cursor.replication_epoch != identity.replication_epoch
@@ -1203,6 +1205,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
+        let bootstrap_complete = store
+            .read_with(|conn| {
+                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+            })
+            .map_err(local)?;
         let mut cursor = current.map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
@@ -1238,6 +1245,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
+        if !queued.is_empty() {
+            crate::deferred::check_redelivery(store, &ops)?;
+        }
+        let fetched_coordinates: BTreeSet<_> = ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
         self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
@@ -1251,11 +1271,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut changed_paths = BTreeMap::new();
         let mut record_facts = Vec::new();
         let mut retryable = Vec::new();
-        let mut deferred_origins = BTreeSet::new();
+        let mut completed = Vec::new();
+        let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
             let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
             match routed {
-                Err(SyncError::RetryableState { .. }) => {
+                Err(SyncError::RetryableState { reason }) => {
+                    if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                        durable_origins.insert(op.origin_id.clone());
+                    }
                     deferred_origins.insert(op.origin_id.clone());
                     retryable.push(op);
                 }
@@ -1263,29 +1287,35 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     retryable.push(op);
                 }
                 Err(error) => return Err(local(error)),
-                Ok(outcome) => accumulate_pull_outcome(
-                    store,
-                    op,
-                    outcome,
-                    &mut applied,
-                    &mut refused,
-                    &mut skipped,
-                    &mut conflicts_opened,
-                    &mut changed_paths,
-                    &mut refusals,
-                    &mut sharing_declined,
-                    &mut record_facts,
-                )?,
+                Ok(outcome) => {
+                    completed.push(op);
+                    accumulate_pull_outcome(
+                        store,
+                        op,
+                        outcome,
+                        &mut applied,
+                        &mut refused,
+                        &mut skipped,
+                        &mut conflicts_opened,
+                        &mut changed_paths,
+                        &mut refusals,
+                        &mut sharing_declined,
+                        &mut record_facts,
+                    )?;
+                }
             }
         }
         while !retryable.is_empty() {
             let mut still_retryable = Vec::new();
-            let mut still_deferred_origins = BTreeSet::new();
+            let mut still_deferred_origins = durable_origins.clone();
             let mut made_progress = false;
             for op in retryable {
                 let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
                 match routed {
-                    Err(SyncError::RetryableState { .. }) => {
+                    Err(SyncError::RetryableState { reason }) => {
+                        if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                            durable_origins.insert(op.origin_id.clone());
+                        }
                         still_deferred_origins.insert(op.origin_id.clone());
                         still_retryable.push(op);
                     }
@@ -1297,6 +1327,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     Err(error) => return Err(local(error)),
                     Ok(outcome) => {
                         made_progress = true;
+                        completed.push(op);
                         accumulate_pull_outcome(
                             store,
                             op,
@@ -1317,11 +1348,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !made_progress {
-                return Err(RelayError::Local("retryable-state".to_owned()));
+                if still_retryable
+                    .iter()
+                    .any(|op| !durable_origins.contains(&op.origin_id))
+                {
+                    return Err(RelayError::Local("retryable-state".to_owned()));
+                }
+                crate::deferred::retain(store, &identity, &still_retryable, faults)?;
+                break;
             }
             retryable = still_retryable;
         }
-        let settlements = match crate::moment_apply::pending::drain_and_claim(
+        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
             faults,
@@ -1337,7 +1375,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if settlements.report_id.is_some() {
             cache.clear();
         }
-        let has_more = has_more || settlements.has_more;
+        let replay_more = crate::deferred::claim_report(
+            store,
+            workspace_id,
+            &queued,
+            &completed,
+            &mut settlements.report_id,
+            faults,
+        )?;
+        let has_more = has_more || settlements.has_more || replay_more;
         for change in settlements.changes {
             insert_changed_path(&mut changed_paths, change);
         }
@@ -1378,6 +1424,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let pending_cursor = RelayCursor {
             cursor,
+            bootstrap_complete: bootstrap_complete
+                || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,
@@ -1553,6 +1601,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let old_origin_id = identity.origin_id;
         let result = store
             .write_with(faults, |tx| {
+                let bootstrap_complete =
+                    crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)?;
                 let collision: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM replication_log \
@@ -1673,8 +1723,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute(
-                    "DELETE FROM sync_relay_cursors WHERE workspace_id=?1",
-                    [workspace_id],
+                    "INSERT INTO sync_relay_cursors \
+                     (workspace_id,cursor,replication_epoch,stream_identity,bootstrap_complete) \
+                     VALUES (?1,'0',?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
+                     cursor='0',replication_epoch=excluded.replication_epoch, \
+                     stream_identity=excluded.stream_identity,bootstrap_complete=excluded.bootstrap_complete",
+                    params![workspace_id, identity.replication_epoch, identity.stream_identity, bootstrap_complete],
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute(
@@ -1713,9 +1767,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPullOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id).map_err(local)?;
-        let own_echo = identity
-            .as_ref()
-            .map(|value| format!("share:{share_id}:{}", value.origin_id));
         let mut cursor = crate::read_share_cursor(
             store,
             workspace_id,
@@ -1734,6 +1785,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         let fetched = page.ops.len();
+        let own_echo = page.own_origin_id;
         let ops = page.ops;
         cursor = page.next_cursor;
 
@@ -2442,7 +2494,7 @@ fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usi
     }
 }
 
-fn collect_blob_refs(
+pub(crate) fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();

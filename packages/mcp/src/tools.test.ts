@@ -36,6 +36,7 @@ import {
 } from "./tools";
 import {
   DOHC_METADATA_GUARD,
+  discoverSites,
   entryCharBudget,
   nameUnitFor,
   notARealFolderRefusal,
@@ -1500,6 +1501,20 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("dohc_detect_apps finds an app declared only by app.publish.json, as workspace-core does", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "trip/trip-poll"), { recursive: true });
+      await writeFile(join(ctx.root, "trip/trip-poll/app.publish.json"), JSON.stringify({ entryPath: "main.tsx", inputs: ["main.tsx"], packageMap: {} }));
+      await writeFile(join(ctx.root, "trip/trip-poll/main.tsx"), "document.body.textContent = 'Poll';");
+
+      const result = await detectApps(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.apps[0]).toMatchObject({ root: "trip/trip-poll", kind: "configured", confidence: "high" });
+      expect(result.apps[0]).toMatchObject(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx"])[0]!);
+    });
+  });
+
   it("dohc_detect_apps classifies a framework-config-only folder the same way workspace-core does", async () => {
     await withWorkspace(async (ctx) => {
       // No dohc.json, no package.json, no index.html — the config file
@@ -2812,6 +2827,15 @@ describe("raw file writes preserve live documents", () => {
       });
     },
   );
+
+  it("names the tool that edits a Markdown document, and dohc for a scene", async () => {
+    await withWorkspace(async (ctx) => {
+      expect(await writeWorkspaceFile(ctx, { path: "note.md", content: "new" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("dohc_edit_document") });
+      expect(await writeWorkspaceFile(ctx, { path: "scene.excalidraw", content: "{}" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("Edit it in dohc") });
+    });
+  });
 
   it("refuses creating a live document before making parent directories", async () => {
     await withWorkspace(async (ctx) => {

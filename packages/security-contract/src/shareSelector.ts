@@ -96,7 +96,7 @@ export function isShareablePath(value: unknown): value is string {
  * The file-share access levels, in the order the UI offers
  * them. `view` is the narrowest.
  *
- * The chat-channel selector's own binary `access` is a different field on a
+ * The chat selector's own binary `access` is a different field on a
  * different selector kind. It is not this rule.
  */
 export const SHARE_ACCESS_VALUES = ["view", "comment", "edit"] as const;

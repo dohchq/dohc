@@ -1969,7 +1969,276 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 }
 
 #[test]
+fn join_pull_recovers_offline_edits_after_the_operation_limit() {
+    assert_join_pull_recovers_offline_edits(false, false);
+}
+
+#[test]
+fn join_pull_recovers_offline_edits_after_the_page_limit() {
+    assert_join_pull_recovers_offline_edits(true, false);
+}
+
+#[test]
+fn join_pull_journals_received_document_edits_without_originating_offline_bases() {
+    assert_join_pull_recovers_offline_edits(false, true);
+}
+
+fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: bool) {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "joining-doc", "joining.md", "offline edit");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "joining-doc").expect("key");
+    let offline = dohc_engine_collab::Ydoc::wire();
+    let update = offline.plaintext_insert(0, "offline edit");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &update,
+        dohc_engine_collab::LocalAppend {
+            marker: Some(dohc_engine_collab::MarkerCreation {
+                path: Some("joining.md"),
+                content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                regime: dohc_engine_collab::Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        1_100,
+        |_, _, _| Ok(()),
+    )
+    .expect("offline edit");
+
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.plaintext_insert(0, "remote edit");
+    let remote_bytes = remote.encode_full_state();
+    let remote_sha = dohc_engine_storage::hex_sha256(&remote_bytes);
+    if edit_between_batches {
+        seed_text_head(&mut engine, "early-doc", "early.md", "remote edit");
+    }
+    let limit = if sparse {
+        crate::model::MAX_PULL_PAGES_PER_PASS
+    } else {
+        crate::model::MAX_PULL_OPS_PER_PASS
+    };
+    let boundary = i64::try_from(limit).expect("boundary");
+    let padding = |seq| envelope("padding-peer", seq, "probe.padding", json!({}));
+    let mut pages = if sparse {
+        (0..boundary)
+            .map(|seq| {
+                (
+                    seq,
+                    PullResponse {
+                        ops: vec![padding(seq)],
+                        next_cursor: seq + 1,
+                        has_more: true,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(
+            0,
+            PullResponse {
+                ops: (0..boundary).map(padding).collect(),
+                next_cursor: boundary,
+                has_more: true,
+            },
+        )]
+    };
+    if edit_between_batches {
+        *pages[0].1.ops.last_mut().expect("first batch") = envelope(
+            "early-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "early-doc",
+                "path": "early.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_sha,
+                "lineageClaimId": remote_sha,
+                "isBaseState": true,
+            }),
+        );
+    }
+    pages.push((
+        boundary,
+        PullResponse {
+            ops: vec![envelope(
+                "document-peer",
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId": "main",
+                    "objectId": "joining-doc",
+                    "path": "joining.md",
+                    "contentKind": "plaintext",
+                    "updateBlobSha256": remote_sha,
+                    "lineageClaimId": remote_sha,
+                    "isBaseState": true,
+                }),
+            )],
+            next_cursor: boundary + 1,
+            has_more: false,
+        },
+    ));
+    let mut relay =
+        PagedRelay::new(pages).with_coordinate("local", 1, LogCoordinateResponse::Absent);
+    relay.blobs.insert(remote_sha.clone(), remote_bytes);
+    let client = RelaySyncClient::new(relay);
+    let first = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        )
+        .expect("first pass");
+    let SyncPassOutcome::Complete {
+        has_more: true,
+        pending_cursor: Some(cursor),
+        ..
+    } = first
+    else {
+        panic!("first pass must stop before the remote base: {first:?}");
+    };
+    assert!(!cursor.bootstrap_complete);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_201)
+        .expect("commit first batch");
+    assert_eq!(
+        engine
+            .write_with(&NoFaults, |tx| {
+                originate_ydoc_base_in_tx(tx, &key, "joining.md", None, None, 1_202)
+            })
+            .expect("edit-time origination remains disabled"),
+        TxnOutcome::Committed(BaseOrigination::NothingToDo)
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_202).expect("resume bootstrap after restart");
+    if edit_between_batches {
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "early-doc",
+                    crate::ydoc_apply::ResultingHead::Text {
+                        path: "early.md",
+                        text: "edited during join",
+                    },
+                    None,
+                    1_203,
+                )
+            })
+            .expect("edit received document during bootstrap");
+        assert!(
+            list_replication_ops(&engine, "ws", "local", -1, 500)
+                .expect("local journal")
+                .iter()
+                .any(|op| op.op_kind == "ydoc.update"
+                    && op.payload["objectId"] == "early-doc"
+                    && op.payload["isBaseState"] == false),
+            "the edit must be journaled before the join finishes"
+        );
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, 1_204, 100_000_000)
+            .expect("a resumed push-first pass can publish the edit");
+        assert!(
+            !dohc_engine_collab::read_marker(&engine, &key)
+                .expect("offline marker")
+                .expect("present")
+                .lineage_claim_status
+                .has_claimed_base(),
+            "a local push during bootstrap must not originate offline bases"
+        );
+    }
+    let second = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_300,
+        )
+        .expect("later remote base must finish without a push or retry loop");
+    let SyncPassOutcome::Complete {
+        has_more: false,
+        pending_cursor: Some(cursor),
+        refused: 0,
+        ..
+    } = second
+    else {
+        panic!("join must finish: {second:?}");
+    };
+    assert!(cursor.bootstrap_complete);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_301)
+        .expect("finish bootstrap");
+    client
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &RelayCursor {
+                cursor: cursor.cursor + 1,
+                bootstrap_complete: false,
+                ..cursor
+            },
+            &NoFaults,
+            1_302,
+        )
+        .expect("later partial batches retain enrollment");
+    assert!(
+        read_relay_cursor(&engine, "ws")
+            .expect("cursor")
+            .expect("present")
+            .bootstrap_complete
+    );
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load document")
+        .expect("document");
+    assert_eq!(persisted.doc.plaintext_string(), "remote edit");
+    assert_eq!(persisted.marker.lineage_claim_id, Some(remote_sha));
+    let texts: Vec<(String, String)> = engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT s.path,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id!='early-doc' ORDER BY b.text",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("materialized content");
+    assert_eq!(texts.len(), 2);
+    assert!(texts[0].0.starts_with("joining (recovered "));
+    assert!(texts[0].0.ends_with(".md"));
+    assert_eq!(texts[0].1, "offline edit");
+    assert_eq!(
+        texts[1],
+        ("joining.md".to_owned(), "remote edit".to_owned())
+    );
+}
+
+#[test]
 fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
+    assert_page_ceiling_retains_bootstrap_state(false);
+}
+
+#[test]
+fn creator_partial_pull_keeps_local_base_origination_enabled() {
+    assert_page_ceiling_retains_bootstrap_state(true);
+}
+
+fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut pages = Vec::new();
@@ -2006,6 +2275,11 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     ));
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
+    if creator {
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, 999, 100_000_000)
+            .expect("creator pushes before its first pull");
+    }
     let first = client
         .pull_chat_workspace(
             &mut engine,
@@ -2027,6 +2301,16 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     };
     assert_eq!(fetched, crate::model::MAX_PULL_PAGES_PER_PASS);
     assert_eq!(pending.cursor, resume_cursor);
+    assert_eq!(pending.bootstrap_complete, creator);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults, 1_001)
+        .expect("persist partial pull");
+    assert_eq!(
+        engine
+            .read_with(|conn| crate::ydoc_origination::can_originate_local_bases_in_tx(conn, "ws"))
+            .expect("base origination state"),
+        creator
+    );
     assert!(
         has_more,
         "the page ceiling must explicitly report that the relay is not drained"
@@ -2855,6 +3139,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
 fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     let (_scratch, _path, mut engine) = open_store();
     let relay = |cursor| RelayCursor {
+        bootstrap_complete: true,
         cursor,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -3618,6 +3903,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         "claiming every workspace row steals the direct RPC retry disposition"
     );
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 0,
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -3640,6 +3926,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
 fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     let (_scratch, _path, mut engine) = open_store();
     let cursor = RelayCursor {
+        bootstrap_complete: true,
         cursor: 42,
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),
@@ -4470,4 +4757,611 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
             .expect("binary blob presence"),
         "an over-cap binary must not persist"
     );
+}
+
+#[test]
+fn held_conflict_allows_later_pages_and_replays_after_restart() {
+    assert_held_conflict_replays_after_restart(false);
+}
+
+#[test]
+fn join_waits_for_held_conflict_before_originating_offline_documents() {
+    assert_held_conflict_replays_after_restart(true);
+}
+
+fn assert_held_conflict_replays_after_restart(joining: bool) {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let offline_key = dohc_engine_collab::DocKey::new("ws", "main", "offline-doc").unwrap();
+    if joining {
+        seed_text_head(&mut engine, "offline-doc", "offline.md", "offline edit");
+        let offline = dohc_engine_collab::Ydoc::wire();
+        let update = offline.plaintext_insert(0, "offline edit");
+        dohc_engine_collab::record_local_update(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &offline_key,
+            &update,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("offline.md"),
+                    content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                    regime: dohc_engine_collab::Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
+            &NoFaults,
+            900,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+    }
+    let result_text = "resolved after retry";
+    let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![result_sha, result_text.len() as i64, result_text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed result blob");
+    let result = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "retry-object".to_owned(),
+        latest_moment_id: "retry-result-moment".to_owned(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: result_sha.clone(),
+        byte_length: result_text.len() as i64,
+        updated_at_ms: 21,
+    });
+    let built = build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "retryable-parent-conflict".to_owned(),
+        chosen_from: ResolveChoiceV1::Incoming,
+        resolution: ResolutionV1::AppliedIncoming,
+        target_version_id: "main".to_owned(),
+        source_version_id: "peer".to_owned(),
+        paths: vec!["retry.md".to_owned()],
+        current: HeadV1::Absent { path_ref: 0 },
+        incoming: result.clone(),
+        result,
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 21,
+            metadata: MetadataV1 {
+                origin: "sync".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: None,
+            result_object_created_at_ms: Some(20),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "retry-result-moment".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+    })
+    .expect("retryable parent carrier");
+    let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "bundle-peer",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 22;
+    let mut same_origin_later =
+        version_create_with_shipped_snapshots("bundle-peer", "same-origin-version", Vec::new());
+    same_origin_later.origin_seq = 2;
+    same_origin_later.recorded_at_ms = 23;
+    let mut later =
+        version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
+    later.recorded_at_ms = 24;
+    let mut page = vec![parent, child, same_origin_later];
+    for sequence in 0..497 {
+        let mut op = version_create_with_shipped_snapshots(
+            "unrelated",
+            &format!("independent-{sequence}"),
+            Vec::new(),
+        );
+        op.origin_seq = sequence;
+        page.push(op);
+    }
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: page,
+                next_cursor: 500,
+                has_more: true,
+            },
+        ),
+        (
+            500,
+            PullResponse {
+                ops: vec![later],
+                next_cursor: 501,
+                has_more: false,
+            },
+        ),
+        (
+            501,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: 501,
+                has_more: false,
+            },
+        ),
+    ]));
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "retry-object").unwrap();
+    let held = leases.acquire(&key).unwrap();
+    for expected_cursor in [500, 501] {
+        let outcome = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &leases,
+                1_000,
+            )
+            .expect("a held conflict must not block unrelated pages");
+        let SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            has_more,
+            ..
+        } = outcome
+        else {
+            panic!("durable cursor");
+        };
+        assert_eq!(cursor.cursor, expected_cursor);
+        if joining {
+            assert!(
+                !cursor.bootstrap_complete,
+                "fetching the last page does not finish applying the join"
+            );
+            assert_eq!(
+                has_more,
+                expected_cursor == 500,
+                "a held lease must not cause an immediate retry loop"
+            );
+        }
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
+            .unwrap();
+        if joining {
+            assert!(
+                !dohc_engine_collab::read_marker(&engine, &offline_key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_status
+                    .has_claimed_base(),
+                "held remote work must not enroll offline documents"
+            );
+        }
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
+            -1,
+            "retention is not application acknowledgement"
+        );
+    }
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "later-peer").unwrap(),
+        0
+    );
+    assert!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .read_with(|conn| conn.execute("DELETE FROM blobs WHERE sha256=?1", [&result_sha]))
+            .is_err(),
+        "held work pins its hydrated blob before advancing the fetch cursor"
+    );
+    drop(held);
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_001).unwrap();
+    // Interrupt after application but before the disk report's cursor commits.
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_001,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(stale_cursor),
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("replay");
+    };
+    assert!(changed_paths.iter().any(|change| change.path == "retry.md"));
+    if joining {
+        assert!(
+            stale_cursor.bootstrap_complete,
+            "applied deferred work finishes the join even before its report commits"
+        );
+    }
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_002).unwrap();
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_002,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("report replay");
+    };
+    assert!(
+        changed_paths.iter().any(|change| change.path == "retry.md"),
+        "uncommitted disk report survives restart"
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &stale_cursor, &NoFaults, 1_002)
+        .unwrap();
+    let pending: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        pending, 3,
+        "a stale report cannot remove the newer report's work"
+    );
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_002)
+        .unwrap();
+    let pending: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(pending, 0);
+    if joining {
+        assert!(
+            read_relay_cursor(&engine, "ws")
+                .unwrap()
+                .unwrap()
+                .bootstrap_complete
+        );
+        assert!(
+            dohc_engine_collab::read_marker(&engine, &offline_key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_status
+                .has_claimed_base(),
+            "settled join enrolls the offline document"
+        );
+    }
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
+        2
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .unwrap()
+            .unwrap()
+            .text,
+        result_text
+    );
+    let count: i64 = engine.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='retry-result-moment'", [], |row| row.get(0))).unwrap();
+    assert_eq!(count, 1, "conflict effect applies exactly once");
+}
+
+#[test]
+fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overflow() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let first = version_create_with_shipped_snapshots("held", "first", Vec::new());
+    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "held").unwrap(),
+        -1
+    );
+    let mut divergent = first.clone();
+    divergent.recorded_at_ms += 1;
+    assert!(crate::deferred::check_redelivery(&engine, &[divergent]).is_err());
+    let mut next = version_create_with_shipped_snapshots("held", "second", Vec::new());
+    next.origin_seq = 2;
+    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    let mut other_identity = identity.clone();
+    other_identity.replication_epoch = "another-epoch".to_owned();
+    assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
+    other_identity = identity.clone();
+    other_identity.stream_identity = "another-stream".to_owned();
+    assert!(crate::deferred::read(&engine, "ws", &other_identity).is_err());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    next.origin_seq = 1;
+    assert!(crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults).is_err());
+    let (pending, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(
+        pending,
+        vec![first],
+        "limit overflow rolls back the entire new retention"
+    );
+    assert!(read_relay_cursor(&engine, "ws").unwrap().is_none());
+}
+
+#[test]
+fn deferred_relay_replay_rotates_between_held_origins() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let mut ops = Vec::new();
+    for seq in 0..501 {
+        let mut op =
+            version_create_with_shipped_snapshots("a-held", &format!("version-{seq}"), Vec::new());
+        op.origin_seq = seq;
+        ops.push(op);
+    }
+    ops.push(version_create_with_shipped_snapshots(
+        "b-held",
+        "other",
+        Vec::new(),
+    ));
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &ops.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    let (first, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(first.len(), 500);
+    assert!(first.iter().all(|op| op.origin_id == "a-held"));
+    let mut report = None;
+    assert!(
+        !crate::deferred::claim_report(&mut engine, "ws", &first, &[], &mut report, &NoFaults)
+            .unwrap(),
+        "held work must not trigger an immediate busy loop"
+    );
+    assert!(report.is_none());
+    let (second, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+    assert_eq!(second[0].origin_id, "b-held");
+    assert_eq!(
+        second[1].origin_seq, 0,
+        "each origin replays from its oldest retained work"
+    );
+}
+
+#[test]
+fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let mut conflict = |origin: &str| {
+        let result_text = "resolved after retry";
+        let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![result_sha, result_text.len() as i64, result_text],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed result blob");
+        let result = HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: format!("{origin}-object"),
+            latest_moment_id: format!("{origin}-moment"),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: result_sha.clone(),
+            byte_length: result_text.len() as i64,
+            updated_at_ms: 21,
+        });
+        let built = build_conflict_resolve_v1(ConflictResolveV1 {
+            workspace_id: "ws".to_owned(),
+            conflict_id: format!("{origin}-conflict"),
+            chosen_from: ResolveChoiceV1::Incoming,
+            resolution: ResolutionV1::AppliedIncoming,
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            paths: vec![format!("{origin}.md")],
+            current: HeadV1::Absent { path_ref: 0 },
+            incoming: result.clone(),
+            result,
+            effect_context: EffectContextV1 {
+                recorded_at_ms: 21,
+                metadata: MetadataV1 {
+                    origin: "sync".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                },
+                author: None,
+                current_object_created_at_ms: None,
+                result_object_created_at_ms: Some(20),
+            },
+            effects: vec![EffectV1 {
+                kind: EffectKindV1::Write,
+                moment_id: format!("{origin}-moment"),
+                payload_sha256: String::new(),
+            }],
+            lineage_transition: None,
+        })
+        .expect("retryable parent carrier");
+        let mut parent = envelope(origin, 0, "conflict.resolve", built.value);
+        parent.recorded_at_ms = 21;
+        parent
+    };
+    let mut retained = vec![conflict("a-held")];
+    let released = conflict("b-released");
+    for seq in 1..500 {
+        let mut op = version_create_with_shipped_snapshots(
+            "a-held",
+            &format!("a-version-{seq}"),
+            Vec::new(),
+        );
+        op.origin_seq = seq;
+        retained.push(op);
+    }
+    retained.push(released);
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &retained.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let a_key = dohc_engine_collab::DocKey::new("ws", "main", "a-held-object").unwrap();
+    let b_key = dohc_engine_collab::DocKey::new("ws", "main", "b-released-object").unwrap();
+    let _held = leases.acquire(&a_key).unwrap();
+    let b_lease = leases.acquire(&b_key).unwrap();
+    drop(b_lease);
+    let pages = (1..=2).map(|seq| {
+        let mut op = version_create_with_shipped_snapshots(
+            "b-released",
+            &format!("b-version-{seq}"),
+            Vec::new(),
+        );
+        op.origin_seq = seq;
+        (
+            seq - 1,
+            PullResponse {
+                ops: vec![op],
+                next_cursor: seq,
+                has_more: false,
+            },
+        )
+    });
+    let client = RelaySyncClient::new(PagedRelay::new(pages));
+    for pass in 1..=2 {
+        let result = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &leases,
+                1_000 + pass,
+            )
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("completed pass");
+        };
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000 + pass)
+            .unwrap();
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "a-held").unwrap(),
+            -1
+        );
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "b-released").unwrap(),
+            if pass == 1 { -1 } else { 2 },
+            "fetched suffixes must not consume the released origin's replay turn"
+        );
+    }
+    assert!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "b-released.md")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let op = |origin: &str, seq: i64| {
+        let mut op =
+            version_create_with_shipped_snapshots(origin, &format!("{origin}-{seq}"), Vec::new());
+        op.origin_seq = seq;
+        op
+    };
+    let mut retained = Vec::new();
+    for origin in ["a-held", "b-held"] {
+        retained.extend((0..500).map(|seq| op(origin, seq)));
+    }
+    retained.push(op("c-released", 0));
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &retained.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    for (turn, expected) in ["a-held", "b-held", "c-released"].into_iter().enumerate() {
+        let (queued, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+        assert_eq!(
+            queued[0].origin_id, expected,
+            "new suffixes and newly admitted origins cannot overtake an origin waiting for replay"
+        );
+        if expected == "c-released" {
+            break;
+        }
+        let mut report = None;
+        crate::deferred::claim_report(&mut engine, "ws", &queued, &[], &mut report, &NoFaults)
+            .unwrap();
+        let suffixes = [
+            op("a-held", 500 + turn as i64),
+            op("b-held", 500 + turn as i64),
+            op(&format!("0-new-{turn}"), 0),
+        ];
+        crate::deferred::retain(
+            &mut engine,
+            &identity,
+            &suffixes.iter().collect::<Vec<_>>(),
+            &NoFaults,
+        )
+        .unwrap();
+    }
 }
