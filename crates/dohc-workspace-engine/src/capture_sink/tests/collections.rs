@@ -1860,7 +1860,7 @@ fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
         sink.take_automation_claims()
             .iter()
             .map(|claim| {
-                assert_eq!(claim.record_id, RECORD_ID);
+                assert_eq!(claim.record_id.as_deref(), Some(RECORD_ID));
                 claim.change.kind
             })
             .collect()
