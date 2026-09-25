@@ -4,8 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FIELD_VALUE_REASON_CODES } from "@dohc/workspace-contracts";
 import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
-import { CellEditor, FieldCell, FLAGGED_REASON_TITLES } from "./cells";
-import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
+import { CellEditor, FieldCell, fieldDisplayText, FLAGGED_REASON_TITLES } from "./cells";
+import {
+  V1_FIELDS,
+  flaggedValue,
+  indexedValue,
+  makeQueryResult,
+  makeRecord,
+} from "../testSupport";
 
 afterEach(cleanup);
 
@@ -87,6 +93,21 @@ describe("FieldCell display", () => {
   it("renders a url value", () => {
     render(<FieldCell field={field("link")} indexed={indexedValue("link", "https://dohc.dev")} />);
     expect(screen.getByText("https://dohc.dev")).toBeDefined();
+  });
+
+  it("shows a button field's name and never a value kept under it", () => {
+    const button: FieldDefinition = { name: "Mark paid", type: "button" };
+    const stray = flaggedValue("Mark paid", true, "expected-empty");
+    const { container } = render(
+      <FieldCell field={button} indexed={stray} onEditStart={() => {}} />,
+    );
+    expect(screen.getByText("Mark paid")).toBeDefined();
+    expect(screen.queryByText("true")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container.querySelector("[data-flagged='true']")?.getAttribute("title")).toBe(
+      FLAGGED_REASON_TITLES["expected-empty"],
+    );
+    expect(fieldDisplayText(button, stray)).toBe("");
   });
 
   it("marks a flagged value and leaves valid and untyped values unmarked", () => {

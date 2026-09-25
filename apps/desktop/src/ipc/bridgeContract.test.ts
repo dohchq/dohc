@@ -1762,6 +1762,7 @@ describe("collection IPC contracts", () => {
           { name: "title", type: "text" },
           { name: "status", type: "select", options: ["open", "done"] },
           { name: "blocks", type: "relation", collection: "projects", many: true },
+          { name: "Mark paid", type: "button" },
         ],
         views: [
           {
@@ -1776,7 +1777,7 @@ describe("collection IPC contracts", () => {
       },
       recordCount: 3,
     });
-    expect(details.schema.fields).toHaveLength(3);
+    expect(details.schema.fields).toHaveLength(4);
     expect(details.schema.views[0]?.kind).toBe("board");
   });
 
