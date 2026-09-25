@@ -1957,7 +1957,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   performDeletes(confirmDelete);
                   setConfirmDelete(null);
                 }}
-                className="rounded bg-danger px-3 py-1 text-xs text-white"
+                className="rounded bg-danger px-3 py-1 text-xs text-bg"
               >
                 Delete
               </button>

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { VersionedLiveAdapter } from "../../../packages/workspace-engine-client/src/index";
+import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { prepareLocalAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../../../apps/desktop/src/workspaces/localDatasetHost";
@@ -45,23 +45,11 @@ async function prepare(host: LocalDatasetHost) {
     ["data/dataset.json", Buffer.from(JSON.stringify(definition))], ["app/main.ts", Buffer.from(frontend)],
     [definition.operationsPath, Buffer.from(backendSource)], [definition.schemaPath, Buffer.from("CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,file_id TEXT NOT NULL);")],
   ]);
-  const blobs = new Map<string, Uint8Array>();
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    const params = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.captureSources") {
-      const files = [...params.paths as string[]].sort().map(path => {
-        const bytes = sources.get(path)!, sha256 = hash(bytes); blobs.set(sha256, bytes);
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" };
-      });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files, totalBytes: files.reduce((sum, file) => sum + file.byteLength, 0), sourceDigest: hash(JSON.stringify(["dohc-source-capture-v1", "w", "main", files])) } };
-    }
-    const bytes = blobs.get(String(params.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const adapter = sourceCaptureAdapter(sources);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
   const dataset = { kind: "dataset", datasetId: definition.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256, operationIds: definition.operations.map(operation => operation.operationId) };
-  sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {}, dataset })));
+  sources.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "main.ts", inputs: ["main.ts"], packageMap: {}, dataset })));
   return prepareLocalAppPublication({ workspaceId: "w", appRoot: "app" }, { adapter, compile: compileClosedApp, signal: new AbortController().signal, assertCurrent() {}, async resolveDatasetRevision() { return revision; } });
 }
 

@@ -18,6 +18,11 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// Bounded by [`MAX_WIRE_INTEGER`] so TypeScript can use plain `number`.
 pub type RequestId = u64;
 
+/// The capability under which a request may ask for `progress` envelopes.
+/// An engine or client that does not know it leaves it out of the
+/// intersection, and neither side sends or expects progress.
+pub const PROGRESS_CAPABILITY: &str = "progress";
+
 /// Opaque, server-issued workspace handle. Clients never fabricate one and
 /// never learn filesystem paths from it; handles die with their session
 /// generation.
@@ -43,6 +48,7 @@ pub enum Envelope {
     Response(Response),
     Error(ErrorEnvelope),
     Event(Event),
+    Progress(Progress),
     Cancel(Cancel),
     BlobStart(BlobStart),
     Batch(Batch),
@@ -118,6 +124,12 @@ pub struct Request {
     /// Method-specific parameters; validated per-method behind the envelope
     /// layer, bounded here as a JSON tree.
     pub params: Value,
+    /// Ask for `progress` envelopes while this request works. The engine
+    /// honors it only on a session that negotiated [`PROGRESS_CAPABILITY`].
+    /// Omitted when false, so a request that does not ask is unchanged on
+    /// the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub progress: bool,
 }
 
 /// A successful response to a request.
@@ -157,6 +169,19 @@ pub struct Event {
     /// Namespaced event name, e.g. `workspace.filesChanged`.
     pub name: String,
     pub payload: Value,
+}
+
+/// Engine → client: the request with this id is still working. Sent only for
+/// a request that set `progress` on a session that negotiated
+/// [`PROGRESS_CAPABILITY`], and never after that request's terminal response.
+/// It says the work moved, not how far it has to go.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
+#[cfg_attr(feature = "bindings", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct Progress {
+    #[cfg_attr(feature = "bindings", ts(type = "number"))]
+    pub id: RequestId,
 }
 
 /// Cooperative cancellation of an in-flight request. The engine still sends
@@ -344,6 +369,7 @@ impl Envelope {
                 check_string(&event.name, "event.name", limits)?;
                 check_json(&event.payload, "event.payload", limits)
             }
+            Envelope::Progress(progress) => check_integer(progress.id, "progress.id"),
             Envelope::Cancel(cancel) => check_integer(cancel.id, "cancel.id"),
             Envelope::BlobStart(blob) => {
                 check_integer(blob.request_id, "blobStart.requestId")?;

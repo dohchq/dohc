@@ -89,6 +89,7 @@
     "@dohc/workspace-fs": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "@legendapp/list": "3.3.11",
+    "@lezer/highlight": "^1.2.3",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-code-block": "^3.30.5",
     "@tiptap/extension-list": "3.30.5",

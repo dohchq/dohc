@@ -1,8 +1,9 @@
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
-import { type ReactNode, useId, useState } from "react";
+import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
+import { useDismiss } from "./ui/useDismiss";
 
 // Workspace labels use the final folder name on either platform.
 export function workspaceName(workspace: WorkspaceSummary): string {
@@ -78,6 +79,14 @@ export function Titlebar(props: {
   agentActive?: boolean;
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const switcherRef = useRef<HTMLDivElement | null>(null);
+  const switcherTriggerRef = useRef<HTMLButtonElement | null>(null);
+  useDismiss({
+    open: switcherOpen,
+    container: switcherRef,
+    trigger: switcherTriggerRef,
+    onClose: () => setSwitcherOpen(false),
+  });
   // macOS draws traffic lights on the left and never populates the
   // titlebar-area-* env vars (WCO is only enabled on the non-darwin branch of
   // createMainWindow) — lay out around them with fixed insets there, and
@@ -105,6 +114,7 @@ export function Titlebar(props: {
 
         {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
           <div
+            ref={switcherRef}
             className="titlebar-no-drag relative flex min-w-0 items-center gap-1"
             onContextMenu={props.onWorkspaceContextMenu ? (event) => {
               event.preventDefault();
@@ -112,6 +122,7 @@ export function Titlebar(props: {
             } : undefined}
           >
             <button
+              ref={switcherTriggerRef}
               type="button"
               data-testid="workspace-switcher"
               aria-haspopup="listbox"
@@ -211,7 +222,7 @@ export function Titlebar(props: {
           className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden />
-          <span className="truncate">Search files…</span>
+          <span className="truncate">Go to…</span>
           <kbd className="ml-auto font-mono text-[10px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}

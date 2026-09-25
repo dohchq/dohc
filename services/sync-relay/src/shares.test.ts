@@ -484,7 +484,7 @@ describe("share grants", () => {
 
   // #646 PR2 opens the append route to comment and edit file shares. What
   // must not change is the refusal a VIEW share gets: one code, and a body
-  // byte-identical to the one a read-only chat-channel grant gets. A refusal
+  // byte-identical to the one a read-only chat grant gets. A refusal
   // that differed by selector kind or by level would let a probing recipient
   // read the grant it was refused. Byte-identical bodies are the
   // anti-fingerprinting property itself, not a proxy for it.

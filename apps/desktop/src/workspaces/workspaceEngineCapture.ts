@@ -18,6 +18,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import {
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
+  type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
   type SecretFileStore,
@@ -242,7 +243,7 @@ export interface WorkspaceEngineMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: "text" | "binary";
   byteLength?: number;
-  metadata: ActorNeutralWriteMetadata;
+  metadata: MomentMetadata;
   author?: MomentAuthor;
   momentOrder: number;
   protected: boolean;
