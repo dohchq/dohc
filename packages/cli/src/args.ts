@@ -95,7 +95,7 @@ export interface CliVerbSpec {
 }
 
 /** Names the result field of an earlier verb that a request field copies. */
-export interface CliFieldSource {
+interface CliFieldSource {
   field: string;
   from: string;
   path: string;
