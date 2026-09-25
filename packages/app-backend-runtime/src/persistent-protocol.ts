@@ -41,6 +41,12 @@ export interface PreparedOperation {
   changeset: Uint8Array;
   changesetSha256: string;
   attachedFileIds: string[];
+  /**
+   * Each approved table's column names, in the order a changeset records
+   * them. A migration can reorder columns, so reading a changeset needs
+   * these; the reader checks them against the approved definition.
+   */
+  columns: Record<string, string[]>;
 }
 export interface FinalizeOperation extends DatasetCursor {
   proposalId: string;

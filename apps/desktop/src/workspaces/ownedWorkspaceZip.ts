@@ -114,7 +114,7 @@ export async function collectOwnedWorkspaceZipEntries(input: {
   if (input.relativePath !== undefined) {
     selection = { kind: "local" };
     if (hasMountRegistry) {
-      const validated = validateUserReadPath(input.relativePath);
+      const validated = validateUserReadPath(input.relativePath, { platform: process.platform });
       const archiveRoot = basename(
         validated.ok ? validated.normalized : input.relativePath,
       );

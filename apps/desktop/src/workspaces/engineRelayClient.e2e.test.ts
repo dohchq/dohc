@@ -2,13 +2,18 @@ import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
-import {
+import type {
   EngineDaemonLifecycle,
-  type EngineWorkspaceSessions,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -161,13 +166,11 @@ describe("EngineRelayClient real daemon", () => {
       );
       const relay = await startRelay(workspaceId);
       try {
-        const senderLifecycle = new EngineDaemonLifecycle({
+        const senderLifecycle = createRealDaemonLifecycle({
           command: binary,
-          requestTimeoutMs: 10_000,
         });
-        const receiverLifecycle = new EngineDaemonLifecycle({
+        const receiverLifecycle = createRealDaemonLifecycle({
           command: binary,
-          requestTimeoutMs: 10_000,
         });
         lifecycles.push(senderLifecycle, receiverLifecycle);
         await Promise.all([
@@ -242,7 +245,7 @@ describe("EngineRelayClient real daemon", () => {
         await relay.close();
       }
     },
-    30_000,
+    REAL_DAEMON_TEST_TIMEOUT_MS,
   );
 });
 
@@ -268,7 +271,7 @@ function relayHarness(
     sessions,
     routes,
     allowInsecureLoopbackForTests: true,
-    requestDeadlineMs: 10_000,
+    requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
   });
   return {
     sessions,

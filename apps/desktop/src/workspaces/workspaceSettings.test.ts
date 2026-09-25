@@ -159,8 +159,6 @@ describe("workspace settings file store", () => {
 
     for (const body of [
       JSON.stringify({ version: 2 }),
-      JSON.stringify({ privacy: { confirmExternalLinks: "false" } }),
-      JSON.stringify({}),
       JSON.stringify([]),
       JSON.stringify(null),
     ]) {
@@ -186,6 +184,39 @@ describe("workspace settings file store", () => {
 
     // The warning crosses the IPC boundary; a path must not overflow its bound.
     expect(WorkspaceSettingsResult.parse(hugeResult)).toEqual(hugeResult);
+  });
+
+  it("turns off only an unknown key or a value dohc cannot use, and a save keeps them", async () => {
+    const root = await createTestScratch("dohc-workspace-settings-");
+    const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    await writeFile(path, JSON.stringify({
+      sites: { defaultPreviewMode: "static" },
+      privacy: { confirmExternalLinks: "false" },
+      theme: "dark",
+    }));
+    const read = await readWorkspaceSettingsFile(root);
+    expect(read).toEqual({
+      settings: { ...DEFAULT_WORKSPACE_SETTINGS, sites: { defaultPreviewMode: "static" } },
+      source: "stored",
+      ignored: [
+        { key: "privacy.confirmExternalLinks", reason: "invalid" },
+        { key: "theme", reason: "unknown" },
+      ],
+    });
+    expect(WorkspaceSettingsResult.parse(read)).toEqual(read);
+
+    const saved = await saveWorkspaceSettingsFile(root, { files: { attachmentFolderName: "media" } });
+    expect(saved).toEqual({
+      ...read,
+      settings: { ...read.settings, files: { ...read.settings.files, attachmentFolderName: "media" } },
+    });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      sites: { defaultPreviewMode: "static" },
+      privacy: { confirmExternalLinks: "false" },
+      theme: "dark",
+      files: { attachmentFolderName: "media" },
+    });
   });
 
   it("an untrustworthy .dohc FOLDER reads as recovered and names the folder", async () => {

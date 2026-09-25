@@ -314,6 +314,27 @@ views:
     many: false
 `,
   },
+  ...["C:/projects", "C:projects", "planning/projects:stream"].map((collection, index) => ({
+    name: `degraded-colon-relation-target-${index + 1}-salvages-siblings`,
+    yaml: `fields:
+  title:
+    type: text
+  project:
+    type: relation
+    collection: "${collection}"
+    many: false
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [],
+      },
+      reasons: [{ code: "invalid-relation-target", path: "/fields/project/collection" }],
+    },
+  })),
   {
     name: "degraded-c1-relation-target-salvages-siblings",
     yaml: `fields:

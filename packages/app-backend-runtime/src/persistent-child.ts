@@ -18,6 +18,8 @@ import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, Persist
 let db:DatabaseSync | undefined;
 let config:OpenRequest;
 let cursor:DatasetCursor;
+// Each approved table's columns in the order a changeset records them. The schema is fixed while the worker is open.
+let columns:Record<string,string[]>;
 let pending:{id:string;changesetSha256:string} | undefined;
 let transaction=false;
 let busy=false;
@@ -154,6 +156,10 @@ function initialize(input:OpenRequest):DatasetCursor {
     db.exec(markerSchema);
     db.prepare(`INSERT INTO ${marker} VALUES(1,?,?,?)`).run(JSON.stringify(config.scope),config.cursor.revision,config.cursor.digest);
   }
+  // table_info leaves out generated columns, as sessions do.
+  const opened=db;
+  columns=Object.fromEntries(config.tables.map(table=>[table,
+    opened.prepare(`PRAGMA table_info("${table.replaceAll('"','""')}")`).all().map(column=>String(column.name))]));
   cursor={...config.cursor};
   return cursor;
 }
@@ -206,7 +212,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       if (changeset.byteLength || attachedFileIds.length) reject("invalid_state","A read operation changed the dataset.");
       rollback();
     } else pending={id:proposalId,changesetSha256};
-    return {proposalId,readOnly:command.guest.readOnly,result:JSON.parse(resultJson),changeset,changesetSha256,attachedFileIds};
+    return {proposalId,readOnly:command.guest.readOnly,result:JSON.parse(resultJson),changeset,changesetSha256,attachedFileIds,columns};
   }
   if (command.kind==="apply") {
     if(!batching) progress("replaying the journal event");

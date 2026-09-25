@@ -9,10 +9,12 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import { EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 // #616, AGENTS.md "measure limits that reject work". YDOC_OPEN_DEADLINE_MS
@@ -120,7 +122,7 @@ it.skipIf(engine.missing)(
   async () => {
     const root = await createTestScratch("dohc-ydoc-open-measurement-");
     const measured: { case: string; ms: number }[] = [];
-    let lifecycle = new EngineDaemonLifecycle({
+    let lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
       requestTimeoutMs: MEASUREMENT_HARNESS_REQUEST_TIMEOUT_MS,
@@ -220,7 +222,7 @@ it.skipIf(engine.missing)(
         },
       );
       await lifecycle.stop();
-      lifecycle = new EngineDaemonLifecycle({
+      lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
         maxRestarts: 0,
         requestTimeoutMs: MEASUREMENT_HARNESS_REQUEST_TIMEOUT_MS,

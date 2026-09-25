@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { transform } from "esbuild";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { parseDatasetDefinition, type AppDatasetBinding } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
@@ -13,7 +13,6 @@ import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost } from "./dataset-host.ts";
 
-vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const read = (app: string, file: string) => readFileSync(new URL(`../../../examples/${app}/${file}`, import.meta.url), "utf8");

@@ -1,14 +1,22 @@
+import { createHash, randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { errorMessage } from "./workspaceError";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
-import type {
-  CollectionQueryParams,
-  CollectionQueryResult,
+import {
+  RECORD_ID_FRONTMATTER_KEY,
+  isRecordId,
+  parseCollectionRecordFields,
+  type CollectionGetRecordParams,
+  type CollectionGetRecordResult,
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
 
-import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
+import {
+  readWorkspaceText,
+  withStaleSensitiveWorkspaceOperation,
+} from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createFile } from "./workspaceFiles";
 
@@ -18,24 +26,31 @@ import { createFile } from "./workspaceFiles";
 // drift between surfaces. The record's live-document frontmatter map is the
 // storage path — the same one the desktop PropertiesPanel and collection
 // views write through.
+//
+// Both writes are safe to run again. A field that already holds the
+// requested value is not written, so a re-run journals only what still
+// differs, under the new attempt's idempotency key. A create given a record
+// id returns that record when it already exists.
 
 // The live document field the desktop writes; one name for one thing
 // (CollectionPage.tsx uses the same constant).
 const FRONTMATTER_FIELD = "frontmatter";
 
-// Adoption runs on the capture/engine side after the created file settles;
-// this caller can only observe the minted id through the index. The deadline
-// bounds a workspace whose engine never adopts (engine wedged, collection
-// removed mid-create).
+// The engine's answer when no record has the id (collections.getRecord).
+const RECORD_NOT_FOUND = "collection-record-not-found";
+
+// The longest a create waits for the engine to adopt its file, when the
+// caller's own signal allows longer. A healthy engine adopts within one
+// capture pass.
 const ADOPTION_DEADLINE_MS = 15_000;
-const ADOPTION_POLL_INTERVAL_MS = 200;
-const ADOPTION_QUERY_PAGE_LIMIT = 500;
+
+const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
-  queryCollectionRecords(
-    params: CollectionQueryParams,
-  ): Promise<CollectionQueryResult>;
+  getCollectionRecord(
+    params: CollectionGetRecordParams,
+  ): Promise<CollectionGetRecordResult>;
 }
 
 /** Workspace-scoped authority the caller (main) supplies. The SDK/MCP caller never sees it. */
@@ -46,7 +61,17 @@ export interface CollectionRecordEditContext {
   withAdapter<T>(
     work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
   ): Promise<T | null>;
-  signal?: AbortSignal;
+  /**
+   * Subscribes to the engine's announcement of each settled capture pass in
+   * this workspace: the paths the pass captured or reconciled, or null when
+   * the announcement did not list them all. Returns the unsubscribe.
+   */
+  onCaptureSettled(listener: (paths: readonly string[] | null) => void): () => void;
+  /**
+   * The caller's lifetime and deadline. A create stops waiting for the
+   * engine to adopt its file when this aborts, and no write starts after it.
+   */
+  signal: AbortSignal;
 }
 
 export interface SetCollectionRecordFieldsInput {
@@ -55,12 +80,22 @@ export interface SetCollectionRecordFieldsInput {
   author: ChangeAuthor;
   /**
    * The wire idempotency key for this write's one journaled update. An
-   * automation run passes its claim id plus its write ordinal, so a handler
-   * re-run after a crash cannot journal the same write twice — the engine
-   * dedupes on the request's idempotency key. Omitted, the session
+   * automation run passes its claim id, its attempt, and its write ordinal:
+   * a retried request of one attempt cannot journal the write twice, and a
+   * new attempt never reuses an earlier attempt's key. Omitted, the session
    * generates a per-update key as every other edit does.
    */
   idempotencyKey?: string;
+}
+
+export interface SetCollectionRecordFieldsResult {
+  path: string;
+  /**
+   * The value each written field held before this write, keyed by field.
+   * A field the record did not have reads as null, as record history
+   * shows it. Fields that already held the requested value are absent.
+   */
+  replaced: Record<string, unknown>;
 }
 
 export interface CreateCollectionRecordInput {
@@ -71,6 +106,13 @@ export interface CreateCollectionRecordInput {
   author: ChangeAuthor;
   /** See SetCollectionRecordFieldsInput.idempotencyKey (applies to the field seed). */
   idempotencyKey?: string;
+  /**
+   * The id of the record to create, from derivedRecordId, for a caller with
+   * a stable step identity. When a record with this id is already in the
+   * Collection, the create returns it (and sets its fields) instead of
+   * adding another. Omitted, the record gets a new random id.
+   */
+  recordId?: string;
 }
 
 /**
@@ -156,11 +198,26 @@ function writableFieldEntries(
 }
 
 /**
+ * A record id derived from `seed`, in the engine's record id shape: "rec_"
+ * plus the first 16 bytes of the seed's SHA-256 in unpadded lowercase
+ * base32. The same seed always names the same record, so an automation step
+ * that seeds it with its claim id and step position finds the record an
+ * earlier attempt created.
+ */
+export function derivedRecordId(seed: string): string {
+  return recordIdFromBytes(
+    createHash("sha256").update(seed).digest().subarray(0, 16),
+  );
+}
+
+/**
  * Sets frontmatter fields on one record through the record's live engine
- * Y.Doc session: open, transact every field in one transaction with the
- * author-derived actorOriginId, settle so the write is durable and the .md
- * is on disk, release. Throws on refusal (invalid path, engine off, the
- * record's doc session held live elsewhere).
+ * Y.Doc session: open, skip every field that already holds the requested
+ * value, transact the rest in one transaction with the author-derived
+ * actorOriginId, settle so the write is durable and the .md is on disk,
+ * release. When no field changes, nothing is journaled or settled. Throws on
+ * refusal (invalid path, engine off, the record's doc session held live
+ * elsewhere).
  *
  * `recordPath` must already be validated and normalized by the caller
  * (sdkWorkspacePath or an equivalent write-path validator).
@@ -168,7 +225,7 @@ function writableFieldEntries(
 export async function setCollectionRecordFields(
   context: CollectionRecordEditContext,
   input: SetCollectionRecordFieldsInput,
-): Promise<{ path: string }> {
+): Promise<SetCollectionRecordFieldsResult> {
   const entries = writableFieldEntries(input.fields);
   if (entries.length === 0) {
     throw new Error("Set at least one field.");
@@ -189,6 +246,9 @@ export async function setCollectionRecordFields(
     },
   });
   try {
+    // The caller can end while the session opens (an automation run's
+    // deadline); a write must not land after that.
+    throwIfAborted(context.signal);
     // The update is computed on a scratch replica, exactly like the renderer
     // editor: the session journals a local edit from its doc's update event,
     // so transacting on the session's own doc would change state without
@@ -197,22 +257,34 @@ export async function setCollectionRecordFields(
     const scratch = new Y.Doc();
     try {
       Y.applyUpdate(scratch, session.initialUpdate);
-      let update: Uint8Array | null = null;
+      const frontmatter = scratch.getMap(FRONTMATTER_FIELD);
+      // Field names are the caller's, so "__proto__" must stay a plain key.
+      const replaced: Record<string, unknown> = Object.create(null);
+      const changed = entries.filter(([field, value]) => {
+        const current = frontmatter.get(field);
+        const currentValue =
+          (current instanceof Y.AbstractType ? current.toJSON() : current) ??
+          null;
+        if (isDeepStrictEqual(currentValue, value)) return false;
+        replaced[field] = currentValue;
+        return true;
+      });
+      if (changed.length === 0) {
+        // Every field already holds its value; nothing to journal or settle.
+        return { path: input.recordPath, replaced };
+      }
+      // Setting a map key always emits an update, so the transaction assigns it.
+      let update!: Uint8Array;
       const captureUpdate = (encoded: Uint8Array): void => {
         update = encoded;
       };
       scratch.on("update", captureUpdate);
       try {
         scratch.transact(() => {
-          const frontmatter = scratch.getMap(FRONTMATTER_FIELD);
-          for (const [field, value] of entries) frontmatter.set(field, value);
+          for (const [field, value] of changed) frontmatter.set(field, value);
         });
       } finally {
         scratch.off("update", captureUpdate);
-      }
-      if (update === null) {
-        // Nothing changed; nothing to journal or settle.
-        return { path: input.recordPath };
       }
       let armed = false;
       const actorOriginId = actorOriginIdFor(input.author);
@@ -239,7 +311,7 @@ export async function setCollectionRecordFields(
           `The engine session did not accept the field change for ${input.recordPath}.`,
         );
       }
-      return { path: input.recordPath };
+      return { path: input.recordPath, replaced };
     } finally {
       scratch.destroy();
     }
@@ -249,11 +321,20 @@ export async function setCollectionRecordFields(
 }
 
 /**
- * Creates one record: writes `${collectionPath}/${name}.md` as an empty file
- * through the same createFile path the desktop's createWorkspaceFile IPC
- * uses, waits for engine adoption to mint the record id, seeds `fields`
- * (when given) through setCollectionRecordFields so initial values land as
- * attributed field history, and returns the minted id.
+ * Creates one record: writes `${collectionPath}/${name}.md` with only its
+ * record id in the frontmatter, through the same createFile path the
+ * desktop's createWorkspaceFile IPC uses, waits for the engine to adopt the
+ * file, seeds `fields` (when given) through setCollectionRecordFields so
+ * initial values land as attributed field history, and returns the record's
+ * path and id. The engine keeps the file's id unless another record, now or
+ * in its history, holds it; then it adopts the file under a new id, and that
+ * id is the one returned.
+ *
+ * A name that is already taken refuses, and the other file is never written,
+ * unless that file carries this create's record id: then it is an earlier
+ * attempt's file, and the create continues with it. With `recordId`, a
+ * record in this Collection that already has the id is the one returned,
+ * even under another name, and its fields are set to `fields`.
  */
 export async function createCollectionRecord(
   context: CollectionRecordEditContext,
@@ -270,14 +351,30 @@ export async function createCollectionRecord(
       "Record name must be a plain file name without path separators.",
     );
   }
+  if (input.recordId !== undefined && !isRecordId(input.recordId)) {
+    throw new Error(
+      `Record id must be "rec_" followed by 26 lowercase base32 characters: ${input.recordId}`,
+    );
+  }
   const entries = writableFieldEntries(input.fields ?? {});
   throwIfAborted(context.signal);
-  const requestedPath = `${input.collectionPath}/${name}.md`;
-  const path = await withStaleSensitiveWorkspaceOperation(
-    context.workspaceRoot,
-    async () => await createFile(context.workspaceRoot, requestedPath, ""),
-  );
-  const recordId = await waitForAdoptedRecordId(context, input.collectionPath, path);
+  const requestedId = input.recordId ?? recordIdFromBytes(randomBytes(16));
+  const existingPath =
+    input.recordId === undefined
+      ? null
+      : await recordPathFor(context, input.collectionPath, requestedId);
+  const { path, recordId } =
+    existingPath === null
+      ? await waitForRecord(
+          context,
+          input.collectionPath,
+          await createRecordFile(
+            context,
+            `${input.collectionPath}/${name}.md`,
+            requestedId,
+          ),
+        )
+      : { path: existingPath, recordId: requestedId };
   if (entries.length > 0) {
     try {
       await setCollectionRecordFields(context, {
@@ -306,79 +403,166 @@ function recordBasename(path: string): string {
   return segments[segments.length - 1] ?? path;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
     throw new Error("The surface that owns this collection edit is no longer active.");
   }
 }
 
-async function findAdoptedRecordId(
+// The engine's record id shape (mint_record_id in dohc-engine-domain): "rec_"
+// plus 16 bytes in unpadded lowercase base32, most significant bit first.
+function recordIdFromBytes(bytes: Uint8Array): string {
+  let id = "rec_";
+  let buffer = 0;
+  let bits = 0;
+  for (const byte of bytes) {
+    buffer = ((buffer << 8) | byte) & 0xfff;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      id += BASE32_ALPHABET[(buffer >>> bits) & 31];
+    }
+  }
+  if (bits > 0) id += BASE32_ALPHABET[(buffer << (5 - bits)) & 31];
+  return id;
+}
+
+/**
+ * Writes the record file with only its id in the frontmatter, so the
+ * record's id is known before adoption. A taken name refuses, unless the
+ * file there carries the same id.
+ */
+async function createRecordFile(
+  context: CollectionRecordEditContext,
+  requestedPath: string,
+  recordId: string,
+): Promise<string> {
+  try {
+    return await withStaleSensitiveWorkspaceOperation(
+      context.workspaceRoot,
+      async () =>
+        await createFile(
+          context.workspaceRoot,
+          requestedPath,
+          `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`,
+          { exclusive: true },
+        ),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  if ((await fileRecordId(context, requestedPath)) === recordId) {
+    return requestedPath;
+  }
+  throw new Error(`${requestedPath} already exists. Choose another record name.`);
+}
+
+/** The valid record id in a file's frontmatter, or null. */
+async function fileRecordId(
+  context: CollectionRecordEditContext,
+  path: string,
+): Promise<string | null> {
+  const read = await readWorkspaceText(context.workspaceRoot, path);
+  const id = read.truncated
+    ? undefined
+    : parseCollectionRecordFields(read.text)?.[RECORD_ID_FRONTMATTER_KEY];
+  return typeof id === "string" && isRecordId(id) ? id : null;
+}
+
+/** Where the record with `recordId` lives in the Collection, or null when no record has it. */
+async function recordPathFor(
   context: CollectionRecordEditContext,
   collectionPath: string,
-  recordPath: string,
+  recordId: string,
 ): Promise<string | null> {
-  return await context.withAdapter(async (adapter) => {
-    let cursor: CollectionQueryParams["cursor"];
-    for (;;) {
-      throwIfAborted(context.signal);
-      const page: CollectionQueryResult = await adapter.queryCollectionRecords({
+  const found = await context.withAdapter(async (adapter) => {
+    try {
+      const { record } = await adapter.getCollectionRecord({
         collectionPath,
-        limit: ADOPTION_QUERY_PAGE_LIMIT,
-        ...(cursor ? { cursor } : {}),
+        recordId,
+        historyLimit: 1,
       });
-      const record = page.records.find((candidate) =>
-        candidate.path === recordPath,
-      );
-      if (record) return record.id;
-      if (page.nextCursor === null) return null;
-      cursor = page.nextCursor;
+      return { path: record.path };
+    } catch (error) {
+      if (error instanceof Error && error.message === RECORD_NOT_FOUND) {
+        return { path: null };
+      }
+      throw error;
     }
   });
+  if (found === null) throw new Error("The workspace engine is not running.");
+  return found.path;
 }
 
-async function waitForAdoptedRecordId(
+/**
+ * Resolves once the engine has adopted the file at `path`, with the id it
+ * adopted it under. The engine announces each capture pass after it
+ * reconciles the Collections it touched, and a new id it gives the file
+ * lands in the file itself. So each check reads the file's id and looks
+ * that id up, once now and once for each announcement that names the path.
+ * The wait ends at the caller's signal or ADOPTION_DEADLINE_MS, whichever
+ * comes first.
+ */
+function waitForRecord(
   context: CollectionRecordEditContext,
   collectionPath: string,
-  recordPath: string,
-): Promise<string> {
-  const deadline = Date.now() + ADOPTION_DEADLINE_MS;
-  let lastError: unknown;
-  for (;;) {
-    throwIfAborted(context.signal);
-    let found: string | null = null;
-    try {
-      found = await findAdoptedRecordId(context, collectionPath, recordPath);
-    } catch (error) {
-      // The engine can refuse mid-adoption (collection reloading); the next
-      // poll answers. A workspace whose engine stays broken hits the deadline
-      // with the last refusal as the cause.
-      lastError = error;
-    }
-    if (found !== null) return found;
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `The record file was created at ${recordPath}, but the engine did not adopt it as a collection record in time.`,
-        lastError === undefined ? undefined : { cause: lastError },
-      );
-    }
-    await abortableDelay(ADOPTION_POLL_INTERVAL_MS, context.signal);
-  }
-}
-
-function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const finish = (): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
+  path: string,
+): Promise<{ path: string; recordId: string }> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let checking = false;
+    let checkAgain = false;
+    let lastError: unknown;
+    const finish = (
+      outcome: { path: string; recordId: string } | { error: Error },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      unsubscribe();
+      context.signal.removeEventListener("abort", expire);
+      if ("error" in outcome) reject(outcome.error);
+      else resolve(outcome);
     };
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(
-        new Error("The surface that owns this collection edit is no longer active."),
-      );
+    const check = async (): Promise<void> => {
+      if (checking) {
+        checkAgain = true;
+        return;
+      }
+      checking = true;
+      do {
+        checkAgain = false;
+        try {
+          const recordId = await fileRecordId(context, path);
+          if (
+            recordId !== null &&
+            (await recordPathFor(context, collectionPath, recordId)) === path
+          ) {
+            finish({ path, recordId });
+          }
+        } catch (error) {
+          // The engine can refuse mid-reconcile (a Collection reloading);
+          // its next announcement answers. One that stays broken reaches
+          // the deadline with this refusal as the cause.
+          lastError = error;
+        }
+      } while (checkAgain && !settled);
+      checking = false;
     };
-    const timer = setTimeout(finish, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
+    const expire = (): void => {
+      finish({
+        error: new Error(
+          `The record file was created at ${path}, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.`,
+          lastError === undefined ? undefined : { cause: lastError },
+        ),
+      });
+    };
+    const deadline = setTimeout(expire, ADOPTION_DEADLINE_MS);
+    const unsubscribe = context.onCaptureSettled((paths) => {
+      if (paths === null || paths.includes(path)) void check();
+    });
+    context.signal.addEventListener("abort", expire, { once: true });
+    if (context.signal.aborted) expire();
+    else void check();
   });
 }

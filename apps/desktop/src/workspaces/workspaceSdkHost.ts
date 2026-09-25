@@ -79,7 +79,7 @@ export interface WorkspaceSdkHostContext {
   // write authority; the advertised collections.edit capability follows it.
   editCollections?: WorkspaceSdkCollectionEditPort;
   // The wire idempotency key a collection write carries to the seam. Only an
-  // automation-run context sets it (to the run's claim id plus its write
+  // automation-run context sets it (to the run's claim id, attempt, and write
   // ordinal, host-derived like the author); every other write lets the
   // session generate one per update.
   collectionWriteIdempotencyKey?: string;
@@ -154,7 +154,8 @@ export function sdkWorkspacePath(
   kind: "read" | "write" = "read",
 ): string {
   const raw = text(requestedPath, "path");
-  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
+  const platform = { platform: process.platform };
+  const result = kind === "read" ? validateUserReadPath(raw, platform) : validateUserMaterializePath(raw, platform);
   if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
   return result.normalized;
 }
@@ -591,7 +592,7 @@ export async function invokeWorkspaceSdkHost(
         collectionPath: collectionPathOfRecord(recordPath),
       });
       assertRequestSurfaceActive(context);
-      return port.setRecordFields({
+      const { path } = await port.setRecordFields({
         recordPath,
         fields: record(input.fields, "fields"),
         author: context.author,
@@ -600,6 +601,7 @@ export async function invokeWorkspaceSdkHost(
           : { idempotencyKey: context.collectionWriteIdempotencyKey }),
         ...(context.signal ? { signal: context.signal } : {}),
       });
+      return { path };
     }
     case "collections.createRecord": {
       const port = requireCollectionEditPort(context);

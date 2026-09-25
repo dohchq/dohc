@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import {
   atRiskOrphanedDraftIds,
@@ -42,6 +42,15 @@ async function relaunch(nowMs?: number): Promise<DraftStore> {
   next.restoreOrphanedDrafts(nowMs);
   return next;
 }
+
+// The store asks the preload bridge which platform's path rules apply.
+beforeEach(() => {
+  vi.stubGlobal("dohcDesktop", { platform: "linux" });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function storedText(): string {
   return localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY) ?? "";

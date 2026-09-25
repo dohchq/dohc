@@ -66,7 +66,7 @@ function buildCliRequest(
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "ownerAppResponses":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
-    case "channels":
+    case "groups":
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
@@ -76,7 +76,7 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, channel: command.channel },
+        args: { cwd: common.cwd, actor: common.actor, group: command.group },
       };
     case "inbox":
       return {
@@ -98,7 +98,7 @@ function buildCliRequest(
           cwd: common.cwd,
           actor: common.actor,
           ...(runId ? { runId } : {}),
-          channel: command.channel,
+          group: command.group,
           ...(command.title ? { title: command.title } : {}),
           attachments: command.attachments,
           needsDecision: command.needsDecision,
@@ -144,7 +144,7 @@ function buildCliRequest(
           cwd: common.cwd,
           actor: common.actor,
           pattern: command.pattern,
-          ...(command.channel ? { channel: command.channel } : {}),
+          ...(command.group ? { group: command.group } : {}),
           ...(command.thread ? { thread: command.thread } : {}),
           ...(command.from ? { from: command.from } : {}),
           ...(command.since ? { since: command.since } : {}),

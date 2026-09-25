@@ -26,6 +26,26 @@ export const WORKER_COMMAND_CAP_MS=600_000;
 // random keys, took 87 s on a loaded desktop machine; this is twice that.
 export const CHECK_SILENCE_CAP_MS=180_000;
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string; silenceMs?:number; commandCapMs?:number }
+// SQLite's ceiling on columns in a table (SQLITE_MAX_COLUMN).
+const MAX_TABLE_COLUMNS=32_767;
+// A plain object naming every approved table's columns, and nothing else.
+function tableColumns(value:unknown,tables:readonly string[]):boolean {
+  if(value===null || typeof value!=="object" || Array.isArray(value) || Object.getPrototypeOf(value)!==Object.prototype) return false;
+  const entries=Object.entries(value);
+  return entries.length===tables.length && entries.every(([table,names])=>tables.includes(table) && columnNames(names));
+}
+// A non-empty list with a name at every index, each distinct in any letter case, as SQLite compares column names.
+function columnNames(names:unknown):boolean {
+  if(!Array.isArray(names) || names.length===0 || names.length>MAX_TABLE_COLUMNS) return false;
+  const seen=new Set<string>();
+  for(let index=0;index<names.length;index+=1) {
+    if(!Object.hasOwn(names,index)) return false;
+    const name:unknown=names[index];
+    if(typeof name!=="string" || name.length===0 || seen.has(name.toLowerCase())) return false;
+    seen.add(name.toLowerCase());
+  }
+  return true;
+}
 const nodeLauncher:AppRuntimeLauncher=options=>{
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
   const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning","--max-old-space-size=96",options.entryPath],{
@@ -163,7 +183,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         if(!result || typeof result.proposalId!=="string" || !/^[a-f0-9-]{36}$/.test(result.proposalId) || result.readOnly!==readOnly ||
           !(result.changeset instanceof Uint8Array) || result.changeset.byteLength>config.limits.databaseBytes || digest(result.changeset)!==result.changesetSha256 ||
           !Array.isArray(result.attachedFileIds) || result.attachedFileIds.length>32 || new Set(result.attachedFileIds).size!==result.attachedFileIds.length ||
-          result.attachedFileIds.some(id=>typeof id!=="string" || !files.some(file=>file.fileId===id)) ||
+          result.attachedFileIds.some(id=>typeof id!=="string" || !files.some(file=>file.fileId===id)) || !tableColumns(result.columns,config.tables) ||
           (result.readOnly && (result.changeset.byteLength || result.attachedFileIds.length))) throw Error("Invalid prepared operation.");
         boundedText(JSON.stringify(result.result),config.limits.resultBytes,"Operation result");
       } catch {

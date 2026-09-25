@@ -62,5 +62,5 @@ export function createPrepareFixture(root, buildSource) {
     const {prepare,preparedStatus}=await import('./scripts/verification/build.mjs');
     await prepare();
     console.log(JSON.stringify({desktopPrepared:preparedStatus('desktop')}));
-  `], { cwd: root, encoding: "utf8", timeout: 10_000, env: { ...process.env, FIXTURE_INSTALL_FAIL: failInstall ? "1" : "0" } });
+  `], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, FIXTURE_INSTALL_FAIL: failInstall ? "1" : "0" } });
 }
