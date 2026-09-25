@@ -778,7 +778,7 @@ async fn a_record_created_in_a_document_session_is_added_as_its_creators_change(
             case.name
         );
         for claim in &claims {
-            assert_eq!(claim.record_id, case.record_id);
+            assert_eq!(claim.record_id.as_deref(), Some(case.record_id));
             assert_eq!(claim.change.kind, AutomationChangeKind::Added);
             assert_eq!(
                 claim.change.author_origin_id.as_deref(),

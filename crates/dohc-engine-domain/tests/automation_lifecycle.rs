@@ -139,7 +139,12 @@ fn reconcile_version(store: &mut EngineStore, version: &str, now_ms: i64) -> Vec
 fn claimed(claims: &[AutomationClaim]) -> Vec<(AutomationChangeKind, &str)> {
     claims
         .iter()
-        .map(|claim| (claim.change.kind, claim.record_id.as_str()))
+        .map(|claim| {
+            (
+                claim.change.kind,
+                claim.record_id.as_deref().unwrap_or_default(),
+            )
+        })
         .collect()
 }
 

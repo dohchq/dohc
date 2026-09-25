@@ -2694,7 +2694,7 @@ mod tests {
             ),
             (
                 "v2-automation-trigger-keys",
-                "d8742f41413dcfa45eac008876f1523c5874263030a6cf42ac508b5901b3121d",
+                "57599cccea26a02546761c6e3ea414ceff2a38d7bdbe631807ed9c4db910f03a",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
