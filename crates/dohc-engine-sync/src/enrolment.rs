@@ -72,6 +72,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(Vec::new());
+    }
     let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
         "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
@@ -763,6 +766,7 @@ mod tests {
         assert_eq!(refusals.len(), 1);
         let refusal_report_id = refusal_report_id.expect("claimed report id");
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -2387,6 +2391,7 @@ mod tests {
             .expect("seed oversized local lineage");
 
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 0,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),

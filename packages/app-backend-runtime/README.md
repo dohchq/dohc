@@ -1,6 +1,6 @@
 # App backend runtime
 
-Reader: engineers connecting published app operations to authoritative storage.
+Reader: engineers connecting published app operations to authoritative storage, and engineers running automation formulas and code steps.
 
 Transactional Collections use this package's host journal and [persistent materialization](#persistent-materialization).
 The trusted host authorizes and commits changes; isolated workers evaluate approved JavaScript and apply committed events.
@@ -8,6 +8,8 @@ See [the operator guide](../../docs/how-to/app-backend.md) to create and manage 
 
 The package also exposes a snapshot evaluator that returns candidate bytes, a changeset, JSON, and attached file identifiers.
 That evaluator does not commit shared state or authorize callers. The snapshot-specific limits below do not describe persistent dataset capacity.
+
+The [automation evaluator](#automation-formulas-and-code-steps) runs the formulas and code steps of Collection automations in the same kind of sealed QuickJS guest.
 
 The host must validate the publication, operation, caller, and files before evaluation.
 The host must recheck authority when it atomically commits the candidate and retry receipt.
@@ -220,3 +222,145 @@ Configured relay deployments do the same under their deployment writer lock. Unl
 Maintenance reads at most 100 manifests per page and yields between pages. Each deletion refunds its reservation in the same transaction.
 It preserves all active checkpoints and stages referenced by recovery imports, including installed imports awaiting a claim.
 Transfer archives, receipts, and recovery-import state have separate lifecycles and are not swept by checkpoint maintenance.
+
+## Automation formulas and code steps
+
+`@dohc/app-backend-runtime/automation` evaluates the formulas and code steps of Collection automations.
+It returns values and requested changes. It never writes; the executor applies each change with its own checks.
+
+```ts
+const evaluator = createAutomationEvaluator();
+const [ready, note] = await evaluator.evaluate(scope, [
+  { kind: "expression", source: 'record.Status == "Done"' },
+  { kind: "text", parts: [{ kind: "text", text: "Finished " }, { kind: "expression", expression: "record.Name" }] },
+]);
+const step = await evaluator.runCode(scope, 'return { set: { "Finished on": ctx.today() } };');
+```
+
+### Isolation
+
+Evaluation runs in a worker thread, so it never blocks the caller's thread. Requests run one at a time.
+Each formula and each code step gets its own QuickJS runtime and context with the dataset guest's controls: no network, files, module loader, host objects, or asynchronous work.
+A formula therefore cannot change what a later formula in the run sees. The evaluator also freezes the scope, the helpers, the global object, and the global built-ins with their prototypes.
+It removes `SharedArrayBuffer` before authored code runs, because its `grow` returns heap memory without clearing it.
+
+A worker thread is enough because evaluation runs only JavaScript and WebAssembly. The dataset guest uses a child process because it also runs SQLite.
+The worker compiles QuickJS once and gives each request a fresh instance with its own WebAssembly memory, so no request reads memory that another request used.
+That memory is capped at 24 MiB. QuickJS uses about 7 MiB of it, so one formula or code step can use about 17 MiB, less its scope.
+QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound. The worker adds about 23 MB to its process when idle and about 38 MB at the cap.
+The worker exits after 30 seconds without work, which returns that memory. The next request starts a new one.
+Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten` dependency and pass that file as `entryPath`.
+
+| Limit | Value | Dataset guest |
+|---|---|---|
+| Time to read the scope into one formula or code step's context | 1 s | none |
+| Time for one formula | 100 ms | none |
+| Time for one code step | 1 s | 1 s for one operation |
+| Time one request's formulas and code steps run, not counting reading the scope | 8 s | 8 s for one operation |
+| Time one request reads the scope, over all its formulas | 8 s | none |
+| Memory for one formula or code step | about 17 MiB, from a 24 MiB cap | 16 MiB for one operation |
+| Stack | 256 KiB | 256 KiB |
+| Source of one formula or code step | 64 KiB | 256 KiB |
+| Parts of one message text | 1,024 | none |
+| Result of one formula or code step, as JSON | 64 KiB, nested at most 64 levels | 256 KiB |
+| Scope, as JSON | 256 KiB, and each value in it nested at most 64 levels | 256 KiB of query results |
+| Formulas in one request | 64 | none |
+| Requests waiting or running | 16 | 8 operations running |
+
+The time limits count wall time, as the dataset guest's limits do. A formula's time starts once its scope is ready, so a large scope does not use it up.
+Windows counts a thread's processor time by clock ticks, and on a busy machine it counted 47 ms for 570 ms of work, so processor time cannot bound a formula.
+The worker evaluates one formula as it starts, so a cold worker's first formula does not spend its time compiling QuickJS's code paths.
+QuickJS checks the limits between bytecodes, so native work such as converting a huge BigInt to text can run past them.
+A result or a read scope that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limits.
+That formula times out and a new worker evaluates the ones after it.
+When an item breaks a worker's QuickJS instance, that item's own result asks for a new worker, which evaluates the items after it. A worker that fails before it finishes any item makes the items sent to it fail with `runtime` instead of starting another worker.
+A request keeps two totals: the time its formulas run, and the time it spends reading the scope.
+Reading a 256 KiB scope takes 15 to 25 ms on a desktop, so 64 formulas can spend several seconds reading it. That time never cuts off a formula's run time.
+Formulas that start after either total passes 8 seconds time out without running. Each total passes 8 seconds only by the item running when it did, so one request takes at most about 21 seconds.
+When 16 requests are waiting or running, a new request returns `busy` for every item at once. The evaluator does this before it reads the scope or the formulas, so it returns `busy` even for input it would reject. The caller runs the automation again later.
+
+The scope and formulas must be plain JSON data: no bigints, functions, symbols, or class instances such as dates, maps, and `Array` subclasses.
+Before the caller's thread copies anything to the worker, the evaluator rejects a scope with such a value. It refuses an oversized source or message text, and an oversized or deeply nested scope, as `too_large`.
+It counts the UTF-8 bytes `JSON.stringify` would write for the scope, including escapes, and stops at the limits, so a cycle is `too_large`.
+Values in the scope, such as a field value or a bound step result, can nest 64 levels deep, as a result can. The scope and its `record` or `bindings` object add two levels.
+The worker measures size and nesting again from the JSON, and it refuses a scope it cannot turn into JSON.
+
+### Scope
+
+| Name | Contents |
+|---|---|
+| `record` | The triggering record's field values, by field name. It is `null` when the trigger has no record, such as a schedule |
+| `previous` | The field values before the change. It is empty when the trigger has no earlier values, such as a new record or a button |
+| `trigger` | The trigger's `kind` and its facts |
+| `person` | `{ id, name }` of the person who made the change, or `null` |
+| `message` | The Group message that triggered the run, or `null` |
+| `now` | The host passes the run's time as ISO 8601 with the running computer's UTC offset. Formulas read it through `now()` and `today()` |
+
+The host also passes `bindings`: earlier step results, each under the name its step binds with `as`.
+A formula reads each one as a name of its own, such as `tasks.length`. A binding cannot use a name in `AUTOMATION_SCOPE_NAMES` or a QuickJS global, such as `Math`.
+Formulas use all these names directly. A code step reads them and the helpers from `ctx`, such as `ctx.record`, `ctx.tasks`, and `ctx.today()`.
+Everything in the scope is frozen, so an assignment fails with a `TypeError`.
+
+An `expression` formula is one JavaScript expression, such as `record.Status == "Done"`.
+A `text` formula is message text that the file contract has split into text and expression parts.
+Each expression's value is inserted: a list as its items joined with `, `, an object as JSON, and an empty value as nothing.
+A formula without a value, such as a missing field, gives `null`.
+
+### Helpers
+
+Dates are ISO strings in and out. A calendar date such as `2026-09-24` has no time zone.
+A date with a time keeps its UTC offset; one written without an offset uses the offset of `now`.
+`now` is the time on the computer that runs the automation, so `today()` is that computer's calendar date.
+
+| Helper | Returns |
+|---|---|
+| `today()` | The calendar date of `now`, such as `2026-09-24` |
+| `now()` | The run's time with its offset, such as `2026-09-24T09:30:00.000+08:00`. Every call in a run returns the same time |
+| `dateAdd(date, amount, unit)` | `date` moved by a whole `amount` of `years`, `quarters`, `months`, `weeks`, `days`, `hours`, or `minutes`. A month that lacks the day uses its last day, so January 31 plus 1 month is February 28. Hours and minutes added to a calendar date start at its midnight on the clock of `now` |
+| `dateBetween(a, b, unit)` | The whole units from `b` to `a`, counted toward zero. It is negative when `a` is earlier. Both dates are read on the clock of `now` |
+| `formatDate(date, format)` | `date` as text, `MMMM D, YYYY` (`September 24, 2026`) by default. Parts: `YYYY` `YY` `MMMM` `MMM` `MM` `M` `DD` `D` `dddd` `ddd` `HH` `H` `hh` `h` `mm` `ss` `A`. Text in `[brackets]` stays as written. Names are English |
+| `lower(text)`, `upper(text)`, `trim(text)` | The changed text. An empty value gives `""` |
+| `contains(value, search)` | Whether text contains `search`, or a list has an item equal to it |
+| `join(list, separator)` | The list's items as text, separated by `, ` by default. Empty items are skipped |
+| `length(value)` | The characters in text or the items in a list. An empty value gives 0 |
+| `sum(...values)`, `min(...values)`, `max(...values)` | The total, lowest, or highest of the numbers given, including numbers in lists. Empty values are skipped. `sum` of nothing is 0; `min` and `max` of nothing are `null` |
+| `round(number, places)` | The number rounded to `places` decimal places, 0 by default. Halves round up |
+
+Units can also be singular, such as `day`.
+
+### Code steps
+
+A code step is a function body that receives `ctx` and returns synchronously. Every key of its result is optional:
+
+```js
+return {
+  set: { "Finished on": ctx.today() },
+  records: [
+    { action: "add", collection: "Trip/Tasks", fields: { Name: "Book hotel" } },
+    { action: "change", collection: "Trip/Tasks", id: "record-7", fields: { Status: "Open" } },
+  ],
+  output: { total: 50 },
+};
+```
+
+`set` names fields of the triggering record. `records` adds records to, or changes records in, the Collection at a workspace path.
+`output` is any JSON value. A later step reads it by the name this step binds with `as`. Returning nothing asks for nothing.
+The evaluator validates this shape. An unknown key or another shape gives `invalid_result`.
+
+### Errors
+
+Each formula and code step gives `{ ok: true, value }` or `{ ok: false, error: { code, message } }`.
+The message is written for the person who reads the run.
+
+| Code | Cause |
+|---|---|
+| `syntax` | The formula or code does not parse |
+| `runtime` | It threw. A thrown string becomes the message. Also, the evaluator stopped before it could run the item |
+| `timeout` | It, or reading its scope, ran past its time limit |
+| `memory` | It used more memory or stack than the limits allow |
+| `too_large` | Its source, the scope, or its result is over its size limit, or the scope nests too deeply |
+| `invalid_result` | It gave a function, a promise, a value JSON cannot hold, a value nested too deeply, or a code step result of another shape |
+| `busy` | The evaluator already had 16 requests waiting or running. Every item of the request gets it and nothing ran; run the automation again later |
+
+The promise rejects for executor mistakes and a worker that cannot start, unless the queue is full.
+Executor mistakes include more than 64 formulas, a malformed formula, a scope with a value JSON cannot hold, which the message names by type, a `now` without a valid UTC offset, a binding under a name the scope or QuickJS owns, and a call after `close`.

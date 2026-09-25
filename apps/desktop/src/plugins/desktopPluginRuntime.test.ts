@@ -336,8 +336,10 @@ describe("desktop plugin runtime composition", () => {
     const parts = f.createParts();
     await parts.pipeline.start();
     f.claims.push({
-      claimId: "orphan-claim", automationId: "missing-plugin/handler", trigger: { originId: "origin", originSeq: 1 },
-      recordId: "record", collectionPath: "tasks", depth: 0, state: "running", attempts: 1,
+      claimId: "orphan-claim", automationId: "plugin:plugin/undeclared", trigger: { originId: "origin", originSeq: 1 },
+      recordId: "record", collectionPath: "tasks", depth: 0,
+      change: { kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+      state: "running", attempts: 1, run: 1,
       createdAtMs: 1, updatedAtMs: 1,
     });
     parts.automations.notifyClaimed();

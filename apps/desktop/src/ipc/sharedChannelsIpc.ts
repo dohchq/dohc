@@ -81,6 +81,8 @@ export function registerSharedChannelsIpcHandlers<
   mountShareFolder(input: {
     workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
   }): Promise<unknown>;
+  // The owner shared one of this workspace's Groups or chats.
+  sharesChanged(workspaceId: string): void;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -89,7 +91,7 @@ export function registerSharedChannelsIpcHandlers<
     relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer, mountShareFolder, unmountShareFolder,
+    notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged,
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
@@ -171,9 +173,9 @@ export function registerSharedChannelsIpcHandlers<
         const created = await awaitCredentialGeneration({
           capturedGeneration: credentialGeneration,
           currentGeneration: () => currentCredentialGeneration(),
-          run: () => {
+          run: async () => {
             operation.assertCurrent();
-            return relayShareJsonWithCredentials<{ shareId: string }>(
+            const share = await relayShareJsonWithCredentials<{ shareId: string }>(
               credentials,
               `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
@@ -188,6 +190,9 @@ export function registerSharedChannelsIpcHandlers<
                 }),
               },
             );
+            // The share exists even if this window has moved on.
+            sharesChanged(workspace.workspaceId);
+            return share;
           },
         });
         operation.assertCurrent();

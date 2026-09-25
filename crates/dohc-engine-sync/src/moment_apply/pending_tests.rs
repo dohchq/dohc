@@ -84,6 +84,7 @@ fn commit_report(store: &mut EngineStore, report_id: Option<String>) {
         store,
         "ws",
         &RelayCursor {
+            bootstrap_complete: true,
             cursor: 65,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),

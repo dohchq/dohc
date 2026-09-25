@@ -94,7 +94,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
-  afterSuccessfulPull?: () => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
   waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
@@ -237,6 +237,80 @@ describe("relaySyncEngine", () => {
 
     await expect(sync.start()).rejects.toThrow("relay unavailable");
     expect(afterSuccessfulPull).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("runs the pull-start hook before each pull request, and its end whatever the pull does", async () => {
+    const calls: string[] = [];
+    const pullStarting = vi.fn(() => {
+      calls.push("starting");
+      return () => calls.push("ended");
+    });
+    pullMock.mockImplementationOnce(async () => {
+      calls.push("pull");
+      throw new Error("relay unavailable");
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      pullStarting,
+      operations: mockOperations(),
+      initialBackoffMs: 100,
+    });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    expect(calls).toEqual(["starting", "pull", "ended"]);
+    // The retry's push fails, so it never sends a pull and starts none.
+    pushMock.mockRejectedValueOnce(new Error("offline"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullStarting).toHaveBeenCalledOnce();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("sends no pull request when the pull-start hook refuses, and still pushes", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      capture: capture(),
+      onChange: vi.fn(),
+      pullStarting: () => {
+        throw new Error("could not save the pull mark");
+      },
+      operations: mockOperations(),
+    });
+
+    await expect(sync.start()).rejects.toThrow("could not save the pull mark");
+    expect(pushMock).toHaveBeenCalledOnce();
+    expect(pullMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("relay sync failed"),
+      expect.objectContaining({ message: "could not save the pull mark" }),
+    );
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("tells post-pull work when a pass succeeds after a failed one", async () => {
+    pullMock.mockRejectedValueOnce(new Error("relay unavailable"));
+    const afterSuccessfulPull = vi.fn(async (_pass: { recovered: boolean }) => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    await vi.advanceTimersByTimeAsync(500);
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
 
     errorSpy.mockRestore();
     await sync.stop();

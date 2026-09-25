@@ -142,6 +142,8 @@ export function registerRelaySharesIpcHandlers<
     ReturnType<typeof createPresencePollRegistry>,
     "begin" | "cancel"
   >;
+  // A grant changed on the relay. Null when the change names no workspace.
+  sharesChanged(workspaceId: string | null): void;
 }): void {
   const {
     registerHandler,
@@ -155,6 +157,7 @@ export function registerRelaySharesIpcHandlers<
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    sharesChanged,
   } = dependencies;
   const ownerRelayShareHandler = createOwnerRelayShareHandler<
     Sender,
@@ -166,6 +169,15 @@ export function registerRelaySharesIpcHandlers<
     remoteForWorkspace,
     credentialGeneration: currentCredentialGeneration,
   });
+  // A relay call that can change who holds a grant on the workspace. The
+  // share roster refreshes as soon as the relay answers, before any check
+  // that this window is still current, because the change happened anyway.
+  const changingGrants = <Result>(workspaceId: string, call: () => Promise<Result>) =>
+    async (): Promise<Result> => {
+      const result = await call();
+      sharesChanged(workspaceId);
+      return result;
+    };
   const assertOriginalWorkspace = (workspace: Workspace): void => {
     if (shareViewIsPresent(workspace.shareView)) {
       throw new Error(
@@ -315,7 +327,7 @@ export function registerRelaySharesIpcHandlers<
       input.workspaceId,
       async (operation, credentials, session) => {
         const workspace = operation.workspace;
-        const created = await session.run(() =>
+        const created = await session.run(changingGrants(workspace.workspaceId, () =>
           relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
             credentials,
             `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
@@ -329,7 +341,7 @@ export function registerRelaySharesIpcHandlers<
               }),
             },
           ),
-        );
+        ));
         const shareCode = buildShareCode({
           shareId: created.shareId,
           relayUrl: credentials.relayUrl!,
@@ -413,6 +425,7 @@ export function registerRelaySharesIpcHandlers<
         method: "POST",
       },
     );
+    sharesChanged(null);
     return undefined;
   });
 
@@ -509,7 +522,8 @@ export function registerRelaySharesIpcHandlers<
       event.sender,
       input.workspaceId,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
+        // A new level applies to the link's dependents too.
+        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
             `/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/retune`,
@@ -523,7 +537,7 @@ export function registerRelaySharesIpcHandlers<
             },
             { retainDependentSetConflict: true },
           ),
-        );
+        ));
         if (relayResult.kind === "dependents-changed") {
           const conflict = RelayShareLinkDependentConflict.safeParse(
             relayResult.body,
@@ -612,7 +626,8 @@ export function registerRelaySharesIpcHandlers<
       event.sender,
       input.workspaceId,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
+        // Ending a link ends its dependents.
+        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
             `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
@@ -626,7 +641,7 @@ export function registerRelaySharesIpcHandlers<
             },
             { retainDependentSetConflict: true },
           ),
-        );
+        ));
         if (relayResult.kind === "dependents-changed") {
           const conflict = RelayShareLinkDependentConflict.safeParse(
             relayResult.body,
@@ -972,7 +987,7 @@ export function registerRelaySharesIpcHandlers<
       event.sender,
       input.workspaceId,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
+        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
             `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote`,
@@ -985,7 +1000,7 @@ export function registerRelaySharesIpcHandlers<
               }),
             },
           ),
-        );
+        ));
         const parsed = RelayShareGrantPromotionResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
@@ -1010,7 +1025,7 @@ export function registerRelaySharesIpcHandlers<
       event.sender,
       input.workspaceId,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
+        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
             credentials,
             `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke`,
@@ -1021,7 +1036,7 @@ export function registerRelaySharesIpcHandlers<
               }),
             },
           ),
-        );
+        ));
         const parsed = RelayShareGrantRevokeResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
