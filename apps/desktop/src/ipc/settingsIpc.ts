@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import {
-  DesktopUserSettingsResult, SetUserSettingsPayload, WorkspaceSettingsPayload,
+  DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload, WorkspaceSettingsPayload,
   SetWorkspaceSettingsPayload, WorkspaceSettingsResult, WorkspaceIdPayload,
   GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
 } from "./bridgeContract";
@@ -12,6 +12,7 @@ import {
   type DesktopUserSettings,
   type ZoomStep,
 } from "../settings/userSettings";
+import { withAppPinned } from "../settings/pinnedApps";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
   ensureUserSettingsFile, readCachedUserSettingsFile, reloadUserSettingsFile,
@@ -57,12 +58,14 @@ export function createSettingsIpc<
   ): Promise<Result>;
   // The system's own opener; answers an error message, or "" when it opened.
   openPath(path: string): Promise<string>;
+  // The workspaces dohc knows, so pins for any other workspace leave the file.
+  knownWorkspaceIds(): readonly string[];
 }) {
   const {
     registerHandler, assertTrustedSender, stateDir,
     setCachedPreferredName, applyZoomLevelToWindows, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
-    broadcastUserSettings, notifyRenderer, openPath,
+    broadcastUserSettings, notifyRenderer, openPath, knownWorkspaceIds,
   } = dependencies;
 
   // Every change to the user settings file runs here, one at a time, and each
@@ -195,6 +198,16 @@ export function createSettingsIpc<
       const input = SetUserSettingsPayload.parse(payload);
       return saveUserSettings(() =>
         writeUserSettingsFile(stateDir(), input.settings, input.base));
+    });
+
+    // One pin at a time, applied to the file as it is now, so two quick pins
+    // both land.
+    registerHandler(CHANNELS.setAppPinned, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = SetAppPinnedPayload.parse(payload);
+      return saveUserSettings(() =>
+        updateUserSettingsFile(stateDir(), (current) =>
+          withAppPinned(current, input, knownWorkspaceIds())));
     });
 
     registerHandler(CHANNELS.resetUserSettings, async (event) => {

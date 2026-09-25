@@ -1,3 +1,4 @@
+import { namedShareOrigin } from "./relayLogInputs";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkHandoffCode as hashHandoffCode, LINK_HANDOFF_CODES_PER_GRANT_LIMIT } from "./linkSecurity";
@@ -649,7 +650,7 @@ describe("single-use authenticated link handoff", () => {
           .prepare(
             "SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?",
           )
-          .get(WORKSPACE, `share:${SHARE_ID}:${batch.originId}`)?.count ?? 0,
+          .get(WORKSPACE, namedShareOrigin(SHARE_ID, RECIPIENT, batch.originId))?.count ?? 0,
       );
 
     database

@@ -1,3 +1,4 @@
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
@@ -112,6 +113,16 @@ export function useAutosavedTextDraft(props: {
   const writersLive = useRef(0);
   const flushBarrier = useRef(false);
   const flushInFlight = useRef<Promise<void> | null>(null);
+  const exitFlush = useRef<DraftFlush>(() => Promise.resolve());
+  const exitCapturedDraft = useRef<{ generation: number; text: string } | null>(null);
+  const captureStalledExit = useRef(() => {});
+  captureStalledExit.current = () => {
+    // A previous recovery may have been dismissed. Capture a fresh copy for
+    // this stalled exit before releasing its hold.
+    capturedConflictDraft.current = null;
+    captureFailedFlush();
+    exitCapturedDraft.current = { generation: editGeneration.current, text: latestDraft.current };
+  };
 
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
@@ -682,8 +693,7 @@ export function useAutosavedTextDraft(props: {
   }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {
-    if (!registerDraftFlush) return;
-    registerDraftFlush((options) => {
+    const flushDraft: DraftFlush = (options) => {
       if (flushInFlight.current) {
         const inFlight = flushInFlight.current;
         if (!options?.captureOnFailure) return inFlight;
@@ -693,6 +703,7 @@ export function useAutosavedTextDraft(props: {
         });
       }
       flushBarrier.current = true;
+      const startedAfterUnmount = unmounted.current;
       const localWritePending = writersLive.current > 0;
       const flush = (async () => {
         try {
@@ -703,6 +714,7 @@ export function useAutosavedTextDraft(props: {
           }
           while (
             (unsavedDraft.current || props.localBuffer.getSnapshot().dirty) &&
+            !startedAfterUnmount &&
             !writesBlocked()
           ) {
             if (saveTimer.current) {
@@ -711,6 +723,7 @@ export function useAutosavedTextDraft(props: {
             }
             await writeDraftNow({ rejectOnError: true, fromFlush: true });
           }
+          if (options?.captureOnFailure && unsavedDraft.current) captureFailedFlush();
           if (flushConflict.current) {
             throw new Error("The file changed on disk while dohc saved it.");
           }
@@ -724,11 +737,21 @@ export function useAutosavedTextDraft(props: {
       })();
       flushInFlight.current = flush;
       return flush;
-    });
-    return () => registerDraftFlush(null);
+    };
+    registerDraftFlush?.(flushDraft);
+    exitFlush.current = flushDraft;
+    return () => registerDraftFlush?.(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
+
+  useEffect(() => registerPendingEditorDraft(
+      () => (unsavedDraft.current || writersLive.current > 0) &&
+        (exitCapturedDraft.current?.generation !== editGeneration.current ||
+          exitCapturedDraft.current.text !== latestDraft.current),
+      options => exitFlush.current(options),
+      () => captureStalledExit.current(),
+    ), []);
 
   return {
     draft,

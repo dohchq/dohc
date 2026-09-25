@@ -26,16 +26,25 @@ export interface CollectionMigrationReviewDialogProps {
 }
 type Change = { kind: "added" | "removed" | "changed"; table: string; field: string; detail: string; before?: string; after?: string };
 function fieldSummary(field: DatasetField): string {
+  if (field.type === "button") return [field.name, field.type].join(" · ");
   return [field.name, field.type, field.required ? "required" : "optional", ...(field.unique ? ["unique"] : []),
     ...(Object.hasOwn(field, "default") ? [`default: ${JSON.stringify(field.default)}`] : []), ...(field.options ? [`options: ${field.options.join(", ")}`] : []),
     ...(field.relation ? [`related field: ${field.relation.fieldId}${field.relation.many ? " (many)" : ""}`] : [])].join(" · ");
 }
+const attributes = ["name", "type", "required", "unique", "default", "options", "relation", "sqlColumn"] as const;
+type Attribute = typeof attributes[number];
+// A button has only a name and a type; its other attributes read as not set.
+function attribute(field: DatasetField, key: Attribute): unknown {
+  return field.type === "button" ? key === "name" ? field.name : key === "type" ? field.type : undefined : field[key];
+}
+function fieldChanged(before: DatasetField, after: DatasetField): boolean {
+  return attributes.some(key => JSON.stringify(attribute(before, key)) !== JSON.stringify(attribute(after, key)));
+}
 function changedFieldSummary(before: DatasetField, after: DatasetField): { before: string; after: string } {
-  const attributes = ["name", "type", "required", "unique", "default", "options", "relation", "sqlColumn"] as const;
   const labels = { name: "Name", type: "Type", required: "Required", unique: "Unique", default: "Default", options: "Options", relation: "Relation", sqlColumn: "Column" };
-  const changed = attributes.filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+  const changed = attributes.filter(key => JSON.stringify(attribute(before, key)) !== JSON.stringify(attribute(after, key)));
   const summary = (field: DatasetField) => changed.map(key => {
-    const value = field[key];
+    const value = attribute(field, key);
     const text = value === undefined ? "Not set" : typeof value === "boolean" ? value ? "Yes" : "No" : typeof value === "string" ? value : JSON.stringify(value);
     return `${labels[key]}: ${text}`;
   }).join("\n");
@@ -61,8 +70,7 @@ function changes(before: DatasetRevision, after: DatasetRevision): Change[] {
     for (const field of table.fields) {
       const prior = oldFields.get(field.fieldId);
       if (!prior) { output.push({ kind: "added", table: table.name, field: field.name, detail: "Field added", after: fieldSummary(field) }); continue; }
-      const changed = prior.name !== field.name || prior.sqlColumn !== field.sqlColumn || prior.type !== field.type || prior.required !== field.required || prior.unique !== field.unique || JSON.stringify(prior.default) !== JSON.stringify(field.default) || JSON.stringify(prior.options) !== JSON.stringify(field.options) || JSON.stringify(prior.relation) !== JSON.stringify(field.relation);
-      if (changed) output.push({ kind: "changed", table: table.name, field: field.name, detail: "Field definition changed", ...changedFieldSummary(prior, field) });
+      if (fieldChanged(prior, field)) output.push({ kind: "changed", table: table.name, field: field.name, detail: "Field definition changed", ...changedFieldSummary(prior, field) });
       oldFields.delete(field.fieldId);
     }
     for (const field of oldFields.values()) output.push({ kind: "removed", table: table.name, field: field.name, detail: "Field removed", before: fieldSummary(field) });

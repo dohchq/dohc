@@ -27,6 +27,7 @@ try {
     import {writeFileSync, mkdirSync} from 'node:fs';
     import {createHash} from 'node:crypto';
     import {openPersistentAppBackend} from '@dohc/app-backend-runtime/persistent';
+    import {createAutomationEvaluator} from '@dohc/app-backend-runtime/automation';
     import {createDesktopAppBackendRuntime, createDesktopAppRuntimeLauncher} from ${JSON.stringify(join(desktopRoot, 'src/workspaces/localAppBackendRuntime.ts'))};
     app.setPath('userData', ${JSON.stringify(userData)});
     app.whenReady().then(async()=>{
@@ -63,7 +64,12 @@ try {
           recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
             source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
         } finally {await recovered.close();}
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,electron:process.versions.electron}));
+        // The automation evaluator's worker thread, started from Electron main as the desktop starts it.
+        const evaluator=createAutomationEvaluator({entryPath:join(process.resourcesPath,'app-backend-runtime','automation-worker.mjs')});
+        let formulaResult;
+        try {formulaResult=await evaluator.evaluate({trigger:{kind:'record-added'},person:null,now:'2026-09-25T09:30:00.000+08:00'},[{kind:'expression',source:'dateAdd(today(), 3, "days")'}]);}
+        finally {await evaluator.close();}
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,formulaResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -92,5 +98,6 @@ try {
   assert.ok(result.changesetBytes > 0);
   assert.deepEqual(result.persistentResult, [{ id: 'persistent-fuse-proof', value: 43 }]);
   assert.deepEqual(result.recoveredResult, result.persistentResult);
-  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored.`);
+  assert.deepEqual(result.formulaResult, [{ ok: true, value: '2026-09-28' }]);
+  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored, automation formulas evaluated.`);
 } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }

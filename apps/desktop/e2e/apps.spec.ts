@@ -68,6 +68,13 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
           colorScheme: "light",
         });
     }
+
+    await page.getByRole("button", { name: "Show in Explorer" }).click();
+    const tree = page.getByTestId("file-tree");
+    await expect(tree.locator('[data-testid="tree-row"][data-path="demo"]')).toBeFocused();
+    await expect(
+      tree.locator('[data-testid="tree-row"][data-path="demo/index.html"]'),
+    ).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

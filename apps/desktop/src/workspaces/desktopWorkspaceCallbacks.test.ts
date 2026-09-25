@@ -29,6 +29,7 @@ function fixture() {
   });
   const notifyRenderer = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["notifyRenderer"]>();
   const handleWatcherEvents = vi.fn<(events: readonly WatcherEvent[]) => void>();
+  const collectionWatcherEvents = vi.fn<(events: readonly WatcherEvent[]) => void>();
   const runtime = { handleWatcherEvents };
   const current = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["pluginWorkspaceRuntimes"]["current"]>(() => runtime);
   const scanWorkspace = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"]["scanWorkspace"]>(async () => undefined);
@@ -54,6 +55,7 @@ function fixture() {
       if (!live.initialized) throw new Error("Dispatch service is not initialized");
       lateReads.push("dispatch"); return live.dispatch;
     },
+    collectionAutomationsOf: () => ({ handleWatcherEvents: collectionWatcherEvents }),
   });
   live.initialized = true;
   function attach() {
@@ -62,12 +64,12 @@ function fixture() {
     lease.release();
     return attached;
   }
-  return { workspace, registry, authorities, disposed, notifyRenderer, handleWatcherEvents,
+  return { workspace, registry, authorities, disposed, notifyRenderer, handleWatcherEvents, collectionWatcherEvents,
     current, scanWorkspace, live, lateReads, callbacks, attach };
 }
 
 describe("desktop workspace callbacks", () => {
-  it("constructs before late owners and forwards the exact watcher batch to the current runtime", () => {
+  it("constructs before late owners and forwards the exact watcher batch to the current runtime and automations", () => {
     const test = fixture();
     expect(test.lateReads).toEqual([]);
     const workspace = test.attach();
@@ -75,6 +77,8 @@ describe("desktop workspace callbacks", () => {
     expect(test.current).toHaveBeenCalledWith(workspace.workspaceId);
     expect(test.handleWatcherEvents).toHaveBeenCalledWith(events);
     expect(test.handleWatcherEvents.mock.calls[0]![0]).toBe(events);
+    // The workspace's Collection automations read the same batch.
+    expect(test.collectionWatcherEvents).toHaveBeenCalledWith(events);
     const replacement = vi.fn<(events: readonly WatcherEvent[]) => void>();
     test.live.runtimes = { current: vi.fn(() => ({ handleWatcherEvents: replacement })) };
     test.callbacks.onWatcherBatch(workspace, events);

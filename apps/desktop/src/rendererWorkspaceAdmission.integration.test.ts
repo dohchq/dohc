@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createStartSitePreviewHandler } from "./ipc/sitePreviewIpc";
+import { createStartSitePreviewHandler, type SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
@@ -51,7 +51,7 @@ describe("renderer reload admission", () => {
     };
     await sessions.open(renderer, workspace, "document-1");
 
-    const siteLifecycle = createSitePreviewLifecycle({
+    const siteLifecycle = createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: () => () => undefined,
     });
     const catalogGet = vi.fn(async () => null);
@@ -118,7 +118,7 @@ describe("renderer reload admission", () => {
     await expect(
       startSitePreview(
         { sender: renderer },
-        { workspaceId: workspace.workspaceId, siteRoot: "site", mode: "static" },
+        { workspaceId: workspace.workspaceId, siteRoot: "site", mode: "static", holderId: "tab", restart: false },
       ),
     ).rejects.toThrow("no active lease");
     await expect(

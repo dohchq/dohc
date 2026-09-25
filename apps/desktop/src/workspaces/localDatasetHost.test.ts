@@ -70,6 +70,42 @@ async function activate(host: LocalDatasetHost, fixture = sources()) {
 const call = (approved: Awaited<ReturnType<typeof activate>>, operationId: string, idempotencyKey = "read", input = {}) =>
   ({datasetId: id(1), revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, operationId, idempotencyKey, input});
 
+it("reopens the same recovery archive after installation was interrupted before claim", async () => {
+  const sourceHost = await open(), approved = await activate(sourceHost.host);
+  await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
+  const archive = await sourceHost.host.prepareExport(id(1));
+  const sourcePath = join(sourceHost.workspaceRoot, "resume.dohc-recovery");
+  await writeDatasetRecoveryExport({ path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+  await archive.dispose(); await sourceHost.host.close();
+  let observer: DatabaseSync | undefined;
+  const target = await open({ assertCurrent() {
+    // Another connection observes only the committed installation, so no
+    // pre-commit authorization check or transaction rollback causes this failure.
+    if (observer?.prepare("SELECT 1 FROM dohc_dataset_imports WHERE phase='installed'").get()) throw Error("Interrupted before claim");
+  } });
+  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    const prepared = await target.host.prepareRecovery({ sourcePath });
+    await expect(target.host.claimRecovery({ ...prepared, oldHostStopped: true })).rejects.toThrow("Interrupted before claim");
+    expect(observer.prepare("SELECT active FROM dohc_dataset_journals WHERE dataset_id=?").get(id(1))!.active).toBe(0);
+    await target.host.close();
+    observer.close(); observer = undefined;
+    const restarted = await open({ workspaceRoot: target.workspaceRoot });
+    // This is the normal UI action after restart, with no saved transfer id.
+    const rebound = await restarted.host.prepareRecovery({ sourcePath });
+    expect(rebound.transferId).toBe(prepared.transferId);
+    const stagingDirectory = join(restarted.workspaceRoot, ".dohc", "datasets", "exports");
+    const stagedBefore = await readdir(stagingDirectory);
+    expect(await restarted.host.prepareRecovery({ sourcePath })).toEqual(rebound);
+    expect(await readdir(stagingDirectory)).toEqual(stagedBefore);
+    await expect(restarted.host.claimRecovery(rebound)).rejects.toThrow(/old host stopped/);
+    const receipt = await restarted.host.claimRecovery({ ...rebound, oldHostStopped: true });
+    expect(receipt.targetCursor).toBeDefined();
+    expect((await restarted.host.invoke(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Preserved" }]);
+    await expect(restarted.host.prepareRecovery({ sourcePath })).rejects.toThrow(/already exists/);
+  } finally { observer?.close(); }
+});
+
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
   const path = join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite");
@@ -262,7 +298,7 @@ describe("local dataset owner adapter", () => {
       } finally { await staged.dispose(); }
     } finally { await archive.dispose(); }
   });
-  it("restores a backup to local authority then transfers records and attachments to the relay through response loss", async () => {
+  it.each(["installed", "claimed"] as const)("restores a backup then resumes a relay transfer after response loss in the %s phase", async phase => {
     const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
     const compileOperations = relayCompileDatasetOperations;
     let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
@@ -273,9 +309,19 @@ describe("local dataset owner adapter", () => {
     const transport=async (_credentials:typeof credentials,path:string,init:RequestInit)=>{
       if(offline)throw Error("offline after response loss");
       const request=new Request(`https://relay${path}`,{...init,headers:{...Object.fromEntries(new Headers(init.headers)),authorization:"Bearer token"},...(init.body instanceof ReadableStream?{duplex:"half" as const}:{})});
+      if (phase === "installed" && path.includes("/imports/") && init.method === "POST" && posted === 0) {
+        const reader = request.body!.getReader();
+        const stream = (async function* () { try { while (true) { const next = await reader.read(); if (next.done) return; yield next.value; } } finally { reader.releaseLock(); } })();
+        await relayHost.importRecovery({ kind: "named", workspaceId: "w", userId: "owner" }, {
+          workspaceId: "w", datasetId: id(1), transferId: path.split("/").at(-1)!,
+          sourceCursor: JSON.parse(request.headers.get("x-dohc-dataset-source-cursor")!),
+          manifestSha256: request.headers.get("x-dohc-dataset-manifest-sha256")!, stream, activate: false,
+        });
+        posted++; offline = true; throw Error("lost import response");
+      }
       const response=await handler()(request),value=path.includes("/imports/")?await response.json():await readDatasetResponse(response,path.split("/").at(-1)!,controller.signal);
       if(!response.ok)throw Error(`Relay ${response.status}: ${JSON.stringify(value)}`);
-      if(path.includes("/imports/")&&init.method==="POST"){posted++;offline=true;throw Error("lost import response");}
+      if(path.includes("/imports/")&&init.method==="POST"){posted++;if(posted===1){offline=true;throw Error("lost import response");}}
       return value;
     };
     const target=()=>createRemoteDatasetTransferTarget({workspaceId:"w",datasetId:id(1),origin:"https://relay",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayStream:transport});
@@ -303,7 +349,7 @@ describe("local dataset owner adapter", () => {
       relayHost=await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
       const restarted=(await open({workspaceRoot:local.workspaceRoot})).host;offline=false;
       const completed=await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()});
-      expect(completed.state).toBe("imported");expect(posted).toBe(1);
+      expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
       expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
       const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
