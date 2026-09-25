@@ -1714,6 +1714,7 @@ async function daemonDeathCapture(
     lineage: "present" | "absent";
     durableUpdates: Uint8Array[];
     journalKeys: Array<string | null>;
+    dropNextApply: boolean;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1736,6 +1737,9 @@ async function daemonDeathCapture(
     durableUpdates: [] as Uint8Array[],
     // The idempotency key each journal write carried, null for none.
     journalKeys: [] as Array<string | null>,
+    // The next journal write meets a daemon that died after the generation
+    // opened; the supervisor has already relaunched it for the rebind.
+    dropNextApply: false,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1750,6 +1754,9 @@ async function daemonDeathCapture(
     releasedGenerations: [] as number[],
   };
   const generations: Y.Doc[] = [];
+  // The daemon's request ledger: a key refuses bytes it was not first used
+  // with, and outlives any one generation.
+  const keyLedger = new Map<string, string>();
   const transportDeath = () =>
     Object.assign(new Error("The engine client is closed: transport closed."), {
       code: "transport-error",
@@ -1846,10 +1853,29 @@ async function daemonDeathCapture(
       evict: async () => undefined,
       async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
+        if (state.dropNextApply) {
+          state.dropNextApply = false;
+          throw transportDeath();
+        }
         if (state.refuseApply) throw new Error("record-update-refused");
+        const key = applyOptions?.idempotencyKey;
+        const bytes = Buffer.from(update).toString("base64");
+        if (key !== undefined && keyLedger.has(key)) {
+          if (keyLedger.get(key) !== bytes) {
+            throw Object.assign(new Error("idempotency-key-reuse-mismatch"), {
+              wireError: {
+                code: "INVALID_PARAMS",
+                message: "idempotency-key-reuse-mismatch",
+                retry: "no",
+              },
+            });
+          }
+          return;
+        }
+        if (key !== undefined) keyLedger.set(key, bytes);
         Y.applyUpdate(doc, update);
         state.durableUpdates.push(update);
-        state.journalKeys.push(applyOptions?.idempotencyKey ?? null);
+        state.journalKeys.push(key ?? null);
       },
       async settleNow() {
         if (!state.daemonAlive) throw transportDeath();
@@ -2000,6 +2026,92 @@ it("journals a keyed write on a dead session under its own key once the daemon i
   expect(state.generation).toBe(2);
   expect(state.journalKeys).toEqual([null, "claim/1/0"]);
   expect((await session.settleNow()).content).toBe("PRE_KILL KEYED");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, Y.encodeStateAsUpdate(rendererDoc));
+  const before = Y.encodeStateVector(scratch);
+  const body = scratch.getText("plainText");
+  body.insert(body.length, text);
+  return Y.encodeStateAsUpdate(scratch, before);
+}
+
+it("sends a keyed write again under its key after its daemon died, so the key still refuses changed content", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-key-reuse-",
+    "ydoc-death-key-reuse",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-key-reuse",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await session.applyLocalUpdate(keyedUpdate(session.doc, "FIRST "), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  state.dropNextApply = true;
+  await expect(
+    session.applyLocalUpdate(keyedUpdate(session.doc, "CHANGED "), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("idempotency-key-reuse-mismatch");
+  expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
+
+  // A fresh key that meets a dead daemon lands once, under that key.
+  state.dropNextApply = true;
+  await session.applyLocalUpdate(keyedUpdate(session.doc, "NEXT"), undefined, {
+    idempotencyKey: "claim/1/1",
+  });
+  expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
+  expect((await session.settleNow()).content).toBe("FIRST NEXT");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("rejects a keyed write on a dead session while the daemon is still down, and keeps none of it", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-keyed-down-",
+    "ydoc-death-keyed-down",
+  );
+  const errors: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-keyed-down",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => errors.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "TYPED ");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  await expect(
+    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("Retry it with the same idempotency key.");
+  expect(session.doc.getText("plainText").toString()).toBe("TYPED ");
+  expect(errors.filter((context) => context.startsWith("Y.Doc local update"))).toHaveLength(1);
+
+  state.daemonAlive = true;
+  expect((await session.settleNow()).content).toBe("TYPED ");
+  expect(state.journalKeys).toEqual([null]);
   await session.close({ settle: false });
   await capture.stop();
 });

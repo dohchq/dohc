@@ -378,9 +378,10 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
   // claim id, attempt, and write ordinal), so a retried request of the same
-  // write dedupes engine-side. When the engine already recorded that key with
-  // other content, the returned promise rejects with its refusal and nothing
-  // of the update reaches the document. It never rejects for anything else.
+  // write dedupes engine-side. A keyed update's promise rejects when the
+  // engine did not record it under its key, with the engine's refusal when
+  // the key already recorded other content; nothing of a rejected update
+  // stays in the document. An update without a key never rejects.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
@@ -2133,6 +2134,77 @@ export function createWorkspaceEngineCapture(
       );
     };
 
+    // A keyed update enters the canonical doc only once the engine recorded
+    // it under its key. A recovery replay carries no key, so it must never
+    // carry this update: a failed attempt restores the canonical doc,
+    // rebuilds the generation without the update, and sends it once more
+    // under its key, so the engine's key ledger decides. A second failure,
+    // or the ledger's refusal, rejects: the caller can retry with the key.
+    const applyKeyedUpdate = async (
+      update: Uint8Array,
+      applyOptions: Parameters<
+        WorkspaceEngineYDocProviderSession["applyLocalUpdate"]
+      >[2],
+      armed: () => void,
+    ): Promise<void> => {
+      for (let attempt = 0; ; attempt += 1) {
+        if (canonicalDoc === null || closed) throw closedError();
+        const doc = canonicalDoc;
+        try {
+          if (current === null) await reviveDeadSession(doc);
+        } catch (error) {
+          throw keyedWriteNotRecorded(error);
+        }
+        if (current === null) throw closedError();
+        const generation = current;
+        // The first generation's doc is the canonical doc, and it takes the
+        // update before the journal answers. Keep the state to return to.
+        const before =
+          generation.doc === doc ? Y.encodeStateAsUpdate(doc) : null;
+        try {
+          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          armed();
+          await journaled;
+          Y.applyUpdate(doc, update);
+          if (
+            canonicalLineageClaimId === null &&
+            generation.lineageClaimId != null
+          ) {
+            canonicalLineageClaimId = generation.lineageClaimId;
+          }
+          return;
+        } catch (error) {
+          if (before !== null && canonicalDoc === doc) {
+            const restored = new Y.Doc();
+            Y.applyUpdate(restored, before);
+            canonicalDoc = restored;
+          }
+          // The failed generation still holds this doc, and keeps it until
+          // something replaces the generation.
+          if (isLineageChangedCause(error)) throw error;
+          const retired = canonicalDoc === doc ? null : doc;
+          try {
+            await rebind(generation, {
+              releaseBeforeOpen: !isEngineSessionReconnectError(error),
+            });
+          } catch (rebindError) {
+            onError(`Y.Doc rebind of ${input.path}`, rebindError);
+            throw keyedWriteNotRecorded(error);
+          }
+          // Its generation was replaced, so nothing reads this doc now.
+          retired?.destroy();
+          if (isIdempotencyKeyReuseRefusal(error)) throw error;
+          if (attempt > 0) throw keyedWriteNotRecorded(error);
+        }
+      }
+    };
+
+    const keyedWriteNotRecorded = (cause: unknown): Error =>
+      new Error(
+        `The engine did not record this write to ${input.path}, and nothing of it was kept. Retry it with the same idempotency key.`,
+        { cause },
+      );
+
     const closedError = (cause?: unknown): Error =>
       new Error(
         `Y.Doc session for ${input.path} is closed.`,
@@ -2249,7 +2321,12 @@ export function createWorkspaceEngineCapture(
         // it, leaving the document on "Saving…" with nothing left to arm
         // another settle). #514, and its two review rounds.
         const armed = announceOnce(onArmed);
+        const keyed = applyOptions?.idempotencyKey !== undefined;
         const applied = append(async () => {
+          if (keyed) {
+            await applyKeyedUpdate(update, applyOptions, armed);
+            return;
+          }
           if (canonicalDoc === null || closed) throw closedError();
           const doc = canonicalDoc;
           // The renderer has already accepted this update, so the canonical doc
@@ -2257,8 +2334,7 @@ export function createWorkspaceEngineCapture(
           // A daemon generation is rebuilt around that text, never instead of
           // it: dropping the update here is exactly how visible typing vanished
           // once a generation died.
-          const keyed = applyOptions?.idempotencyKey !== undefined;
-          if (current === null && !keyed) {
+          if (current === null) {
             Y.applyUpdate(doc, update);
             // The revive replays the canonical doc — this update included —
             // into the new generation. It announces the update when that
@@ -2266,15 +2342,7 @@ export function createWorkspaceEngineCapture(
             await reviveDeadSession(doc, armed);
             return;
           }
-          // A revive replay carries no idempotency key, so a keyed update
-          // waits for the revived generation and journals under its key.
-          if (current === null) await reviveDeadSession(doc);
-          if (current === null) throw closedError();
           const generation = current;
-          // The generation applies the update to its doc before the journal
-          // answers, and that doc can be the canonical doc itself. Keep the
-          // state a refused key must return to.
-          const beforeKeyed = keyed ? Y.encodeStateAsUpdate(doc) : null;
           try {
             // The provider journals and arms its settle synchronously inside
             // this call, so the update is covered from here. Announce it before
@@ -2293,24 +2361,6 @@ export function createWorkspaceEngineCapture(
               canonicalLineageClaimId = generation.lineageClaimId;
             }
           } catch (error) {
-            // The engine recorded none of this update, so the document must
-            // not keep it either. Restore the canonical doc to its state
-            // before the update, rebuild the generation from it, and hand the
-            // refusal to the caller that chose the key. The renderer never
-            // received this update, so it needs no replacement.
-            if (beforeKeyed !== null && isIdempotencyKeyReuseRefusal(error)) {
-              if (canonicalDoc === doc) {
-                const restored = new Y.Doc();
-                Y.applyUpdate(restored, beforeKeyed);
-                canonicalDoc = restored;
-              }
-              await rebind(generation, { releaseBeforeOpen: true }).catch(
-                (rebindError: unknown) => {
-                  onError(`Y.Doc rebind of ${input.path}`, rebindError);
-                },
-              );
-              throw error;
-            }
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.
             //
@@ -2349,10 +2399,10 @@ export function createWorkspaceEngineCapture(
             });
           }
         });
-        // The key's refusal belongs to the caller that chose the key. Every
-        // other failure is the session's, reported here as before.
+        // A keyed write's failure belongs to the caller that chose the key.
+        // Every other failure is the session's, reported here as before.
         return applied.catch((error: unknown) => {
-          if (isIdempotencyKeyReuseRefusal(error)) throw error;
+          if (keyed) throw error;
           onError(`Y.Doc local update of ${input.path}`, error);
         });
       },

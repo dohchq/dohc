@@ -66,6 +66,9 @@ let settleRefusal: unknown = null;
 // `last_settled_sha` (crates/dohc-engine-collab/src/durable.rs) and reinserts
 // the session entry, so the doc stays reserved.
 let closeRefusal: unknown = null;
+// Refuses the next journal write once, the way the daemon refuses it on the
+// wire, then lets later writes (the adapter's recovery included) through.
+let nextRecordRefusal: unknown = null;
 let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
@@ -104,6 +107,14 @@ function daemonSessions(): EngineWorkspaceSessions {
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
+      }
+      if (
+        request.method === YDOC_METHOD.recordUpdate &&
+        nextRecordRefusal !== null
+      ) {
+        const refusal = nextRecordRefusal;
+        nextRecordRefusal = null;
+        throw refusal;
       }
       if (
         recordUpdateDelayMs > 0 &&
@@ -188,6 +199,7 @@ beforeEach(async () => {
   requests = [];
   settleRefusal = null;
   closeRefusal = null;
+  nextRecordRefusal = null;
   captureErrors = [];
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
@@ -994,26 +1006,36 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     (request.params as { actorOriginId?: string }).actorOriginId === "claude-code")).toBe(true);
 });
 
+function keyedWrite(
+  session: Awaited<ReturnType<typeof capture.openYDocSession>>,
+  text: string,
+): Promise<void> {
+  const scratch = new Y.Doc();
+  Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
+  const before = Y.encodeStateVector(scratch);
+  typeIntoBody(scratch, text);
+  return session.applyLocalUpdate(
+    Y.encodeStateAsUpdate(scratch, before),
+    undefined,
+    { idempotencyKey: "claim/1/0" },
+  );
+}
+
+function journalMarkdown(): string {
+  const journal = new Y.Doc();
+  for (const update of ydoc.recordedUpdates) Y.applyUpdate(journal, update);
+  return documentMarkdown(Y.encodeStateAsUpdate(journal));
+}
+
 it("refuses a reused idempotency key with other content, and none of that content lands", async () => {
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
   });
-  const keyedWrite = (text: string) => {
-    const scratch = new Y.Doc();
-    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
-    const before = Y.encodeStateVector(scratch);
-    typeIntoBody(scratch, text);
-    return session.applyLocalUpdate(
-      Y.encodeStateAsUpdate(scratch, before),
-      undefined,
-      { idempotencyKey: "claim/1/0" },
-    );
-  };
-  await keyedWrite("First attempt.");
+  await keyedWrite(session, "First attempt.");
   await session.settleNow();
 
-  const refused = expect(keyedWrite("Changed retry.")).rejects.toThrow(
+  const refused = expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
     "idempotency-key-reuse-mismatch",
   );
   await session.settleNow();
@@ -1021,9 +1043,7 @@ it("refuses a reused idempotency key with other content, and none of that conten
 
   expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Changed retry.");
-  const journal = new Y.Doc();
-  for (const update of ydoc.recordedUpdates) Y.applyUpdate(journal, update);
-  expect(documentMarkdown(Y.encodeStateAsUpdate(journal))).not.toContain("Changed retry.");
+  expect(journalMarkdown()).not.toContain("Changed retry.");
   expect(captureErrors).toEqual([]);
 
   // The session still takes ordinary writes, and they land beside the first.
@@ -1040,4 +1060,26 @@ it("refuses a reused idempotency key with other content, and none of that conten
   expect(settled).toContain("Next edit.");
   expect(settled).not.toContain("Changed retry.");
   await session.close({ settle: false });
+});
+
+it("refuses a reused key that a busy store first turned away, and never resends it without the key", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  await keyedWrite(session, "First attempt.");
+  await session.settleNow();
+
+  // The store is busy for the changed retry. The adapter's recovery then
+  // resends it under the same key, and the key ledger refuses it.
+  nextRecordRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
+  await expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
+    "idempotency-key-reuse-mismatch",
+  );
+  await session.settleNow();
+  await session.close();
+
+  expect(journalMarkdown()).toContain("First attempt.");
+  expect(journalMarkdown()).not.toContain("Changed retry.");
+  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
 });

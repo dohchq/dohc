@@ -754,6 +754,11 @@ export class YdocAdapterSession {
         try {
           return await this.recoverCanonicalState(update, options);
         } catch (recoveryFailure) {
+          // Recovery resent under the caller's key and the engine found the
+          // key already used. That answer outranks whatever sent us here.
+          if (isIdempotencyKeyReuseRefusal(recoveryFailure)) {
+            throw recoveryFailure;
+          }
           if (
             recoveryFailure instanceof YdocAdapterError &&
             recoveryFailure.code === "lineage-changed"
@@ -786,7 +791,11 @@ export class YdocAdapterSession {
         }
       }
     });
-    return this.trackRecordOperation(operation);
+    return this.trackRecordOperation(
+      operation,
+      false,
+      options?.idempotencyKey !== undefined,
+    );
   }
 
   /**
@@ -810,6 +819,10 @@ export class YdocAdapterSession {
     // one transaction observed, so its success says nothing about an earlier
     // update the engine still has not seen.
     levelsTheEngine = false,
+    // A resend carries no idempotency key, so it may never carry a keyed
+    // update: the engine would record it even when the key refuses it. A
+    // keyed failure quarantines the session instead of owing a resend.
+    keyed = false,
   ): Promise<T> {
     const guarded = operation.then(
       (value) => {
@@ -824,8 +837,9 @@ export class YdocAdapterSession {
         // this doc holds. Recorded here because this is the one place that
         // sees both halves — the refusal and the resend that repairs it — and
         // a caller tracking it separately can only ever be a stale copy.
-        if (isTransientEngineRefusal(error)) this.engineMissingLocalState = true;
-        else this.quarantine(error);
+        if (isTransientEngineRefusal(error) && !keyed) {
+          this.engineMissingLocalState = true;
+        } else this.quarantine(error);
         this.surfaceSessionError(error);
         throw error;
       },
