@@ -326,6 +326,14 @@ export function AutomationsPanel(props: {
   const fileRef = useRef(file);
   fileRef.current = file;
   const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
+  // Runs replaces the list, so focus moves to Back, and Back returns it to
+  // the actions of the row that opened Runs.
+  const backButton = useRef<HTMLButtonElement | null>(null);
+  const returnFocusTo = useRef<string | null>(null);
+  const openRuns = (automationId: string, name: string) => {
+    returnFocusTo.current = automationId;
+    setRunsOf({ automationId, name });
+  };
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
   // Rises when the workspace or Collection changes, or the panel closes: a
@@ -405,6 +413,16 @@ export function AutomationsPanel(props: {
   // control cannot take focus.
   const rowElements = useRef(new Map<string, HTMLLIElement>());
   const closeButton = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (runsOf) {
+      backButton.current?.focus();
+      return;
+    }
+    const automationId = returnFocusTo.current;
+    returnFocusTo.current = null;
+    const row = automationId === null ? undefined : rowElements.current.get(automationId.split("#").at(-1) ?? "");
+    row?.querySelector<HTMLElement>('[aria-haspopup="menu"]')?.focus();
+  }, [runsOf]);
   const [focusAfterDelete, setFocusAfterDelete] = useState<{ neighbor: string | null } | null>(null);
   useEffect(() => {
     if (focusAfterDelete === null || saving) return;
@@ -459,7 +477,7 @@ export function AutomationsPanel(props: {
 
   const header = runsOf ? (
     <>
-      <IconButton aria-label="Back to automations" title="Back to automations" onClick={() => setRunsOf(null)}>
+      <IconButton ref={backButton} aria-label="Back to automations" title="Back to automations" onClick={() => setRunsOf(null)}>
         <ArrowLeft size={14} aria-hidden />
       </IconButton>
       <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{runsOf.name}</span>
@@ -537,7 +555,7 @@ export function AutomationsPanel(props: {
                             automation.id === entry.automation.id ? { ...automation, enabled } : automation))}
                       />
                     </div>
-                    <div className={`min-w-0 flex-1 ${entry.automation.enabled ? "" : "opacity-60"}`}>
+                    <div className="min-w-0 flex-1">
                       <p className="m-0 truncate text-[13px] font-medium text-ink">{entry.automation.name}</p>
                       <p className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted" title={sentenceText(automationSentence(entry.automation))}>
                         <Sentence parts={automationSentence(entry.automation)} />
@@ -550,12 +568,12 @@ export function AutomationsPanel(props: {
                     </div>
                     <LastRun
                       lastRun={entry.lastRun}
-                      onOpen={() => setRunsOf({ automationId: entry.automationId, name: entry.automation.name })}
+                      onOpen={() => openRuns(entry.automationId, entry.automation.name)}
                     />
                     <RowMenu
                       label={`${entry.automation.name} actions`}
                       items={[
-                        { label: "Runs", onSelect: () => setRunsOf({ automationId: entry.automationId, name: entry.automation.name }) },
+                        { label: "Runs", onSelect: () => openRuns(entry.automationId, entry.automation.name) },
                         { label: "Duplicate", onSelect: () => duplicate(entry.automation), disabled: editable === null || saving || count >= MAX_AUTOMATIONS },
                         { label: "Delete", onSelect: () => remove(entry.automation), disabled: editable === null || saving },
                       ]}
@@ -595,7 +613,7 @@ export function AutomationsPanel(props: {
           }}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
-            dohc rewrites the whole file when it saves, so its comments and hand formatting will be lost.
+            dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
           </p>
         </ConfirmDialog>
       ) : null}

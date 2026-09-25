@@ -222,6 +222,16 @@ export function CollectionPage({
   automationsOpenRef.current = automationsOpen;
   const automationsTouched = useRef(false);
   const reloadAutomations = automations.reload;
+  // Opening the panel reads the list again: runs and missing fields change
+  // without touching automations.yaml.
+  useEffect(() => {
+    if (automationsOpen) void reloadAutomations();
+  }, [automationsOpen]);
+  // Closing forgets a notice's ask, so the next open shows the list.
+  const closeAutomations = useCallback(() => {
+    setAutomationsOpen(false);
+    setPanelFocus(null);
+  }, []);
 
   // Invalidation: refresh when a settled batch touches this collection's
   // folder (or arrives without path detail), on the shell's trailing-edge
@@ -453,7 +463,7 @@ export function CollectionPage({
       collectionPath={collectionPath}
       automations={automations}
       focus={panelFocus}
-      onClose={() => setAutomationsOpen(false)}
+      onClose={closeAutomations}
       onOpenFile={onOpenFile}
       onError={onError}
       onNotice={onNotice}
@@ -474,7 +484,7 @@ export function CollectionPage({
       <SecondaryButton
         data-testid="collection-automations-button"
         aria-pressed={automationsOpen}
-        onClick={() => setAutomationsOpen((open) => !open)}
+        onClick={() => (automationsOpen ? closeAutomations() : setAutomationsOpen(true))}
         className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
       >
         <Zap size={12} aria-hidden />

@@ -124,7 +124,7 @@ describe("the ⚡ panel", () => {
     render(<Panel />);
     await userEvent.click(await screen.findByRole("switch", { name: "Stamp the finish date" }));
     const dialog = await screen.findByTestId("automations-reformat");
-    expect(dialog.textContent).toContain("comments and hand formatting will be lost");
+    expect(dialog.textContent).toContain("so you lose its comments and hand formatting.");
     await userEvent.click(screen.getByTestId("automations-reformat-confirm"));
     await waitFor(() => expect(written).toHaveLength(2));
     expect(written[1]).toMatchObject({ reformat: true, automations: [{ ...stamp, enabled: false }] });
@@ -167,6 +167,21 @@ describe("the ⚡ panel", () => {
     (onNotice.mock.calls[0]![1] as () => void)();
     await waitFor(() => expect(written).toHaveLength(3));
     expect(written[2]!.automations.map((automation) => automation.id)).toEqual(["stamp", "stamp-copy", "nudge"]);
+  });
+
+  it("moves focus to Back when Runs opens, and back to the row's actions when it closes", async () => {
+    makeBridge(read([summary(stamp), summary(nudge)]), [run({})]);
+    const user = userEvent.setup();
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-nudge");
+    const actions = within(row).getByRole("button", { name: "Nudge the owner actions" });
+    await user.click(actions);
+    await user.click(screen.getByRole("menuitem", { name: "Runs" }));
+    await screen.findByTestId("automation-runs");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to automations" }));
+    await user.keyboard("{Enter}");
+    await screen.findByTestId("automation-nudge");
+    expect(document.activeElement).toBe(within(screen.getByTestId("automation-nudge")).getByRole("button", { name: "Nudge the owner actions" }));
   });
 
   it("changes nothing when a save or an Undo answers after the workspace changed", async () => {
