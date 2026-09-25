@@ -2,7 +2,7 @@ use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
     AutomationClaim, AutomationClaimAttempt, AutomationFailure, AutomationFieldFacts,
-    AutomationRetry, AutomationSettle, AutomationSubscription,
+    AutomationGroupSubscription, AutomationRetry, AutomationSettle, AutomationSubscription,
 };
 use dohc_engine_storage::FaultInjector;
 use std::sync::Arc;
@@ -51,6 +51,56 @@ impl ActorHandle {
                     &workspace_id,
                     &automation_id,
                     &prefix,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn automation_subscribe_group(
+        &self,
+        workspace_id: String,
+        subscription: AutomationGroupSubscription,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::subscribe_automation_group(
+                    store,
+                    &workspace_id,
+                    &subscription,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn automation_unsubscribe_group(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        channel_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::unsubscribe_automation_group(
+                    store,
+                    &workspace_id,
+                    &automation_id,
+                    &channel_id,
                     faults.as_ref(),
                 )
                 .map_err(RuntimeError::from)

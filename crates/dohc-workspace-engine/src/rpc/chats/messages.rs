@@ -111,6 +111,12 @@ struct ChatReactionSetParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatMessageGetParams {
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatMessagesListParams {
     thread_id: String,
     limit: Option<i64>,
@@ -560,6 +566,27 @@ impl EngineService {
         )
         .await?;
         Ok(message_json(&message))
+    }
+
+    /// One message by id. A Group automation reads the whole message when
+    /// its claim carried the body truncated.
+    pub(crate) async fn chats_messages_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatMessageGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let message = Self::read_under_ctx(
+            &cancellation,
+            "chats.messages.get",
+            open.actor
+                .chat_message_get(open.workspace_id.clone(), params.message_id),
+        )
+        .await?;
+        Ok(json!({ "message": message_json(&message) }))
     }
 
     pub(crate) async fn chats_decisions_resolve(

@@ -1619,7 +1619,7 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
         Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(()),
+            primary: ApplyDisposition::Applied(_),
             refusals: ref outcome_refusals,
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()

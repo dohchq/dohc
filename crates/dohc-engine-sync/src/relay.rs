@@ -608,6 +608,10 @@ pub enum SyncPassOutcome {
 
 pub struct RelaySyncClient<T> {
     transport: T,
+    /// Group automation claims this client's applies committed and nobody
+    /// took yet. A pass that fails after an apply committed leaves them here:
+    /// its retry finds the message stored and claims nothing again.
+    automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
 struct PendingBaseRelayRepair {
@@ -633,7 +637,28 @@ struct PendingDeferredRelayRepair {
 
 impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            automation_claims: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The Group automation claims this client's applies committed since the
+    /// last call, whether or not the pass that applied them finished.
+    pub fn take_automation_claims(&self) -> Vec<dohc_engine_domain::AutomationClaim> {
+        std::mem::take(
+            &mut *self
+                .automation_claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn keep_automation_claims(&self, claims: Vec<dohc_engine_domain::AutomationClaim>) {
+        self.automation_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(claims);
     }
 
     pub fn transport(&self) -> &T {
@@ -1280,6 +1305,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut refusals,
                     &mut sharing_declined,
                     &mut record_facts,
+                    |claims| self.keep_automation_claims(claims),
                 )?,
             }
         }
@@ -1314,6 +1340,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refusals,
                             &mut sharing_declined,
                             &mut record_facts,
+                            |claims| self.keep_automation_claims(claims),
                         )?;
                     }
                 }
@@ -1786,7 +1813,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
                     match primary {
-                        ApplyDisposition::Applied(_) => applied += 1,
+                        ApplyDisposition::Applied(claims) => {
+                            applied += 1;
+                            self.keep_automation_claims(claims);
+                        }
                         ApplyDisposition::Refused(refusal) => {
                             push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                         }
@@ -2206,7 +2236,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
-                        ApplyDisposition::Applied(_) => {}
+                        ApplyDisposition::Applied(claims) => self.keep_automation_claims(claims),
                         ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => {
                             skipped += 1;
                             continue;
@@ -4485,6 +4515,7 @@ fn accumulate_pull_outcome(
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    keep_automation_claims: impl FnOnce(Vec<dohc_engine_domain::AutomationClaim>),
 ) -> Result<(), RelayError> {
     let ApplyOutcome {
         primary,
@@ -4503,6 +4534,7 @@ fn accumulate_pull_outcome(
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
             record_facts.extend(routed.record_facts);
+            keep_automation_claims(routed.automation_claims);
             for change in routed.materialization_changes {
                 insert_changed_path(changed_paths, change);
             }
