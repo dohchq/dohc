@@ -100,9 +100,9 @@ describe("app operation runtime", () => {
     "return {toJSON(){while(true){}}}",
     "const rows=[];while(true)rows.push('x'.repeat(10000));",
   ])("bounds guest execution and serialization: %s", async body => {
-    const input = request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:2*1024*1024}});
+    const input = request({source:`globalThis.operations={reserve(){${body}}}`,limits:{evaluationMs:100,memoryBytes:16*1024*1024}});
     // The guest limit must stop it. The worker deadline kill reports "exceeded its deadline" instead.
-    await expect(evaluateAppOperation(input)).rejects.toThrow("App operation failed.");
+    await expect(evaluateAppOperation(input)).rejects.toThrow(/^App operation (?:failed\.|needed more than its 16 MiB memory limit, so it stopped\.)$/);
   });
 
   it("kills a native SQL runaway and accepts a following operation", async () => {
@@ -132,6 +132,12 @@ describe("app operation runtime", () => {
       ["ctx.db.query('SELECT 1');return ctx.db.query('SELECT 2')",{statements:1}],
       ["return 'x'.repeat(1000)",{resultBytes:10}],
     ] as const) await expect(evaluateAppOperation({...input,source:`globalThis.operations={reserve(ctx){${body}}}`,limits})).rejects.toThrow();
+  });
+
+  it("names the memory limit an operation reached and accepts only limits QuickJS can start in", async () => {
+    const input = request({source:"globalThis.operations={reserve(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}"});
+    await expect(evaluateAppOperation(input)).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+    for(const memoryBytes of [2*1024*1024,20*1024*1024+1,32*1024*1024]) await expect(evaluateAppOperation({...input,limits:{memoryBytes}})).rejects.toThrow("Invalid app runtime limit.");
   });
 
   it("preserves a structured refusal even if guest code catches it", async () => {

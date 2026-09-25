@@ -170,7 +170,7 @@ async function poll(
   return (await r.json()) as { version: number; peers: Peer[] };
 }
 
-// Grant a chat-channel share addressed to a recipient user id, returning the
+// Grant a chat share addressed to a recipient user id, returning the
 // shareId. The selector's channelWireId is what the presence gate keys on.
 async function createChatShare(
   baseUrl: string,
@@ -334,7 +334,7 @@ describe("two-client presence over a real relay child", () => {
     const wireId = "wire-general";
     await claimWorkspace(baseUrl, "owner", ownerWs);
     await appendChannelCreate(baseUrl, "owner", ownerWs, 0, wireId);
-    // Owner grants the channel to a participant (chat-channel share).
+    // Owner grants the channel to a participant (chat share).
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", wireId);
 
     // OWNER publishes presence via the WORKSPACE route on the wireId topic.

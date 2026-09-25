@@ -409,6 +409,7 @@ mod tests {
                 workspace: Some(self.workspace.clone()),
                 deadline_ms: Some(30_000),
                 idempotency_key: None,
+                progress: false,
                 params,
             }
         }
@@ -572,6 +573,7 @@ mod tests {
                         workspace: Some(workspace),
                         deadline_ms: None,
                         idempotency_key: None,
+                        progress: false,
                         params: Value::Null,
                     },
                 )

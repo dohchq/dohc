@@ -13,6 +13,7 @@ import {
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "./ui/controls";
+import { useDismiss } from "./ui/useDismiss";
 import type {
   SitePackageInfo,
   SitePreviewMode,
@@ -212,6 +213,9 @@ export function SitePreviewPage(props: {
     [],
   );
   const [logsOpen, setLogsOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsRef = useRef<HTMLDetailsElement | null>(null);
+  const optionsTriggerRef = useRef<HTMLElement | null>(null);
   const [runningMode, setRunningMode] = useState<SitePreviewMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Why the preview isn't currently running, when it isn't: the dev server
@@ -306,6 +310,13 @@ export function SitePreviewPage(props: {
     [load, props.siteRoot, props.sharedView],
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
+
+  useDismiss({
+    open: optionsOpen,
+    container: optionsRef,
+    trigger: optionsTriggerRef,
+    onClose: () => setOptionsOpen(false),
+  });
 
   const start = useCallback(async (mode: SitePreviewMode) => {
     const request = ++previewStartRequestRef.current;
@@ -597,8 +608,14 @@ export function SitePreviewPage(props: {
               onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
           {modes.length > 0 ? (
-            <details className="group relative">
+            <details
+              ref={optionsRef}
+              open={optionsOpen}
+              onToggle={(event) => setOptionsOpen(event.currentTarget.open)}
+              className="group relative"
+            >
               <summary
+                ref={optionsTriggerRef}
                 data-testid="site-preview-options"
                 aria-label="Preview options"
                 title="Preview options"
@@ -616,7 +633,11 @@ export function SitePreviewPage(props: {
                     type="button"
                     data-testid={`site-preview-${mode}`}
                     disabled={runningMode !== null}
-                    onClick={() => void start(mode)}
+                    onClick={() => {
+                      setOptionsOpen(false);
+                      optionsTriggerRef.current?.focus();
+                      void start(mode);
+                    }}
                     className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
                     {mode === "build" ? (

@@ -41,6 +41,7 @@ async fn direct_call_passes_typed_structs_through() {
         workspace: None,
         deadline_ms: None,
         idempotency_key: None,
+        progress: false,
         params: json!({ "verbose": true }),
     };
     let response = transport

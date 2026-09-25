@@ -1,4 +1,6 @@
 import {
+  RelayApiVersionError,
+  type RelayApiUpdate,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   type PullWorkspaceFromRelayResult,
@@ -74,6 +76,10 @@ export interface CloudSyncSnapshot {
   pendingChangeCount: number;
   conflictCount: number;
   authExpired: boolean;
+  // Sync stopped because the relay does not serve this build's relay API
+  // version. Names the side that must update; sync starts again after dohc
+  // restarts on a version the relay serves.
+  updateRequired?: RelayApiUpdate;
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
   syncFailing?: boolean;
@@ -101,6 +107,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let conflictCount = 0;
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
+  let updateRequired: RelayApiUpdate | null = null;
   let authExpired = false;
   let syncFailing = false;
   let sharingDeclined: SharingDeclined[] = [];
@@ -163,6 +170,15 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (error instanceof RelayUnauthorizedError) {
       authExpired = true;
       stopped = true;
+      clearTimers();
+      emitChange();
+      return;
+    }
+    // Retrying cannot help until one side updates, so sync stops and says which.
+    if (error instanceof RelayApiVersionError) {
+      updateRequired = error.update;
+      stopped = true;
+      syncFailing = false;
       clearTimers();
       emitChange();
       return;
@@ -369,6 +385,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         pendingChangeCount,
         conflictCount,
         authExpired,
+        ...(updateRequired ? { updateRequired } : {}),
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         ...(syncFailing ? { syncFailing: true } : {}),

@@ -55,7 +55,7 @@ const GroupGrant = z.object({
 });
 const ChatGrant = z.object({
   ...BASE,
-  selector: z.object({ kind: z.literal("chat-channel"), channelWireId: ID }),
+  selector: z.object({ kind: z.literal("chat"), channelWireId: ID }),
   access: CHAT_ACCESS,
 });
 const FileGrant = z.object({

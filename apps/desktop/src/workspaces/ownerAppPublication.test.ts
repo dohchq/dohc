@@ -80,6 +80,17 @@ describe("app.publish.json paths", () => {
     expect(h.capturePaths).toEqual([["app/app.publish.json"]]);
   });
 
+  it("names the missing app.publish.json after the engine refuses to capture it", async () => {
+    const h = harness(); place(h, "app", "");
+    h.hooks.onCapture = () => { h.sources.delete("app/app.publish.json"); };
+    await expect(h.prepare("app", ["app", "shared"])).rejects.toThrow("app/app.publish.json changed while dohc prepared the app. Prepare the app again.");
+    expect(h.listCalls).toEqual([
+      { versionId: "main", limit: 500, afterPath: "app/" },
+      { versionId: "main", limit: 500 },
+    ]);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
   it("names a file that disappears while dohc captures the app", async () => {
     const h = harness(); place(h, "app", "");
     h.hooks.onCapture = () => { h.sources.delete("app/deps/greeting.js"); };

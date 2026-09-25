@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseUpdateManifest } from "./merge-update-manifests.mjs";
 
 const platforms = {
@@ -87,6 +86,6 @@ async function main() {
   console.log(JSON.stringify(await verifyDesktopReleaseArtifacts(options), null, 2));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

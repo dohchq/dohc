@@ -95,7 +95,7 @@
         "parentGrantId": "grant-link-active"
       },
       {
-        "kind": "chat-channel",
+        "kind": "chat",
         "grantId": "grant-chat-write",
         "shareId": "share-chat",
         "principal": { "kind": "user", "userId": "user-riley" },
@@ -107,7 +107,7 @@
         "parentGrantId": null
       },
       {
-        "kind": "chat-channel",
+        "kind": "chat",
         "grantId": "grant-chat-read",
         "shareId": "share-chat",
         "principal": { "kind": "email", "email": "riley@example.com" },
@@ -274,7 +274,7 @@
         "parentGrantId": null
       },
       {
-        "kind": "chat-channel",
+        "kind": "chat",
         "grantId": "chat-with-file-access",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-alex" },

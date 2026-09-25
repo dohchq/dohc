@@ -217,10 +217,10 @@ describe("desktop relay helpers", () => {
     }
   });
 
-  // A chat-channel grant has no file selector at all. That is a known kind,
+  // A chat grant has no file selector at all. That is a known kind,
   // not an unreadable response, so it resolves to null and the file surfaces
   // refuse it with their own guidance.
-  it("reports a chat-channel grant as having no file selector", async () => {
+  it("reports a chat grant as having no file selector", async () => {
     await expect(
       fetchShareViewInfo({
         relay: relay(
@@ -231,7 +231,7 @@ describe("desktop relay helpers", () => {
               granterEmail: null,
               genericChatWritable: false,
               selector: {
-                kind: "chat-channel",
+                kind: "chat",
                 channelWireId: "wire-a",
               },
               access: "read-only",
@@ -273,7 +273,7 @@ describe("desktop relay helpers", () => {
             Response.json({
               shareId: "share-channel",
               selector: {
-                kind: "chat-channel",
+                kind: "chat",
                 channelWireId: "wire-a",
                 access: "read-only",
               },
@@ -333,7 +333,7 @@ describe("desktop relay helpers", () => {
               granterUserId: "user-a",
               granterEmail: null,
               selector: {
-                kind: "chat-channel",
+                kind: "chat",
                 channelWireId: "wire-a",
               },
               access: "read-only",
@@ -349,7 +349,7 @@ describe("desktop relay helpers", () => {
       granterEmail: null,
       channelWireId: "wire-a",
       access: "read-only",
-      kind: "chat-channel",
+      kind: "chat",
       createdAtMs: 84,
     });
   });

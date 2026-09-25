@@ -116,7 +116,7 @@ describe("application menu template", () => {
       ["File", "New File", "CommandOrControl+N"],
       ["File", "Close Tab", "CommandOrControl+W"],
       ["View", "Command Palette", "CommandOrControl+Shift+P"],
-      ["View", "Quick Open", "CommandOrControl+P"],
+      ["View", "Go To", "CommandOrControl+P"],
       ["View", "New Editor Group Right", "CommandOrControl+\\"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
       ["View", "Toggle Chats Panel", "CommandOrControl+Alt+B"],
