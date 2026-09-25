@@ -18,6 +18,7 @@ import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type N
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
 import {serveRemoteMcp} from "./remoteMcp";
+import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, readRelayVersionRefusal } from "./relayVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -1104,6 +1105,11 @@ export function createShareWebApplication({
       if (relayResponse.status === 200) {
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
+      const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
+      if (versionRefusal) {
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return answer(jsonResponse(versionRefusal, { status: RELAY_VERSION_REFUSAL_STATUS }));
+      }
       const translated = await call.refusal?.(relayResponse);
       if (translated) return answer(translated);
       await relayResponse.body?.cancel().catch(() => undefined);
@@ -1157,7 +1163,11 @@ export function createShareWebApplication({
           })),
         });
         return response(result.body, {status: result.status, headers: result.headers});
-      } catch {return refused();}
+      } catch (error) {
+        return error instanceof RelayVersionRefusalError
+          ? jsonResponse(error.refusal, {status: RELAY_VERSION_REFUSAL_STATUS})
+          : refused();
+      }
       finally {mcpRequests--; release();}
     }
     if (pathname === "/api/apps") return discoverApps(request);
@@ -1235,7 +1245,12 @@ export function createShareWebApplication({
           let exchanged: ReturnType<typeof parsedRelaySession>;
           try {
             const relayResponse = await fetchRelay(bounded.request);
-            if (relayResponse.status !== 200) {await relayResponse.body?.cancel();return refused(relayResponse.status === 429 ? 429 : 404);}
+            if (relayResponse.status !== 200) {
+              const versionRefusal = await readRelayVersionRefusal(relayResponse, bounded.request.signal);
+              await relayResponse.body?.cancel().catch(() => undefined);
+              if (versionRefusal) return jsonResponse(versionRefusal, {status: RELAY_VERSION_REFUSAL_STATUS});
+              return refused(relayResponse.status === 429 ? 429 : 404);
+            }
             exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
           } finally {bounded.dispose();}
           if (!exchanged) return refused();

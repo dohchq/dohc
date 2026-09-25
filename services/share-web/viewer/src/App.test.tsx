@@ -1530,6 +1530,22 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it.each(["exchange", "current"] as const)("says which server part needs an update when its versions disagree at %s", async (step) => {
+    const message = "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.";
+    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_new", error: message }, 409);
+    history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") return step === "exchange" ? mismatch() : jsonResponse({ session: SESSION });
+      if (path === "/api/view/current") return mismatch();
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => container.querySelector("main.state")?.textContent === message);
+
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it("retries a rejected exchange and establishes the session", async () => {
     vi.useFakeTimers();
     const secret = "r".repeat(43);

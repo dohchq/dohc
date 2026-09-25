@@ -66,6 +66,7 @@ export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 type ViewerState =
   | { status: "loading" }
   | { status: "refused" }
+  | { status: "version-mismatch"; message: string }
   | {
       status: "ready";
       session: string;
@@ -92,6 +93,18 @@ class ViewResponseError extends Error {
   constructor(readonly status: number) {
     super("refused");
   }
+}
+
+// The server's share page and sync service run versions that disagree. The
+// server names which one needs the update.
+class VersionMismatchError extends Error {}
+
+async function versionMismatch(response: Response): Promise<VersionMismatchError | null> {
+  if (response.status !== 409) return null;
+  const body = await response.clone().json().catch(() => null) as { code?: unknown; error?: unknown } | null;
+  return (body?.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
+    ? new VersionMismatchError(body.error)
+    : null;
 }
 
 class EpochFloorChangedError extends Error {
@@ -380,7 +393,7 @@ async function loadCurrentProjection(
   signal?: AbortSignal,
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
-  if (!response.ok) throw new ViewResponseError(response.status);
+  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const body = await response.json() as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
@@ -479,7 +492,7 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
     );
     scrubFragment();
     const response = await exchange;
-    if (!response.ok) throw new Error("refused");
+    if (!response.ok) throw (await versionMismatch(response)) ?? new Error("refused");
     const body = (await response.json()) as { session?: unknown };
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
@@ -1047,8 +1060,12 @@ export function App() {
             epochLogFloor: log.epochLogFloor,
           });
         }
-      } catch {
-        if (current) setState({ status: "refused" });
+      } catch (error) {
+        if (current) {
+          setState(error instanceof VersionMismatchError
+            ? { status: "version-mismatch", message: error.message }
+            : { status: "refused" });
+        }
       }
     })();
     return () => {
@@ -1227,6 +1244,7 @@ export function App() {
       state.meta.effectiveSelector.versionId === null && state.files.some(file => file.path === editing.path)}
     onClose={() => setEditing(null)} />;
   if (state.status === "refused") return <Unavailable />;
+  if (state.status === "version-mismatch") return <main className="state"><p>{state.message}</p></main>;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
   const tree = fileTree(state.files);

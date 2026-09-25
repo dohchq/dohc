@@ -239,6 +239,65 @@ describe("share-web sessions", () => {
     expect(receivedClientAddress).toBe(clientAddress);
   });
 
+  describe.each(["api_version_too_old", "api_version_too_new"] as const)("a relay that refuses share-web's API version (%s)", (code) => {
+    const versionRefused = () => Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
+    const expected = {
+      ok: false,
+      code,
+      error: code === "api_version_too_old"
+        ? "This server's share page needs an update to match its sync service. Ask the person who runs the server to update it."
+        : "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.",
+    };
+
+    it.each(["/api/exchange", "/api/mcp/exchange"])("answers %s with which part needs the update", async (path) => {
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: async () => versionRefused(),
+      });
+      const response = await handler(request(path, exchange(SECRET_ALPHA)));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual(expected);
+    });
+
+    it("answers a session route and an agent's MCP call with which part needs the update", async () => {
+      let refuse = false;
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+        fetchRelay: async () => refuse
+          ? versionRefused()
+          : Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 }),
+        nowMs: () => 1_000,
+        newSessionToken: () => Buffer.alloc(32, 21).toString("base64url"),
+      });
+      const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+      const { session } = (await exchanged.json()) as { session: string };
+      const agent = (await (await handler(request("/api/mcp/exchange", exchange(SECRET_ALPHA)))).json()) as { bearer: string };
+      refuse = true;
+
+      const meta = await handler(request("/api/view/meta", {
+        headers: { cookie: cookiePair(exchanged), "x-dohc-link-session": session },
+      }));
+      expect(meta.status).toBe(409);
+      expect(await meta.json()).toEqual(expected);
+
+      const mcp = await handler(request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${agent.bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }));
+      expect(mcp.status).toBe(409);
+      expect(await mcp.json()).toEqual(expected);
+    });
+
+    it("keeps any other relay 400 as the generic refusal", async () => {
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+        fetchRelay: async () => Response.json({ ok: false, code: "bad_request", error: "relay text" }, { status: 400 }),
+      });
+      const response = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+      expect({ status: response.status, body: await response.text() }).toEqual({ status: 404, body: shareWebRefusalBody });
+    });
+  });
+
   it("names the relay API version it speaks on a relay request, whatever the browser sent", async () => {
     const versions: Array<string | null> = [];
     const handler = createShareWebHandler({
