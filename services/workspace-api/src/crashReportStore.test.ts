@@ -25,6 +25,8 @@ async function postgresReachable(): Promise<boolean> {
 describe.skipIf(!(await postgresReachable()))("crash report store", () => {
   const schema = `crash_reports_test_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   let client: pg.Client;
+  // The store takes a pool, as main.ts gives it, pointed at the same schema.
+  let pool: pg.Pool;
 
   beforeAll(async () => {
     client = new pg.Client({ connectionString: POSTGRES_URL });
@@ -32,9 +34,11 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
     await client.query(`create schema "${schema}"`);
     await client.query(`set search_path to "${schema}"`);
     await client.query(await readFile(MIGRATION, "utf8"));
+    pool = new pg.Pool({ connectionString: POSTGRES_URL, options: `-c search_path=${schema}`, max: 8 });
   });
 
   afterAll(async () => {
+    await pool?.end().catch(() => undefined);
     await client?.query(`drop schema if exists "${schema}" cascade`).catch(() => undefined);
     await client?.end().catch(() => undefined);
   });
@@ -44,7 +48,7 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
   });
 
   it("stores a report with its version and the time it arrived", async () => {
-    const store = createPostgresCrashReportStore(client);
+    const store = createPostgresCrashReportStore(pool);
     expect(await store.insert({ id: "r1", appVersion: "0.9.0", body: "dohc crash report\n\nx" })).toBe(true);
     const rows = await client.query<{ id: string; app_version: string; body: string; recent: boolean }>(
       "select id, app_version, body, received_at > now() - interval '1 minute' as recent from crash_reports",
@@ -53,15 +57,26 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
   });
 
   it("refuses a report once storage holds the most it keeps", async () => {
-    const store = createPostgresCrashReportStore(client, 2);
+    const store = createPostgresCrashReportStore(pool, 2);
     expect(await store.insert({ id: "a", appVersion: null, body: "dohc crash report" })).toBe(true);
     expect(await store.insert({ id: "b", appVersion: null, body: "dohc crash report" })).toBe(true);
     expect(await store.insert({ id: "c", appVersion: null, body: "dohc crash report" })).toBe(false);
     expect((await client.query("select id from crash_reports order by id")).rows).toEqual([{ id: "a" }, { id: "b" }]);
   });
 
+  it("never stores past the cap, however many inserts run at once", async () => {
+    const store = createPostgresCrashReportStore(pool, 3);
+    await store.insert({ id: "first", appVersion: null, body: "dohc crash report" });
+    await store.insert({ id: "second", appVersion: null, body: "dohc crash report" });
+    // Eight connections race for the one place left.
+    const results = await Promise.all(Array.from({ length: 8 }, (_, index) =>
+      store.insert({ id: `racer-${index}`, appVersion: null, body: "dohc crash report" })));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect((await client.query("select count(*)::int as n from crash_reports")).rows).toEqual([{ n: 3 }]);
+  });
+
   it("deletes only reports older than 90 days", async () => {
-    const store = createPostgresCrashReportStore(client);
+    const store = createPostgresCrashReportStore(pool);
     for (const id of ["old", "recent"]) {
       await store.insert({ id, appVersion: null, body: "dohc crash report" });
     }
@@ -72,7 +87,7 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
   });
 
   it("deletes more expired reports than one batch holds", async () => {
-    const store = createPostgresCrashReportStore(client, undefined, 2);
+    const store = createPostgresCrashReportStore(pool, undefined, 2);
     for (const id of ["a", "b", "c", "d", "e", "recent"]) {
       await store.insert({ id, appVersion: null, body: "dohc crash report" });
     }

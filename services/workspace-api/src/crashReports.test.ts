@@ -205,9 +205,46 @@ describe("expired crash reports", () => {
         queries.push(values);
         return { rowCount: counts.shift() ?? 0 };
       },
+      connect: async () => { throw new Error("delete takes no transaction"); },
     });
     expect(await store.deleteExpired()).toBe(1_003);
     expect(queries).toEqual(Array(4).fill([90, 500]));
+  });
+});
+
+describe("storing a crash report", () => {
+  function fakePool(failOn?: RegExp) {
+    const statements: string[] = [];
+    let released = 0;
+    const client = {
+      query: async (sql: string) => {
+        statements.push(sql.replace(/\s+/g, " ").trim().split(" ").slice(0, 2).join(" "));
+        if (failOn?.test(sql)) throw new Error("the database went away");
+        return { rowCount: 1 };
+      },
+      release: () => { released += 1; },
+    };
+    const pool = {
+      query: async () => { throw new Error("insert must use one connection"); },
+      connect: async () => client,
+    };
+    return { pool, statements, released: () => released };
+  }
+
+  it("takes the lock before the count, inside one transaction", async () => {
+    const { pool, statements, released } = fakePool();
+    const stored = await createPostgresCrashReportStore(pool).insert({ id: "r", appVersion: null, body: REPORT });
+    expect(stored).toBe(true);
+    expect(statements).toEqual(["begin", "select pg_advisory_xact_lock(hashtext('crash_reports'))", "insert into", "commit"]);
+    expect(released()).toBe(1);
+  });
+
+  it("rolls back and releases the connection when the insert fails", async () => {
+    const { pool, statements, released } = fakePool(/^\s*insert/);
+    await expect(createPostgresCrashReportStore(pool).insert({ id: "r", appVersion: null, body: REPORT }))
+      .rejects.toThrow("the database went away");
+    expect(statements.at(-1)).toBe("rollback");
+    expect(released()).toBe(1);
   });
 });
 

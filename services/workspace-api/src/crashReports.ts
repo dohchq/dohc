@@ -36,27 +36,46 @@ export interface CrashReportStore {
   deleteExpired(): Promise<number>;
 }
 
-/** The slice of `pg.Pool` the store uses. */
-export interface CrashReportQuery {
+interface CrashReportQuery {
   query(sql: string, values: unknown[]): Promise<{ rowCount: number | null }>;
 }
 
+/** The slice of `pg.Pool` the store uses. */
+export interface CrashReportPool extends CrashReportQuery {
+  connect(): Promise<CrashReportQuery & { release(): void }>;
+}
+
 export function createPostgresCrashReportStore(
-  pool: CrashReportQuery,
+  pool: CrashReportPool,
   storedMax = CRASH_REPORTS_STORED_MAX,
   deleteBatch = CRASH_REPORT_DELETE_BATCH,
 ): CrashReportStore {
   return {
+    // One insert at a time holds the lock from before the count until its
+    // commit, so two requests can never both see room for one more report.
+    // Each statement reads a fresh snapshot, so the count sees every report
+    // committed before the lock was granted.
     async insert(report) {
-      // Concurrent inserts can pass the count together, so the cap can be
-      // exceeded by the number of requests in flight. That is still a bound.
-      const result = await pool.query(
-        `insert into crash_reports (id, app_version, body)
-         select $1, $2, $3
-         where (select count(*) from crash_reports) < $4`,
-        [report.id, report.appVersion, report.body, storedMax],
-      );
-      return result.rowCount === 1;
+      const client = await pool.connect();
+      try {
+        await client.query("begin", []);
+        try {
+          await client.query("select pg_advisory_xact_lock(hashtext('crash_reports'))", []);
+          const result = await client.query(
+            `insert into crash_reports (id, app_version, body)
+             select $1, $2, $3
+             where (select count(*) from crash_reports) < $4`,
+            [report.id, report.appVersion, report.body, storedMax],
+          );
+          await client.query("commit", []);
+          return result.rowCount === 1;
+        } catch (error) {
+          await client.query("rollback", []).catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        client.release();
+      }
     },
     // In batches, so each statement stays within the pool's statement
     // timeout even after a long outage, and every batch that ends is kept.
