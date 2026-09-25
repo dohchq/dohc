@@ -27,7 +27,7 @@ import {
   unsupportedReason,
 } from "./automationPlan";
 import { checkAutomationReach, type ReachCollection, type ReachRoster } from "./automationReach";
-import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -204,6 +204,23 @@ export type CollectionAutomationUndo =
   | { status: "refused"; reason: string };
 
 const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
+
+/**
+ * What runs did, oldest first. A record a run created before it stopped
+ * has no write yet, so it is listed from `created`, once.
+ */
+function writesOf(runs: readonly StoredRun[]): RunWrite[] {
+  const writes = runs.flatMap((run) => run.applied.flatMap((effect) => effect.writes));
+  const listed = new Set(writes.flatMap((write) => (write.kind === "created" ? [write.recordId] : [])));
+  for (const run of runs) {
+    for (const created of run.created) {
+      if (listed.has(created.recordId)) continue;
+      listed.add(created.recordId);
+      writes.push({ kind: "created", recordId: created.recordId, path: created.path });
+    }
+  }
+  return writes;
+}
 
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -563,7 +580,7 @@ export class CollectionAutomations {
         error: claim.error ?? null,
         createdAtMs: claim.createdAtMs,
         updatedAtMs: claim.updatedAtMs,
-        writes: stored.flatMap((run) => run.applied.flatMap((effect) => effect.writes)),
+        writes: writesOf(stored),
         definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
         // The engine's rule: a chain stop is inserted failed and never served.
         chainStopped: claim.state === "failed" && claim.attempts === 0,

@@ -971,6 +971,28 @@ describe("Collection automations", () => {
     expect(finished).toMatchObject({ undone: true });
   });
 
+  it("lists a record a run created before it stopped, once, so its Undo shows", async () => {
+    const addOnly = [
+      "  - id: log",
+      "    name: Log",
+      "    when: {field-changed: Status}",
+      "    do:",
+      "      - add-record: {Title: Logged}",
+      "        collection: Log",
+    ].join("\n");
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: addOnly } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    // The record is created, then its fields cannot be set.
+    w.failOpenAt(1);
+    const claim = w.claim("collection:Tasks#log", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    const added = [...w.records.values()].find((record) => record.collection === "Log")!;
+    const [run] = await w.executor.runs("collection:Tasks#log");
+    expect(run!.writes).toEqual([{ kind: "created", recordId: added.id, path: added.path }]);
+  });
+
   it("moves a record to the trash that a run created before it stopped setting its fields", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
