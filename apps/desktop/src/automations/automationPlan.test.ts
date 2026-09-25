@@ -94,10 +94,10 @@ describe("find conditions", () => {
 
 describe("what the executor can run", () => {
   it("subscribes each record trigger to the changes it names", () => {
-    expect(subscriptionFor({ kind: "record-added" })).toEqual({ kinds: ["added"] });
-    expect(subscriptionFor({ kind: "field-changed", field: "Status", to: null })).toEqual({ kinds: ["changed"], fields: ["Status"] });
-    expect(subscriptionFor({ kind: "record-changed", fields: null })).toEqual({ kinds: ["changed"] });
-    expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late" })).toEqual({ kinds: ["added", "changed"] });
+    expect(subscriptionFor({ kind: "record-added", table: null })).toEqual({ kinds: ["added"] });
+    expect(subscriptionFor({ kind: "field-changed", field: "Status", to: null, table: null })).toEqual({ kinds: ["changed"], fields: ["Status"] });
+    expect(subscriptionFor({ kind: "record-changed", fields: null, table: null })).toEqual({ kinds: ["changed"] });
+    expect(subscriptionFor({ kind: "starts-matching", condition: "record.Late", table: null })).toEqual({ kinds: ["added", "changed"] });
   });
 
   it("names why it cannot run messages, code, schedules, or a Find the query cannot express", () => {
@@ -106,6 +106,8 @@ describe("what the executor can run", () => {
     expect(unsupportedReason(withStep("{notify: Hi, to: [user-1]}"))).toMatch(/messages/);
     expect(unsupportedReason(withStep("{run: 'return 1'}"))).toMatch(/code steps/);
     expect(unsupportedReason(withStep("{find: 'record.Points > 3', as: big}"))).toMatch(/one field/);
+    expect(unsupportedReason(withStep("{set: {Done: true}, operation: tasks.edit}"))).toMatch(/dataset/);
+    expect(unsupportedReason(automation("id: a\nname: A\nwhen: {record-added: null, table: Tasks}\ndo: [{set: {Done: true}}]"))).toMatch(/dataset/);
     expect(unsupportedReason(automation("id: a\nname: A\nwhen: {schedule: day, timezone: UTC}\ndo: [{find: 'true', as: all}]")))
       .toMatch(/record change/);
     const finds = Array.from({ length: 6 }, (_, index) => `{find: 'true', as: f${index}}`).join(", ");
