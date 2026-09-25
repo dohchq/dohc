@@ -154,7 +154,7 @@ Other input and result fields remain excluded. Choose **Undo edit** to restore t
 
 Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
-Run `dohc dataset --help` for the supported command fields.
+Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 
 ## Change fields and rules
 

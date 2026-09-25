@@ -249,6 +249,36 @@ describe("parseCliArguments", () => {
     });
   });
 
+  it("asks for help without parsing the verb's arguments", () => {
+    expect(parseCliArguments([], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["-h"], {})).toEqual({ help: [] });
+    expect(parseCliArguments(["chat"], {})).toEqual({ help: ["chat"] });
+    expect(parseCliArguments(["--help", "dataset"], {})).toEqual({ help: ["dataset"] });
+    expect(parseCliArguments(["chat", "reply", "--help"], {})).toEqual({ help: ["chat", "reply"] });
+    expect(parseCliArguments(["app", "prepare", "-h", "{}"], {})).toEqual({ help: ["app", "prepare"] });
+  });
+
+  it("reads --help as text after the terminator or as a flag value", () => {
+    expect(parseCliArguments(["chat", "post", "general", "--", "--help"], {})).toMatchObject({
+      verb: "post",
+      body: "--help",
+    });
+    expect(parseCliArguments(["chat", "post", "general", "--title", "--help", "Body"], {})).toMatchObject({
+      verb: "post",
+      title: "--help",
+      body: "Body",
+    });
+  });
+
+  it("requires the fields the CLI cannot ask for later", () => {
+    expect(() =>
+      parseCliArguments(["dataset", "prepareRecovery", JSON.stringify({ workspaceId: "w" })], {}),
+    ).toThrow("dataset prepareRecovery requires sourcePath");
+    expect(() =>
+      parseCliArguments(["dataset", "list", JSON.stringify({ workspaceId: "w", action: "delete" })], {}),
+    ).toThrow("dataset list arguments must not name another action");
+  });
+
   it("returns distinct input errors", () => {
     expect(() => parseCliArguments(["chat", "reply", "th_a"], {})).toThrow(
       "reply requires a body or '-' for stdin",
