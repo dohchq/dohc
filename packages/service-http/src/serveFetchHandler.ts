@@ -1,10 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 import { pipeResponseBody } from "./pipeResponseBody";
 
 export interface ServeFetchHandlerOptions {
   handler: (request: Request) => Promise<Response>;
   /** The most request-body bytes buffered for this URL before the upload is refused. */
   maxBodyBytes: (url: URL) => number;
+  /** Dispatch without buffering. These handlers must authenticate before reading and bound body consumption. */
+  streamBody?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
   /** The answer when the handler throws. */
@@ -14,10 +17,9 @@ export interface ServeFetchHandlerOptions {
 }
 
 /**
- * A node:http server over a fetch-style handler. The body is buffered under a
- * streaming cap so an oversized upload is refused as it arrives, raw bytes
- * pass through untouched in both directions, and a client disconnect aborts
- * the request signal so parked work releases at once.
+ * A node:http server over a fetch-style handler. Bodies are buffered under a
+ * cap unless a handler opts into bounded streaming. Raw bytes pass through
+ * untouched in both directions. A client disconnect aborts the request signal.
  */
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   return createServer((incoming, outgoing) => {
@@ -39,6 +41,26 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       disconnect.abort();
       outgoing.destroy();
     });
+    const method = incoming.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD" && options.streamBody?.(url, method)) {
+      const headers = new Headers(incoming.headers as Record<string, string>);
+      options.prepareHeaders?.(headers, incoming, url);
+      const body = Readable.toWeb(incoming, {
+        strategy: { highWaterMark: 64 * 1024, size: (chunk: Uint8Array) => chunk.byteLength },
+      }) as ReadableStream<Uint8Array>;
+      const init: RequestInit & { duplex: "half" } = { method, headers, signal: disconnect.signal, body, duplex: "half" };
+      let request: Request;
+      try { request = new Request(url, init); }
+      catch { incoming.destroy(); outgoing.destroy(); return; }
+      // An admission refusal may leave the upload unread. Flush its response
+      // before closing the connection; never drain an unauthenticated archive.
+      void options.handler(request)
+        .then(response => writeResponse(response, outgoing, incoming.readableEnded ? undefined : incoming))
+        .catch(() => {
+          if (!outgoing.destroyed) void writeResponse(options.failure(), outgoing, incoming);
+        });
+      return;
+    }
     incoming.on("data", (chunk: Buffer) => {
       if (rejected) return;
       received += chunk.length;

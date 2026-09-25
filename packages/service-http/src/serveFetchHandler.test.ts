@@ -42,6 +42,36 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 }
 
 describe("serveFetchHandler", () => {
+  it("admits a streaming upload before its client finishes sending the body", async () => {
+    const { port } = await serve({
+      streamBody: () => true,
+      handler: async () => new Response("not authorized", { status: 403 }),
+    });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "POST" }, resolve);
+      request.on("error", reject);
+      request.write(Buffer.alloc(1));
+      // No end: authentication must not wait for the rest of an archive.
+    });
+    expect(response.statusCode).toBe(403);
+    response.resume();
+  });
+
+  it("streams uploads larger than its ordinary buffering cap with prepared headers", async () => {
+    const { port } = await serve({
+      streamBody: () => true,
+      prepareHeaders: headers => headers.set("x-trusted", "server"),
+      handler: async request => {
+        expect(request.headers.get("x-trusted")).toBe("server");
+        let bytes = 0;
+        for await (const chunk of request.body!) bytes += chunk.byteLength;
+        return Response.json({ bytes });
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${port}/import`, { method: "POST", body: Buffer.alloc(2048) });
+    expect(await response.json()).toEqual({ bytes: 2048 });
+  });
+
   it("disposes an errored response returned after its client disconnected", async () => {
     let entered!: () => void, cancellationAwaited!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
