@@ -14,6 +14,11 @@ import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./
 import { createLinkAppCollectionRoutes, type LinkAppCollectionRoute, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {
+  createCollectionWriteRateLimiter,
+  createCollectionWriteRoutes,
+  type CollectionWriteRoute,
+} from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -138,6 +143,10 @@ export interface CreateSyncRelayHandlerOptions {
   relayExchangeKey?: string;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
+  // Direct writes to a Collection's own files under Edit. Off unless the
+  // deployment opts in.
+  collectionWritesEnabled?: boolean;
+  collectionWriteRateLimiter?: TokenBucketLimiter;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
   linkExchangeGrantRateLimiter?: TokenBucketLimiter;
@@ -188,6 +197,7 @@ type SyncRelayRoute =
   | { route: "share-discussion-activity"; shareId: string }
   | { route: "share-discussion-moderation"; shareId: string }
   | ShareProposalRoute
+  | CollectionWriteRoute
   | WorkspaceProposalRoute
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
@@ -217,6 +227,8 @@ export function createSyncRelayHandler({
   relayExchangeKey,
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
+  collectionWritesEnabled = false,
+  collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
   linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -445,6 +457,16 @@ export function createSyncRelayHandler({
     shareActionGuard,
     discussionActivity,
   );
+
+  const respondToCollectionWrites = createCollectionWriteRoutes({
+    storage,
+    enabled: collectionWritesEnabled,
+    rateLimiter: collectionWriteRateLimiter,
+    nowMs,
+    newId,
+    claimPendingShares,
+    discussionActivity,
+  });
 
   const {
     grantedShareSummary,
@@ -832,6 +854,10 @@ export function createSyncRelayHandler({
         return await respondToShareProposals(request, route, actor.userId);
       }
 
+      if (route.route === "share-collection-writes") {
+        return await respondToCollectionWrites(request, route, actor.userId);
+      }
+
       if (route.route === "share-presence") {
         return await respondToSharePresence(request, route.shareId, actor.userId);
       }
@@ -1028,6 +1054,9 @@ function parseRoute(request: Request): SyncRelayRoute {
     }
     if (parts.length === 4 && parts[3] === "proposals") {
       return { route: "share-proposals", shareId };
+    }
+    if (parts.length === 4 && parts[3] === "collection-writes") {
+      return { route: "share-collection-writes", shareId };
     }
     if (parts.length === 6 && parts[3] === "proposals" && parts[5] === "withdraw") {
       return {

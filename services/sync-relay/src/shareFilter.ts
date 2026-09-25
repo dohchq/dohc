@@ -16,6 +16,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
+import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
 // PR 18 share grants: the server-side filter that decides which replicated
@@ -1419,6 +1420,145 @@ export function filterProposedChangeForShare(
       afterContentKind,
       afterByteLength,
       recordedAtMs,
+    },
+  };
+}
+
+// The Collection files a named recipient with Edit may write directly
+// (ADR 0013). Everything else, deletes and renames included, stays on
+// proposals.
+export const COLLECTION_SCHEMA_FILE = "collection.yaml";
+export const COLLECTION_AUTOMATIONS_FILE = "automations.yaml";
+// Records one new-Collection batch may create.
+export const MAX_NEW_COLLECTION_RECORDS = 500;
+// The content one direct write may carry, summed over its files.
+export const MAX_COLLECTION_WRITE_BYTES = 4 * 1024 * 1024;
+
+// One direct write, as the decision classifies it. Every change is a text
+// write with normalized paths, and `collectionPath` is never the root.
+export type CollectionWrite =
+  // An in-place write to `<C>/collection.yaml`.
+  | { kind: "schema"; collectionPath: string; change: ProposedChange }
+  // An in-place write to `<C>/automations.yaml`, or creating it.
+  | { kind: "automations"; collectionPath: string; change: ProposedChange }
+  // Creates `<P>/<N>/collection.yaml`, then an optional `automations.yaml`,
+  // then `.md` records directly inside `<P>/<N>`, in that order, so the
+  // owner's engine meets the schema before the records.
+  | { kind: "new-collection"; collectionPath: string; changes: ProposedChange[] };
+
+export type CollectionWriteDecision =
+  | { allowed: false }
+  | { allowed: true; write: CollectionWrite };
+
+function parentPath(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
+}
+
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+// The single decision point for what a recipient may WRITE DIRECTLY. It is a
+// fourth question beside reading, appending, and proposing, and it has its
+// own function for the reason those do: the direct lane must never widen by
+// inheriting the proposal allowlist. It parses each change with the proposal
+// rules and then narrows: an Edit grant on files in main, text writes only,
+// and one of three shapes whose Collection folder the selector covers.
+//
+// It decides the shape only. Whether the files exist, whether the base is
+// current, and whether their content is valid are the storage's and the
+// route's checks.
+export function filterCollectionWriteForShare(
+  selector: AnyShareSelector,
+  raw: unknown,
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): CollectionWriteDecision {
+  const refused: CollectionWriteDecision = { allowed: false };
+  if (isChatChannelSelector(selector)) return refused;
+  if (isGroupSelector(selector)) {
+    if (!groupChannelIsOrdinary(selector, chat)) return refused;
+    return filterCollectionWriteForShare(fileHalfOfGroup(selector), raw, chat);
+  }
+  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) {
+    return refused;
+  }
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
+    return refused;
+  }
+  const changes: ProposedChange[] = [];
+  // Two paths that one disk would hold as one file are one path here.
+  const paths = new Set<string>();
+  let bytes = 0;
+  for (const entry of raw) {
+    const decision = filterProposedChangeForShare(selector, entry, chat);
+    if (!decision.allowed) return refused;
+    const change = decision.change;
+    if (
+      change.operation !== "write" || change.afterContentKind !== "text" ||
+      change.afterPath === null || change.afterByteLength === null
+    ) {
+      return refused;
+    }
+    // A write in place names one path on both sides. Anything else moves a
+    // file, which stays on proposals.
+    if (change.basedOnPath !== null && change.basedOnPath !== change.afterPath) return refused;
+    const key = pathCollisionKey(change.afterPath);
+    if (paths.has(key)) return refused;
+    paths.add(key);
+    bytes += change.afterByteLength;
+    if (bytes > MAX_COLLECTION_WRITE_BYTES) return refused;
+    changes.push(change);
+  }
+  // Edit on the Collection folder itself, not only on its files.
+  const coversFolder = (folder: string) => folder !== "" && visibleSharePath(selector, folder) === folder;
+
+  const schemaCreates = changes.filter(
+    (change) => change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
+  );
+  if (schemaCreates.length === 0) {
+    if (changes.length !== 1) return refused;
+    const change = changes[0]!;
+    const collectionPath = parentPath(change.afterPath!);
+    if (!coversFolder(collectionPath)) return refused;
+    const file = baseName(change.afterPath!);
+    if (file === COLLECTION_SCHEMA_FILE && change.basedOnPath !== null) {
+      return { allowed: true, write: { kind: "schema", collectionPath, change } };
+    }
+    if (file === COLLECTION_AUTOMATIONS_FILE) {
+      return { allowed: true, write: { kind: "automations", collectionPath, change } };
+    }
+    return refused;
+  }
+
+  // A new Collection: creates only, all directly inside one folder whose
+  // parent the selector covers.
+  if (schemaCreates.length !== 1) return refused;
+  const schema = schemaCreates[0]!;
+  const collectionPath = parentPath(schema.afterPath!);
+  if (!coversFolder(parentPath(collectionPath))) return refused;
+  let automations: ProposedChange | null = null;
+  const records: ProposedChange[] = [];
+  for (const change of changes) {
+    if (change === schema) continue;
+    if (change.basedOnPath !== null || parentPath(change.afterPath!) !== collectionPath) return refused;
+    const file = baseName(change.afterPath!);
+    if (file === COLLECTION_AUTOMATIONS_FILE) {
+      if (automations !== null) return refused;
+      automations = change;
+    } else if (file.toLowerCase().endsWith(".md")) {
+      records.push(change);
+    } else {
+      return refused;
+    }
+  }
+  if (records.length > MAX_NEW_COLLECTION_RECORDS) return refused;
+  return {
+    allowed: true,
+    write: {
+      kind: "new-collection",
+      collectionPath,
+      changes: [schema, ...(automations ? [automations] : []), ...records],
     },
   };
 }
