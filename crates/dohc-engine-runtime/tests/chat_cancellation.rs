@@ -26,6 +26,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         .await
         .expect("create prerequisite channel");
     let start = StartChannelThread {
+        automation: None,
         workspace_id: workspace_id.clone(),
         channel_id: "existing-channel".to_owned(),
         thread_id: "existing-thread".to_owned(),
@@ -71,6 +72,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
     assert_eq!(revision_before, 1);
 
     let cancelled_start = StartChannelThread {
+        automation: None,
         thread_id: "cancelled-channel-thread".to_owned(),
         message_id: "cancelled-opening-message".to_owned(),
         request_id: Some("cancelled-start-request".to_owned()),
@@ -87,6 +89,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         request_id: "cancelled-create-request".to_owned(),
     };
     let message = SendMessage {
+        automation: None,
         workspace_id: workspace_id.clone(),
         thread_id: start.thread_id.clone(),
         message_id: "cancelled-reply".to_owned(),

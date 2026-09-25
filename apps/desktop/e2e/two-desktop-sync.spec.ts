@@ -158,7 +158,7 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
   }
 });
 
-test("@two-client two desktops that open a document offline merge their edits once each closes it", async () => {
+test("@two-client two desktops that open a document offline each show the other's edits while it stays open", async () => {
   test.setTimeout(300_000);
   const first = await createTempWorkspace();
   const second = await createTempWorkspace();
@@ -187,16 +187,14 @@ test("@two-client two desktops that open a document offline merge their edits on
     await expect.poll(() => lineageClaims(second), { message: "both editors originate the same base" }).toEqual(lineageClaims(first));
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
 
-    // Online: the left types. An open editor does not yet show edits pulled
-    // from another desktop, so the right closes the document to receive them.
+    // Online: the left types while nobody touches the right. The right's open
+    // editor shows the edit, and its file follows.
     await typeAtEnd(left.page, " Typed on the left.");
     await expect.poll(() => disk(first)).toContain("Typed on the left.");
-    await right.page.keyboard.press("ControlOrMeta+w");
+    await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.", { timeout: 90_000 });
     await expect.poll(() => disk(second), { timeout: 90_000 }).toContain("Typed on the left.");
-    await openLiveDocument(right.page);
-    await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.");
 
-    // Offline: each desktop types into the same document, then closes it.
+    // Offline: each desktop types into the same open document.
     await relay.stop();
     relay = null;
     await typeAtEnd(left.page, " Left offline.");
@@ -204,9 +202,18 @@ test("@two-client two desktops that open a document offline merge their edits on
     await expect.poll(() => disk(first)).toContain("Left offline.");
     await expect.poll(() => disk(second)).toContain("Right offline.");
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
+
+    // Back online, each open editor shows every sentence exactly once.
+    const typed = ["Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
+    for (const desktop of [left, right]) {
+      await expect.poll(async () => {
+        const shown = await desktop.page.getByTestId("markdown-editor").innerText();
+        return typed.every((edit) => count(shown, edit) === 1);
+      }, { timeout: 120_000 }).toBe(true);
+    }
     for (const desktop of [left, right]) await desktop.page.keyboard.press("ControlOrMeta+w");
 
-    const everyEdit = ["# Shared", "Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
+    const everyEdit = ["# Shared", ...typed];
     await expect.poll(async () => {
       const [leftText, rightText] = [await disk(first), await disk(second)];
       return leftText === rightText && everyEdit.every((edit) => count(leftText, edit) === 1);

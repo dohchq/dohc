@@ -13,9 +13,10 @@ use dohc_engine_sync::{
     MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
     ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, RelayError,
     RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
-    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
-    SharedChannelRequest, SharedChannelResponse,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
+    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
+    SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -782,14 +783,26 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
+        let has_origin = !req.origin_id.is_empty();
         let page = self.read_share_log(
             &req.share_id,
             req.cursor,
             MAX_PULL_OPS,
-            &[("channelWireId", req.channel_wire_id)],
+            &[
+                ("channelWireId", req.channel_wire_id),
+                ("originId", req.origin_id),
+            ],
         )?;
+        if has_origin && page.own_origin_id.as_ref().is_none_or(String::is_empty) {
+            return Err(RelayError::InvalidResponse);
+        }
         Ok(SharedChannelResponse {
-            ops: page.ops,
+            own_origin_id: page.own_origin_id,
+            ops: page
+                .ops
+                .into_iter()
+                .map(WireLogRow::into_share_envelope)
+                .collect(),
             next_cursor: page.next_cursor,
             has_more: page.has_more,
             push: None,
@@ -822,7 +835,11 @@ impl RelayTransport for HttpRelayTransport {
         let page =
             self.read_share_log(&req.share_id, req.cursor, req.limit.min(MAX_PULL_OPS), &[])?;
         Ok(ShareViewResponse {
-            ops: page.ops,
+            ops: page
+                .ops
+                .into_iter()
+                .map(WireLogRow::into_share_envelope)
+                .collect(),
             next_cursor: page.next_cursor,
             has_more: page.has_more,
         })
@@ -883,6 +900,76 @@ impl RelayTransport for HttpRelayTransport {
             ops: wire.ops,
         })
     }
+
+    fn share_collection_write(
+        &self,
+        req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
+        let body = WireShareCollectionWriteRequest {
+            submit_id: &req.submit_id,
+            changes: &req.changes,
+        };
+        let url = self.share_url(&req.share_id, "/collection-writes", &[]);
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("authorization", &self.authorization())
+            .send_json(body)
+            .map_err(map_transport_error)?;
+        if response.status().is_success() {
+            let wire: WireShareCollectionWriteResponse = response
+                .body_mut()
+                .with_config()
+                .limit(MAX_JSON_RESPONSE_BYTES)
+                .read_json()
+                .map_err(|_| RelayError::InvalidResponse)?;
+            return Ok(ShareCollectionWriteResponse::Written { paths: wire.paths });
+        }
+        collection_write_answer(&mut response)
+    }
+}
+
+/// A direct write the relay did not take. A stale base and a refusal are
+/// answers the recipient shows, so they come back as outcomes; every other
+/// status is an error, mapped the way every other route maps it.
+fn collection_write_answer(
+    response: &mut Response<Body>,
+) -> Result<ShareCollectionWriteResponse, RelayError> {
+    let status = response.status().as_u16();
+    if status == 401 {
+        return Err(RelayError::Unauthorized);
+    }
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_ERROR_RESPONSE_BYTES)
+        .read_json::<WireCollectionWriteError>()
+        .ok();
+    match body {
+        Some(WireCollectionWriteError {
+            code: Some(code),
+            error,
+            path,
+            current_blob_sha256,
+        }) => match code.as_str() {
+            "stale" if status == 409 => Ok(ShareCollectionWriteResponse::Stale {
+                path: path.ok_or(RelayError::InvalidResponse)?,
+                current_blob_sha256,
+            }),
+            "share_op_rejected" if status == 403 => Ok(ShareCollectionWriteResponse::Refused {
+                reason: error.unwrap_or_default(),
+            }),
+            other => Err(map_server_code(other, RequestContext::Share)),
+        },
+        _ => Err(match status {
+            403 => RelayError::Forbidden,
+            404 => unavailable(RequestContext::Share),
+            409 => RelayError::Conflict,
+            413 => RelayError::PayloadTooLarge,
+            500..=599 => RelayError::ServerInternal,
+            other => RelayError::HttpStatus(other),
+        }),
+    }
 }
 
 impl HttpRelayTransport {
@@ -892,7 +979,7 @@ impl HttpRelayTransport {
         cursor: i64,
         limit: usize,
         extra_query: &[(&str, String)],
-    ) -> Result<ShareViewResponse, RelayError> {
+    ) -> Result<WireLogPage, RelayError> {
         let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
         query.extend_from_slice(extra_query);
         let url = self.share_url(share_id, "/log", &query);
@@ -903,15 +990,7 @@ impl HttpRelayTransport {
                 .call(),
             RequestContext::Share,
         )?;
-        Ok(ShareViewResponse {
-            ops: wire
-                .ops
-                .into_iter()
-                .map(WireLogRow::into_share_envelope)
-                .collect(),
-            next_cursor: wire.next_cursor,
-            has_more: wire.has_more,
-        })
+        Ok(wire)
     }
 }
 
@@ -1041,9 +1120,11 @@ define_server_error_codes! {
     "api_version_too_new" => |_| RelayError::ApiVersionTooNew,
     "api_version_too_old" => |_| RelayError::ApiVersionTooOld,
     "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
+    "automation_host_rate_limited" => |_| RelayError::HttpStatus(429),
     "bad_request" => |_| RelayError::BadRequest,
     "blob_missing" => |_| RelayError::BlobReferenceMissing,
     "blob_not_found" => |_| RelayError::BlobMissing,
+    "collection_write_rate_limited" => |_| RelayError::HttpStatus(429),
     "conflict" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
@@ -1073,6 +1154,7 @@ define_server_error_codes! {
     "self_share" => |_| RelayError::SelfShare,
     "share_op_rejected" => |_| RelayError::ShareOperationRejected,
     "share_read_only" => |_| RelayError::ShareReadOnly,
+    "stale" => |_| RelayError::Conflict,
     "stream_identity_mismatch" => |_| RelayError::StreamIdentityMismatch,
     "too_many_paths" => |_| RelayError::BadRequest,
     "unknown_chat_op" => |_| RelayError::UnknownChatOperation,
@@ -1220,6 +1302,32 @@ struct WireShareProposalSubmitResponse {
     ops: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareCollectionWriteRequest<'a> {
+    submit_id: &'a str,
+    changes: &'a [ShareProposalChange],
+}
+
+/// The receipt also names the submit id, the commit time, and whether this
+/// answer is a replay; the recipient needs only the paths.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareCollectionWriteResponse {
+    paths: Vec<String>,
+}
+
+/// A refused direct write: the relay's code and message, and for a stale
+/// base the path and the granter's current content.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCollectionWriteError {
+    code: Option<String>,
+    error: Option<String>,
+    path: Option<String>,
+    current_blob_sha256: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePushResponse {
@@ -1232,6 +1340,7 @@ struct WirePushResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogPage {
+    own_origin_id: Option<String>,
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,
@@ -1432,6 +1541,133 @@ mod tests {
 
     const TEST_CERT_DER_BASE64: &str = "MIIDJTCCAg2gAwIBAgIUEHQ492IM8Ral38aCrsQtLAty8wAwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDcyNjIyMzQyNloXDTI2MDcyODIyMzQyNlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlas3XDBWs7j98PENiunFPUWT5X7I+PKLO7A+HFd3JMBwtYVtWBvxmBsLcZ+2Rx4eVJXtAjR4xxBHekNs3z44Ao9didAx485uOPPO8Ksj+cWNgZ4bAYrJrqF7sWEvhP7dilFLKT/vi0BnG/zrac8CEaHl5LzxpBZDOvsQ0mDY0RWXysq6QV37woJIY6wxJ0zJP93T5fl/a3sHE29WkSPgNIEBz85jVkbmmQBWXPEH4sQ0Ey7dOC2q+qZPOrfkgQrbXMHnPxO6LKrwVwRGnFgjIxqnjaOnBEsxyhVzgxe9oXoAIgooibIx7lZUFg72D+Wo9cRs2wTL3ZLJji8z0HD1JQIDAQABo28wbTAdBgNVHQ4EFgQU91mseAS1pHPttIK0/FAofXtrkIkwHwYDVR0jBBgwFoAU91mseAS1pHPttIK0/FAofXtrkIkwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAAgv1+SbYGUsfw7FpwATOjt4lLSZYItTel9FtszmWsCnD2l9NaFaOeGLjHN/A/maczv3QGEIDu5ZD9jkNkabsPQeOsV2aR/266AW4OjbCCQ8GujSZxZzdoaUhjTumwI9sIkni6Z7FJuCL0ch8ljGh9YxIvtgmX05E9k1md9wsXOT56pCvQ8jmcdkxROpoGZOkJqyqmJ5P/rEf+bHsnjR9PGv2YqvS/984MaYBKmgZ4BhRd8QksAum7KHSczJ/pZL/YEg8AQowEf6vXgS7reXDjOQfc+Er+Lh9im01E56Fqp78RlnEo5ifGw/sn8vM0FescNxLs9pqZRX6haaYjT5S7o=";
     const TEST_KEY_DER_BASE64: &str = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCVqzdcMFazuP3w8Q2K6cU9RZPlfsj48os7sD4cV3ckwHC1hW1YG/GYGwtxn7ZHHh5Ule0CNHjHEEd6Q2zfPjgCj12J0DHjzm44887wqyP5xY2BnhsBismuoXuxYS+E/t2KUUspP++LQGcb/OtpzwIRoeXkvPGkFkM6+xDSYNjRFZfKyrpBXfvCgkhjrDEnTMk/3dPl+X9rewcTb1aRI+A0gQHPzmNWRuaZAFZc8QfixDQTLt04Lar6pk86t+SBCttcwec/E7osqvBXBEacWCMjGqeNo6cESzHKFXODF72hegAiCiiJsjHuVlQWDvYP5aj1xGzbBMvdksmOLzPQcPUlAgMBAAECggEAAv3QL/QGL5zRdCWyEkyedOoombKUiSetfiZrv2MSJ9zLnYOXgWZuYdtpUz6Qq2nTMl6cXtBpeS6x0KRIKOTt93ZVG/v0Abkh1w3GEGWWfpei8ewukjPR2L80ITUvkkMKO4lpBqyKX0HZlCO65ggz4uIina7j54mYYDWEPkHR45ZSj5UAxhvTGoY+AdECQy7J96+czeKf2qsciBOtfwQDeivO+BHLFCKWYcgmMb+Dq91eXL4vdWZr29duWpr/7WXLmPfo9/4B6dkZbKxPxDg4PBUOSUsi4B0L2lXOBQY++To0FUdfFB9EiBBNHD9RrAqXHpNvLD77CFd4xsVzCUPScQKBgQDPuDZT2JYchrrdvBue8JS21JrMw2IHzQ5zIhMTWhFcGSNF/YhuLrVSsSFdYrmOFJ1aE5d7NQ1p7G19Pe/OcSoEkxeqMZaMjki1UAxqMoAmdC/lgYSkPsxZYjSw1VqpvHGlbyyg/FNbQC9U2mrYP+oo6lCxrYTwprDpApsbUfSELQKBgQC4dNnxwIL/loKoEXe8SuC7apTqvSfJwvAlBC3QH/hURHgIBpQ4R+ZzpT2+WPY3YY92ZxCSWJfySHaoHj/Dls1Q5wmQdrw5bn/sJ7dNGFSf7fdUoiHoydl0mdHgjhC5ZN76jFqiuAtboOA8MvpCo9xRApuhIVA7qDbPPadTMyx32QKBgQCZKbfFc3qcZiv7u+yR8ct2VKYgPiFWpzj0ZDe0mUEbq916ikvDEuXYp4t2lIlF3qV3+eJEkwXlCNRi+PyOOJtG7D8S26Wq1m9+YhwFYl9j+2Al1q67fSKo9eTsTyWe6rjRx3wc6HF+Y4GDC9qkwdwjd0MxAEV6PS9NYQKFzpSBsQKBgBWpIy7QfJGnCxDRfE4QPPPFQFeQfuuiiLDQHNEj7/V1VOMcYqt5RgaukOGZcNBwFHjDAZ8t6Cn7eHOlmbdOLi4h822Tg+b6ousIfu3+vXFKcJDvuSutCGw44/yKskwTHFwvvzT8h9jqu2pWUi0hMO4ScFQrpVBcIJOVmeCbUc2BAoGBALy89w8VTTKbHZ9EMHthbOF1DLxu939/li1J+q9vHh7Ie7T37CKZ+XZFS2od54g451QSDeaYHCihcC7YR2y/EfefPRRRjio157ULeZ2avB4Gd7tvVntYPv9+HG5pxLXkbgZL7b077vSL4kFi9m32V8Vo5SRsI8J722Npyq7q2spR";
+
+    /// Answers one request on loopback with a canned status and JSON body,
+    /// and hands back the request it read.
+    fn answer_once(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = stream.read(&mut buffer).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                if head.contains("transfer-encoding: chunked") {
+                    if request.ends_with(b"0\r\n\r\n") {
+                        break;
+                    }
+                    continue;
+                }
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status} Answer\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write answer");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (base, handle)
+    }
+
+    /// A stale base and a refusal come back as answers the recipient shows;
+    /// every other refusal is an error, mapped as every route maps it.
+    #[test]
+    fn a_direct_write_reads_a_stale_base_and_a_refusal_as_answers() {
+        let request = || ShareCollectionWriteRequest {
+            share_id: "share-1".to_owned(),
+            submit_id: "direct-1".to_owned(),
+            changes: vec![ShareProposalChange {
+                based_on_path: Some("trip/packing/collection.yaml".to_owned()),
+                based_on_blob_sha256: Some("a".repeat(64)),
+                operation: "write".to_owned(),
+                after_path: Some("trip/packing/collection.yaml".to_owned()),
+                after_blob_sha256: Some("b".repeat(64)),
+                after_content_kind: Some("text".to_owned()),
+                after_byte_length: Some(12),
+                recorded_at_ms: 7,
+            }],
+        };
+        let cases: [(
+            u16,
+            &'static str,
+            Result<ShareCollectionWriteResponse, RelayError>,
+        ); 5] = [
+            (
+                200,
+                r#"{"ok":true,"submitId":"direct-1","paths":["trip/packing/collection.yaml"],"committedAtMs":9,"created":true}"#,
+                Ok(ShareCollectionWriteResponse::Written {
+                    paths: vec!["trip/packing/collection.yaml".to_owned()],
+                }),
+            ),
+            (
+                409,
+                r#"{"ok":false,"error":"the file changed since you read it","code":"stale","path":"trip/packing/collection.yaml","currentBlobSha256":null}"#,
+                Ok(ShareCollectionWriteResponse::Stale {
+                    path: "trip/packing/collection.yaml".to_owned(),
+                    current_blob_sha256: None,
+                }),
+            ),
+            (
+                403,
+                r#"{"ok":false,"error":"trip/packing/collection.yaml is not a valid collection.yaml","code":"share_op_rejected"}"#,
+                Ok(ShareCollectionWriteResponse::Refused {
+                    reason: "trip/packing/collection.yaml is not a valid collection.yaml"
+                        .to_owned(),
+                }),
+            ),
+            (
+                429,
+                r#"{"ok":false,"error":"too many direct writes","code":"collection_write_rate_limited"}"#,
+                Err(RelayError::HttpStatus(429)),
+            ),
+            (
+                403,
+                r#"{"ok":false,"error":"this share does not accept appends","code":"share_read_only"}"#,
+                Err(RelayError::ShareReadOnly),
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let (base, server) = answer_once(status, body);
+            let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+                .expect("loopback transport");
+            assert_eq!(
+                transport.share_collection_write(request()),
+                expected,
+                "{status} {body}"
+            );
+            let sent = server.join().expect("server");
+            assert!(
+                sent.starts_with("POST /sync/shares/share-1/collection-writes "),
+                "{sent}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(&sent[sent.find('{').expect("a JSON body")..])
+                    .expect("the body is JSON");
+            assert_eq!(body["submitId"], "direct-1", "{sent}");
+            assert_eq!(body["changes"].as_array().map(Vec::len), Some(1), "{sent}");
+        }
+    }
 
     #[test]
     fn response_budget_covers_a_full_maximal_relay_page() {

@@ -3290,6 +3290,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
                 content_kind: "text",
             }],
             record_facts: Vec::new(),
+            automation_claims: Vec::new(),
         }))
     );
     store

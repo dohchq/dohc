@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
+import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 type ShellErrorKind =
@@ -7,6 +8,7 @@ type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
+  | DirectWriteNoticeKind
   | SettingsFileKind;
 
 // A message the toast and the Notices row can hold. A protocol response or a
@@ -22,8 +24,10 @@ export interface ShellError {
   id: string;
   message: string;
   retry: (() => void) | null;
-  // A step that fixes the cause, offered beside Try again.
-  action?: { label: string; run: () => void };
+  // A step offered beside Try again: one that fixes the cause, such as
+  // opening the file it names, or a success notice's Undo. A step that
+  // `ends` the notice removes its row when it runs.
+  action?: { label: string; run: () => void; ends?: boolean };
   kind?: ShellErrorKind;
   // A technical fact the copied report carries under the message.
   detail?: string;
@@ -201,12 +205,40 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
-  // The row stays: the file is still wrong until the person saves it.
+  // One row per kind of direct-write answer. Sending the waiting changes
+  // answers every row that offered it, so it clears them.
+  const showDirectWriteNotice = useCallback(
+    (notice: DirectWriteNotice) => {
+      const { send } = notice;
+      push({
+        message: notice.message,
+        retry: notice.retry,
+        ...(send
+          ? {
+              action: {
+                label: send.label,
+                run: () => {
+                  clearKind("direct-write-stale", "direct-write-refused", "direct-write-unavailable");
+                  send.run();
+                },
+              },
+            }
+          : {}),
+        kind: notice.kind,
+      });
+    },
+    [clearKind, push],
+  );
+  // A settings file's row stays: the file is still wrong until the person
+  // saves it. An Undo's row goes, so it runs once.
   const runShellErrorAction = useCallback((id: string) => {
-    shellErrorsRef.current.find((error) => error.id === id)?.action?.run();
+    const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
+    target?.action?.run();
   }, []);
   const showSuccessNotice = useCallback(
-    (message: string) => push({ message, retry: null, tone: "success" }),
+    (message: string, undo?: () => void) =>
+      push({ message, retry: null, tone: "success", ...(undo ? { action: { label: "Undo", run: undo, ends: true } } : {}) }),
     [push],
   );
   // The toast closes; the row in Notices stays.
@@ -241,6 +273,7 @@ export function useShellError(workspaceId: string) {
     clearEditorGroupRefusalError,
     showShellError,
     showSettingsFileNotice,
+    showDirectWriteNotice,
     showSuccessNotice,
     hideShellError,
     dismissShellError,

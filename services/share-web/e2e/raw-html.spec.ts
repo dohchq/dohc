@@ -44,7 +44,7 @@ async function expectNoAttackSentinel(page: Page): Promise<void> {
   expect(sentinelExists).toEqual(ATTACK_SENTINELS.map(() => false));
 }
 
-test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({
+test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
   browser,
   probe,
   stack,
@@ -80,7 +80,7 @@ test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({
   const htmlFile = seeded.files.find((file) => file.path === "docs/raw.html");
   if (!htmlFile) throw new Error("raw HTML fixture was not seeded");
 
-  const context = await browser.newContext({ acceptDownloads: true });
+  const context = await browser.newContext();
   try {
     const page = await context.newPage();
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
@@ -101,36 +101,28 @@ test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({
     await expectNoAttackSentinel(page);
     expect(probe.requests).toEqual([]);
 
-    await navigation.getByRole("button", { name: "raw.html", exact: true }).click();
-    const downloadCard = page.locator(".download-card");
-    await expect(downloadCard).toBeVisible();
-    await expect(downloadCard).toContainText("This file opens as a download.");
-    await expect(page.locator("article.markdown")).toHaveCount(0);
-    expect(await page.content()).not.toContain(HTML_DOM_MARKER);
-    await expectNoAttackSentinel(page);
-    expect(probe.requests).toEqual([]);
-
-    const [downloadResponse, startedDownload] = await Promise.all([
+    const [sourceResponse] = await Promise.all([
       page.waitForResponse((response) =>
         response.request().method() === "GET" &&
         new URL(response.url()).pathname === `/api/view/blob/${htmlFile.blobSha256}`
       ),
-      page.waitForEvent("download"),
-      downloadCard.getByRole("link", { name: "Download file" }).click(),
+      navigation.getByRole("button", { name: "raw.html", exact: true }).click(),
     ]);
-    const download = startedDownload;
+    expect(sourceResponse.status()).toBe(200);
+    expect(sourceResponse.headers()["content-type"]).toBe("application/octet-stream");
+    expect(sourceResponse.headers()["content-disposition"]).toBe("attachment");
+    expect(sourceResponse.headers()["x-content-type-options"]).toBe("nosniff");
 
-    expect(downloadResponse.status()).toBe(200);
-    expect(downloadResponse.headers()["content-type"]).toBe("application/octet-stream");
-    expect(downloadResponse.headers()["content-disposition"]).toBe("attachment");
-    expect(downloadResponse.headers()["x-content-type-options"]).toBe("nosniff");
-    expect(download.suggestedFilename()).toBe("raw.html");
-    const downloadStream = await download.createReadStream();
-    const downloadedChunks: Buffer[] = [];
-    for await (const chunk of downloadStream) downloadedChunks.push(Buffer.from(chunk));
-    expect(Buffer.concat(downloadedChunks).toString("utf8")).toBe(rawHtml);
-
-    expect(await page.content()).not.toContain(HTML_DOM_MARKER);
+    const content = page.locator("main.content");
+    const source = content.locator("pre.source-text");
+    await expect(source).toHaveText(rawHtml);
+    await expect(content.locator(".download-card, article.markdown")).toHaveCount(0);
+    await expect(content.locator("script, iframe, object, form, svg, embed, link, meta, img, a, p"))
+      .toHaveCount(0);
+    await expect(content.locator("[onerror], [onload], [onclick], [onfocus], [onsubmit]"))
+      .toHaveCount(0);
+    expect(await source.evaluate((element) => element.childElementCount)).toBe(1);
+    expect(await source.locator("code").evaluate((element) => element.childElementCount)).toBe(0);
     await expectNoAttackSentinel(page);
     expect(probe.requests).toEqual([]);
   } finally {

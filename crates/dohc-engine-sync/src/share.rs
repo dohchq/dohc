@@ -157,7 +157,7 @@ pub fn apply_shared_envelope(
     boundary: &ShareBoundary,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
-) -> Result<ApplyOutcome<i64>, SyncError> {
+) -> Result<ApplyOutcome<Vec<dohc_engine_domain::AutomationClaim>>, SyncError> {
     crate::model::bounded(&boundary.share_id, "share_id must be non-empty and bounded")?;
     // A file share carries chat about the files it shares, and chat
     // needs the store. `chat.message.append` carries no path, only a threadId,
@@ -169,9 +169,7 @@ pub fn apply_shared_envelope(
         boundary.surface == ShareSurface::ShareView && is_share_view_chat_kind(&envelope.op_kind);
     if boundary.surface == ShareSurface::ShareView && !share_view_chat {
         enforce_share_view_boundary(boundary, envelope)?;
-        return Ok(ApplyOutcome::new(ApplyDisposition::Applied(
-            envelope.origin_seq,
-        )));
+        return Ok(ApplyOutcome::new(ApplyDisposition::Applied(Vec::new())));
     }
     if share_view_chat {
         enforce_share_view_thread_create(boundary, envelope)?;
@@ -203,14 +201,16 @@ pub fn apply_shared_envelope(
         } else {
             enforce_shared_channel_boundary(tx, boundary, op)?;
         }
-        replay_refusals = crate::apply::apply_chat_tx(tx, op)?;
+        let applied = crate::apply::apply_chat_tx(tx, op)?;
+        replay_refusals = applied.refusals;
         advance_shared_peer_tx(
             tx,
             &op.workspace_id,
             &boundary.share_id,
             &source_origin_id,
             source_origin_seq,
-        )
+        )?;
+        Ok(applied.automation_claims)
     })?;
     let advance_source = match &outcome.primary {
         ApplyDisposition::Applied(_) | ApplyDisposition::Crashed { .. } => false,

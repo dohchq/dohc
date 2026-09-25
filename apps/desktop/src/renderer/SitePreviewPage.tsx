@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Box,
   ExternalLink,
+  FolderCode,
   Globe2,
   Hammer,
   Play,
@@ -12,7 +13,7 @@ import {
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconButton } from "./ui/controls";
+import { IconButton, SecondaryButton } from "./ui/controls";
 import { useDismiss } from "./ui/useDismiss";
 import type {
   SitePackageInfo,
@@ -27,6 +28,9 @@ import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppPublication } from "./OwnerAppPublication";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
+// Shown through the shell's error hook, with Try again.
+const SHARE_BUILD_REPLACED_MESSAGE =
+  "dohc did not share this app. Another view started its preview again before the build finished.";
 const NO_SHARE_OUTPUT_MESSAGE =
   "This app has no static entry file or build output to share.";
 
@@ -203,9 +207,17 @@ function shareRefusalMessage(
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
+  // A pinned app in the side panel, whose header already names the app.
+  variant?: "panel";
+  // Takes a pinned app whose folder no longer holds an app out of the sidebar.
+  onUnpin?: () => void;
   sharedView?: boolean;
+  onShowSource?: () => void;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
+  // Opens an app of this workspace in a tab. A notice that outlives this page
+  // uses it to take the person back to the app it is about.
+  onOpenApp?: (siteRoot: string) => void;
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -230,6 +242,20 @@ export function SitePreviewPage(props: {
   const logsRequestRef = useRef(0);
   const shareRequestRef = useRef(0);
   const siteContextRef = useRef("");
+  // This surface, among the tabs and pinned panels that can show one app's
+  // preview. Main keeps the preview running while any of them shows it.
+  const holderId = useRef(crypto.randomUUID()).current;
+  // The newest start of this app's preview this surface has shown. Another
+  // surface can start it again; main tells this one, and an older answer
+  // never paints over a newer preview.
+  const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
 
@@ -245,6 +271,7 @@ export function SitePreviewPage(props: {
     setLogsOpen(false);
     previewStartRequestRef.current += 1;
     logsRequestRef.current += 1;
+    generationRef.current = 0;
     setRunningMode(null);
     setIdleReason(null);
     autoStartKeyRef.current = null;
@@ -289,10 +316,10 @@ export function SitePreviewPage(props: {
   useEffect(() => {
     return () => {
       void bridge()
-        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot })
+        .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot, holderId })
         .catch(() => undefined);
     };
-  }, [props.workspaceId, props.siteRoot]);
+  }, [holderId, props.workspaceId, props.siteRoot]);
 
 
   // getSitePackage intentionally returns the deepest containing site for a
@@ -318,12 +345,62 @@ export function SitePreviewPage(props: {
     onClose: () => setOptionsOpen(false),
   });
 
-  const start = useCallback(async (mode: SitePreviewMode) => {
+  // Shows one start of the app's preview, or nothing when none runs.
+  const showPreview = useCallback((result: StartSitePreviewResult | null) => {
+    logsRequestRef.current += 1;
+    setActionError(null);
+    if (!result) {
+      setPreview(null);
+      setPreviewLogs([]);
+      setLogsOpen(false);
+      setIdleReason("stopped");
+      return;
+    }
+    setPreviewLogs(result.logs);
+    if (result.exited) {
+      setPreview(null);
+      setIdleReason("exited");
+      setLogsOpen(result.logs.length > 0);
+      return;
+    }
+    setPreview(result);
+    setIdleReason(null);
+  }, []);
+
+  // Another surface, such as this app's pinned panel or its tab, started the
+  // preview again. This surface follows it instead of keeping a frame whose
+  // server has stopped.
+  useEffect(
+    () =>
+      bridge().onSitePreviewReplaced((event) => {
+        if (
+          event.holderId !== holderId ||
+          event.workspaceId !== props.workspaceId ||
+          event.siteRoot !== props.siteRoot ||
+          event.generation <= generationRef.current
+        ) {
+          return;
+        }
+        generationRef.current = event.generation;
+        showPreview(event.preview);
+        // A start of this surface that the newer one replaced ends here.
+        setRunningMode(null);
+      }),
+    [holderId, props.siteRoot, props.workspaceId, showPreview],
+  );
+
+  // `restart` is a start the person asked for: it runs the preview again
+  // even when another surface already shows it in this mode.
+  const start = useCallback(async (mode: SitePreviewMode, restart: boolean) => {
     const request = ++previewStartRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
       request === previewStartRequestRef.current &&
       requestContext === siteContextRef.current;
+    const generationAtStart = generationRef.current;
+    // Another surface replaced this start with a newer one; this surface
+    // keeps saying it is starting until that one arrives.
+    let replaced = false;
     logsRequestRef.current += 1;
     setLogsOpen(false);
     setPreviewLogs([]);
@@ -335,20 +412,24 @@ export function SitePreviewPage(props: {
         workspaceId: props.workspaceId,
         siteRoot: props.siteRoot,
         mode,
+        holderId,
+        restart,
       });
       if (!isCurrent()) return;
-      setPreviewLogs(result.logs);
-      rememberMode(props.workspaceId, props.siteRoot, mode);
-      if (result.exited) {
-        setPreview(null);
-        setIdleReason("exited");
-        setLogsOpen(result.logs.length > 0);
-        return result;
+      if ("replaced" in result) {
+        replaced = true;
+        return "replaced" as const;
       }
-      setPreview(result);
+      // A newer start another surface made is already on screen, and its
+      // mode is the one to open next time.
+      if (result.generation < generationRef.current) return result;
+      rememberMode(props.workspaceId, props.siteRoot, mode);
+      generationRef.current = result.generation;
+      showPreview(result);
       return result;
     } catch (error) {
-      if (!isCurrent()) return;
+      // A newer start another surface made replaced this one.
+      if (!isCurrent() || generationRef.current > generationAtStart) return;
       setPreview(null);
       setActionError(
         error instanceof Error
@@ -357,9 +438,9 @@ export function SitePreviewPage(props: {
       );
       return null;
     } finally {
-      if (isCurrent()) setRunningMode(null);
+      if (isCurrent() && !replaced) setRunningMode(null);
     }
-  }, [props.siteRoot, props.workspaceId, siteContext]);
+  }, [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext]);
 
   const prepareShare = useCallback(async () => {
     const request = ++shareRequestRef.current;
@@ -400,8 +481,25 @@ export function SitePreviewPage(props: {
           }
           return;
         }
-        const built = await start("build");
-        if (!built || !isCurrent()) return;
+        const built = await start("build", true);
+        if (!isCurrent()) return;
+        if (built === "replaced") {
+          // The notice outlives this page, and the page can move to another
+          // app. Try again shares only this app, from this page while it
+          // still shows it; otherwise it opens the app and leaves Share to
+          // the person.
+          const openApp = props.onOpenApp;
+          const siteRoot = props.siteRoot;
+          props.reportError?.(SHARE_BUILD_REPLACED_MESSAGE, null, () => {
+            if (mountedRef.current && siteContextRef.current === requestContext) {
+              void prepareShareRef.current();
+            } else {
+              openApp?.(siteRoot);
+            }
+          });
+          return;
+        }
+        if (!built) return;
         // This branch just built specifically to get a shareable
         // artifact — "build" is the mode that artifact was produced for.
         const refreshedAfterBuild = await bridge().getSitePackage({
@@ -433,7 +531,9 @@ export function SitePreviewPage(props: {
         setActionError(error instanceof Error ? error.message : "Could not prepare this app for sharing.");
       }
     }
-  }, [preview, props.onShareSite, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  }, [preview, props.onOpenApp, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  const prepareShareRef = useRef(prepareShare);
+  prepareShareRef.current = prepareShare;
 
   const refreshPreviewLogs = useCallback(async () => {
     if (
@@ -496,7 +596,7 @@ export function SitePreviewPage(props: {
     const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
-    void start(mode);
+    void start(mode, false);
   }, [
     idleReason,
     load,
@@ -520,6 +620,7 @@ export function SitePreviewPage(props: {
       await bridge().stopSitePreview({
         workspaceId: props.workspaceId,
         siteRoot: props.siteRoot,
+        holderId,
       });
       if (!isCurrent()) return;
       setPreview(null);
@@ -553,7 +654,9 @@ export function SitePreviewPage(props: {
             Shared
           </span>
         ) : null}
-        <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
+        {props.variant === "panel" ? null : (
+          <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           {preview ? (
             <>
@@ -590,6 +693,17 @@ export function SitePreviewPage(props: {
                 </>
               ) : null}
             </>
+          ) : null}
+          {props.onShowSource ? (
+            <IconButton
+              data-testid="site-preview-show-source"
+              aria-label="Show in Explorer"
+              title="Show in Explorer"
+              onClick={props.onShowSource}
+              className="size-7"
+            >
+              <FolderCode size={13} aria-hidden />
+            </IconButton>
           ) : null}
           {canShare ? (
             <IconButton
@@ -636,7 +750,7 @@ export function SitePreviewPage(props: {
                     onClick={() => {
                       setOptionsOpen(false);
                       optionsTriggerRef.current?.focus();
-                      void start(mode);
+                      void start(mode, true);
                     }}
                     className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
@@ -672,13 +786,18 @@ export function SitePreviewPage(props: {
           Loading app…
         </div>
       ) : load.status === "missing" ? (
-        <EmptyState title="App not detected" body="dohc no longer detects an app in this folder." />
+        <EmptyState
+          title="App not detected"
+          body="dohc no longer detects an app in this folder."
+          onUnpin={props.onUnpin}
+        />
       ) : load.status === "error" ? (
         <EmptyState title="Could not load app" body={load.message} />
       ) : load.status === "ready" && !site ? (
         <EmptyState
           title="App not detected"
           body={APP_MISSING_MESSAGE}
+          onUnpin={props.onUnpin}
         />
       ) : site ? (
         <>
@@ -794,12 +913,17 @@ function LogsDetails(props: {
   );
 }
 
-function EmptyState(props: { title: string; body: string }) {
+function EmptyState(props: { title: string; body: string; onUnpin?: (() => void) | undefined }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
       <AlertTriangle size={20} aria-hidden className="text-warning" />
       <span className="text-sm text-ink">{props.title}</span>
       <span className="max-w-sm text-xs text-muted">{props.body}</span>
+      {props.onUnpin ? (
+        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin} className="mt-1">
+          Unpin
+        </SecondaryButton>
+      ) : null}
     </div>
   );
 }

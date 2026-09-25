@@ -1004,6 +1004,8 @@ impl EngineService {
         });
         // Keep the workspace fence until the writer is terminal if the RPC is cancelled.
         let mut retirement = RetireOnCancellation(Some(host.clone()));
+        let claim_events = self.events.clone();
+        let claim_workspace = host.open.workspace_id.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
             match input.operation {
@@ -1022,7 +1024,12 @@ impl EngineService {
                     )
                     .await
                     .map(|result| match result {
-                        ApplicationResult::Applied(ack) => {
+                        ApplicationResult::Applied(ack, claims) => {
+                            crate::events::emit_automation_claimed(
+                                &claim_events,
+                                &claim_workspace,
+                                &claims,
+                            );
                             json!({ "status": "applied", "ack": ack })
                         }
                         ApplicationResult::Pending(reason) => pending_result(reason),

@@ -1,10 +1,14 @@
 import { jsonResponse } from "@dohc/service-http";
-import type { DiscussionActivityHub } from "./discussionActivity";
+import {
+  DiscussionActivityCapacityError,
+  ownerLogWaitGroup,
+  type DiscussionActivityHub,
+} from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
-import { MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
@@ -26,9 +30,10 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceIdentity"
     | "verifyWorkspaceIdentity"
     | "getEpochLogFloor"
+    | "workspaceIsOwnedBy"
   >,
   nowMs: () => number,
-  discussionActivity: Pick<DiscussionActivityHub, "wake">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -62,6 +67,10 @@ export function createWorkspaceReplicationRoutes(
     route: WorkspaceReplicationRoute,
     actor: { userId: string },
     guard: () => void = () => {},
+    // Resolves the caller's session again, and rejects when it no longer
+    // authenticates as `actor`. A held log read awaits it after every wait.
+    // Without it, the read does not wait.
+    reauthenticate?: () => Promise<void>,
   ): Promise<Response> {
     guard();
     if (route.route === "bootstrap" && request.method === "GET") {
@@ -135,7 +144,7 @@ export function createWorkspaceReplicationRoutes(
         },
       });
       if (result.inserted > 0) {
-        discussionActivity.wake(`log:${route.workspaceId}`);
+        discussionActivity.wakeLog(route.workspaceId);
       }
       return jsonResponse({
         ok: true,
@@ -156,6 +165,19 @@ export function createWorkspaceReplicationRoutes(
       );
       const requestedSince = parseCursor(url.searchParams.get("since"));
       const since = Math.max(requestedSince, epochLogFloor);
+      const hold = url.searchParams.get("hold");
+      if (hold !== null) {
+        const holdMs = parseLogHold(hold);
+        return await waitForLogChange(request, route.workspaceId, actor.userId, {
+          identity,
+          requestedSince,
+          since,
+          ...(reauthenticate === undefined
+            ? { holdMs: 0, reauthenticate: async () => {} }
+            : { holdMs, reauthenticate }),
+          guard,
+        });
+      }
       const limit = parseLimit(url.searchParams.get("limit"));
       const page = storage.fetchLogPage({
         workspaceId: route.workspaceId,
@@ -222,7 +244,78 @@ export function createWorkspaceReplicationRoutes(
     throw relayError("method_not_allowed");
   }
 
+  // A held read tells a device when its log has an op past `since`, so an
+  // idle device can pull only when there is something to pull. It answers
+  // only `hasMore` and never serves an op. `hold` is an
+  // upper bound. The relay answers at once when the log already has an op,
+  // and also when its parked reads are at capacity, so a device must not
+  // read an early empty answer as a promise to hold the next one.
+  async function waitForLogChange(
+    request: Request,
+    workspaceId: string,
+    userId: string,
+    input: {
+      identity: OptionalWorkspaceIdentity | null;
+      requestedSince: number;
+      since: number;
+      holdMs: number;
+      guard: () => void;
+      reauthenticate: () => Promise<void>;
+    },
+  ): Promise<Response> {
+    let since = input.since;
+    const hasMore = () =>
+      storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
+    const deadlineAtMs = Date.now() + input.holdMs;
+    // A wake can leave nothing past `since`, for example a retried link
+    // submission that appended nothing. The read then parks again until its
+    // deadline, so it answers early only with a change.
+    while (!hasMore() && !request.signal.aborted) {
+      const holdMs = deadlineAtMs - Date.now();
+      if (holdMs <= 0) break;
+      try {
+        await discussionActivity.wait(ownerLogWaitGroup(workspaceId), `owner:${userId}`, {
+          holdMs,
+          signal: request.signal,
+          shouldPark: () => !hasMore(),
+        });
+      } catch (error) {
+        if (!(error instanceof DiscussionActivityCapacityError)) throw error;
+        break;
+      }
+      // The read was authenticated and authorized before it parked. Check
+      // both again, and re-read the epoch floor, before it answers or parks
+      // again: a session revoked during the wait learns nothing.
+      await input.reauthenticate();
+      input.guard();
+      if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
+      since = Math.max(
+        input.requestedSince,
+        enforceWorkspaceIdentity(storage, workspaceId, input.identity),
+      );
+    }
+    return jsonResponse({
+      ok: true,
+      ops: [],
+      nextCursor: input.requestedSince,
+      hasMore: hasMore(),
+    });
+  }
+
   return { respondToWorkspaceRegistration, respondToWorkspaceReplication };
+}
+
+function parseLogHold(value: string): number {
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw badRequest("hold must be a non-negative integer");
+  }
+  const hold = Number(value);
+  if (!Number.isSafeInteger(hold) || hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+    throw badRequest(
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
+    );
+  }
+  return hold;
 }
 
 function parseWorkspaceIdentityValue(value: unknown, name: string): string {

@@ -129,12 +129,26 @@ export function createWorkspaceFileMutationOwner<
   shareViewFiles: Pick<ShareViewFiles, "change">;
   trashItem(path: string): Promise<void>;
   notifyRenderer(workspaceId: string): void;
+  // A file in a share view was created or saved, and its change is in the
+  // share view's journal. The shell answers with a direct push.
+  shareViewEdited(workspaceId: string): void;
   logError(message: string, error: unknown): void;
 }): WorkspaceFileMutationOwner<IpcEvent> {
   const shareTarget = (workspace: Readonly<Workspace>) => ({
     kind: "standalone" as const,
     workspaceId: workspace.workspaceId,
   });
+
+  // A committed create or save: the change is journaled, so a direct push can
+  // carry it.
+  const editedShareViewValue = (
+    workspaceId: string,
+    outcome: ShareViewFileChangeOutcome,
+  ): ShareViewFileChangeValue => {
+    const value = committedShareViewChangeValue(workspaceId, outcome);
+    dependencies.shareViewEdited(workspaceId);
+    return value;
+  };
 
   const committedShareViewChangeValue = (
     workspaceId: string,
@@ -215,7 +229,7 @@ export function createWorkspaceFileMutationOwner<
         workspace.rootPath,
         async (lease) => {
           const path = receivedShare
-            ? committedShareViewChangeValue(
+            ? editedShareViewValue(
                 workspace.workspaceId,
                 await dependencies.shareViewFiles.change(
                   lease,
@@ -450,7 +464,7 @@ export function createWorkspaceFileMutationOwner<
         const result = await withStaleSensitiveWorkspaceOperation(
           workspace.rootPath,
           async (lease) =>
-            committedShareViewChangeValue(
+            editedShareViewValue(
               workspace.workspaceId,
               await dependencies.shareViewFiles.change(
                 lease,
