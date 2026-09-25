@@ -16,9 +16,11 @@ import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations
 import type {
   CollectionAutomationHolds,
   CollectionAutomationRetry,
-  CollectionFieldMark,
   CollectionAutomationRun,
+  CollectionAutomationShareStop,
   CollectionAutomationsFile,
+  CollectionAutomationStop,
+  CollectionFieldMark,
 } from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
@@ -5313,7 +5315,8 @@ export const ConfirmCollectionAutomationStepPayload = z.object({
 export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
 export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
 
-// Steps waiting for a current editor to allow them, one notice each.
+// Steps waiting for a current editor to allow them, one notice each, and
+// steps a narrower share stopped, one notice for all of them.
 export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
 export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
 export type ListAutomationHoldsResult = CollectionAutomationHolds;
@@ -5325,6 +5328,30 @@ export type ResetAutomationHoldsPayload = z.infer<typeof ResetAutomationHoldsPay
 export type ResetAutomationHoldsResult = { status: "reset" | "roster-unknown" };
 export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
 export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
+// Dismisses the stopped-steps notice. `seq` names each step's verdict the
+// person saw, so a step that stopped again since keeps its notice.
+export const DismissAutomationStopsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  stops: z.array(z.object({
+    automationId: COLLECTION_AUTOMATION_ID,
+    definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+    step: z.number().int().nonnegative().max(10_000),
+    seq: z.number().int().nonnegative(),
+  })).max(1_000),
+});
+export type DismissAutomationStopsPayload = z.infer<typeof DismissAutomationStopsPayload>;
+
+// The automation steps a share with these paths and access would stop,
+// asked before the share is made. `recipientEmail` is null for a link,
+// which makes an editor of whoever opens it.
+export const AutomationShareImpactPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  recipientEmail: EMAIL_STRING.nullable(),
+  paths: z.array(PATH_STRING).min(1).max(100),
+  access: SHARE_ACCESS,
+});
+export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactPayload>;
+export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
 
 // The fields in one Collection that switched-on automations set, for the
 // ⚡ marks on the table and the record's properties.
@@ -6651,6 +6678,8 @@ export interface DohcDesktopBridge
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
   revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
+  dismissAutomationStops(payload: DismissAutomationStopsPayload): Promise<void>;
+  automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
   listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
@@ -6840,7 +6869,8 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
-  // A step started or stopped waiting for a current editor: re-list holds.
+  // A step started or stopped waiting for a current editor, or a share
+  // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;

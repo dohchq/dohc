@@ -158,6 +158,7 @@ const ReachVerdictsSchema = z.object({
     step: z.number().int().nonnegative(),
     verdict: z.enum(["allowed", "stopped", "held"]),
     stoppedFor: z.string().nullable(),
+    narrowed: z.literal(true).optional(),
     seq: z.number().int().nonnegative(),
   })),
 });

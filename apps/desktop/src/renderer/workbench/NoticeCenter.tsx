@@ -16,7 +16,7 @@ import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
-import type { AutomationHoldNotice } from "../shell/useAutomationHolds";
+import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -227,6 +227,33 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   };
 }
 
+// The one notice for every step a narrower share stopped. It names each
+// automation it will dismiss, with its file, and who cannot reach what.
+function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
+  const automations = new Map<string, { name: string; file: string; reasons: Set<string> }>();
+  for (const stop of stops) {
+    const collection = collectionAutomationOf(stop.automationId)?.collection ?? stop.collection;
+    const entry = automations.get(stop.automationId) ??
+      { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
+    const who = stop.stoppedFor ?? "Someone you shared with";
+    entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
+    automations.set(stop.automationId, entry);
+  }
+  const [only] = automations.values();
+  if (automations.size === 1 && only) {
+    return {
+      title: `Automation "${only.name}" stopped`,
+      body: `${[...only.reasons].join(" ")} Open ${only.file} to change the step.`,
+    };
+  }
+  const named = [...automations.values()]
+    .map((entry) => `"${entry.name}" in ${entry.file}: ${[...entry.reasons].join(" ")}`);
+  return {
+    title: `${automations.size} automations stopped`,
+    body: `${named.join(" ")} Open each file to change its steps.`,
+  };
+}
+
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
 // again, so it never offers Try again — resuming a document there would
@@ -373,6 +400,10 @@ export function NoticeCenter(props: {
   onOpenSentNotice?: (notice: NoticeRow, signal: AbortSignal) => Promise<string | null>;
   onDismissSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
+  // Automation steps a narrower share stopped, shown as one notice until
+  // someone dismisses it.
+  automationStops?: readonly AutomationStopNotice[];
+  onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -709,6 +740,18 @@ export function NoticeCenter(props: {
           : {}),
       });
     }
+    const stops = props.automationStops ?? [];
+    if (stops.length > 0) {
+      next.push({
+        id: "automation-stops",
+        tone: "warning",
+        ...automationStopsCopy(stops),
+        Icon: AlertTriangle,
+        ...(props.onDismissAutomationStops
+          ? { onDismiss: () => props.onDismissAutomationStops?.(stops) }
+          : {}),
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
@@ -947,6 +990,8 @@ export function NoticeCenter(props: {
     props.automationHoldsUnreadable,
     props.onResetAutomationHolds,
     props.onRevealAutomationHolds,
+    props.automationStops,
+    props.onDismissAutomationStops,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,

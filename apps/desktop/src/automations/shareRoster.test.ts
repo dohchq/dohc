@@ -618,14 +618,4 @@ describe("keeping the roster current", () => {
     expect(await r.forRun("ws-local")).toEqual({ kind: "owner", ownerUserId: null, grants: [] });
     expect(list).not.toHaveBeenCalled();
   });
-
-  it("answers share impact from a current roster", async () => {
-    const { rosters: r } = rosters(async () => answered({ grants: [ana] }));
-    const impact = await r.shareImpact(
-      WORKSPACE,
-      { paths: ["Budget"], versionId: null, access: "edit", recipientEmail: "ben@dohc.test" },
-      [{ id: "log", collection: { path: "Budget", name: "Budget" }, codeFiles: [], steps: [{ kind: "find-records", collection: { path: "Notes", name: "Notes" } }] }],
-    );
-    expect(impact).toEqual([{ automationId: "log", step: 0, reason: "ben@dohc.test cannot view Notes." }]);
-  });
 });

@@ -268,6 +268,16 @@ describe("share impact", () => {
       ]);
   });
 
+  it("counts whoever opens an Edit link as one new editor, apart from everyone the roster lists", () => {
+    // Ana already edits Trip with the reach Budget needs; the link's opener does not.
+    const roster = owner(grant(ana, { paths: ["Trip", "Budget", "Notes"], access: "edit" }));
+    expect(shareImpactOf(roster, { paths: ["Trip"], versionId: null, access: "edit", recipientEmail: null }, automations))
+      .toEqual([
+        { automationId: "stamp", step: 1, reason: "Someone you shared with cannot edit Budget." },
+        { automationId: "stamp", step: 3, reason: "Someone you shared with cannot view Notes." },
+      ]);
+  });
+
   it("names the steps a share of automations.yaml alone would stop", () => {
     expect(shareImpactOf(owner(), { paths: ["Trip/automations.yaml"], versionId: null, access: "edit", recipientEmail: "ana@dohc.test" }, automations))
       .toEqual([
