@@ -35,6 +35,11 @@ import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
+import {
+  COLLECTION_WRITES_PATH,
+  MAX_COLLECTION_WRITE_BODY_BYTES,
+  readCollectionWritesConfig,
+} from "./collectionWriteRoutes";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -195,6 +200,10 @@ const appCollectionPolicy = (() => {
   try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
   catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
 })();
+const collectionWritesEnabled = (() => {
+  try { return readCollectionWritesConfig(process.env.DOHC_RELAY_COLLECTION_WRITES); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid collection writes setting"}`); }
+})();
 if (appCollectionPolicy && !appPublicationLimits) {
   fatal("FATAL: App collections require DOHC_RELAY_APP_PUBLICATIONS=1.");
 }
@@ -335,6 +344,7 @@ const relayApplication = createSyncRelayHandler({
   appPublicationLimits,
   datasetHost,
   appCollectionPolicy,
+  collectionWritesEnabled,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -427,6 +437,7 @@ const server = serveFetchHandler({
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     isAutomationHostPath(url.pathname) ? AUTOMATION_HOST_MAX_BODY_BYTES :
+    COLLECTION_WRITES_PATH.test(url.pathname) ? MAX_COLLECTION_WRITE_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :

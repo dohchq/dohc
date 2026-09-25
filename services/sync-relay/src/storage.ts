@@ -98,6 +98,7 @@ import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as automationHostStorage from "./storage/automationHosts";
+import * as collectionWriteStorage from "./storage/collectionWrites";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -200,6 +201,7 @@ export {
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
 export { normalizeDiscussionDisplayName } from "./storage/discussion";
+export { CollectionWriteStaleError, type CollectionWriteReceipt } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
 
@@ -558,6 +560,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   takeOverAutomationHost(input: automationHostStorage.AutomationHostTakeOverInput) {
     return automationHostStorage.takeOverAutomationHost(this, input);
+  }
+
+  commitCollectionWrite(input: collectionWriteStorage.CommitCollectionWriteInput) {
+    return collectionWriteStorage.commitCollectionWrite(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
