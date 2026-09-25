@@ -105,4 +105,11 @@ describe("readConfig", () => {
   it("reports a partly configured SMTP server as a configuration error", () => {
     expect(() => readConfig(env({ DOHC_SMTP_HOST: "smtp.example.com" }))).toThrow(ConfigError);
   });
+
+  it("takes crash reports only when the operator sets DOHC_CRASH_REPORTS=1", () => {
+    expect(readConfig(env()).crashReports).toBe(false);
+    expect(readConfig(env({ DOHC_CRASH_REPORTS: "0" })).crashReports).toBe(false);
+    expect(readConfig(env({ DOHC_CRASH_REPORTS: "1" })).crashReports).toBe(true);
+    expect(() => readConfig(env({ DOHC_CRASH_REPORTS: "true" }))).toThrow("DOHC_CRASH_REPORTS must be 0 or 1");
+  });
 });
