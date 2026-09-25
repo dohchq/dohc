@@ -1,4 +1,8 @@
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterEditsRefused,
+  frontmatterIsOneLine,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter";
 import { modalFocusableElements, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -82,7 +86,9 @@ export function PageIdentity(props: PageIdentityProps) {
   // there is no second save cycle: a Y.Map transaction for collab, or a
   // frontmatter rewrite handed back through onChange for local markdown.
   function writeField(key: "title" | "icon", value: string | undefined) {
-    if (readOnly) return;
+    // Frontmatter written on one line cannot change one property without
+    // rewriting the others, so the write is refused before it starts.
+    if (readOnly || (ydoc ? frontmatterEditsRefused(ydoc) : frontmatterIsOneLine(body))) return;
     if (ydoc) {
       if (value === undefined || value === "") ydoc.getMap(FRONTMATTER_FIELD).delete(key);
       else setFrontmatterValue(ydoc, key, value);

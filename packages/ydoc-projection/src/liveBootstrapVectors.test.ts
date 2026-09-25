@@ -91,12 +91,16 @@ const settleSamples: Sample[] = [
     'quoted-continued-at-sequence-column': '---\na:\n- "x\ny"\n---\n\nBody\n',
     'collection-key': '---\n? [a, b]\n: 1\n---\n\nBody\n',
     'bare-carriage-return': '---\na: "x\ry"\n---\n\nBody\n',
+    'question-key': '---\n?bad: [\n---\n\nBody\n',
+    'question-entry': '---\n? [a\n---\n\nBody\n',
   }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed', keeps: true })),
   // Other refused blocks stay body text.
   ...Object.entries({
     'tag-directive': '---\n%TAG !e! tag:example.com,2026:\na: !e!x 1\n---\n\nBody\n',
     'inner-document-start': '---\n--- # x\na: 1\n---\n\nBody\n',
     'thematic-breaks': '---\nJust a line\n---\n\nBody\n',
+    'empty-key': '---\n: [\n---\n\nBody\n',
+    'question-without-separator': '---\n?[a\n---\n\nBody\n',
   }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed' })),
   { name: 'settle-key-changed', markdown: WRITTEN_FRONTMATTER, values: { title: 'Porto' } },
   { name: 'settle-key-removed', markdown: WRITTEN_FRONTMATTER, remove: ['score'] },

@@ -1976,14 +1976,40 @@ pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
     None
 }
 
+/// Whether a frontmatter line looks like a mapping entry: `?` then a space,
+/// tab, or the end; or a first character other than space, tab, `#`, `%`, or
+/// `-`, then a colon followed by a space, tab, or the end. The desktop uses
+/// the same rule (`MAPPING_ENTRY_RE` in packages/ydoc-projection/src/frontmatter.ts).
 fn looks_like_mapping_entry(line: &str) -> bool {
-    if let Some(rest) = line.strip_prefix('?') {
-        return rest.is_empty() || rest.starts_with([' ', '\t']);
+    let separator = |rest: &str| rest.is_empty() || rest.starts_with([' ', '\t']);
+    if line.strip_prefix('?').is_some_and(separator) {
+        return true;
     }
-    !line.starts_with([' ', '\t', '#', '%', '-'])
-        && line.match_indices(':').any(|(index, _)| {
-            line[index + 1..].is_empty() || line[index + 1..].starts_with([' ', '\t'])
-        })
+    let Some(first) = line.chars().next() else {
+        return false;
+    };
+    if matches!(first, ' ' | '\t' | '#' | '%' | '-') {
+        return false;
+    }
+    let rest = &line[first.len_utf8()..];
+    rest.match_indices(':')
+        .any(|(index, _)| separator(&rest[index + 1..]))
+}
+
+/// Whether a readable frontmatter block's root is a flow mapping written as
+/// one `{...}` value. Changing one of its entries would rewrite the others, so
+/// edits to such a document's properties are refused. The desktop uses the
+/// same rule (`frontmatterIsOneLine` in packages/ydoc-projection/src/frontmatter.ts).
+#[must_use]
+pub fn frontmatter_is_one_line(markdown: &str) -> bool {
+    markdown_frontmatter_block(markdown).is_some_and(|block| {
+        block
+            .yaml
+            .lines()
+            .map(|line| line.trim_start_matches([' ', '\t']))
+            .find(|line| !line.trim_end_matches('\r').is_empty() && !line.starts_with('#'))
+            .is_some_and(|line| line.starts_with('{'))
+    })
 }
 
 /// The document's frontmatter block, or `None` when it has none or the block

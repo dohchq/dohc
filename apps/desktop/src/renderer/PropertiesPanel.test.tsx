@@ -226,6 +226,18 @@ describe("PropertiesPanel", () => {
     );
   });
 
+  it("refuses edits when the file's properties are written on one line", async () => {
+    const user = userEvent.setup();
+    const initialBody = "---\n# Keep\n{status: draft, score: .nan}\n---\n\n# Plan\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    expect(screen.getByTestId("properties-locked")).toBeTruthy();
+    await user.type(screen.getByLabelText("Property status value"), "x");
+    await user.click(screen.getByLabelText("Remove property score"));
+
+    expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
+  });
+
   it("writes shared properties into the Y.Doc frontmatter map", async () => {
     const user = userEvent.setup();
     const doc = new Y.Doc();

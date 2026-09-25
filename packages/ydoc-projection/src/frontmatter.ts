@@ -343,9 +343,37 @@ function unreadableFrontmatterPrefix(markdown: string): string | undefined {
   const entry = (text.match(/[^\n]*\n/gu) ?? [])
     .map(line => line.replace(/\r?\n$/u, ''))
     .find(line => !/^[ \t]*(?:#|$)/u.test(line))
-  return entry !== undefined && /^(?:\?(?:[ \t]|$)|[^ \t#%-][^\r\n]*?:(?:[ \t]|$))/u.test(entry)
+  return entry !== undefined && MAPPING_ENTRY_RE.test(entry)
     ? open + text + closeLine
     : undefined
+}
+
+// A frontmatter line that looks like a mapping entry: `?` then a space, tab, or
+// the end; or a first character other than space, tab, `#`, `%`, or `-`, then a
+// colon followed by a space, tab, or the end. The engine uses the same rule
+// (`looks_like_mapping_entry` in crates/dohc-engine-domain/src/collections.rs).
+const MAPPING_ENTRY_RE = /^(?:\?(?:[ \t]|$)|[^ \t#%-][^\r\n]*?:(?:[ \t]|$))/u
+
+/**
+ * Whether a document's readable frontmatter block has a root flow mapping
+ * written as one `{...}` value. Changing one of its entries would rewrite the
+ * others, so edits to such a document's properties are refused. The engine
+ * uses the same rule (`frontmatter_is_one_line` in
+ * crates/dohc-engine-domain/src/collections.rs).
+ */
+export function frontmatterIsOneLine(markdown: unknown): boolean {
+  if (typeof markdown !== 'string') return false
+  const block = readFrontmatterBlock(markdown)
+  if (!block) return false
+  const entry = (block.yaml.match(/[^\n]*\n/gu) ?? [])
+    .map(line => line.replace(/\r?\n$/u, '').replace(/^[ \t]*/u, ''))
+    .find(line => line !== '' && !line.startsWith('#'))
+  return entry?.startsWith('{') ?? false
+}
+
+/** Whether edits to a live document's properties are refused, because its kept frontmatter is written on one line. */
+export function frontmatterEditsRefused(doc: Y.Doc): boolean {
+  return frontmatterIsOneLine(doc.getMap('meta').get(FRONTMATTER_SOURCE_META_KEY))
 }
 
 /**

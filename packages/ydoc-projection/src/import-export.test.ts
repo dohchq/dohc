@@ -17,7 +17,12 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { loadMarkdownFrontmatter, setFrontmatterValue } from './frontmatter.js'
+import {
+  frontmatterEditsRefused,
+  frontmatterIsOneLine,
+  loadMarkdownFrontmatter,
+  setFrontmatterValue,
+} from './frontmatter.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
@@ -481,6 +486,21 @@ describe('Y.Doc markdown import/export', () => {
       for (const key of ['x', 'y']) a.getMap('frontmatter').set(key, 'new')
       expect(yDocToMarkdown(a)).toBe('---\nx: new\ny: new\nz:   3\n---\n\nBody')
     } finally { base.destroy(); a.destroy(); b.destroy() }
+  })
+
+  it('refuses property edits when the frontmatter is written on one line', () => {
+    const flow = '---\n# Keep\n{a: 1, b: .nan}\n---\n\nBody'
+    expect(frontmatterIsOneLine(flow)).toBe(true)
+    expect(frontmatterIsOneLine('---\n  {a: 1}\n---\n')).toBe(true)
+    expect(frontmatterIsOneLine('---\na: {b: 1}\n---\n')).toBe(false)
+    expect(frontmatterIsOneLine('---\n? [a, b]\n: 1\n---\n')).toBe(false)
+    const doc = markdownToYDoc(flow)
+    const block = markdownToYDoc('---\na: 1\n---\n\nBody')
+    try {
+      expect(frontmatterEditsRefused(doc)).toBe(true)
+      expect(frontmatterEditsRefused(block)).toBe(false)
+      expect(yDocToMarkdown(doc)).toBe(flow)
+    } finally { doc.destroy(); block.destroy() }
   })
 
   it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {

@@ -1091,6 +1091,20 @@ impl Ydoc {
         Ok(update)
     }
 
+    /// Whether edits to this document's properties are refused, because its
+    /// kept frontmatter is written on one line (a root flow mapping), and
+    /// changing one entry would rewrite the others. Callers check this before
+    /// [`Ydoc::frontmatter_set`].
+    pub fn frontmatter_edits_refused(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        matches!(
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
+            Some(Out::Any(Any::String(source)))
+                if dohc_engine_domain::collections::frontmatter_is_one_line(&source)
+        )
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
     pub fn frontmatter_set(&self, key: &str, value: &str) -> Vec<u8> {
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -6573,6 +6587,21 @@ fn main() {}
             println!("settle with {name} frontmatter: {:?}", started.elapsed());
             assert!(settled.contains("key1000: edited"));
         }
+    }
+
+    #[test]
+    fn frontmatter_written_on_one_line_refuses_property_edits() {
+        let flow = "---\n# Keep\n{a: 1, b: .nan}\n---\n\nBody";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, flow)
+            .unwrap();
+        assert!(doc.frontmatter_edits_refused());
+        assert_eq!(doc.project_richdoc().unwrap(), flow);
+        let block = Ydoc::wire();
+        block
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "---\na: 1\n---\n\nBody")
+            .unwrap();
+        assert!(!block.frontmatter_edits_refused());
     }
 
     #[test]

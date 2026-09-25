@@ -7,7 +7,11 @@ import type {
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterEditsRefused,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter";
+import { FRONTMATTER_ONE_LINE_MESSAGE } from "../renderer/markdown/frontmatter";
 
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -198,6 +202,7 @@ export async function setCollectionRecordFields(
     const scratch = new Y.Doc();
     try {
       Y.applyUpdate(scratch, session.initialUpdate);
+      if (frontmatterEditsRefused(scratch)) throw new Error(FRONTMATTER_ONE_LINE_MESSAGE);
       let update: Uint8Array | null = null;
       const captureUpdate = (encoded: Uint8Array): void => {
         update = encoded;

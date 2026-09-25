@@ -1,9 +1,14 @@
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterEditsRefused,
+  frontmatterIsOneLine,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
 import {
   applyFrontmatter,
+  FRONTMATTER_ONE_LINE_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromMeta,
   type FrontmatterEntry,
@@ -178,7 +183,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     setEntries(editableEntries(sourceEntries));
   }, [sourceEntries]);
 
+  // Frontmatter written on one line cannot change one property without
+  // rewriting the others, so the panel refuses edits before any write.
+  const locked = ydoc ? frontmatterEditsRefused(ydoc) : frontmatterIsOneLine(body);
+
   function commit(next: FrontmatterEntry[]) {
+    if (locked) return;
     const previous = editableEntries(sourceEntries);
     setEntries(next);
     if (hasDuplicateKeys(next)) return;
@@ -219,6 +229,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       aria-label="Properties"
     >
       <div className="dohc-page-properties__inner">
+        {locked ? (
+          <span
+            data-testid="properties-locked"
+            className="dohc-page-properties__flag"
+            title={FRONTMATTER_ONE_LINE_MESSAGE}
+          >
+            written on one line
+          </span>
+        ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
           const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
@@ -230,6 +249,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 value={entry.key}
                 placeholder="Property"
                 spellCheck={false}
+                readOnly={locked}
                 onChange={(event) => setKey(index, event.target.value)}
                 onBlur={() => commit(entries)}
                 className={`dohc-page-properties__key${
@@ -259,6 +279,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   value={entry.value}
                   placeholder="Empty"
                   spellCheck={false}
+                  readOnly={locked}
                   onChange={(event) => setValue(index, event.target.value)}
                   className="dohc-page-properties__value"
                 />
