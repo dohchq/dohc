@@ -302,7 +302,16 @@ pub(super) fn kept(
                 .iter()
                 .all(|(key, entry)| parsed.get(key.as_str()) == Some(&Some(entry.clone())))
     };
-    let block = markdown_frontmatter_block(source).filter(|block| only_line_breaks(block.body))?;
+    let Some(block) = markdown_frontmatter_block(source) else {
+        // A block neither loader reads is kept as written while no key is set.
+        return (rendered.is_empty()
+            && dohc_engine_domain::collections::unreadable_frontmatter_prefix(source)
+                .is_some_and(|prefix| only_line_breaks(&source[prefix.len()..])))
+        .then(|| source.to_owned());
+    };
+    if !only_line_breaks(block.body) {
+        return None;
+    }
     let parsed = rendered_entries(&block.value);
     if reads_as_current(&parsed) && block.value.keys().all(|key| written.contains(key)) {
         return Some(source.to_owned());

@@ -36,6 +36,8 @@ type Sample = {
   name: string; markdown: string; edit?: boolean; values?: Record<string, unknown>; raw?: Record<string, unknown>
   // Typed at the end of the body, and a replacement frontmatter source.
   typed?: string; remove?: string[]; source?: string
+  // Values set on two replicas of the imported document, one each, then merged.
+  concurrent?: [[string, unknown], [string, unknown]]
   // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean
 }
@@ -79,16 +81,22 @@ const settleSamples: Sample[] = [
     'number-keys': '---\n1e21: a\n1e-7: b\n-0.0: c\n1.0: d\n---\n\nBody\n',
     aliases: '---\nlist: &list [1, 2]\ncopy: *list\nname: &name key\n*name : value\n---\n\nBody\n',
     'empty-key': '---\n: note\ntitle: A\n---\n\nBody\n',
+    proto: '---\n# Keep\n__proto__:   x\n---\n\nBody\n',
     'folded-keep': '---\nb: >+\n  folded\n\n\nc: 1\n---\n\nBody\n',
     written: WRITTEN_FRONTMATTER,
   }).map(([name, markdown]) => ({ name: `settle-typed-${name}`, markdown, typed: ', typed', keeps: true })),
-  // Blocks both loaders refuse stay body text.
+  // A block both loaders refuse, whose first entry looks like a mapping key,
+  // is kept byte for byte and not read as body Markdown.
   ...Object.entries({
     'quoted-continued-at-sequence-column': '---\na:\n- "x\ny"\n---\n\nBody\n',
     'collection-key': '---\n? [a, b]\n: 1\n---\n\nBody\n',
+    'bare-carriage-return': '---\na: "x\ry"\n---\n\nBody\n',
+  }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed', keeps: true })),
+  // Other refused blocks stay body text.
+  ...Object.entries({
     'tag-directive': '---\n%TAG !e! tag:example.com,2026:\na: !e!x 1\n---\n\nBody\n',
     'inner-document-start': '---\n--- # x\na: 1\n---\n\nBody\n',
-    'bare-carriage-return': '---\na: "x\ry"\n---\n\nBody\n',
+    'thematic-breaks': '---\nJust a line\n---\n\nBody\n',
   }).map(([name, markdown]) => ({ name: `settle-typed-refused-${name}`, markdown, typed: ', typed' })),
   { name: 'settle-key-changed', markdown: WRITTEN_FRONTMATTER, values: { title: 'Porto' } },
   { name: 'settle-key-removed', markdown: WRITTEN_FRONTMATTER, remove: ['score'] },
@@ -113,6 +121,7 @@ const settleSamples: Sample[] = [
   { name: 'settle-key-deleted-then-name-reused', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { wifi: 'new' } },
   { name: 'settle-key-deleted-then-name-reused-directly', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], raw: { wifi: 'new' } },
   { name: 'settle-key-deleted-then-value-reused', markdown: '---\n# delete before publishing\ndraft: true\ntitle: A\n---\n\nBody\n', remove: ['draft'], values: { featured: true } },
+  { name: 'settle-concurrent-key-edits', markdown: '---\n# a note\na:   1\n# b note\nb:   2\n---\n\nBody\n', concurrent: [['a', 10], ['b', 20]] },
   { name: 'settle-last-key-forgotten', markdown: '---\nz: 1\n---\n\nBody\n', remove: ['z'] },
   { name: 'settle-key-replaced', markdown: '---\n# Wi-Fi password\nwifi: hunter2\nbudget: 100\n---\n\nBody\n', remove: ['wifi'], values: { note: 'x' } },
   { name: 'settle-keep-block-scalar-last-key-added', markdown: '---\nb: |+\n  keeps\n\n---\n\nBody\n', values: { c: 1 } },
@@ -162,6 +171,14 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
   const vectors: Vector[] = samples.map(sample => {
     const doc = markdownToYDoc(sample.markdown)
     try {
+      if (sample.concurrent) {
+        const peer = new Y.Doc()
+        Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc))
+        setFrontmatterValue(doc, ...sample.concurrent[0])
+        setFrontmatterValue(peer, ...sample.concurrent[1])
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer))
+        peer.destroy()
+      }
       for (const key of sample.remove ?? []) doc.getMap('frontmatter').delete(key)
       if (sample.edit) doc.getMap('frontmatter').set('priority', 'low')
       for (const [key, value] of Object.entries(sample.values ?? {})) setFrontmatterValue(doc, key, value)

@@ -329,6 +329,26 @@ function readFrontmatterBlock(markdown: string): FrontmatterBlock | null | undef
 }
 
 /**
+ * A frontmatter block that neither loader reads, up to and including its
+ * closing delimiter line, when its first entry looks like a mapping key:
+ * `key:` or `?` at the start of a line. A settle keeps such a block byte
+ * for byte instead of reading it as body Markdown. The engine applies the
+ * same rule (`unreadable_frontmatter_prefix` in
+ * crates/dohc-engine-domain/src/collections.rs).
+ */
+function unreadableFrontmatterPrefix(markdown: string): string | undefined {
+  const match = FRONTMATTER_RE.exec(markdown)
+  if (!match || readFrontmatterBlock(markdown) !== null) return undefined
+  const [, open = '', text = '', closeLine = ''] = match
+  const entry = (text.match(/[^\n]*\n/gu) ?? [])
+    .map(line => line.replace(/\r?\n$/u, ''))
+    .find(line => !/^[ \t]*(?:#|$)/u.test(line))
+  return entry !== undefined && /^(?:\?(?:[ \t]|$)|[^ \t#%-][^\r\n]*?:(?:[ \t]|$))/u.test(entry)
+    ? open + text + closeLine
+    : undefined
+}
+
+/**
  * Frontmatter values with top-level keys in document order, and the text after
  * the block. `undefined` when the document has no readable block.
  */
@@ -353,7 +373,14 @@ export function parseFrontmatter(src: string, usesCrlf: boolean): {
   frontmatterSource?: string
 } {
   const block = readFrontmatterBlock(src)
-  if (!block) return { meta: {}, body: src }
+  if (!block) {
+    // A block neither loader reads stays as written, with no values.
+    const prefix = unreadableFrontmatterPrefix(src)
+    if (prefix === undefined) return { meta: {}, body: src }
+    const rest = src.slice(prefix.length)
+    const separator = /^(?:\r?\n)*/u.exec(rest)?.[0] ?? ''
+    return { meta: {}, body: rest.slice(separator.length), frontmatterSource: prefix + separator }
+  }
   const separator = /^(?:\r?\n)*/u.exec(block.rest)?.[0] ?? ''
   const source = src.slice(0, src.length - block.rest.length + separator.length)
   let canonical: string
@@ -397,7 +424,15 @@ export function keptFrontmatter(
   if (exceedsLiveMarkdownLimit(source)) return undefined
   try {
     const block = readFrontmatterBlock(source)
-    if (!block || !/^(?:\r?\n)*$/u.test(block.rest)) return undefined
+    if (!block) {
+      // A block neither loader reads is kept as written while no key is set.
+      const prefix = unreadableFrontmatterPrefix(source)
+      return prefix !== undefined && Object.keys(current).length === 0
+        && /^(?:\r?\n)*$/u.test(source.slice(prefix.length))
+        ? source
+        : undefined
+    }
+    if (!/^(?:\r?\n)*$/u.test(block.rest)) return undefined
     // Each value renders once and compares as its canonical entry.
     const rendered = renderedEntries(current)
     const readsAsCurrent = (parsed: Map<string, string>): boolean =>
@@ -446,44 +481,39 @@ export function keptFrontmatter(
 /** The Y.Doc meta key that holds the frontmatter text a document keeps. */
 export const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
 /**
- * The Y.Doc meta key that holds the item each frontmatter key held when its
- * text was kept: a JSON object from key to `client:clock`. Writing a key
- * creates a new item, so a key written since, by any writer, no longer
- * matches. The engine reads it the same way.
+ * The prefix of the Y.Doc meta keys that hold the item a frontmatter key held
+ * when its text was kept, as `client:clock`. One entry per key, so edits to
+ * different keys on different devices merge. Writing a key creates a new
+ * item, so a key written since, by any writer, no longer matches. The engine
+ * reads them the same way.
  */
-export const FRONTMATTER_SOURCE_ITEMS_META_KEY = 'dohcFrontmatterSourceItems'
+export const FRONTMATTER_SOURCE_ITEM_META_PREFIX = 'dohcFrontmatterSourceItem:'
 
 function entryItem(map: Y.Map<unknown>, key: string): string | undefined {
   const item = map._map.get(key)
   return item === undefined || item.deleted ? undefined : `${item.id.client}:${item.id.clock}`
 }
 
-function sourceItems(meta: Y.Map<unknown>): Record<string, unknown> {
-  const items = meta.get(FRONTMATTER_SOURCE_ITEMS_META_KEY)
-  if (typeof items !== 'string') return {}
-  try {
-    const parsed: unknown = JSON.parse(items)
-    return isFrontmatterMap(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
 /** Record the item each frontmatter key holds now, beside the kept text. */
 export function recordFrontmatterSourceItems(frontmatter: Y.Map<unknown>, meta: Y.Map<unknown>): void {
-  const items: Record<string, string> = {}
+  for (const key of [...meta.keys()]) {
+    if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) meta.delete(key)
+  }
   for (const key of frontmatter.keys()) {
     const item = entryItem(frontmatter, key)
-    if (item !== undefined) items[key] = item
+    if (item !== undefined) meta.set(FRONTMATTER_SOURCE_ITEM_META_PREFIX + key, item)
   }
-  meta.set(FRONTMATTER_SOURCE_ITEMS_META_KEY, JSON.stringify(items))
 }
 
 /** The frontmatter keys still held by the items their kept text was written for. */
 export function writtenFrontmatterKeys(frontmatter: Y.Map<unknown>, meta: Y.Map<unknown>): Set<string> {
-  return new Set(Object.entries(sourceItems(meta))
-    .filter(([key, item]) => entryItem(frontmatter, key) === item)
-    .map(([key]) => key))
+  const written = new Set<string>()
+  for (const [metaKey, item] of meta.entries()) {
+    if (!metaKey.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) continue
+    const key = metaKey.slice(FRONTMATTER_SOURCE_ITEM_META_PREFIX.length)
+    if (entryItem(frontmatter, key) === item) written.add(key)
+  }
+  return written
 }
 
 /**
@@ -498,9 +528,9 @@ export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): vo
     const meta = doc.getMap<unknown>('meta')
     const before = entryItem(frontmatter, key)
     frontmatter.set(key, value)
-    const items = sourceItems(meta)
-    if (before === undefined || items[key] !== before) return
-    meta.set(FRONTMATTER_SOURCE_ITEMS_META_KEY, JSON.stringify({ ...items, [key]: entryItem(frontmatter, key) }))
+    const after = entryItem(frontmatter, key)
+    const metaKey = FRONTMATTER_SOURCE_ITEM_META_PREFIX + key
+    if (before !== undefined && after !== undefined && meta.get(metaKey) === before) meta.set(metaKey, after)
   })
 }
 

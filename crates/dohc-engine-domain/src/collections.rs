@@ -1219,10 +1219,13 @@ pub fn is_frontmatter_delimiter(line: &str) -> bool {
 /// A frontmatter YAML node. An alias shares its anchor's node, so the tree
 /// never copies what an alias names.
 enum FrontmatterNode {
+    /// `value` and `non_finite` are resolved once, when the scalar is read,
+    /// so an alias that repeats a long spelling never resolves it again.
     Scalar {
         text: String,
-        style: ScalarStyle,
         tag: Option<Tag>,
+        value: Value,
+        non_finite: bool,
     },
     Sequence {
         tag: Option<Tag>,
@@ -1237,9 +1240,7 @@ enum FrontmatterNode {
 /// A scalar key as text; `None` for a key that is a collection.
 fn frontmatter_node_key(node: &FrontmatterNode) -> Option<String> {
     match node {
-        FrontmatterNode::Scalar { text, style, tag } => Some(frontmatter_key_text(
-            frontmatter_scalar(text, *style, tag.as_ref()).value,
-        )),
+        FrontmatterNode::Scalar { value, .. } => Some(frontmatter_key_text(value.clone())),
         _ => None,
     }
 }
@@ -1479,9 +1480,7 @@ fn frontmatter_key_text(value: Value) -> String {
 
 fn frontmatter_node_json(node: &FrontmatterNode) -> Value {
     match node {
-        FrontmatterNode::Scalar { text, style, tag } => {
-            frontmatter_scalar(text, *style, tag.as_ref()).value
-        }
+        FrontmatterNode::Scalar { value, .. } => value.clone(),
         FrontmatterNode::Sequence { items, .. } => Value::Array(
             items
                 .iter()
@@ -1501,9 +1500,7 @@ fn frontmatter_node_json(node: &FrontmatterNode) -> Value {
 
 fn frontmatter_node_is_non_finite(node: &FrontmatterNode) -> bool {
     match node {
-        FrontmatterNode::Scalar { text, style, tag } => {
-            frontmatter_scalar(text, *style, tag.as_ref()).non_finite
-        }
+        FrontmatterNode::Scalar { non_finite, .. } => *non_finite,
         _ => false,
     }
 }
@@ -1658,7 +1655,10 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
         let node = match event {
             Event::Scalar(text, style, anchor, tag) => {
                 let tag = tag.map(std::borrow::Cow::into_owned);
-                let resolved = frontmatter_scalar(&text, style, tag.as_ref()).value;
+                let FrontmatterScalar {
+                    value: resolved,
+                    non_finite,
+                } = frontmatter_scalar(&text, style, tag.as_ref());
                 if matches!(
                     style,
                     ScalarStyle::Plain | ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted
@@ -1669,7 +1669,7 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                 }
                 let value_bytes = string_bytes(&resolved);
                 if is_key {
-                    bytes += frontmatter_key_text(resolved).len();
+                    bytes += frontmatter_key_text(resolved.clone()).len();
                 } else {
                     nodes += 1;
                     bytes += value_bytes;
@@ -1698,8 +1698,9 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                 }
                 let node = Rc::new(FrontmatterNode::Scalar {
                     text: text.into_owned(),
-                    style,
                     tag,
+                    value: resolved,
+                    non_finite,
                 });
                 if anchor > 0 {
                     anchors.insert(
@@ -1941,6 +1942,48 @@ fn frontmatter_block(
     };
     block.value = value;
     Ok(Some((block, Some(document))))
+}
+
+/// A frontmatter block that neither loader reads, up to and including its
+/// closing delimiter line, when its first entry looks like a mapping key: `key:`
+/// or `?` at the start of a line. A settle keeps such a block byte for byte
+/// instead of reading it as body Markdown. The desktop applies the same rule
+/// (`unreadableFrontmatterPrefix` in packages/ydoc-projection/src/frontmatter.ts).
+#[must_use]
+pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
+    if frontmatter_block(markdown).is_ok() {
+        return None;
+    }
+    let mut lines = markdown.split_inclusive('\n');
+    let first = lines
+        .next()
+        .filter(|line| line.ends_with('\n') && is_frontmatter_delimiter(line))?;
+    let mut end = first.len();
+    let mut entry = None;
+    for line in lines {
+        end += line.len();
+        if is_frontmatter_delimiter(line) {
+            return entry
+                .is_some_and(looks_like_mapping_entry)
+                .then(|| &markdown[..end]);
+        }
+        let content = line.trim_end_matches(['\r', '\n']);
+        let trimmed = content.trim_start_matches([' ', '\t']);
+        if entry.is_none() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            entry = Some(content);
+        }
+    }
+    None
+}
+
+fn looks_like_mapping_entry(line: &str) -> bool {
+    if let Some(rest) = line.strip_prefix('?') {
+        return rest.is_empty() || rest.starts_with([' ', '\t']);
+    }
+    !line.starts_with([' ', '\t', '#', '%', '-'])
+        && line.match_indices(':').any(|(index, _)| {
+            line[index + 1..].is_empty() || line[index + 1..].starts_with([' ', '\t'])
+        })
 }
 
 /// The document's frontmatter block, or `None` when it has none or the block
@@ -6089,6 +6132,40 @@ mod tests {
             assert!(super::markdown_frontmatter_json(&markdown).is_none());
             assert_eq!(markdown_record_id(&markdown), None);
         }
+    }
+
+    /// An anchored integer spelled with 500,000 leading zeros, repeated by a
+    /// ladder of aliases 32,768 times, stays within every budget. The loader
+    /// resolves the spelling once, so reading it costs one scan, not one per
+    /// repetition. The bound is far above one scan and far below 32,768.
+    #[test]
+    fn an_aliased_long_scalar_is_resolved_once() {
+        let mut yaml = format!(
+            "l0: &l0 {}7
+",
+            "0".repeat(500_000)
+        );
+        for level in 1..=15 {
+            yaml.push_str(&format!(
+                "l{level}: &l{level} [*l{}, *l{}]
+",
+                level - 1,
+                level - 1
+            ));
+        }
+        let markdown = format!(
+            "---
+{yaml}---
+"
+        );
+        let started = std::time::Instant::now();
+        let value = super::markdown_frontmatter_json(&markdown).expect("the ladder reads");
+        assert_eq!(value["l0"], 7);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "reading took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

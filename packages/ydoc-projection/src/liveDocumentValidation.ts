@@ -49,13 +49,15 @@ const MAX_INT64 = (1n << 63n) - 1n
 const SHARED_BIGINT_KEY = '$dohcBigInt'
 const PUBLIC_ROOTS = new Set(['body', 'frontmatter', 'meta'])
 const META_KEYS = new Set([
-  'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource', 'dohcFrontmatterSourceItems',
+  'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource',
   'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
 const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
 // Exact text the projection keeps only while it reads as the current state.
 // A frontmatter edit leaves it behind, so it need not match a reimport.
-const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource', 'dohcFrontmatterSourceItems'] as const
+const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource'] as const
+// The item each frontmatter key held when its text was kept, one entry per key.
+const FRONTMATTER_SOURCE_ITEM_META_PREFIX = 'dohcFrontmatterSourceItem:'
 const ByteArray = Uint8Array
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!
@@ -663,7 +665,7 @@ function semanticEqual(left: unknown, right: unknown): boolean {
 function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record<string, unknown> {
   const snapshot: Record<string, unknown> = Object.create(null)
   for (const [key, value] of meta.entries()) {
-    if (!META_KEYS.has(key)) refuse('invalid-schema')
+    if (!META_KEYS.has(key) && !key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) refuse('invalid-schema')
     snapshot[key] = value
   }
   if (Object.hasOwn(snapshot, 'schemaVersion')) {
@@ -672,12 +674,18 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
   if (Object.hasOwn(snapshot, 'dohcMarkdownCrlf') && snapshot.dohcMarkdownCrlf !== true) {
     refuse('invalid-schema')
   }
-  // Frontmatter text, and the items it was written for, are never longer
-  // than the document they lead.
-  for (const key of ['dohcFrontmatterSource', 'dohcFrontmatterSourceItems'] as const) {
-    if (Object.hasOwn(snapshot, key) && (
-      typeof snapshot[key] !== 'string' || exceedsLiveMarkdownLimit(snapshot[key])
-    )) refuse('invalid-schema')
+  // Frontmatter text is never longer than the document it leads.
+  if (Object.hasOwn(snapshot, 'dohcFrontmatterSource') && (
+    typeof snapshot.dohcFrontmatterSource !== 'string'
+    || exceedsLiveMarkdownLimit(snapshot.dohcFrontmatterSource)
+  )) refuse('invalid-schema')
+  // The item records name each frontmatter key once, as `client:clock`.
+  let itemBytes = 0
+  for (const [key, item] of Object.entries(snapshot)) {
+    if (!key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) continue
+    if (typeof item !== 'string') refuse('invalid-schema')
+    itemBytes += utf8.encode(key).length + utf8.encode(item).length
+    if (itemBytes > 2 * 1024 * 1024) refuse('invalid-schema')
   }
   const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
   if (sourceFields !== 0) {
@@ -756,6 +764,7 @@ function validatePublicState(
       const withoutSources = (values: Record<string, unknown>) => {
         const kept = { ...values }
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key]
+        for (const key of Object.keys(kept)) if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key]
         return kept
       }
       if (!semanticEqual(withoutSources(metadata), withoutSources(Object.fromEntries(reimported.getMap('meta').entries())))) refuse('invalid-schema')

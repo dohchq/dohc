@@ -62,11 +62,11 @@ const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
 /// The frontmatter text a document was imported with, kept while it reads as
 /// the current frontmatter. See [`frontmatter_yaml::kept`].
 const FRONTMATTER_SOURCE_META_KEY: &str = "dohcFrontmatterSource";
-/// The item each frontmatter key held when its text was kept: a JSON object
-/// from key to `client:clock`. Writing a key creates a new item, so a key
-/// written since, by any writer, no longer matches and its kept text and
-/// comments are not written back.
-const FRONTMATTER_SOURCE_ITEMS_META_KEY: &str = "dohcFrontmatterSourceItems";
+/// The item a frontmatter key held when its text was kept, as `client:clock`,
+/// one meta entry per key so edits to different keys on different devices
+/// merge. Writing a key creates a new item, so a key written since, by any
+/// writer, no longer matches and its kept comments are not written back.
+const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
@@ -542,35 +542,45 @@ impl Ydoc {
         }
         for (key, value) in meta.iter(&txn) {
             let valid = matches!(
-                (key, value),
+                (key, &value),
                 ("schemaVersion", Out::Any(Any::Number(1.0)))
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
                         FRONTMATTER_SOURCE_META_KEY
-                            | FRONTMATTER_SOURCE_ITEMS_META_KEY
                             | MARKDOWN_SOURCE_META_KEY
                             | MARKDOWN_SOURCE_SHA_META_KEY
                             | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
                         Out::Any(Any::String(_)),
                     )
             );
-            if !valid {
+            let item_record = matches!(
+                (key, value),
+                (key, Out::Any(Any::String(_))) if key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)
+            );
+            if !valid && !item_record {
                 return Err(invalid());
             }
         }
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
             return Err(invalid());
         }
-        for key in [
-            FRONTMATTER_SOURCE_META_KEY,
-            FRONTMATTER_SOURCE_ITEMS_META_KEY,
-        ] {
-            if matches!(
-                meta.get(&txn, key),
-                Some(Out::Any(Any::String(text)))
-                    if text.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
-            ) {
-                return Err(invalid());
+        if matches!(
+            meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
+            Some(Out::Any(Any::String(text)))
+                if text.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+        ) {
+            return Err(invalid());
+        }
+        // The item records name each frontmatter key once, as `client:clock`.
+        let mut item_bytes = 0usize;
+        for (key, value) in meta.iter(&txn) {
+            if let (true, Out::Any(Any::String(item))) =
+                (key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX), value)
+            {
+                item_bytes = item_bytes.saturating_add(key.len() + item.len());
+                if item_bytes > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                    return Err(invalid());
+                }
             }
         }
         let source_fields = [
@@ -1375,6 +1385,10 @@ fn item_text(id: yrs::ID) -> String {
     format!("{}:{}", id.client.get(), id.clock)
 }
 
+fn item_meta_key(key: &str) -> String {
+    format!("{FRONTMATTER_SOURCE_ITEM_META_PREFIX}{key}")
+}
+
 /// Keep `source` as the document's frontmatter text, with the item each
 /// frontmatter key holds now, in the caller's transaction. `None` removes both.
 fn keep_frontmatter_source(
@@ -1383,36 +1397,28 @@ fn keep_frontmatter_source(
     txn: &mut yrs::TransactionMut,
     source: Option<&str>,
 ) {
+    let stale: Vec<String> = meta
+        .keys(txn)
+        .filter(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX))
+        .map(str::to_owned)
+        .collect();
+    for key in stale {
+        meta.remove(txn, &key);
+    }
     let Some(source) = source else {
         meta.remove(txn, FRONTMATTER_SOURCE_META_KEY);
-        meta.remove(txn, FRONTMATTER_SOURCE_ITEMS_META_KEY);
         return;
     };
-    let items: serde_json::Map<String, Value> = map
+    let items: Vec<(String, String)> = map
         .keys(txn)
         .filter_map(|key| {
             map.entry_id(txn, key)
-                .map(|id| (key.to_owned(), Value::String(item_text(id))))
+                .map(|id| (item_meta_key(key), item_text(id)))
         })
         .collect();
     meta.insert(txn, FRONTMATTER_SOURCE_META_KEY, source);
-    meta.insert(
-        txn,
-        FRONTMATTER_SOURCE_ITEMS_META_KEY,
-        Value::Object(items).to_string(),
-    );
-}
-
-fn frontmatter_source_items<T: ReadTxn>(
-    meta: &yrs::MapRef,
-    txn: &T,
-) -> serde_json::Map<String, Value> {
-    match meta.get(txn, FRONTMATTER_SOURCE_ITEMS_META_KEY) {
-        Some(Out::Any(Any::String(items))) => match serde_json::from_str(&items) {
-            Ok(Value::Object(items)) => items,
-            _ => serde_json::Map::new(),
-        },
-        _ => serde_json::Map::new(),
+    for (key, item) in items {
+        meta.insert(txn, key.as_str(), item);
     }
 }
 
@@ -1422,13 +1428,13 @@ fn written_frontmatter_keys<T: ReadTxn>(
     meta: &yrs::MapRef,
     txn: &T,
 ) -> BTreeSet<String> {
-    frontmatter_source_items(meta, txn)
-        .into_iter()
-        .filter(|(key, item)| {
-            map.entry_id(txn, key)
-                .is_some_and(|id| item.as_str() == Some(item_text(id).as_str()))
+    meta.iter(txn)
+        .filter_map(|(meta_key, item)| {
+            let key = meta_key.strip_prefix(FRONTMATTER_SOURCE_ITEM_META_PREFIX)?;
+            matches!(item, Out::Any(Any::String(item))
+                if map.entry_id(txn, key).is_some_and(|id| item.as_ref() == item_text(id)))
+            .then(|| key.to_owned())
         })
-        .map(|(key, _)| key)
         .collect()
 }
 
@@ -1443,19 +1449,14 @@ fn carry_frontmatter_source_item(
     key: &str,
     before: Option<yrs::ID>,
 ) {
-    let mut items = frontmatter_source_items(meta, txn);
     let (Some(before), Some(after)) = (before, map.entry_id(txn, key)) else {
         return;
     };
-    if items.get(key).and_then(Value::as_str) != Some(item_text(before).as_str()) {
-        return;
+    let meta_key = item_meta_key(key);
+    if matches!(meta.get(txn, &meta_key), Some(Out::Any(Any::String(item))) if item.as_ref() == item_text(before))
+    {
+        meta.insert(txn, meta_key.as_str(), item_text(after));
     }
-    items.insert(key.to_owned(), Value::String(item_text(after)));
-    meta.insert(
-        txn,
-        FRONTMATTER_SOURCE_ITEMS_META_KEY,
-        Value::Object(items).to_string(),
-    );
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1537,7 +1538,24 @@ fn split_markdown_frontmatter(
                 body,
             )
         }
-        None => (serde_json::Map::new(), None, markdown),
+        None => match dohc_engine_domain::collections::unreadable_frontmatter_prefix(markdown) {
+            // A block neither loader reads stays as written, with no values.
+            Some(prefix) => {
+                let mut body = &markdown[prefix.len()..];
+                while let Some(rest) = body
+                    .strip_prefix("\r\n")
+                    .or_else(|| body.strip_prefix('\n'))
+                {
+                    body = rest;
+                }
+                (
+                    serde_json::Map::new(),
+                    Some(&markdown[..markdown.len() - body.len()]),
+                    body,
+                )
+            }
+            None => (serde_json::Map::new(), None, markdown),
+        },
     }
 }
 
@@ -6358,7 +6376,9 @@ fn main() {}
         );
         let txn = doc.doc.transact();
         assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
-        assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_ITEMS_META_KEY));
+        assert!(meta
+            .keys(&txn)
+            .all(|key| !key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
     }
 
     /// A collaborator can write any frontmatter source. One too deep, too
