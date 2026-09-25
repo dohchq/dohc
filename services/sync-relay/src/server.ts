@@ -840,7 +840,16 @@ export function createSyncRelayHandler({
   });
 }
 
-function parseRoute(request: Request): SyncRelayRoute {
+/** Only recovery imports have an authenticated, bounded streaming body reader. */
+export function isDatasetRecoveryUpload(url: URL, method: string): boolean {
+  if (method !== "POST") return false;
+  try {
+    const route = parseRoute({ url: url.href });
+    return route.route === "dataset" && route.action === "import";
+  } catch { return false; }
+}
+
+function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "link-app-publication"};

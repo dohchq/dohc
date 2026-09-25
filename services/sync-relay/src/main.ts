@@ -19,7 +19,7 @@ import { errorBody, errorResponse } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
-import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, createSyncRelayHandler, isDatasetRecoveryUpload } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
@@ -421,6 +421,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 
 const server = serveFetchHandler({
   handler: fetchHandler,
+  streamBody: isDatasetRecoveryUpload,
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
