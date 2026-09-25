@@ -100,15 +100,24 @@ export class RelayKeyEnvelopeMissingError extends Error {
   }
 }
 
-// The relay does not serve the relay API version this build speaks. "app"
-// means the relay needs a newer dohc; "server" means the relay is older than
-// this dohc and must be updated first.
+// Which side must update when the relay does not serve the relay API version
+// this build speaks. "app" means the relay needs a newer dohc; "server" means
+// the relay is older than this dohc.
+export type RelayApiUpdate = "app" | "server";
+
+export const RELAY_API_VERSION_CAUSE: Readonly<Record<RelayApiUpdate, string>> = {
+  app: "This server needs a newer version of dohc.",
+  server: "This server runs an older version of dohc.",
+};
+
 export class RelayApiVersionError extends Error {
-  constructor(readonly update: "app" | "server") {
+  constructor(readonly update: RelayApiUpdate) {
     super(
-      update === "app"
-        ? "This server needs a newer version of dohc. Update dohc, then try again."
-        : "This server runs an older version of dohc. Ask the person who runs it to update it.",
+      `${RELAY_API_VERSION_CAUSE[update]} ${
+        update === "app"
+          ? "Update dohc, then try again."
+          : "Ask the person who runs it to update it."
+      }`,
     );
     this.name = "RelayApiVersionError";
   }

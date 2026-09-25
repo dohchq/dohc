@@ -1216,6 +1216,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
+  // Sync stopped because the server does not serve this dohc's relay API
+  // version: "app" means update dohc, "server" means the server is older.
+  updateRequired: z.enum(["app", "server"]).optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
