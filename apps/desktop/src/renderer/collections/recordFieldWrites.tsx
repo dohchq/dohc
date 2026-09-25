@@ -3,7 +3,7 @@ import {
   frontmatterEditsRefused,
   setFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
-import { FRONTMATTER_ONE_LINE_MESSAGE } from "../markdown/frontmatter";
+import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
@@ -210,7 +210,7 @@ export function CollectionRecordFieldWrite({
       return;
     }
     if (frontmatterEditsRefused(doc)) {
-      onFailed(FRONTMATTER_ONE_LINE_MESSAGE);
+      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
       return;
     }
     applied.current = true;

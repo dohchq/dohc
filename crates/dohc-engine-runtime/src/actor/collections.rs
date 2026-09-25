@@ -310,7 +310,7 @@ fn ensure_collection_record_id_on_store(
             }
             Err(error) => return Err(error.into()),
         },
-        // Frontmatter written on one line cannot take a key without rewriting
+        // An unsplittable block cannot take a key without rewriting
         // the others; adoption declines until the file is edited.
         None if doc.frontmatter_edits_refused() => return Ok(None),
         None => doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id),

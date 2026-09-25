@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { setFrontmatterValue } from './frontmatter.js'
+import { frontmatterEditsRefused, setFrontmatterValue } from './frontmatter.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import frontmatterFixtures from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
@@ -40,6 +40,7 @@ type Sample = {
   concurrent?: [[string, unknown], [string, unknown]]
   // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean
+  checkImport?: boolean; editsRefused?: boolean
 }
 // The frontmatter block as written, read with a pattern and not a YAML loader,
 // so a fault both loaders share cannot rewrite the expectation.
@@ -62,6 +63,48 @@ const WRITTEN_FRONTMATTER = [
   'tags:', '- a', '- b', '---', '', 'Body', '',
 ].join('\n')
 const settleSamples: Sample[] = [
+  { name: 'preserve-unreadable-crlf-key', markdown: '---\r\na: [\r\n---\r\n\r\nBody', keeps: true, checkImport: true },
+  ...Object.entries({
+    'bare-cr-in-key': 'a\r: [',
+    'double-cr-in-key': 'a\r\r: [',
+    'cr-at-start-of-key': '\rkey: [',
+    'cr-after-value': 'a: [\r',
+    'double-cr-after-value': 'a: [\r\r',
+  }).map(([name, yaml]) => ({
+    name: `preserve-unreadable-${name}`, markdown: `---\n${yaml}\n---\n\nBody`, keeps: true, checkImport: true,
+  })),
+  ...Object.entries({
+    'cr-after-colon': 'a:\r\r\n',
+    'cr-after-question': '?\r\r\n',
+    'cr-before-first-entry': '\r\r\na: [\n',
+    'lf-before-colon': 'a\n: [\n',
+    'crlf-before-colon': 'a\r\n: [\r\n',
+  }).map(([name, yaml]) => ({
+    name: `body-unreadable-${name}`, markdown: `---\n${yaml}---\n\nBody`, checkImport: true,
+  })),
+  ...Object.entries({
+    flow: '{a: 1, b: .nan}',
+    anchor: '&root {a: 1, b: .nan}',
+    tag: '!!map {a: 1, b: .nan}',
+    'tag-anchor': '!<tag:yaml.org,2002:map> &root {a: 1, b: .nan}',
+    'anchor-tag': '&root !custom\n{a: 1, b: .nan}',
+    multiline: '{\n a: 1,\n b: .nan\n}',
+    'empty-key': ': note\na: 1\nb: .nan',
+    empty: '&root {}',
+  }).map(([name, yaml]) => ({
+    name: `refuse-property-edit-${name}`, markdown: `---\n${yaml}\n---\n\nBody`,
+    keeps: true, checkImport: true, editsRefused: true,
+  })),
+  ...Object.entries({
+    nested: 'a: 1\nb: {c: .nan}',
+    block: '&root\na: 1\nb: .nan',
+    'tagged-block': '!!map\na: 1\nb: .nan',
+    empty: '',
+  }).map(([name, yaml]) => ({
+    name: `allow-property-edit-${name}`, markdown: `---\n${yaml}\n---\n\nBody`,
+    keeps: true, checkImport: true, editsRefused: false,
+  })),
+
   ...Object.entries({
     'non-finite': '---\nnan: .nan\ninf: .inf\nneg: -.inf\n---\n\nBody\n',
     'beyond-i64': '---\nbig: 9223372036854775808\nsmall: -9223372036854775809\nid: 99999999999999999999\n---\n\nBody\n',
@@ -161,7 +204,7 @@ const samples: Sample[] = [
   ...numericSamples,
   ...frontmatterFixtures.vectors.map(vector => ({ name: `public-frontmatter-${vector.name}`, markdown: vector.markdown })),
 ]
-type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string }
+type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string; sourceMarkdown?: string; editsRefused?: boolean }
 const validate = createLiveMarkdownRegistrationValidator({
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000,
@@ -205,6 +248,7 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
         Y.applyUpdate(decoded, bytes)
         return {
           name: sample.name, bytes: [...bytes], markdown: yDocToMarkdown(decoded), registrationAccepted: admitted(bytes),
+          ...(sample.checkImport ? { sourceMarkdown: sample.markdown, editsRefused: sample.editsRefused } : {}),
           ...(sample.keeps ? { keptFrontmatter: WRITTEN_BLOCK.exec(sample.markdown)![0] } : {}),
         }
       } finally { decoded.destroy() }
@@ -245,6 +289,14 @@ describe('shared bootstrap projections', () => {
     try {
       Y.applyUpdate(doc, bytes)
       expect(yDocToMarkdown(doc)).toBe(vector.markdown)
+      if (vector.editsRefused !== undefined) expect(frontmatterEditsRefused(doc)).toBe(vector.editsRefused)
+      if (vector.sourceMarkdown !== undefined) {
+        const imported = markdownToYDoc(vector.sourceMarkdown)
+        try {
+          expect(yDocToMarkdown(imported)).toBe(vector.markdown)
+          if (vector.editsRefused !== undefined) expect(frontmatterEditsRefused(imported)).toBe(vector.editsRefused)
+        } finally { imported.destroy() }
+      }
       if (vector.keptFrontmatter !== undefined) expect(vector.markdown.startsWith(vector.keptFrontmatter)).toBe(true)
       if (vector.name === 'negative-zero') expect(Object.is(doc.getMap('frontmatter').get('value'), -0)).toBe(true)
       expect(admitted(bytes)).toBe(vector.registrationAccepted)

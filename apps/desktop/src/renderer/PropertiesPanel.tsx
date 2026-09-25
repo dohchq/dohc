@@ -1,6 +1,6 @@
 import {
   frontmatterEditsRefused,
-  frontmatterIsOneLine,
+  markdownFrontmatterEditsRefused,
   setFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
 import {
   applyFrontmatter,
-  FRONTMATTER_ONE_LINE_MESSAGE,
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromMeta,
   type FrontmatterEntry,
@@ -183,9 +183,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     setEntries(editableEntries(sourceEntries));
   }, [sourceEntries]);
 
-  // Frontmatter written on one line cannot change one property without
+  // An unsplittable block cannot change one property without
   // rewriting the others, so the panel refuses edits before any write.
-  const locked = ydoc ? frontmatterEditsRefused(ydoc) : frontmatterIsOneLine(body);
+  const locked = ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body);
 
   function commit(next: FrontmatterEntry[]) {
     if (locked) return;
@@ -233,9 +233,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           <span
             data-testid="properties-locked"
             className="dohc-page-properties__flag"
-            title={FRONTMATTER_ONE_LINE_MESSAGE}
+            title={FRONTMATTER_EDIT_REFUSED_MESSAGE}
           >
-            written on one line
+            Edit in text
           </span>
         ) : null}
         {entries.map((entry, index) => {

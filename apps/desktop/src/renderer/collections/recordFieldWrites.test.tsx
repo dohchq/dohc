@@ -10,6 +10,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
 import {
@@ -90,6 +91,25 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it.each([
+    '&root {id: rec-1, status: draft, score: .nan}',
+    '!!map &root {id: rec-1, status: draft, score: .nan}',
+    ': note\nid: rec-1\nstatus: draft\nscore: .nan',
+  ])("refuses a field write before changing the document: %s", yaml => {
+    const markdown = `---\n${yaml}\n---\n\nBody`;
+    const doc = markdownToYDoc(markdown);
+    const before = Y.encodeStateAsUpdate(doc);
+    try {
+      docMock.current = engineDocState({ available: true, doc });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      expect(collectionWriteFailures()[0]?.message).toContain("without rewriting the others");
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      expect(yDocToMarkdown(doc)).toBe(markdown);
+      host.unmount();
+    } finally { doc.destroy(); }
+  });
+
   it.each<{ name: string; base: CollectionValue; current: CollectionValue | undefined }>([
     { name: "scalar", base: "alpha", current: "alpha" },
     { name: "duplicate list", base: ["alpha", "alpha"], current: ["alpha", "alpha"] },

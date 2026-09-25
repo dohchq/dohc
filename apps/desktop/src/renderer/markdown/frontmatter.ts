@@ -9,8 +9,8 @@ import {
 export { orderFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 
 /** Why a document's properties cannot be edited one at a time. */
-export const FRONTMATTER_ONE_LINE_MESSAGE =
-  "This file's properties are written on one line, so dohc can't change one without rewriting the others. Edit the file's text instead.";
+export const FRONTMATTER_EDIT_REFUSED_MESSAGE =
+  "dohc can't change one property in this file without rewriting the others. Edit the file's text instead.";
 
 export type FrontmatterEntry = {
   key: string;

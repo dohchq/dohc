@@ -226,9 +226,14 @@ describe("PropertiesPanel", () => {
     );
   });
 
-  it("refuses edits when the file's properties are written on one line", async () => {
+  it.each([
+    '{status: draft, score: .nan}',
+    '&root {status: draft, score: .nan}',
+    '!!map &root {status: draft, score: .nan}',
+    ': note\nstatus: draft\nscore: .nan',
+  ])("refuses edits without changing the file: %s", async (yaml) => {
     const user = userEvent.setup();
-    const initialBody = "---\n# Keep\n{status: draft, score: .nan}\n---\n\n# Plan\n";
+    const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
     expect(screen.getByTestId("properties-locked")).toBeTruthy();

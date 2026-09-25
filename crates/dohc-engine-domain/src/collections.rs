@@ -1720,6 +1720,9 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
                     return None;
                 }
                 let flow = span.start.index() != span.end.index();
+                if frames.is_empty() && flow {
+                    root_keys = None;
+                }
                 frames.push(LoadFrame {
                     flow,
                     column: if mapping || flow {
@@ -1967,7 +1970,10 @@ pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
                 .is_some_and(looks_like_mapping_entry)
                 .then(|| &markdown[..end]);
         }
-        let content = line.trim_end_matches(['\r', '\n']);
+        let content = line
+            .strip_suffix("\r\n")
+            .or_else(|| line.strip_suffix('\n'))
+            .unwrap_or(line);
         let trimmed = content.trim_start_matches([' ', '\t']);
         if entry.is_none() && !trimmed.is_empty() && !trimmed.starts_with('#') {
             entry = Some(content);
@@ -1979,7 +1985,7 @@ pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
 /// Whether a frontmatter line looks like a mapping entry: `?` then a space,
 /// tab, or the end; or a first character other than space, tab, `#`, `%`, or
 /// `-`, then a colon followed by a space, tab, or the end. The desktop uses
-/// the same rule (`MAPPING_ENTRY_RE` in packages/ydoc-projection/src/frontmatter.ts).
+/// the same rule (`looksLikeMappingEntry` in packages/ydoc-projection/src/frontmatter.ts).
 fn looks_like_mapping_entry(line: &str) -> bool {
     let separator = |rest: &str| rest.is_empty() || rest.starts_with([' ', '\t']);
     if line.strip_prefix('?').is_some_and(separator) {
@@ -1996,20 +2002,11 @@ fn looks_like_mapping_entry(line: &str) -> bool {
         .any(|(index, _)| separator(&rest[index + 1..]))
 }
 
-/// Whether a readable frontmatter block's root is a flow mapping written as
-/// one `{...}` value. Changing one of its entries would rewrite the others, so
-/// edits to such a document's properties are refused. The desktop uses the
-/// same rule (`frontmatterIsOneLine` in packages/ydoc-projection/src/frontmatter.ts).
+/// Whether the entry splitter cannot preserve this block through property edits.
+/// The desktop uses `markdownFrontmatterEditsRefused` for the same decision.
 #[must_use]
-pub fn frontmatter_is_one_line(markdown: &str) -> bool {
-    markdown_frontmatter_block(markdown).is_some_and(|block| {
-        block
-            .yaml
-            .lines()
-            .map(|line| line.trim_start_matches([' ', '\t']))
-            .find(|line| !line.trim_end_matches('\r').is_empty() && !line.starts_with('#'))
-            .is_some_and(|line| line.starts_with('{'))
-    })
+pub fn markdown_frontmatter_edits_refused(markdown: &str) -> bool {
+    markdown_frontmatter_block(markdown).is_some_and(|block| block.entries.is_none())
 }
 
 /// The document's frontmatter block, or `None` when it has none or the block

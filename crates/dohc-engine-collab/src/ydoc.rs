@@ -1092,16 +1092,15 @@ impl Ydoc {
     }
 
     /// Whether edits to this document's properties are refused, because its
-    /// kept frontmatter is written on one line (a root flow mapping), and
-    /// changing one entry would rewrite the others. Callers check this before
-    /// [`Ydoc::frontmatter_set`].
+    /// kept frontmatter cannot split into entries without rewriting the others.
+    /// Callers check this before [`Ydoc::frontmatter_set`].
     pub fn frontmatter_edits_refused(&self) -> bool {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let txn = self.doc.transact();
         matches!(
             meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
             Some(Out::Any(Any::String(source)))
-                if dohc_engine_domain::collections::frontmatter_is_one_line(&source)
+                if dohc_engine_domain::collections::markdown_frontmatter_edits_refused(&source)
         )
     }
 
@@ -1159,13 +1158,17 @@ impl Ydoc {
 
     /// Remove one target from a relation field. A single relation removes the
     /// key; a many relation keeps the sequence and removes matching entries.
-    /// Returns `None` when the applied frontmatter has no such link.
+    /// Returns `None` when there is no such link or edits cannot preserve
+    /// other entries.
     pub fn frontmatter_drop_relation_target(
         &self,
         key: &str,
         target_record_id: &str,
         many: bool,
     ) -> Option<Vec<u8>> {
+        if self.frontmatter_edits_refused() {
+            return None;
+        }
         let current = self.frontmatter_json();
         let value = current.as_object()?.get(key)?;
         let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -6590,18 +6593,105 @@ fn main() {}
     }
 
     #[test]
-    fn frontmatter_written_on_one_line_refuses_property_edits() {
-        let flow = "---\n# Keep\n{a: 1, b: .nan}\n---\n\nBody";
+    fn shared_frontmatter_import_and_edit_refusal_vectors() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        for row in fixtures.as_array().unwrap() {
+            let Some(source) = row["sourceMarkdown"].as_str() else {
+                continue;
+            };
+            for from_wire in [false, true] {
+                let doc = Ydoc::wire();
+                if from_wire {
+                    doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
+                        .unwrap();
+                } else {
+                    doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                        .unwrap();
+                }
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    row["markdown"].as_str().unwrap(),
+                    "{}",
+                    row["name"]
+                );
+                if let Some(refused) = row["editsRefused"].as_bool() {
+                    assert_eq!(doc.frontmatter_edits_refused(), refused, "{}", row["name"]);
+                    if refused {
+                        assert_eq!(doc.project_richdoc().unwrap().as_bytes(), source.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsplittable_frontmatter_refuses_relation_cleanup_without_changing_bytes() {
+        for yaml in [
+            "{owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            "&root {owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            "!!map &root {owner: rec_a, editors: [rec_a, rec_b], score: .nan}",
+            ": note\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: .nan",
+        ] {
+            let markdown = format!("---\n{yaml}\n---\n\nBody");
+            for exact_source in [false, true] {
+                for (key, many) in [("owner", false), ("editors", true)] {
+                    let doc = Ydoc::wire();
+                    if exact_source {
+                        doc.rewrite_content_to_markdown_preserving_source(
+                            ContentKind::Richdoc,
+                            &markdown,
+                        )
+                        .unwrap();
+                    } else {
+                        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                            .unwrap();
+                    }
+                    assert!(doc.frontmatter_edits_refused(), "{yaml}");
+                    let before = doc.encode_full_state();
+                    assert!(
+                        doc.frontmatter_drop_relation_target(key, "rec_a", many)
+                            .is_none()
+                    );
+                    assert!(
+                        doc.frontmatter_drop_relation_target_preserving_markdown_source(
+                            key, "rec_a", many
+                        )
+                        .unwrap()
+                        .is_none()
+                    );
+                    assert_eq!(doc.encode_full_state(), before, "{yaml}");
+                    let projected = doc.project_richdoc().unwrap();
+                    assert_eq!(projected.as_bytes(), markdown.as_bytes());
+                    if exact_source {
+                        assert_eq!(
+                            doc.preserved_markdown_source(&projected).as_deref(),
+                            Some(markdown.as_str())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relation_cleanup_keeps_untouched_nested_flow_entries() {
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, flow)
+        doc.rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "---\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody",
+        )
+        .unwrap();
+        assert!(!doc.frontmatter_edits_refused());
+        doc.frontmatter_drop_relation_target_preserving_markdown_source("owner", "rec_a", false)
+            .unwrap()
             .unwrap();
-        assert!(doc.frontmatter_edits_refused());
-        assert_eq!(doc.project_richdoc().unwrap(), flow);
-        let block = Ydoc::wire();
-        block
-            .rewrite_content_to_markdown(ContentKind::Richdoc, "---\na: 1\n---\n\nBody")
-            .unwrap();
-        assert!(!block.frontmatter_edits_refused());
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            "---\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody"
+        );
     }
 
     #[test]

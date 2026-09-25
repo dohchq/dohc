@@ -19,7 +19,7 @@ import {
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 import {
   frontmatterEditsRefused,
-  frontmatterIsOneLine,
+  markdownFrontmatterEditsRefused,
   loadMarkdownFrontmatter,
   setFrontmatterValue,
 } from './frontmatter.js'
@@ -490,10 +490,10 @@ describe('Y.Doc markdown import/export', () => {
 
   it('refuses property edits when the frontmatter is written on one line', () => {
     const flow = '---\n# Keep\n{a: 1, b: .nan}\n---\n\nBody'
-    expect(frontmatterIsOneLine(flow)).toBe(true)
-    expect(frontmatterIsOneLine('---\n  {a: 1}\n---\n')).toBe(true)
-    expect(frontmatterIsOneLine('---\na: {b: 1}\n---\n')).toBe(false)
-    expect(frontmatterIsOneLine('---\n? [a, b]\n: 1\n---\n')).toBe(false)
+    expect(markdownFrontmatterEditsRefused(flow)).toBe(true)
+    expect(markdownFrontmatterEditsRefused('---\n  {a: 1}\n---\n')).toBe(true)
+    expect(markdownFrontmatterEditsRefused('---\na: {b: 1}\n---\n')).toBe(false)
+    expect(markdownFrontmatterEditsRefused('---\n? [a, b]\n: 1\n---\n')).toBe(false)
     const doc = markdownToYDoc(flow)
     const block = markdownToYDoc('---\na: 1\n---\n\nBody')
     try {
@@ -501,6 +501,33 @@ describe('Y.Doc markdown import/export', () => {
       expect(frontmatterEditsRefused(block)).toBe(false)
       expect(yDocToMarkdown(doc)).toBe(flow)
     } finally { doc.destroy(); block.destroy() }
+  })
+
+
+  it.each([
+    '&root {a: 1, b: .nan}',
+    '!!map {a: 1, b: .nan}',
+    '!<tag:yaml.org,2002:map> &root {a: 1, b: .nan}',
+    '&root !custom\n{a: 1, b: .nan}',
+    '{\n a: 1,\n b: .nan\n}',
+    ': note\na: 1\nb: .nan',
+    '&root {}',
+  ])('refuses edits to unsplittable frontmatter: %s', yaml => {
+    const markdown = `---\n${yaml}\n---\n\nBody`
+    const doc = markdownToYDoc(markdown)
+    try {
+      expect(markdownFrontmatterEditsRefused(markdown)).toBe(true)
+      expect(frontmatterEditsRefused(doc)).toBe(true)
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally { doc.destroy() }
+  })
+
+  it.each(['a\r: [', 'a\r\r: ['])('keeps unreadable keys containing carriage returns: %s', yaml => {
+    const markdown = `---\n${yaml}\n---\n\nBody`
+    const doc = markdownToYDoc(markdown)
+    try {
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally { doc.destroy() }
   })
 
   it('keeps an empty frontmatter block until a key arrives and drops a block whose keys all go', () => {
