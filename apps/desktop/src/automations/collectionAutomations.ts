@@ -178,6 +178,13 @@ export interface CollectionFieldMark {
   automations: string[];
 }
 
+/** A Collection a step can reach, or why it cannot, for the builder. */
+export interface CollectionAutomationTarget {
+  path: string;
+  name: string;
+  stopped: string | null;
+}
+
 /**
  * A step whose reach changed, for its notice: one that waits for a current
  * editor to allow it, or one a narrower share stopped.
@@ -602,6 +609,25 @@ export class CollectionAutomations {
   /** Where the verdicts are saved, for a person to look at. */
   reachVerdictsPath(): Promise<string> {
     return this.options.store.reachVerdictsPath();
+  }
+
+  /**
+   * The Collections a step in this Collection's automations can add or
+   * change records in, for the builder's picker: every Collection the
+   * engine lists, with why the reach check (ADR 0012) stops a step there,
+   * or null.
+   */
+  async targetsFor(collectionPath: string): Promise<CollectionAutomationTarget[]> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    const collection = collectionNamed(collectionPath);
+    return [...this.collections].sort().map((path) => {
+      const target = collectionNamed(path);
+      const [reach] = checkAutomationReach(roster, {
+        id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }],
+      });
+      return { path, name: target.name, stopped: reach && !reach.allowed ? reach.reason : null };
+    });
   }
 
   /** Every step that waits for a current editor to allow it, one per step. */
