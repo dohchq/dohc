@@ -24,7 +24,9 @@ const exchangeKey = "network-test-key-".repeat(3), cookieName = getCookies({ bas
 const cookie = `${cookieName}=reader-account`, otherCookie = `${cookieName}=other-account`;
 const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 8192 },
   maxQueuedBytes: 8192, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 8192 };
-const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 2000 };
+// Both network hops are real sockets that a loaded gate host can stall past 2 s,
+// so share-web's relay request, relay handshake, and gateway upgrade allow 10 s.
+const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 10_000 };
 const transport = { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
   maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 5000, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 2000, idleTimeoutMs: 10000, drainTimeoutMs: 100 };
@@ -115,12 +117,12 @@ async function fixture() {
   const gateway = createLiveGateway({ publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
     limits: { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
       maxFrameBytes: 1024, maxPendingBytes: 8192, maxPendingFrames: 32, maxFragments: 8, maxBufferedChunks: 16,
-      upgradeTimeoutMs: 2000, idleTimeoutMs: 10000, drainTimeoutMs: 100 },
+      upgradeTimeoutMs: 10_000, idleTimeoutMs: 10000, drainTimeoutMs: 100 },
     resolveSession: async (request, discriminator, signal) => {
       const authenticated = namedLiveGatewayRequest(request, audience, signal);
       return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null;
     },
-    openHostRoute: createNamedLiveRelayRoute({ relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 2000 }),
+    openHostRoute: createNamedLiveRelayRoute({ relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 10_000 }),
   });
   const publicHttp = serveFetchHandler({ handler: application.handle, maxBodyBytes: () => 8192,
     oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });

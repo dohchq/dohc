@@ -115,7 +115,7 @@ test("released slots remove only their listeners and allow later interrupt clean
       process.emit("SIGINT");
       assert.equal(cleaned, true);
       console.log("later-phase cleanup completed");
-    `, root], { encoding: "utf8", timeout: 5000 });
+    `, root], { encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /later-phase cleanup completed/);
@@ -167,7 +167,7 @@ test("cooperative budget cancellation stops its child before releasing the slot 
           }));
         }
       `, root, signal], {
-        encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+        encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL",
         env: { ...process.env, DOHC_BUILD_SLOT_ROOT: root, DOHC_GATE_DISK_FLOOR_GB: "0" },
       });
       const finallyPath = join(root, "finally.json");

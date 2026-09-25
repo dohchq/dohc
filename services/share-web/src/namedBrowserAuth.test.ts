@@ -16,15 +16,17 @@ import { request as requestHttp, type Server } from "node:http";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
 
 const connectionString = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
-const probe = new Client({ connectionString, connectionTimeoutMillis: 2000 });
+// A refused connection fails at once, so a run without Postgres still skips
+// immediately. The timeout covers only a slow answer: under the full JS gate a
+// 2 s bound timed out against a healthy database.
+const probe = new Client({ connectionString, connectionTimeoutMillis: 30_000 });
 let available = false;
 try {
   await probe.connect();
-  available = true;
-} catch {
-  if (process.env.DOHC_REQUIRE_POSTGRES === "1") throw new Error("Named browser auth requires reachable Postgres.");
-} finally {
   await probe.end();
+  available = true;
+} catch (error) {
+  if (process.env.DOHC_REQUIRE_POSTGRES === "1") throw new Error("Named browser auth requires reachable Postgres.", { cause: error });
 }
 
 const origin = "https://share.example.test";

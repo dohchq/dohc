@@ -53,9 +53,6 @@ const settings = (zoomLevel = 0): DesktopUserSettingsResult => ({
 function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Dependencies["workspaceSummaries"]) {
   let stored = settings();
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
-  let write: Dependencies["writeUserSettingsFile"] = async (_directory, value) => {
-    stored = { settings: structuredClone(value), source: "stored" };
-  };
   let ready = true;
   let canInstall = false;
   let rows = [workspace("a"), workspace("b")];
@@ -92,7 +89,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     currentUpdateState: vi.fn(() => ({ canInstall })),
     stateDir: () => "state",
     readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
-    writeUserSettingsFile: vi.fn((directory, value) => write(directory, value)),
+    stepWindowZoom: vi.fn(async () => structuredClone(stored)),
     createMainWindow: vi.fn((options) => {
       createdOptions.push(options);
       const window = new Window(); all.push(window); return window.native;
@@ -105,7 +102,6 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
   return {
     windows, dependencies, sessions, all, templates, createdOptions, guests, applyGuests,
     setRead: (value: typeof read) => { read = value; },
-    setWrite: (value: typeof write) => { write = value; },
     setStored: (value: typeof stored) => { stored = value; },
     setRows: (value: typeof rows) => { rows = value; },
     setReady: (value: boolean) => { ready = value; },
@@ -226,7 +222,7 @@ describe("desktop workspace windows", () => {
     expect(managerWindow.webContents.setZoomLevel).toHaveBeenLastCalledWith(3);
     expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
     expect(f.windows.workspaceWindows.allLive()).toEqual([]);
-    await f.windows.stepWindowZoom("in");
+    f.windows.broadcastUserSettings(settings(3));
     expect(managerWindow.webContents.send).toHaveBeenCalledWith(CHANNELS.userSettingsChanged, expect.objectContaining({ source: "stored" }));
     expect(utility.webContents.send).not.toHaveBeenCalled();
     managerWindow.destroy();
@@ -458,43 +454,6 @@ describe("desktop window zoom", () => {
     guest.destroyed = true; f.windows.applyZoomLevelToWindows(2); guest.emit("did-finish-load");
     expect(guest.setZoomLevel.mock.calls).toEqual([[1], [4]]);
   });
-
-  it("shares one queue between full settings work and zoom steps, persisting before application", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred(); const window = new Window();
-    f.windows.trackWorkspaceWindow(window.native);
-    const save = f.windows.enqueueUserSettingsWrite(async () => {
-      entered.resolve(); await held.promise; f.setStored(settings(2)); f.windows.applyZoomLevelToWindows(2);
-    });
-    const first = f.windows.stepWindowZoom("in"); const second = f.windows.stepWindowZoom("in");
-    try {
-      await entered.promise;
-      expect(f.dependencies.writeUserSettingsFile).not.toHaveBeenCalled();
-      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
-      held.resolve(); await save;
-      expect((await first).settings.appearance.zoomLevel).toBe(3);
-      expect((await second).settings.appearance.zoomLevel).toBe(4);
-      expect(vi.mocked(f.dependencies.writeUserSettingsFile).mock.calls.map((call) => call[1].appearance.zoomLevel)).toEqual([3, 4]);
-      expect(window.webContents.setZoomLevel.mock.calls).toEqual([[2], [3], [4]]);
-      expect(window.webContents.send.mock.calls.map((call) => [call[0], call[1].settings.appearance.zoomLevel])).toEqual([
-        [CHANNELS.userSettingsChanged, 3], [CHANNELS.userSettingsChanged, 4],
-      ]);
-    } finally { held.resolve(); await Promise.allSettled([save, first, second]); }
-  });
-
-  it("waits for the real zoom write and leaves zoom unchanged after write rejection", async () => {
-    const f = fixture(); const held = deferred(); const entered = deferred(); const window = new Window();
-    f.windows.trackWorkspaceWindow(window.native);
-    f.setWrite(async () => { entered.resolve(); await held.promise; throw new Error("write failed"); });
-    const pending = f.windows.stepWindowZoom("in").catch((error: unknown) => error);
-    try {
-      await entered.promise;
-      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(window.webContents.send).not.toHaveBeenCalled();
-      held.resolve(); expect(await pending).toMatchObject({ message: "write failed" });
-      expect(window.webContents.setZoomLevel).not.toHaveBeenCalled(); expect(window.webContents.send).not.toHaveBeenCalled();
-      expect(f.applyGuests).not.toHaveBeenCalled();
-      expect(await f.windows.enqueueUserSettingsWrite(async () => "next write")).toBe("next write");
-    } finally { held.resolve(); await pending; }
-  });
 });
 
 describe("desktop native menus", () => {
@@ -710,18 +669,17 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
   });
 
-  it.each([new Error("unreadable settings"), "unreadable settings"])("reports accelerator zoom rejection %s", async (error) => {
+  it.each([new Error("dohc did not save settings. Fix the file."), "unreadable settings"])("reports accelerator zoom rejection %s", async (error) => {
     const f = fixture(); const reported = deferred();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    f.setRead(async () => { throw error; });
+    vi.mocked(f.dependencies.stepWindowZoom).mockRejectedValueOnce(error);
     vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => { reported.resolve(); });
     f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom In"));
-    try {
-      await reported.promise;
-      expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Zoom", error instanceof Error
-        ? "unreadable settings Open Settings to repair or reset it." : "dohc could not change the window zoom.");
-      expect(f.dependencies.writeUserSettingsFile).not.toHaveBeenCalled();
-    } finally { await f.windows.enqueueUserSettingsWrite(async () => undefined); }
+    await reported.promise;
+    expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
+    // The refusal already names the file and the way out.
+    expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Zoom", error instanceof Error
+      ? "dohc did not save settings. Fix the file." : "dohc could not change the window zoom.");
   });
 
   it("uses the existing About dialog content", () => {

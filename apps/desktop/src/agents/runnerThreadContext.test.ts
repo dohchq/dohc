@@ -91,11 +91,11 @@ describe("buildRunnerThreadContext", () => {
       thread: {
         id: "th_1",
         title: "Launch review",
-        channel: {
+        group: {
           id: "files",
           name: "files",
           slug: "files",
-          kind: "channel",
+          kind: "group",
         },
         commentCount: 1,
         openDecisionCount: 0,

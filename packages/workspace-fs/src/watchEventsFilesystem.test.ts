@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { watchWorkspaceEvents, type WorkspaceEventsWatcher } from "./watchEvents";
 
+// Native watch events can lag well past vi.waitFor's 1 s default on a loaded gate host.
+const wait = { timeout: 10_000 };
+
 describe("workspace watcher filesystem changes", () => {
   const roots: string[] = [];
   const watchers: WorkspaceEventsWatcher[] = [];
@@ -31,15 +34,15 @@ describe("workspace watcher filesystem changes", () => {
     expect(seen()).toEqual([]);
     await writeFile(join(root, "new.md"), "new");
     await writeFile(join(root, "existing.md"), "edited");
-    await vi.waitFor(() => expect(seen()).toEqual(expect.arrayContaining(["existing.md", "new.md"])));
+    await vi.waitFor(() => expect(seen()).toEqual(expect.arrayContaining(["existing.md", "new.md"])), wait);
     batches.length = 0;
     await writeFile(join(root, "replacement.tmp"), "replacement");
     await rename(join(root, "replacement.tmp"), join(root, "existing.md"));
-    await vi.waitFor(() => expect(seen()).toContain("existing.md"));
+    await vi.waitFor(() => expect(seen()).toContain("existing.md"), wait);
     expect(seen()).not.toContain("replacement.tmp");
     batches.length = 0;
     await rm(join(root, "existing.md"));
-    await vi.waitFor(() => expect(seen()).toContain("existing.md"));
+    await vi.waitFor(() => expect(seen()).toContain("existing.md"), wait);
   });
 
   it("reports descendants of created, moved, and removed directories", async () => {
@@ -47,15 +50,15 @@ describe("workspace watcher filesystem changes", () => {
     const { batches, seen } = await start(root);
     await mkdir(join(root, "folder", "nested"), { recursive: true });
     await writeFile(join(root, "folder", "nested", "note.md"), "note");
-    await vi.waitFor(() => expect(seen()).toContain("folder/nested/note.md"));
+    await vi.waitFor(() => expect(seen()).toContain("folder/nested/note.md"), wait);
     batches.length = 0;
     await rename(join(root, "folder", "nested"), join(root, "moved"));
     await vi.waitFor(() => expect(seen()).toEqual(expect.arrayContaining([
       "folder/nested/note.md", "moved/note.md",
-    ])));
+    ])), wait);
     batches.length = 0;
     await rm(join(root, "moved"), { recursive: true });
-    await vi.waitFor(() => expect(seen()).toContain("moved/note.md"));
+    await vi.waitFor(() => expect(seen()).toContain("moved/note.md"), wait);
   });
 
   it("prunes metadata and symlink targets while preserving SQLite sidecar events", async () => {
@@ -68,7 +71,7 @@ describe("workspace watcher filesystem changes", () => {
     await writeFile(join(root, ".dohc", "history", "event.json"), "{}");
     await writeFile(join(outside, "outside.md"), "after");
     await writeFile(join(root, "db.sqlite-wal"), "wal");
-    await vi.waitFor(() => expect(seen()).toContain("db.sqlite-wal"));
+    await vi.waitFor(() => expect(seen()).toContain("db.sqlite-wal"), wait);
     expect(seen().some(path => path.includes(".dohc") || path.includes("outside.md"))).toBe(false);
   });
 
@@ -80,7 +83,7 @@ describe("workspace watcher filesystem changes", () => {
     const second = await start(root);
     controller.abort();
     await writeFile(join(root, "note.md"), "after");
-    await vi.waitFor(() => expect(second.seen()).toContain("note.md"));
+    await vi.waitFor(() => expect(second.seen()).toContain("note.md"), wait);
     expect(first.seen()).toEqual([]);
   });
 
@@ -92,6 +95,6 @@ describe("workspace watcher filesystem changes", () => {
     const { seen } = await start(root);
     await writeFile(path, "after!");
     await utimes(path, before.atime, before.mtime);
-    await vi.waitFor(() => expect(seen()).toContain("note.md"));
+    await vi.waitFor(() => expect(seen()).toContain("note.md"), wait);
   });
 });

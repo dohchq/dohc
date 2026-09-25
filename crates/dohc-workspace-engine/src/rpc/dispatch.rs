@@ -826,8 +826,16 @@ impl EngineService {
                     .await?
             }
             "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
+            "automations.listClaims" => {
+                self.automations_list_claims(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.retry" => {
+                self.automations_retry(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.dispatch.requeueFailedTrigger" => {
@@ -1111,6 +1119,8 @@ mod tests {
         const METHODS: &[&str] = &[
             "automations.claimNext",
             "automations.failures",
+            "automations.listClaims",
+            "automations.retry",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",

@@ -64,7 +64,7 @@ export async function salvageRelayContent(directory: string, output: string): Pr
       const workspaceId = String(row.workspace_id), versionId = String(row.version_id), path = String(row.path);
       const base = `files/${sha256(workspaceId)}/${sha256(versionId)}`;
       const record = { workspaceId, versionId, path, blobSha256: row.blob_sha256, stateRelaySeq: row.state_relay_seq };
-      const validation = validateUserMaterializePath(path);
+      const validation = validateUserMaterializePath(path, { platform: process.platform });
       let reason: string | undefined;
       if (!validation.ok || validation.normalized !== path || classifyEngineFilePath(path).kind !== "tracked") reason = "path-cannot-be-materialized";
       const blob = reason ? undefined : content.get(workspaceId, String(row.blob_sha256));
