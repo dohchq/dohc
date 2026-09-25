@@ -212,6 +212,15 @@ pub(crate) fn open_engine_db(
     now_ms: i64,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_with_root_token(path, now_ms, None, work)
+}
+
+pub(crate) fn open_engine_db_with_root_token(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
@@ -234,7 +243,12 @@ pub(crate) fn open_engine_db(
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
     // (the migration fault points are exercised by `migration.rs`'s tests).
-    let ctx = MigrationContext::current(now_ms);
+    let mut ctx = MigrationContext::current(now_ms);
+    // Initial ownership and the schema commit together. Existing stores never
+    // acquire a new binding merely because the caller supplies a token.
+    if disposition == Disposition::Fresh {
+        ctx.initial_root_token = root_token.map(str::to_owned);
+    }
     let no_faults = NoFaults;
     match run_migrations(
         &mut conn,

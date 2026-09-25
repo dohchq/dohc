@@ -136,7 +136,18 @@ impl WorkspaceSupervisor {
     /// without opening a second connection. A dead actor (its worker panicked)
     /// is evicted and re-opened.
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None)
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None, None)
+    }
+
+    /// Persist a fresh store's root binding with its initial schema.
+    pub fn open_root_bound(
+        &self,
+        db_path: &Path,
+        now_ms: i64,
+        token: &str,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<SupervisorOpen, RuntimeError> {
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, Some(token), work)
     }
 
     /// [`Self::open`], counting into `work`, when given, the SQLite work of
@@ -149,13 +160,13 @@ impl WorkspaceSupervisor {
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, work)
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::ReadWrite, None, work)
     }
 
     /// Open an existing workspace through a read-only store connection. This
     /// path never creates the parent, the database, or migration state.
     pub fn open_read_only(&self, db_path: &Path) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, None)
+        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, None, None)
     }
 
     /// [`Self::open_read_only`], counting into `work` like
@@ -165,7 +176,7 @@ impl WorkspaceSupervisor {
         db_path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
-        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, work)
+        self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, None, work)
     }
 
     fn open_with_mode(
@@ -173,6 +184,7 @@ impl WorkspaceSupervisor {
         db_path: &Path,
         now_ms: i64,
         mode: ActorOpenMode,
+        root_token: Option<&str>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
         if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -232,7 +244,18 @@ impl WorkspaceSupervisor {
 
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
-                WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
+                if let Some(token) = root_token {
+                    WorkspaceActor::spawn_root_bound(
+                        db_path.to_path_buf(),
+                        identity.clone(),
+                        1,
+                        now_ms,
+                        token.to_owned(),
+                        work,
+                    )
+                } else {
+                    WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
+                }
             }
             ActorOpenMode::ReadOnly => {
                 WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
@@ -514,6 +537,37 @@ mod tests {
             .expect("a command after the owner is gone");
         assert!(released.upgrade().is_none());
         supervisor.close(&db).expect("close");
+    }
+
+    #[test]
+    fn a_counted_root_bound_open_persists_its_initial_token() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let work = Arc::new(AtomicU64::new(0));
+        let opened = supervisor
+            .open_root_bound(&db, 1, "initial-root", Some(Arc::clone(&work)))
+            .expect("counted root-bound open");
+        assert!(opened.store_freshly_created);
+        assert!(work.load(Ordering::Relaxed) > 0);
+        drop(opened);
+        supervisor.close(&db).expect("close fresh actor");
+        assert_eq!(Arc::strong_count(&work), 1);
+
+        let store = dohc_engine_storage::EngineStore::open_read_only(&db).expect("reopen store");
+        let token: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("initial token is already durable without a later bind");
+        assert_eq!(token, "initial-root");
     }
 
     #[test]

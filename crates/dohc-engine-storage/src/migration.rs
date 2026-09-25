@@ -31,11 +31,12 @@ pub(crate) struct Migration {
 }
 
 /// Ambient inputs stamped into every ledger row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct MigrationContext {
     pub engine_build: &'static str,
     pub protocol_version: i64,
     pub now_ms: i64,
+    pub initial_root_token: Option<String>,
 }
 
 impl MigrationContext {
@@ -45,6 +46,7 @@ impl MigrationContext {
             engine_build: ENGINE_BUILD,
             protocol_version: ENGINE_STORAGE_PROTOCOL_VERSION,
             now_ms,
+            initial_root_token: None,
         }
     }
 }
@@ -2336,6 +2338,13 @@ fn apply_transactional(
             rusqlite::params![ctx.now_ms, ctx.engine_build, ENGINE_SCHEMA_VERSION],
         )
         .map_err(StorageError::migration)?;
+        if let Some(token) = &ctx.initial_root_token {
+            tx.execute(
+                "INSERT INTO shadow_clone (rowid_guard, token) VALUES (1, ?1)",
+                [token],
+            )
+            .map_err(StorageError::migration)?;
+        }
     }
 
     let integrity_ok = quick_check_ok(&tx)?;
@@ -3093,6 +3102,51 @@ mod tests {
             })
             .expect("foreign key check");
         assert_eq!(fk_violations, 0);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn initial_root_binding_survives_both_migration_crash_boundaries() {
+        for point in [
+            FaultPoint::MigrateBeforeLedgerCommit,
+            FaultPoint::MigrateBetweenSteps,
+        ] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut ctx = MigrationContext::current(1_000);
+            ctx.initial_root_token = Some("root-token".to_owned());
+            {
+                let mut conn = open_bare(&path);
+                assert_eq!(
+                    run_migrations(
+                        &mut conn,
+                        BASELINE_MIGRATIONS,
+                        &ctx,
+                        &OneShotCrash::at(point)
+                    )
+                    .unwrap(),
+                    MigrationOutcome::Crashed,
+                );
+            }
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 2_000, "root-token", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            drop(reopened);
+            let mut reopened =
+                crate::EngineStore::open_with_root_token(&path, 3_000, "other-root", None).unwrap();
+            assert!(reopened.bind_root_token("root-token", &NoFaults).unwrap());
+            assert!(!reopened.bind_root_token("other-root", &NoFaults).unwrap());
+        }
+    }
+
+    #[test]
+    fn initial_root_binding_never_adopts_an_existing_unbound_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        drop(crate::EngineStore::open(&path, 1_000).unwrap());
+        let mut reopened =
+            crate::EngineStore::open_with_root_token(&path, 2_000, "new-root", None).unwrap();
+        assert!(!reopened.bind_root_token("new-root", &NoFaults).unwrap());
     }
 
     #[cfg(feature = "fault-injection")]

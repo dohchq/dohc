@@ -604,9 +604,21 @@ impl EngineService {
         let binding_root = root.clone();
         let store_work = work.store.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
+            // The marker precedes database creation. A crash leaves either a marker
+            // and no schema, or a schema already bound to that marker.
+            let root_token = match requested_mode {
+                WorkspaceOpenMode::Full => {
+                    root_binding::write_new_root_binding(&binding_root).map_err(map_root_binding)?
+                }
+                WorkspaceOpenMode::ReadOnly => root_binding::read_root_binding(&binding_root)
+                    .map_err(map_root_binding)?
+                    .ok_or_else(|| {
+                        map_root_binding(root_binding::RootBindingError::DatabaseMismatch)
+                    })?,
+            };
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => {
-                    supervisor.open_counting(&actor_path, now_ms, store_work)
+                    supervisor.open_root_bound(&actor_path, now_ms, &root_token, store_work)
                 }
                 WorkspaceOpenMode::ReadOnly => {
                     supervisor.open_read_only_counting(&actor_path, store_work)
@@ -624,48 +636,22 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
-            // The root binding runs here, inside the task no cancellation can
-            // interrupt, not as the first await after it. The first open of a
-            // workspace creates and migrates engine.db; a request dropped
-            // between that commit and the bind left the store migrated but
-            // unbound, and every later open then refused it as a mismatch,
-            // permanently. Now the store is either bound or the actor
-            // is closed before the request can observe either.
-            //
-            // A root with no binding yet gets a fresh token only when the
-            // store is fresh too: an existing engine.db under an unbound root
-            // was copied or moved here, and adopting it would let one
-            // database serve two roots.
-            //
-            // A fresh store whose binding cannot be read, written, or
-            // stamped is deleted again before the refusal returns. Leaving it
-            // would make the next open find an existing engine.db under a
-            // bound root it never recorded and refuse it as a mismatch, for
-            // good. So the stamp's storage failure lands in the same `bound`
-            // error as the marker's, not in the open's own error.
+            // Verify the committed binding before exposing the actor. The initial
+            // token is part of schema creation; existing stores are never adopted.
             let opened = opened.map(|open| {
                 if !open.created_actor {
                     return (open, Ok(()));
                 }
-                let bound = (|| {
-                    let token = match root_binding::read_root_binding(&binding_root)? {
-                        Some(token) => token,
-                        None if open.store_freshly_created => {
-                            root_binding::write_new_root_binding(&binding_root)?
-                        }
-                        None => return Err(root_binding::RootBindingError::DatabaseMismatch),
-                    };
-                    match tokio::runtime::Handle::current()
-                        .block_on(open.actor.bind_root(token, bind_root_faults))
-                    {
-                        Ok(true) => Ok(()),
-                        Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
-                        Err(error) => {
-                            eprintln!("engine: root binding stamp failed: {error}");
-                            Err(root_binding::RootBindingError::Unstamped)
-                        }
+                let bound = match tokio::runtime::Handle::current()
+                    .block_on(open.actor.bind_root(root_token, bind_root_faults))
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                    Err(error) => {
+                        eprintln!("engine: root binding stamp failed: {error}");
+                        Err(root_binding::RootBindingError::Unstamped)
                     }
-                })();
+                };
                 (open, bound)
             });
             if open_guard.db_path.is_some()
@@ -673,7 +659,7 @@ impl EngineService {
             {
                 probe.pause_open_install_if_armed();
             }
-            (opened, open_guard)
+            Ok((opened, open_guard))
         });
         let (actor_open, open_guard) = tokio::select! {
             biased;
@@ -684,7 +670,7 @@ impl EngineService {
                 return Err(cancellation.interruption("workspace open (actor startup)"));
             }
             opened = &mut opening => {
-                opened.map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))?
+                opened.map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))??
             }
         };
         let (actor_open, bound) = actor_open.map_err(map_runtime)?;
@@ -1813,6 +1799,44 @@ mod tests {
                     ErrorCode::Cancelled
                 }
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initial_root_binding_reopens_after_marker_or_schema_commit() {
+        for schema_committed in [false, true] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let token = root_binding::write_new_root_binding(scratch.path()).unwrap();
+            let db_path = scratch.path().join(".dohc/engine/engine.db");
+            if schema_committed {
+                // Stop at the real actor-open boundary, before RPC bind_root.
+                let interrupted = WorkspaceSupervisor::new();
+                let opened = interrupted
+                    .open_root_bound(&db_path, 1, &token, None)
+                    .unwrap();
+                assert!(opened.store_freshly_created);
+                drop(opened);
+                interrupted.close(&db_path).unwrap();
+            }
+            let supervisor: &'static WorkspaceSupervisor =
+                Box::leak(Box::new(WorkspaceSupervisor::new()));
+            let service = EngineService::with_supervisor(supervisor);
+            service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": "initialization-recovery",
+                        "captureMode": "none"
+                    }),
+                )
+                .await
+                .expect("interrupted initialization must reopen");
+            assert_eq!(
+                root_binding::read_root_binding(scratch.path()).unwrap(),
+                Some(token)
+            );
+            supervisor.close(&db_path).unwrap();
         }
     }
 
