@@ -254,7 +254,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     <script>throw new Error("A broken script stops only itself.");</script>
     <script>
       for (const title of books) {
-        const item = document.createElement("li");
+        const item = Document.prototype.createElement.call(document, "li");
         item.textContent = title;
         document.getElementById("books").append(item);
       }
