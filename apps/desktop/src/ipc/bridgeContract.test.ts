@@ -90,6 +90,7 @@ import {
   GetSitePreviewLogsResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
+  SitePreviewReplacedEvent,
   StopSitePreviewPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
@@ -2763,6 +2764,22 @@ describe("update IPC contract", () => {
 });
 
 describe("site IPC contract", () => {
+  it("tells one surface what preview it follows, or that none runs", () => {
+    const event = {
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      holderId: "tab",
+      generation: 3,
+      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:4173/", logs: [], exited: false, generation: 3 },
+    };
+    expect(SitePreviewReplacedEvent.parse(event)).toEqual(event);
+    expect(SitePreviewReplacedEvent.parse({ ...event, preview: null }).preview).toBeNull();
+    expect(SitePreviewReplacedEvent.safeParse({
+      ...event,
+      preview: { ...event.preview, url: "https://example.com/" },
+    }).success).toBe(false);
+  });
+
   it("accepts detected normal website metadata", () => {
     expect(
       ListSitesResult.parse({
@@ -2981,12 +2998,20 @@ describe("site IPC contract", () => {
         workspaceId: "ws-sites",
         siteRoot: ".",
         mode: "static",
+        holderId: "tab",
+        restart: false,
       }),
     ).toEqual({
       workspaceId: "ws-sites",
       siteRoot: ".",
       mode: "static",
+      holderId: "tab",
+      restart: false,
     });
+    // A start names the surface that shows the preview.
+    expect(
+      StartSitePreviewPayload.safeParse({ workspaceId: "ws-sites", siteRoot: ".", mode: "static", restart: false }).success,
+    ).toBe(false);
 
     expect(
       StartSitePreviewResult.parse({
@@ -2995,6 +3020,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1:4173/",
         logs: [{ stream: "stdout", text: "built", at: 1 }],
         exited: false,
+        generation: 1,
         build: {
           ok: true,
           command: "pnpm",
@@ -3011,14 +3037,16 @@ describe("site IPC contract", () => {
         url: "http://localhost:4173/",
         logs: [],
         exited: false,
+        generation: 1,
       }).logs,
     ).toEqual([]);
     expect(
       StopSitePreviewPayload.parse({
         workspaceId: "ws-sites",
         siteRoot: ".",
+        holderId: "tab",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: ".", holderId: "tab" });
     expect(
       GetSitePreviewLogsPayload.parse({
         workspaceId: "ws-sites",
@@ -3087,6 +3115,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1:43210",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3096,6 +3125,7 @@ describe("site IPC contract", () => {
         url: "http://[::1]:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3105,6 +3135,7 @@ describe("site IPC contract", () => {
         url: "http://[::ffff:127.0.0.1]:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3114,6 +3145,7 @@ describe("site IPC contract", () => {
         url: "http://127.0.0.1/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     expect(
@@ -3123,6 +3155,7 @@ describe("site IPC contract", () => {
         url: "http://127.42.0.7:43210/",
         logs: [],
         exited: false,
+        generation: 1,
       }).success,
     ).toBe(true);
     for (const url of [
@@ -3143,6 +3176,7 @@ describe("site IPC contract", () => {
           url,
           logs: [],
           exited: false,
+          generation: 1,
         }).success,
       ).toBe(false);
     }

@@ -30,7 +30,7 @@ import {
 import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
-import { isViewId } from "../../desktop/src/renderer/workbench/workbenchState";
+import { isViewId, VIEW_IDS } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
   DemoSidebar,
   type DemoPanelId,
@@ -570,6 +570,7 @@ export function ProductDemo() {
             and never asks for a plugin's icon. */}
         <ActivityBar
           workspaceId="demo"
+          views={VIEW_IDS}
           pluginViews={[]}
           activeView={activeActivity === "chats" ? "explorer" : activeActivity}
           sidebarVisible={sidebarVisible}
