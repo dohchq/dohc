@@ -111,7 +111,7 @@ function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist",
-    ...(process.platform === "win32" ? ["apps/desktop/resources/app-compiler"] : []),
+    ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
 

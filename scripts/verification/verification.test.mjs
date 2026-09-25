@@ -284,15 +284,16 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("prepared desktop checks staged compiler bytes only on Windows", () => {
-  for (const platform of ["win32", "linux"]) {
+test("prepared desktop checks staged compiler bytes only on Windows x64", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"]]) {
+    const supported = platform === "win32" && arch === "x64";
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
       for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "launcher", { mode: 0o755 });
       const run = options => {
-        const result = invoke({ platform, ...options });
+        const result = invoke({ platform, arch, ...options });
         assert.equal(result.status, 0, result.stderr);
         return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
       };
@@ -300,12 +301,12 @@ test("prepared desktop checks staged compiler bytes only on Windows", () => {
       const compiler = join(root, "apps/desktop/resources/app-compiler");
       mkdirSync(compiler, { recursive: true });
       writeFileSync(join(compiler, "built.txt"), "changed compiler");
-      assert.equal(run({ statusOnly: true }).desktopPrepared, platform !== "win32", `${platform} changed compiler`);
+      assert.equal(run({ statusOnly: true }).desktopPrepared, !supported, `${platform}/${arch} changed compiler`);
       rmSync(compiler, { recursive: true });
-      assert.equal(run({ statusOnly: true }).desktopPrepared, platform !== "win32", `${platform} missing compiler`);
+      assert.equal(run({ statusOnly: true }).desktopPrepared, !supported, `${platform}/${arch} missing compiler`);
       assert.equal(run().desktopPrepared, true);
       const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter").length, platform === "win32" ? 2 : 1);
+      assert.equal(calls.filter(({ command, args }) => command === "pnpm" && args[0] === "--filter").length, supported ? 2 : 1);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 });
@@ -314,7 +315,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
   for (const [mode, job, fault] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
-    ["pr", null, "rust-verdict"], ["pr", null, "source"],
+    ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
   ]) await t.test([mode, job, fault].filter(Boolean).join(" "), () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
@@ -355,10 +356,6 @@ test("verification prepares the engine after Rust without changing gate scope", 
             assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
             return {stdout:'compiled runtime'};
           }
-          if(command==='pnpm' && args[1]==='@dohc/sdk') {
-            assert.deepEqual(args,['--filter','@dohc/sdk','build']);
-            return {stdout:'compiled sdk'};
-          }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
@@ -367,6 +364,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
           if(command==='cargo' && args[1]==='--version') {
             const {createRequire}=await import('node:module');
             const pins=createRequire(import.meta.url)('js-yaml').load(readFileSync(join(repoRoot,'.github/workflows/pr-checks.yml'),'utf8')).env;
+            if(process.env.FIXTURE_FAULT==='cargo-version' && args[0]==='deny')return {stdout:'cargo-deny 0.0.0'};
             return {stdout:'cargo-'+args[0]+' '+pins['CARGO_'+args[0].toUpperCase()+'_VERSION']};
           }
           if(args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
@@ -464,6 +462,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
         const messages = {
           source: /Source changed during verification/,
           "rust-verdict": /fixture Rust verdict rejected/,
+          "cargo-version": /Install cargo-deny .* to match the workflow/,
           "accounts-skipped": /Account browser verification did not complete without failures or skips/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "onboarding-missing": /did not pass both persistence and self-host onboarding proofs/,
@@ -481,7 +480,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
           ...(mode === "pr" ? ["install"] : []),
           "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
-          ...(js ? ["sdk", "typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
+          ...(js ? ["typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
         ]);
         assert.equal(report.verdict, "PASS");
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);

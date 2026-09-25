@@ -70,7 +70,7 @@ for (const cancel of [false, true]) test(cancel ? "cancellation rejects queued p
   const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
-    put("package.json", '{"type":"module"}');
+    put("package.json", '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}');
     for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
       mkdirSync(join(root, "scripts/verification"), {recursive:true});
       copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
@@ -92,7 +92,7 @@ for (const cancel of [false, true]) test(cancel ? "cancellation rejects queued p
         if(args[1]==='test:repo'){writeFileSync('repository-complete','yes');return {stdout:''};}
         assert.ok(existsSync('repository-complete'));
         if(args.includes('list'))return {stdout:JSON.stringify([
-          {name:'dohc',path:repoRoot}, {name:'@dohc/desktop',path:resolve('apps/desktop')},
+          {name:'dohc',path:process.platform==='win32'?repoRoot.toUpperCase():repoRoot}, {name:'@dohc/desktop',path:resolve('apps/desktop')},
           {name:'@dohc/app-backend-runtime',path:resolve('packages/app-backend-runtime')},
           {name:'@dohc/new-package',path:resolve('packages/new-package')}
         ])};

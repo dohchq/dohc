@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
@@ -66,7 +66,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     // package readers outside that interval.
     await command("repository", ["run", "test:repo"]);
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
-    const packages = JSON.parse(inventory.stdout).filter(pkg => resolve(pkg.path) !== repoRoot)
+    const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
     const tasks = testPlan(packages);
     if (!tasks.length) throw new Error("No workspace package tests were discovered.");

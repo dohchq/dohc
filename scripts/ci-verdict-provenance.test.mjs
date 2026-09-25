@@ -348,23 +348,17 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 // contract. `scripts/rust-gate-artifact.test.mjs` now runs the real producer
 // and feeds its evidence line to this checker, which cannot rot.
 
-test("PR workflow validates the canonical verdict and installed cargo-deny version", () => {
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/run-rust-checks\.mjs 2>&1 \| tee pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /node tools\/rust-engine-program\/require-ci-pass-verdict\.mjs pr-engine-gate\.log/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_DENY_VERSION[\s\S]*"cargo-deny \$CARGO_DENY_VERSION"/,
-  );
-  assert.match(
-    workflow,
-    /RESOLVED_CARGO_AUDIT_VERSION[\s\S]*"\$CARGO_AUDIT_VERSION"/,
-  );
+test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
+  const document = load(workflow);
+  for (const [job, invocation] of [
+    ["javascript", "xvfb-run -a pnpm verify:pr --base HEAD --job js"],
+    ["rust", "pnpm verify:pr --base HEAD --job rust"],
+  ]) {
+    assert.equal(document.jobs[job].steps.filter(step => step.run?.trim() === invocation).length, 1);
+  }
+  const install = document.jobs.rust.steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
+  assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
+    `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
 });
 
 test("both gate filters select on ignore rules and vendored engine dependencies", () => {
