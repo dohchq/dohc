@@ -564,6 +564,21 @@ function notifyAutomationFailuresChanged(workspaceId: string): void {
   }
 }
 
+// A file in a share view was created or saved: poke the windows on that
+// workspace so the shell pushes the change to a Collection's own files
+// straight to the owner. A poke, not the change; the push reads the journal.
+function notifyShareViewEdited(workspaceId: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.shareViewEdited, { workspaceId });
+  }
+}
+
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
   if (!payload.success) {
@@ -3618,6 +3633,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
   shareViewFiles,
   trashItem: (path) => shell.trashItem(path),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  shareViewEdited: notifyShareViewEdited,
   logError: (message, error) => console.error(message, error),
 });
 const ensureOwnedProjectionTargetCurrent =

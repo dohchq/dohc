@@ -677,6 +677,73 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("writes a Collection's own files through daemon RPC and reads each write's answer", async () => {
+    const daemon = new MockDaemon((request) =>
+      request.method === "share.direct.push"
+        ? {
+            writes: [
+              { paths: ["docs/packing/collection.yaml"], result: "written" },
+              {
+                paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
+                result: "stale",
+                stalePath: "docs/ideas",
+                currentBlobSha256: null,
+              },
+              { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
+            ],
+            morePending: false,
+          }
+        : undefined,
+    );
+    const { client, sessions } = await harness(daemon);
+
+    await expect(
+      client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
+    ).resolves.toEqual({
+      writes: [
+        { paths: ["docs/packing/collection.yaml"], result: "written" },
+        {
+          paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
+          result: "stale",
+          stalePath: "docs/ideas",
+          currentBlobSha256: null,
+        },
+        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
+      ],
+      morePending: false,
+    });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.direct.push")
+        .map((request) => request.params),
+    ).toEqual([
+      {
+        workspaceId: "workspace-a",
+        shareId: "share-file",
+        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+      },
+    ]);
+    expectStatefulRequestsScoped(daemon.requests);
+    await sessions.closeAll();
+  });
+
+  it("refuses a direct push answer it cannot read", async () => {
+    for (const writes of [
+      [{ paths: [], result: "written" }],
+      [{ paths: ["docs/a/collection.yaml"], result: "maybe" }],
+      [{ paths: ["docs/a/collection.yaml"], result: "stale", currentBlobSha256: null }],
+    ]) {
+      const daemon = new MockDaemon((request) =>
+        request.method === "share.direct.push" ? { writes, morePending: false } : undefined,
+      );
+      const { client, sessions } = await harness(daemon);
+      await expect(
+        client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
+      ).rejects.toThrow("share.direct.push");
+      await sessions.closeAll();
+    }
+  });
+
   it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit"

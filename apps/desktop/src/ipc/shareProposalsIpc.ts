@@ -6,6 +6,7 @@ import {
   ReadShareProposalFileContentPayload, ReadShareProposalFileContentResult,
   SettleShareProposalPayload, SettleShareProposalResult,
   SubmitShareChangesPayload, resolveSubmitShareChangesResult,
+  PushShareDirectWritesPayload, PushShareDirectWritesResult, type DirectWriteRow,
   ListMyShareChangesPayload, ListMyShareChangesResult,
   WithdrawShareChangesPayload, WithdrawShareChangesResult,
 } from "./bridgeContract";
@@ -19,7 +20,7 @@ import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
 import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
-import type { ShareProposal, ShareProposalOp, SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import { ShareUnavailableError, type ShareProposal, type ShareProposalOp, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewSelector } from "../workspaces/shareViewInfo";
@@ -30,6 +31,8 @@ import type {
   listMyShareProposals, listShareProposals, readShareProposal, readShareProposalOp,
   settleShareProposal, withdrawShareProposal,
 } from "../workspaces/shareProposalRelay";
+
+const DIRECT_PUSH_PASSES = 4;
 
 export function registerShareProposalsIpcHandlers<
   Sender,
@@ -483,6 +486,57 @@ export function registerShareProposalsIpcHandlers<
         );
         operation.assert(scope);
         return result;
+      },
+    );
+  });
+
+  // Writes the share view's changes to a Collection's own files straight into
+  // the owner's workspace (ADR 0013). Saves are already in the share view's
+  // journal, so nothing is captured first. A relay that does not take direct
+  // writes answers as the share being unavailable; the changes then wait for
+  // Send changes, and the push reports nothing.
+  registerHandler(CHANNELS.pushShareDirectWrites, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PushShareDirectWritesPayload.parse(payload);
+    return withShareProposalRecipientOperation(
+      event.sender,
+      input.workspaceId,
+      requireShareViewProposalScope,
+      async (operation) => {
+        const scope = operation.resolve();
+        const relay = receivedShareEngine.relayFor({
+          engineWorkspaceId: scope.workspaceId,
+          rootPath: scope.rootPath,
+          attachmentId: scope.attachmentId,
+          relay: scope.relay,
+        });
+        const writes: DirectWriteRow[] = [];
+        try {
+          // A push reads a bounded window; a few passes drain a backlog.
+          for (let pass = 0; pass < DIRECT_PUSH_PASSES; pass += 1) {
+            const result = await relay.pushDirectWrites({
+              shareId: scope.shareId,
+              grantedSelector: scope.grant,
+            });
+            operation.assert(scope);
+            for (const write of result.writes) {
+              writes.push(
+                write.result === "stale"
+                  ? { result: "stale", paths: write.paths, stalePath: write.stalePath }
+                  : write,
+              );
+            }
+            if (!result.morePending) break;
+          }
+        } catch (error) {
+          if (!(error instanceof ShareUnavailableError)) {
+            return PushShareDirectWritesResult.parse({
+              ok: false,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        return PushShareDirectWritesResult.parse({ ok: true, writes });
       },
     );
   });

@@ -106,6 +106,7 @@ import {
 } from "./MarkdownView";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import { useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
   abandonPendingCollectionFieldWrites,
@@ -793,6 +794,7 @@ export function DesktopWorkspaceShell(props: {
     showShellError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showDirectWriteNotice,
     dismissShellError,
     retryShellError,
     runShellErrorAction,
@@ -4012,6 +4014,14 @@ export function DesktopWorkspaceShell(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, reloadMyShareChanges]);
+  useShareDirectWrites({
+    workspaceId,
+    enabled: shareViewDocumentsWritable,
+    ownerName: shareGranterName,
+    refreshShareView,
+    sendShareChanges,
+    showNotice: showDirectWriteNotice,
+  });
   const withdrawShareChanges = useCallback(
     async (proposalId: string) => {
       const token = myShareChangeToken.current;

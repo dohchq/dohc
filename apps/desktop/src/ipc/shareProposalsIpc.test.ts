@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
-import type { ShareProposalOp } from "@dohc/workspace-contracts/relay";
+import { ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
 import { registerShareProposalsIpcHandlers } from "./shareProposalsIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -58,7 +58,8 @@ async function harness() {
     kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [], collisionRecordQuarantined: false,
   }));
   const submit = vi.fn<EngineRelayWorkspaceClient["submitShareProposal"]>(async () => ({ submitted: 1, proposalId: "proposal", skippedOutsideShare: 0, morePending: false }));
-  const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit } as unknown as EngineRelayWorkspaceClient));
+  const pushDirect = vi.fn<EngineRelayWorkspaceClient["pushDirectWrites"]>(async () => ({ writes: [], morePending: false }));
+  const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit, pushDirectWrites: pushDirect } as unknown as EngineRelayWorkspaceClient));
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerShareProposalsIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -82,7 +83,7 @@ async function harness() {
     };
   };
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,
-    readText, queue, reconcile, submit, relayFor, handlers, invoke, recipient,
+    readText, queue, reconcile, submit, pushDirect, relayFor, handlers, invoke, recipient,
     retireRenderer: () => { rendererCurrent = false; } };
 }
 
@@ -93,7 +94,8 @@ describe("registered share proposal handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.listShareProposals, CHANNELS.readShareProposalChanges, CHANNELS.readShareProposalFileContent,
-      CHANNELS.settleShareProposal, CHANNELS.submitShareChanges, CHANNELS.listMyShareChanges, CHANNELS.withdrawShareChanges,
+      CHANNELS.settleShareProposal, CHANNELS.submitShareChanges, CHANNELS.pushShareDirectWrites,
+      CHANNELS.listMyShareChanges, CHANNELS.withdrawShareChanges,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     await expect(h.invoke(CHANNELS.listShareProposals, { workspaceId: "" })).rejects.toThrow();
@@ -202,6 +204,49 @@ describe("registered share proposal handlers", () => {
     expect(h.submit.mock.calls[0]![0].submitId).not.toBe(h.submit.mock.calls[1]![0].submitId);
     h.submit.mockRejectedValue(new Error("offline"));
     await expect(h.invoke(CHANNELS.submitShareChanges)).resolves.toEqual({ ok: false, capturedLocalChanges: 3, errorMessage: "offline" });
+  });
+
+  it("pushes direct writes through the pinned grant without settling files first", async () => {
+    const h = await harness(); h.recipient();
+    h.pushDirect
+      .mockResolvedValueOnce({
+        writes: [
+          { paths: ["docs/packing/collection.yaml"], result: "written" },
+          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", currentBlobSha256: null },
+        ],
+        morePending: true,
+      })
+      .mockResolvedValueOnce({
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+        morePending: false,
+      });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toEqual({
+      ok: true,
+      writes: [
+        { paths: ["docs/packing/collection.yaml"], result: "written" },
+        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas" },
+        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
+      ],
+    });
+    expect(h.reconcile).not.toHaveBeenCalled();
+    expect(h.pushDirect).toHaveBeenCalledTimes(2);
+    expect(h.pushDirect).toHaveBeenCalledWith({
+      shareId: "pinned-share", grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+  });
+
+  it("reports a failed direct push, and nothing when the relay does not take direct writes", async () => {
+    const h = await harness(); h.recipient();
+    h.pushDirect.mockRejectedValueOnce(new Error("offline"));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ ok: false, errorMessage: "offline" });
+    h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ ok: true, writes: [] });
+  });
+
+  it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {
+    const h = await harness(); h.recipient(access);
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).rejects.toThrow();
+    expect(h.pushDirect).not.toHaveBeenCalled();
   });
 
   it("refuses a changed grant after local reconciliation without submitting", async () => {

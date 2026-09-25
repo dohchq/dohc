@@ -4858,6 +4858,41 @@ export async function resolveSubmitShareChangesResult(
   }
 }
 
+export const PushShareDirectWritesPayload = z.object({
+  // The SHARE VIEW, resolved to its share and pinned grant in main, like
+  // SubmitShareChangesPayload.
+  workspaceId: WORKSPACE_ID,
+});
+export type PushShareDirectWritesPayload = z.infer<typeof PushShareDirectWritesPayload>;
+
+// A new Collection's batch is the largest write: its schema, an automations
+// file, and 500 records.
+const DirectWritePaths = z.array(z.string().min(1)).min(1).max(502);
+
+// How one direct write to a Collection's own files ended (ADR 0013). A stale
+// or refused write stays for Send changes.
+export const DirectWriteRow = z.discriminatedUnion("result", [
+  z.object({ result: z.literal("written"), paths: DirectWritePaths }),
+  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1) }),
+  z.object({ result: z.literal("refused"), paths: DirectWritePaths, reason: z.string() }),
+]);
+export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
+
+// A push that fails in transit is an ordinary result, for the reason a failed
+// submit is one: Electron does not carry custom Error properties across IPC.
+// A relay that does not take direct writes answers with no writes; the
+// changes stay for Send changes.
+export const PushShareDirectWritesResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), writes: z.array(DirectWriteRow).max(MAX_SHARE_PROPOSAL_OPS) }),
+  z.object({ ok: z.literal(false), errorMessage: z.string() }),
+]);
+export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
+
+// A file in this share view was saved or created. The shell answers with a
+// direct push.
+export const ShareViewEditedEvent = z.object({ workspaceId: WORKSPACE_ID });
+export type ShareViewEditedEvent = z.infer<typeof ShareViewEditedEvent>;
+
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -6437,6 +6472,12 @@ export interface DohcDesktopBridge
   submitShareChanges(
     payload: SubmitShareChangesPayload,
   ): Promise<SubmitShareChangesResult>;
+  // Writes the share view's changes to a Collection's own files straight
+  // into the owner's workspace. Every other change waits for Send changes.
+  pushShareDirectWrites(
+    payload: PushShareDirectWritesPayload,
+  ): Promise<PushShareDirectWritesResult>;
+  onShareViewEdited(listener: (event: ShareViewEditedEvent) => void): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;

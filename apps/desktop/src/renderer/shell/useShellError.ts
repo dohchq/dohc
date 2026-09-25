@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
+import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 type ShellErrorKind =
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
+  | DirectWriteNoticeKind
   | SettingsFileKind;
 
 // A message the toast and the Notices row can hold. A protocol response or a
@@ -173,6 +175,30 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // One row per kind of direct-write answer. Send as proposal sends every
+  // waiting change and then clears the rows it answers.
+  const showDirectWriteNotice = useCallback(
+    (notice: DirectWriteNotice) => {
+      const { sendAsProposal } = notice;
+      push({
+        message: notice.message,
+        retry: notice.retry,
+        ...(sendAsProposal
+          ? {
+              action: {
+                label: "Send as proposal",
+                run: () => {
+                  clearKind("direct-write-stale", "direct-write-refused");
+                  sendAsProposal();
+                },
+              },
+            }
+          : {}),
+        kind: notice.kind,
+      });
+    },
+    [clearKind, push],
+  );
   // The row stays: the file is still wrong until the person saves it.
   const runShellErrorAction = useCallback((id: string) => {
     shellErrorsRef.current.find((error) => error.id === id)?.action?.run();
@@ -211,6 +237,7 @@ export function useShellError(workspaceId: string) {
     clearEditorGroupRefusalError,
     showShellError,
     showSettingsFileNotice,
+    showDirectWriteNotice,
     showSuccessNotice,
     hideShellError,
     dismissShellError,
