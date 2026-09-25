@@ -182,7 +182,7 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
-import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
+import { createShareRosters, listRosterGrants, rosterAuthorLabel } from "./automations/shareRoster";
 import { CollectionAutomations } from "./automations/collectionAutomations";
 import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
@@ -1850,7 +1850,15 @@ function engineForWorkspace(
     relay,
     operations: {
       push: () => daemonRelay.push(),
-      pull: (materializePage) => daemonRelay.pull(materializePage),
+      // Each page's files, once written, go to the Collection automation
+      // executor: a pull need not leave a watcher batch.
+      pull: (materializePage) =>
+        daemonRelay.pull(async (changed) => {
+          await materializePage(changed);
+          collectionAutomationsOf(workspace.workspaceId)?.handlePulledPaths(
+            changed.map((change) => change.path),
+          );
+        }),
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
@@ -4229,7 +4237,9 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent",
+    namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
+    notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,

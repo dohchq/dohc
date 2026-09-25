@@ -1368,6 +1368,9 @@ export const EngineMomentRecord = z.object({
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
+  // Present when a person the owner shared with wrote the moment directly
+  // (ADR 0013): main names them from the owner's share roster.
+  namedAuthorLabel: z.string().min(1).max(400).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic

@@ -318,13 +318,24 @@ export class CollectionAutomations {
 
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
+    this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]));
+  }
+
+  /**
+   * Files a relay pull wrote. A pull writes the owner's files itself, and
+   * need not leave a watcher batch, so a collaborator's direct change to a
+   * Collection's automations or schema (ADR 0013) is read from here.
+   */
+  handlePulledPaths(paths: readonly string[]): void {
+    this.rereadFoldersOf(paths);
+  }
+
+  private rereadFoldersOf(paths: readonly (string | undefined)[]): void {
     const folders = new Set<string>();
-    for (const event of events) {
-      for (const path of [event.path, event.fromPath]) {
-        if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
-        const folder = posix.dirname(path);
-        if (folder !== ".") folders.add(folder);
-      }
+    for (const path of paths) {
+      if (path === undefined || !WATCHED_FILES.has(posix.basename(path))) continue;
+      const folder = posix.dirname(path);
+      if (folder !== ".") folders.add(folder);
     }
     if (folders.size === 0 || this.opened === null) return;
     void this.enqueue(async () => {

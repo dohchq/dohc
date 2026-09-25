@@ -62,9 +62,10 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel); everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "namedAuthorLabel">,
 ): string {
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.namedAuthorLabel) return moment.namedAuthorLabel;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
     : engineOriginLabel(moment.origin);

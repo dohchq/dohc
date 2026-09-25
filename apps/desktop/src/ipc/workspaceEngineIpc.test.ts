@@ -141,7 +141,7 @@ async function harness() {
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
     },
-    requireEngineCapture, localAgentDisplayName: displayName, notifyRenderer: notify,
+    requireEngineCapture, localAgentDisplayName: displayName, namedAuthorLabel: () => "Someone you shared with", notifyRenderer: notify,
     retryOwnerLiveDelivery,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,

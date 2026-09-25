@@ -56,6 +56,11 @@ describe("engineOriginLabel", () => {
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("engineMomentSourceLabel", () => {
+  it("names a person the owner shared with, not the sync that carried their change", () => {
+    expect(engineMomentSourceLabel(moment({ id: "named", origin: "sync", namedAuthorLabel: "ana@example.com (Edit)" })))
+      .toBe("ana@example.com (Edit)");
+    expect(engineMomentSourceLabel(moment({ id: "served", origin: "sync" }))).toBe("Sync");
+  });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });

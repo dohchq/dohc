@@ -397,6 +397,23 @@ describe("Collection automations", () => {
     });
   });
 
+  it("reads a Collection's automations again when a relay pull writes them, with no watcher batch", async () => {
+    const w = await world({ automations: { Tasks: BUMP } });
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has(TASKS));
+
+    // A collaborator's direct write removes the automation (ADR 0013).
+    await w.writeAutomations("Tasks", "version: 1\nautomations: []\n");
+    w.executor.handlePulledPaths(["Tasks/notes.md"]);
+    // A read queued after the pull sees the index the pull left.
+    const unchanged = await w.executor.automationsIn("Tasks");
+    expect(unchanged.status === "read" && unchanged.automations.length, "a pull that names no definition file reads nothing").toBe(1);
+    expect(w.subscriptions.has(TASKS)).toBe(true);
+
+    w.executor.handlePulledPaths(["Tasks/notes.md", "Tasks/automations.yaml"]);
+    await w.until(() => !w.subscriptions.has(TASKS));
+  });
+
   it("finds records, changes each with its own values, branches, and adds records it then changes", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: [
       "  - id: sweep",
