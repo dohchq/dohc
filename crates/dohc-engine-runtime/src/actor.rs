@@ -41,6 +41,7 @@ mod ydoc;
 pub use capture::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
+pub use collections::CollectionReconciliation;
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
@@ -69,6 +70,32 @@ use tokio::sync::{mpsc, oneshot};
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Hears the Group automation claims a workspace's chat writes and relay
+/// passes commit, after commit. The host sets it when it opens the workspace.
+pub type AutomationClaimListener =
+    Arc<dyn Fn(&[dohc_engine_domain::AutomationClaim]) + Send + Sync>;
+
+/// The actor's one place to announce Group automation claims. Every handle
+/// shares it, and the latest listener replaces an earlier one.
+#[derive(Clone, Default)]
+pub(crate) struct ClaimAnnouncer(Arc<std::sync::RwLock<Option<AutomationClaimListener>>>);
+
+impl ClaimAnnouncer {
+    pub(crate) fn announce(&self, claims: &[dohc_engine_domain::AutomationClaim]) {
+        if claims.is_empty() {
+            return;
+        }
+        let listener = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(claims);
+        }
+    }
+}
 
 /// Physical channel capacity: the data bound plus one slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
@@ -140,6 +167,7 @@ pub struct WorkspaceActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    claims: ClaimAnnouncer,
 }
 
 impl WorkspaceActor {
@@ -250,6 +278,7 @@ impl WorkspaceActor {
                 close_permit,
                 state,
                 worker: Some(worker),
+                claims: ClaimAnnouncer::default(),
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -268,6 +297,7 @@ impl WorkspaceActor {
             identity: self.identity.clone(),
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
+            claims: self.claims.clone(),
         }
     }
 
@@ -344,9 +374,20 @@ pub struct ActorHandle {
     identity: EngineDbIdentity,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
+    claims: ClaimAnnouncer,
 }
 
 impl ActorHandle {
+    /// Hear every Group automation claim this workspace's chat writes and
+    /// relay passes commit. The latest listener replaces an earlier one.
+    pub fn listen_for_automation_claims(&self, listener: AutomationClaimListener) {
+        *self
+            .claims
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener);
+    }
+
     async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
