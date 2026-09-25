@@ -4761,6 +4761,15 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
 
 #[test]
 fn held_conflict_allows_later_pages_and_replays_after_restart() {
+    assert_held_conflict_replays_after_restart(false);
+}
+
+#[test]
+fn join_waits_for_held_conflict_before_originating_offline_documents() {
+    assert_held_conflict_replays_after_restart(true);
+}
+
+fn assert_held_conflict_replays_after_restart(joining: bool) {
     use crate::conflict_resolve_v1::{
         ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
@@ -4769,6 +4778,30 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
     let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
+    let offline_key = dohc_engine_collab::DocKey::new("ws", "main", "offline-doc").unwrap();
+    if joining {
+        seed_text_head(&mut engine, "offline-doc", "offline.md", "offline edit");
+        let offline = dohc_engine_collab::Ydoc::wire();
+        let update = offline.plaintext_insert(0, "offline edit");
+        dohc_engine_collab::record_local_update(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &offline_key,
+            &update,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("offline.md"),
+                    content_kind: dohc_engine_collab::ContentKind::Plaintext,
+                    regime: dohc_engine_collab::Regime::LocalOnly,
+                }),
+                ..Default::default()
+            },
+            &NoFaults,
+            900,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+    }
     let result_text = "resolved after retry";
     let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
     engine
@@ -4888,15 +4921,37 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
             .expect("a held conflict must not block unrelated pages");
         let SyncPassOutcome::Complete {
             pending_cursor: Some(cursor),
+            has_more,
             ..
         } = outcome
         else {
             panic!("durable cursor");
         };
         assert_eq!(cursor.cursor, expected_cursor);
+        if joining {
+            assert!(
+                !cursor.bootstrap_complete,
+                "fetching the last page does not finish applying the join"
+            );
+            assert_eq!(
+                has_more,
+                expected_cursor == 500,
+                "a held lease must not cause an immediate retry loop"
+            );
+        }
         client
             .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
             .unwrap();
+        if joining {
+            assert!(
+                !dohc_engine_collab::read_marker(&engine, &offline_key)
+                    .unwrap()
+                    .unwrap()
+                    .lineage_claim_status
+                    .has_claimed_base(),
+                "held remote work must not enroll offline documents"
+            );
+        }
         assert_eq!(
             read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
             -1,
@@ -4942,6 +4997,12 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
         panic!("replay");
     };
     assert!(changed_paths.iter().any(|change| change.path == "retry.md"));
+    if joining {
+        assert!(
+            stale_cursor.bootstrap_complete,
+            "applied deferred work finishes the join even before its report commits"
+        );
+    }
     drop(engine);
     let mut engine = EngineStore::open(&path, 1_002).unwrap();
     let outcome = client
@@ -4991,6 +5052,22 @@ fn held_conflict_allows_later_pages_and_replays_after_restart() {
         })
         .unwrap();
     assert_eq!(pending, 0);
+    if joining {
+        assert!(
+            read_relay_cursor(&engine, "ws")
+                .unwrap()
+                .unwrap()
+                .bootstrap_complete
+        );
+        assert!(
+            dohc_engine_collab::read_marker(&engine, &offline_key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_status
+                .has_claimed_base(),
+            "settled join enrolls the offline document"
+        );
+    }
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(),
         2
