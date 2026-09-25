@@ -95,7 +95,7 @@ export function registerSharedChannelsIpcHandlers<
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
-  // A chat-channel grant shares a whole channel (threads/messages/reactions)
+  // A chat grant shares a whole channel (threads/messages/reactions)
   // with another account, read-write by default. The relay owns every
   // security decision (membership, authorship, channel scoping, revocation);
   // these handlers only address grants and move the member-side sync.
@@ -406,7 +406,7 @@ export function registerSharedChannelsIpcHandlers<
                   const selector = row.selector as
                     | { kind?: unknown }
                     | undefined;
-                  return selector?.kind === "chat-channel" &&
+                  return selector?.kind === "chat" &&
                     typeof row.shareId === "string"
                     ? [row.shareId]
                     : [];

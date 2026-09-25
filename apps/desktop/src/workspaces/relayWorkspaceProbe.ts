@@ -7,6 +7,7 @@ import {
   type RelayWorkspaceBootstrapResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { relayApiFetch } from "./sharedChannels";
 
 function relayUrl(relay: SyncRelayConnection, path: string): string {
   return `${relay.baseUrl.replace(/\/+$/u, "")}${path}`;
@@ -19,7 +20,7 @@ async function jsonRelay<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(relayUrl(relay, path), {
+  const response = await (relay.fetch ?? relayApiFetch())(relayUrl(relay, path), {
     ...init,
     headers,
   });

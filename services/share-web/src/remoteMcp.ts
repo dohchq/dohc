@@ -2,6 +2,7 @@ import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextp
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import type { createLinkLiveClient } from "./linkLiveClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -34,7 +35,14 @@ const text = (value: unknown): CallToolResult => {
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
-  if (!response.ok) {await response.body?.cancel(); throw new Error(`Share link request failed (${response.status}).`);}
+  if (!response.ok) {
+    const refusal = response.status === RELAY_VERSION_REFUSAL_STATUS
+      ? relayVersionRefusal(await readBoundedJson(response, 4096, signal).catch(() => null))
+      : null;
+    await response.body?.cancel().catch(() => undefined);
+    if (refusal) throw new RelayVersionRefusalError(refusal);
+    throw new Error(`Share link request failed (${response.status}).`);
+  }
   return readBoundedJson(response, 1024 * 1024, signal);
 };
 
