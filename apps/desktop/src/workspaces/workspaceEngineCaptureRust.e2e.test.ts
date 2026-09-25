@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -790,8 +790,17 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // durably pending materialization job through the idempotent settle.
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
+        const contents = await readFile(absolute, "utf8").catch(async (error) => {
+          console.error("Locked-save recovery read failed", {
+            path: absolute,
+            states: [...states],
+            errors: [...errors],
+            directory: await readdir(root).catch((listingError: NodeJS.ErrnoException) => listingError.code),
+          });
+          throw error;
+        });
         if (
-          (await readFile(absolute, "utf8")) !== "base\n" &&
+          contents !== "base\n" &&
           states.includes("saved")
         ) {
           break;
