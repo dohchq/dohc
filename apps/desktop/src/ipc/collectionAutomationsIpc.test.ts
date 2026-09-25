@@ -17,6 +17,8 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
+  const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
+  const executor = { fieldMarks } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -24,7 +26,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) =>
-      await work({ workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace" }, state: { collectionAutomations: {} as CollectionAutomations } }),
+      await work({ workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace" }, state: { collectionAutomations: executor } }),
     sharedViewOf: () => (options.sharedView ? {} : null),
     readText: async () => options.file === undefined ? null : { text: options.file, truncated: false, contentHash: sha256(options.file) },
     createFile,
@@ -37,8 +39,20 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { write, call, createFile, writeText };
+  const marks = (collectionPath: string) =>
+    handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
+  return { write, call, marks, fieldMarks, createFile, writeText };
 }
+
+describe("field marks", () => {
+  it("answers one Collection's marks from the executor, and none in a shared view", async () => {
+    await expect(fixture().marks("Tasks")).resolves.toEqual({ marks: [{ field: "Finished on", automations: ["Stamp in Tasks"] }] });
+    const shared = fixture({ sharedView: true });
+    await expect(shared.marks("Tasks")).resolves.toEqual({ marks: [] });
+    expect(shared.fieldMarks).not.toHaveBeenCalled();
+    await expect(fixture().marks("shared-with-me/Trip")).rejects.toThrow(/not a Collection/);
+  });
+});
 
 describe("writing automations.yaml from the panel", () => {
   it("creates the file when the Collection has none, as the writer lays it out", async () => {
