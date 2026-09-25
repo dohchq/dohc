@@ -56,6 +56,27 @@ it("keeps later relation choices across partial acknowledgments", async () => {
   expect(emit.mock.calls.at(-1)?.[0]).toEqual(["a", "b", "c"]);
 });
 
+it("keeps a later removal after discarding its predecessor and retires it on discard", () => {
+  let discard!: (writeId: number) => void;
+  const emit = writeEmitter();
+  const editor = (value: string[]) => <CellEditor
+    field={field("tags")} indexed={indexedValue("tags", value)} acknowledgedWriteId={0}
+    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
+    emit={emit} close={() => {}} />;
+  const view = render(editor(["alpha", "beta"]));
+  fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta", "gamma"]);
+  act(() => discard(1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+  view.rerender(editor(["alpha"]));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(false);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+  act(() => discard(2));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(true);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+});
+
 function field(name: string): FieldDefinition {
   const match = V1_FIELDS.find((entry) => entry.name === name);
   if (!match) throw new Error(`no test field named ${name}`);

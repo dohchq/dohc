@@ -24,10 +24,22 @@ export function useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subs
     pending: [] as PendingSelection[],
   }));
   useEffect(() => subscribeToDiscardedWrites?.((writeId) => {
-    setSelection((current) => ({
-      ...current,
-      pending: current.pending.filter((change) => change.writeId !== writeId),
-    }));
+    setSelection((current) => {
+      const index = current.pending.findIndex((change) => change.writeId === writeId);
+      if (index < 0) return current;
+      const pending = [...current.pending];
+      const discarded = pending[index]!;
+      const next = pending[index + 1];
+      // The next queued full value includes this edit. Carry its net changes
+      // forward while retaining delta replay against external updates.
+      if (next) pending[index + 1] = {
+        ...next,
+        added: [...new Set([...discarded.added.filter(id => !next.removed.includes(id)), ...next.added])],
+        removed: [...new Set([...discarded.removed.filter(id => !next.added.includes(id)), ...next.removed])],
+      };
+      pending.splice(index, 1);
+      return { ...current, pending };
+    });
   }), [subscribeToDiscardedWrites]);
   const observed = ids;
   let current = selection;
