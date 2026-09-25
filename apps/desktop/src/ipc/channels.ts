@@ -54,6 +54,7 @@ export const WORKBENCH_MENU_COMMANDS = [
   "install-update",
   "settings",
   "toggle-theme",
+  "unpin-app",
 ] as const;
 
 export const PLUGIN_PIPELINE_STATUSES = [
@@ -191,6 +192,7 @@ export const CHANNELS = {
   startSitePreview: "desktop:start-site-preview",
   getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
+  sitePreviewReplaced: "desktop:site-preview-replaced",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",
@@ -277,6 +279,23 @@ export const CHANNELS = {
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
   noticesChanged: "desktop:notices-changed",
+  // Collection automations: main parses and writes automations.yaml.
+  listCollectionAutomations: "desktop:list-collection-automations",
+  listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
+  retryCollectionAutomation: "desktop:retry-collection-automation",
+  undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
+  listAutomationTargets: "desktop:list-automation-targets",
+  checkCollectionAutomation: "desktop:check-collection-automation",
+  confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
+  writeCollectionAutomations: "desktop:write-collection-automations",
+  listAutomationHolds: "desktop:list-automation-holds",
+  resetAutomationHolds: "desktop:reset-automation-holds",
+  revealAutomationHolds: "desktop:reveal-automation-holds",
+  dismissAutomationStops: "desktop:dismiss-automation-stops",
+  automationShareImpact: "desktop:automation-share-impact",
+  automationHoldsChanged: "desktop:automation-holds-changed",
+  listCollectionFieldMarks: "desktop:list-collection-field-marks",
+  collectionAutomationsChanged: "desktop:collection-automations-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
@@ -284,6 +303,8 @@ export const CHANNELS = {
   readShareProposalFileContent: "desktop:read-share-proposal-file-content",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
+  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   listMyShareChanges: "desktop:list-my-share-changes",
   withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",
@@ -344,6 +365,7 @@ export const CHANNELS = {
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
   reloadUserSettings: "desktop:reload-user-settings",
+  setAppPinned: "desktop:set-app-pinned",
   getUserSettingsFilePath: "desktop:get-user-settings-file-path",
   openUserSettingsFile: "desktop:open-user-settings-file",
   openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",

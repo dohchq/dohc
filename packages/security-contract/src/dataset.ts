@@ -13,7 +13,8 @@ export const DATASET_MAX_TABLES = 64;
 export const DATASET_MAX_FIELDS = 128;
 export const DATASET_MAX_OPERATIONS = 128;
 
-export type DatasetFieldType = "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "relation" | "attachment";
+export type DatasetColumnFieldType = "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "relation" | "attachment";
+export type DatasetFieldType = DatasetColumnFieldType | "button";
 export type DatasetOperationKind = "read" | "create" | "edit" | "delete" | "action";
 export interface DatasetRelation {
   datasetId: string;
@@ -21,17 +22,30 @@ export interface DatasetRelation {
   fieldId: string;
   many: boolean;
 }
-export interface DatasetField {
+/** A field stored in a SQL column. */
+export interface DatasetColumnField {
   fieldId: string;
   name: string;
   sqlColumn: string;
-  type: DatasetFieldType;
+  type: DatasetColumnFieldType;
   required: boolean;
   unique: boolean;
   default?: AppBackendJson;
   options?: string[];
   relation?: DatasetRelation;
 }
+/**
+ * A button on each record that runs an automation. It stores nothing, so it
+ * has no column, and no operation reads or writes it.
+ */
+export interface DatasetButtonField {
+  fieldId: string;
+  name: string;
+  type: "button";
+}
+export type DatasetField = DatasetColumnField | DatasetButtonField;
+/** A field as a description shows it: its column stays with the host. */
+export type DatasetDescribedField = Omit<DatasetColumnField, "sqlColumn"> | DatasetButtonField;
 export interface DatasetTable {
   tableId: string;
   name: string;
@@ -95,7 +109,7 @@ export interface DatasetDescription {
   name: string;
   revision: number;
   revisionSha256: string;
-  tables: Array<{ tableId: string; name: string; fields: Array<Omit<DatasetField, "sqlColumn">> }>;
+  tables: Array<{ tableId: string; name: string; fields: DatasetDescribedField[] }>;
   operations: DatasetOperation[];
 }
 
@@ -103,7 +117,7 @@ const ids = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const sqlNames = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const operationNames = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
-const fieldTypes = new Set<DatasetFieldType>(["text", "number", "checkbox", "date", "select", "multi-select", "url", "relation", "attachment"]);
+const fieldTypes = new Set<DatasetColumnFieldType>(["text", "number", "checkbox", "date", "select", "multi-select", "url", "relation", "attachment"]);
 const operationKinds = new Set<DatasetOperationKind>(["read", "create", "edit", "delete", "action"]);
 const encoder = new TextEncoder();
 
@@ -157,7 +171,14 @@ function date(value: string): boolean {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
-function validDefault(field: DatasetField, value: AppBackendJson): boolean {
+export function isDatasetColumnField<Field extends { type: DatasetFieldType }>(field: Field): field is Exclude<Field, DatasetButtonField> {
+  return field.type !== "button";
+}
+/** The fields a table stores: what SQL, CSV, copies, and operations read. */
+export function datasetColumnFields<Field extends { type: DatasetFieldType }>(table: { fields: readonly Field[] }): Array<Exclude<Field, DatasetButtonField>> {
+  return table.fields.filter(isDatasetColumnField);
+}
+function validDefault(field: DatasetColumnField, value: AppBackendJson): boolean {
   if (value === null) return !field.required;
   switch (field.type) {
     case "text": return typeof value === "string";
@@ -175,10 +196,21 @@ function validDefault(field: DatasetField, value: AppBackendJson): boolean {
     case "relation": return field.relation?.many !== false && Array.isArray(value) && value.length === 0;
   }
 }
-function field(value: unknown, allowWithheldRelation = false): DatasetField {
+function button(value: unknown): DatasetButtonField {
+  const row = record(value, ["fieldId", "name", "type"]);
+  if (row.type !== "button") fail();
+  return { fieldId: uuid(row.fieldId), name: text(row.name), type: "button" };
+}
+function isButtonRow(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).type === "button";
+}
+function field(value: unknown): DatasetField {
+  return isButtonRow(value) ? button(value) : columnField(value);
+}
+function columnField(value: unknown, allowWithheldRelation = false): DatasetColumnField {
   const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation"]);
-  if (!fieldTypes.has(row.type as DatasetFieldType)) fail();
-  const result: DatasetField = { fieldId: uuid(row.fieldId), name: text(row.name), sqlColumn: sqlName(row.sqlColumn), type: row.type as DatasetFieldType,
+  if (!fieldTypes.has(row.type as DatasetColumnFieldType)) fail();
+  const result: DatasetColumnField = { fieldId: uuid(row.fieldId), name: text(row.name), sqlColumn: sqlName(row.sqlColumn), type: row.type as DatasetColumnFieldType,
     required: boolean(row.required), unique: boolean(row.unique) };
   if (result.type === "select" || result.type === "multi-select") {
     result.options = boundedArray(row.options, 100, 1).map(value => text(value, 200));
@@ -198,10 +230,11 @@ function field(value: unknown, allowWithheldRelation = false): DatasetField {
 function table(value: unknown): DatasetTable {
   const row = record(value, ["tableId", "name", "sqlName", "primaryKey", "fields"]);
   const result: DatasetTable = { tableId: uuid(row.tableId), name: text(row.name), sqlName: sqlName(row.sqlName), primaryKey: sqlName(row.primaryKey),
-    fields: boundedArray(row.fields, DATASET_MAX_FIELDS, 1).map(value => field(value)) };
-  unique(result.fields.map(field => field.sqlColumn.toLowerCase()));
+    fields: boundedArray(row.fields, DATASET_MAX_FIELDS, 1).map(field) };
+  const columns = datasetColumnFields(result);
+  unique(columns.map(field => field.sqlColumn.toLowerCase()));
   unique(result.fields.map(field => field.name));
-  const primary = result.fields.find(field => field.sqlColumn === result.primaryKey);
+  const primary = columns.find(field => field.sqlColumn === result.primaryKey);
   if (!primary || !["text", "number"].includes(primary.type) || !primary.required || !primary.unique || Object.hasOwn(primary, "default")) fail();
   return result;
 }
@@ -233,18 +266,23 @@ function definition(value: unknown): DatasetDefinition {
   unique(result.operations.map(operation => operation.name));
   const tables = new Map(result.tables.map(table => [table.tableId, table]));
   for (const table of result.tables) {
-    for (const field of table.fields) {
-      if (!field.relation) continue;
-      const target = tables.get(field.relation.tableId)?.fields.find(candidate => candidate.fieldId === field.relation!.fieldId);
-      if (field.relation.datasetId !== result.datasetId || !target || !target.unique || !target.required || !["text", "number"].includes(target.type)) fail();
+    for (const field of datasetColumnFields(table)) {
+      if (field.relation) relationTarget(tables, result.datasetId, field.relation);
     }
   }
   for (const operation of result.operations) {
     const table = tables.get(operation.tableId);
-    if (!table || operation.fieldIds.some(id => !table.fields.some(field => field.fieldId === id))) fail();
-    if (operation.kind === "edit" && operation.fieldIds.some(id => table.fields.some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
+    // An operation reads and writes columns. A button has none.
+    if (!table || operation.fieldIds.some(id => !datasetColumnFields(table).some(field => field.fieldId === id))) fail();
+    if (operation.kind === "edit" && operation.fieldIds.some(id => datasetColumnFields(table).some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
   }
   return result;
+}
+// A relation names a required, unique text or number column in this dataset.
+function relationTarget(tables: ReadonlyMap<string, { fields: ReadonlyArray<{ fieldId: string; type: DatasetFieldType; unique?: boolean; required?: boolean }> }>,
+  datasetId: string, relation: DatasetRelation): void {
+  const target = tables.get(relation.tableId)?.fields.find(candidate => candidate.fieldId === relation.fieldId);
+  if (relation.datasetId !== datasetId || !target || target.type === "button" || !target.unique || !target.required || !["text", "number"].includes(target.type)) fail();
 }
 
 export function parseDatasetDefinition(value: unknown): DatasetDefinition {
@@ -259,9 +297,10 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
     datasetId: uuid(row.datasetId), name: text(row.name), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     tables: boundedArray(row.tables, DATASET_MAX_TABLES).map(value => {
       const table = record(value, ["tableId", "name", "fields"]);
-      const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map(value => {
+      const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map((value): DatasetDescribedField => {
+        if (isButtonRow(value)) return button(value);
         const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation"]);
-        const { sqlColumn: _column, ...parsed } = field({ ...metadata, sqlColumn: "field" }, true);
+        const { sqlColumn: _column, ...parsed } = columnField({ ...metadata, sqlColumn: "field" }, true);
         return parsed;
       });
       unique(fields.map(field => field.name));
@@ -275,19 +314,37 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
   const tables = new Map(result.tables.map(table => [table.tableId, table]));
   for (const operation of result.operations) {
     const table = tables.get(operation.tableId);
-    if (!table || operation.fieldIds.some(id => !table.fields.some(field => field.fieldId === id))) fail();
+    if (!table || operation.fieldIds.some(id => !datasetColumnFields(table).some(field => field.fieldId === id))) fail();
   }
   for (const table of result.tables) {
     const archivedMetadata = result.archived === true && result.operations.length === 0;
     if (!archivedMetadata && !result.operations.some(operation => operation.tableId === table.tableId)) fail();
-    for (const field of table.fields) {
+    // A described column belongs to a described operation. A button belongs to none.
+    for (const field of datasetColumnFields(table)) {
       if (!archivedMetadata && !result.operations.some(operation => operation.tableId === table.tableId && operation.fieldIds.includes(field.fieldId))) fail();
-      if (!field.relation) continue;
-      const target = tables.get(field.relation.tableId)?.fields.find(candidate => candidate.fieldId === field.relation!.fieldId);
-      if (field.relation.datasetId !== result.datasetId || !target || !target.unique || !target.required || !["text", "number"].includes(target.type)) fail();
+      if (field.relation) relationTarget(tables, result.datasetId, field.relation);
     }
   }
   return result;
+}
+/**
+ * What a caller holding `operations` may see of an approved revision: each
+ * table an operation uses, the columns the operations list, and the table's
+ * buttons. A button grants nothing: pressing one checks the operations its
+ * automation's steps invoke. A relation to a column the caller cannot see
+ * is left out.
+ */
+export function describeApprovedDataset(approved: DatasetRevision, operations: DatasetOperation[]): DatasetDescription {
+  const fields = new Set(operations.flatMap(operation => operation.fieldIds));
+  const tables = new Set(operations.map(operation => operation.tableId));
+  return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
+    tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
+      fields: table.fields.filter(field => field.type === "button" || fields.has(field.fieldId)).map((field): DatasetDescribedField => {
+        if (field.type === "button") return { fieldId: field.fieldId, name: field.name, type: "button" };
+        const { sqlColumn: _sqlColumn, ...description } = field;
+        if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
+        return description;
+      }) })), operations };
 }
 export function parseDatasetRevision(value: unknown): DatasetRevision {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "revision", "revisionSha256", "definitionSha256", "schemaSha256", "operationsSha256", "definition"]);
@@ -401,6 +458,8 @@ export function datasetRevisionsPreserveAccess(previous: DatasetRevision, curren
     definition.operationsPath = "operations.js";
     for (const table of definition.tables) {
       table.name = table.tableId;
+      // No operation reads or writes a button, so buttons do not change access.
+      table.fields = datasetColumnFields(table);
       for (const field of table.fields) field.name = field.fieldId;
     }
     return datasetDefinitionDigestContent(definition);

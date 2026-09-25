@@ -701,7 +701,7 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
             })
         )
         .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let seq = f
         .store

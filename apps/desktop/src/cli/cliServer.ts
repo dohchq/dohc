@@ -49,7 +49,7 @@ import {
   type GranularChatMessageSearchResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -77,7 +77,13 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import {
+  LiveDocumentEditAppliedError,
+  type LiveDocumentEditOrigin,
+  type LiveDocumentEditOutcome,
+} from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import type { DocumentEdit } from "@dohc/ydoc-projection";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -177,6 +183,18 @@ export interface CliCollectionsPort {
   writes: CliCollectionWriteSeam;
 }
 
+// Live Markdown documents for the document verbs. Main answers through the
+// editor session that holds a document, so an edit reaches an open editor
+// as the person's own typing would.
+export interface CliDocumentsPort {
+  read(path: string): Promise<{ path: string; markdown: string }>;
+  edit(input: {
+    path: string;
+    edit: DocumentEdit;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<LiveDocumentEditOutcome>;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -200,6 +218,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
+  documents?: CliDocumentsPort;
 }
 
 export interface CliRunMessageLink {
@@ -236,6 +255,8 @@ export interface CliServerOptions {
   chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  /** How many finished results and forgotten request ids each workspace keeps; tests lower them. */
+  requestIdLimits?: { results: number; ids: number };
   runMessageLinkForegroundBudgetMs?: number;
   runMessageLinkRecoveryRetryMs?: number;
   runMessageLinkRecoveryMaxPending?: number;
@@ -500,6 +521,25 @@ function collectionWriteAuthor(
 ): ChangeAuthor {
   if (actor === "agent") return CLI_AGENT_AUTHOR;
   return createLocalChangeAuthor(options.localUserDisplayName());
+}
+
+// Provenance for a document edit, derived here. A person types in the
+// editor, so every edit through this socket is an agent's on behalf of the
+// local owner, recorded under the name the agent gave itself or under none.
+// Any process holding the socket token could otherwise claim the person's
+// typing.
+function documentEditOrigin(agent: string | undefined): LiveDocumentEditOrigin {
+  return {
+    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+  };
+}
+
+function documentsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "documents are not available in this workspace",
+  };
 }
 
 async function loadChannels(
@@ -1559,6 +1599,112 @@ async function linkRunMessage(
   return warning;
 }
 
+// The results of requests a caller sent with a request id, per workspace. A
+// caller whose request passed the socket deadline sends it again with the same
+// id and gets the first result instead of the work done twice. Kept in memory
+// while dohc runs.
+//
+// A running request is never dropped; the socket's connection limit bounds how
+// many run at once. A finished one is kept as a digest of its input and its
+// small result. Past the limit the oldest finished result is dropped and only
+// its id is kept, so a resend is refused instead of run again. Past that
+// limit too, the oldest ids go, and only then could a very old id run again.
+// The MCP tool descriptions that take a requestId state these numbers.
+const REQUEST_ID_LIMITS = { results: 1_024, ids: 16_384 };
+
+interface RememberedRequest {
+  input: string;
+  result: Promise<unknown>;
+  finished: boolean;
+}
+
+interface WorkspaceRequests {
+  requests: Map<string, RememberedRequest>;
+  forgotten: Set<string>;
+}
+
+const requestMemory = new WeakMap<CliServerOptions, Map<string, WorkspaceRequests>>();
+
+function workspaceRequests(options: CliServerOptions, workspaceId: string): WorkspaceRequests {
+  let workspaces = requestMemory.get(options);
+  if (!workspaces) {
+    workspaces = new Map();
+    requestMemory.set(options, workspaces);
+  }
+  let memory = workspaces.get(workspaceId);
+  if (!memory) {
+    memory = { requests: new Map(), forgotten: new Set() };
+    workspaces.set(workspaceId, memory);
+  }
+  return memory;
+}
+
+function forgetOldestResults(memory: WorkspaceRequests, limits: { results: number; ids: number }): void {
+  let finished = 0;
+  for (const request of memory.requests.values()) if (request.finished) finished += 1;
+  for (const [requestId, request] of memory.requests) {
+    if (finished <= limits.results) break;
+    if (!request.finished) continue;
+    memory.requests.delete(requestId);
+    memory.forgotten.add(requestId);
+    finished -= 1;
+  }
+  for (const requestId of memory.forgotten) {
+    if (memory.forgotten.size <= limits.ids) break;
+    memory.forgotten.delete(requestId);
+  }
+}
+
+async function onceForRequestId(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  requestId: string,
+  input: unknown,
+  run: () => Promise<{ done: boolean; result: unknown }>,
+): Promise<unknown> {
+  const memory = workspaceRequests(options, context.workspaceId);
+  // A digest, so a remembered edit does not keep its text in memory.
+  const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+  const remembered = memory.requests.get(requestId);
+  if (remembered) {
+    if (remembered.input !== inputKey) {
+      return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
+    }
+    return await remembered.result;
+  }
+  if (memory.forgotten.has(requestId)) {
+    return {
+      ok: false as const,
+      reason: `dohc no longer holds the result of request id ${requestId}, so it did not run it again. Read the document or the chat to see whether it happened, and send any new request with a new id.`,
+    };
+  }
+  const started = run();
+  const result = started.then((outcome) => outcome.result);
+  // A retry may never come to await it.
+  result.catch(() => undefined);
+  const entry: RememberedRequest = { input: inputKey, result, finished: false };
+  memory.requests.set(requestId, entry);
+  const limits = options.requestIdLimits ?? REQUEST_ID_LIMITS;
+  try {
+    const outcome = await started;
+    if (outcome.done) {
+      // Finished results leave in the order they finished.
+      entry.finished = true;
+      if (memory.requests.get(requestId) === entry) {
+        memory.requests.delete(requestId);
+        memory.requests.set(requestId, entry);
+      }
+      forgetOldestResults(memory, limits);
+    } else {
+      memory.requests.delete(requestId);
+    }
+    return outcome.result;
+  } catch (error) {
+    memory.requests.delete(requestId);
+    throw error;
+  }
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -1909,6 +2055,53 @@ async function dispatch(
           `failed to create a record in: ${request.args.collectionPath}`,
         );
       }
+    }
+
+    case "documentRead": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      try {
+        return { ok: true as const, ...(await documents.read(validated.normalized)) };
+      } catch (error) {
+        return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "documentEdit": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, find, replacement } = request.args;
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      const validated = validateUserWritePath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const path = validated.normalized;
+      const edit = async (): Promise<{ done: boolean; result: unknown }> => {
+        try {
+          const outcome = await documents.edit({
+            path,
+            edit: { find, replacement },
+            origin: documentEditOrigin(agent),
+          });
+          return { done: true, result: { ok: true as const, ...outcome } };
+        } catch (error) {
+          return {
+            // An edit that reached the document is remembered with its
+            // failure, so a retry does not apply it again.
+            done: error instanceof LiveDocumentEditAppliedError,
+            result: mcpFailure(error, `failed to edit document: ${request.args.path}`),
+          };
+        }
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await edit()).result;
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
     }
   }
 
@@ -2377,8 +2570,10 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const documentWriteRequest = request.verb === "documentEdit";
   const writeRequest =
     collectionWriteRequest ||
+    documentWriteRequest ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2388,7 +2583,9 @@ async function workspaceContextForRequest(
     throw new CliCommandError(
       collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
-        : "chats are not available in a read-only shared view",
+        : documentWriteRequest
+          ? "document edits are not available in a read-only shared view"
+          : "chats are not available in a read-only shared view",
     );
   }
   const context = await options.openWorkspace(workspace);

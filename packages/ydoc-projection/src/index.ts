@@ -19,3 +19,10 @@ export {
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
 export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
 export { codeBlockFence } from "./markdown-fence.js";
+export {
+  documentEditUpdate,
+  settledDocumentMarkdown,
+  type DocumentEditOptions,
+  documentMarkdown,
+  type DocumentEdit,
+} from "./document-edit.js";

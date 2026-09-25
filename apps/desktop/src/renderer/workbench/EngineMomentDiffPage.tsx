@@ -12,7 +12,7 @@ import {
   computeTextDiff,
   type UnifiedDiffLine,
 } from "./unifiedDiff";
-import { engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
 import { parseMomentDiffTabPath } from "./workbenchState";
 import { hasBlockingModal } from "../modalFocus";
 import { PanelLoading } from "./PanelLoading";
@@ -315,9 +315,7 @@ export function EngineMomentDiffPage({
                   ? "Created"
                   : "Changed"}
             </span>
-            <span data-testid="engine-diff-source">
-              {engineMomentSourceLabel(moment)}
-            </span>
+            <EngineMomentSource moment={moment} testId="engine-diff-source" />
             {counts ? (
               <span className="font-mono" data-testid="engine-diff-counts">
                 +{counts.added} -{counts.removed}

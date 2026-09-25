@@ -789,6 +789,30 @@ impl ActorHandle {
         .await
     }
 
+    /// For each open editor, given as its document and the lineage it is
+    /// bound to, whether its resync would drain pulled updates into it.
+    pub async fn ydoc_sessions_behind(
+        &self,
+        sessions: Vec<(DocKey, String)>,
+        token: CancellationToken,
+    ) -> Result<Vec<bool>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let mut behind = Vec::with_capacity(sessions.len());
+            for (key, lineage_claim_id) in &sessions {
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
+                behind.push(dohc_engine_sync::live_session_has_drainable_deferred_ydoc(
+                    store,
+                    key,
+                    lineage_claim_id,
+                )?);
+            }
+            Ok(behind)
+        })
+        .await
+    }
+
     /// Test evidence seam: observe the actor-local writer cache without
     /// exposing it through the product protocol.
     #[doc(hidden)]
@@ -1785,6 +1809,28 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
+            // The lineage's first update names who created it.
+            if outcome.seq == 1
+                && !outcome.deduped
+                && let Some(creator) = dohc_engine_domain::moment_author_json(
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                )
+            {
+                tx.execute(
+                    "UPDATE ydoc_docs SET creator_author_json = ?4 \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![
+                        journal_key.workspace_id,
+                        journal_key.version_id,
+                        journal_key.object_id,
+                        creator
+                    ],
+                )
+                .map_err(|error| {
+                    dohc_engine_collab::CollabError::Storage(StorageError::persist_public(error))
+                })?;
+            }
             dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &journal_key,
@@ -1918,6 +1964,25 @@ pub(super) fn ydoc_record_update_on_store(
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+/// Who created a lineage: the author its first update declared, kept on the
+/// lineage so compaction cannot fold it away. The settle that creates the
+/// lineage's file records it, so a record an automation creates in a
+/// document session is added as that automation's change, at its depth.
+fn lineage_creator_json(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, dohc_engine_domain::DomainError> {
+    tx.query_row(
+        "SELECT creator_author_json FROM ydoc_docs \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|error| dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(error)))
 }
 
 /// One recorded Y.Doc append, and what its origination attempt decided.
@@ -2509,6 +2574,13 @@ pub(super) fn ydoc_settle_on_store(
             "moment-ydoc-{}",
             dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
         );
+        // A settle that creates the file is the lineage creator's change.
+        // One that edits an existing file names no author, as before.
+        let author_json = if current.snapshot.is_none() {
+            lineage_creator_json(tx, key)?
+        } else {
+            None
+        };
         let result = write_projected_text_in_tx(
             tx,
             ProjectedWriteText {
@@ -2521,7 +2593,7 @@ pub(super) fn ydoc_settle_on_store(
                 metadata_origin: "ydoc",
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: author_json.as_deref(),
                 now_ms,
                 request_id: None,
             },

@@ -2613,6 +2613,7 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
                     text: &changed,
                 },
                 None,
+                None,
                 4_000,
             )
         })

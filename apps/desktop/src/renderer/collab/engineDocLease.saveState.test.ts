@@ -344,7 +344,9 @@ it.each([
     // either way. Only a tracked path may reach plaintext storage.
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
     expect(
-      localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)?.includes("seed!") ?? false,
+      Object.keys(localStorage)
+        .filter(key => key === ORPHANED_DRAFT_STORAGE_KEY || key.startsWith(`${ORPHANED_DRAFT_STORAGE_KEY}:`))
+        .some(key => localStorage.getItem(key)?.includes("seed!")),
     ).toBe(stored);
   },
 );

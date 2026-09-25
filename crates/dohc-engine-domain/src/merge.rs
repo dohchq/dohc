@@ -711,6 +711,16 @@ where
         MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
     };
+    // The moment replays another version's change. Automations claimed that
+    // change where it was made, so the records it adds or removes here claim
+    // nothing (automations.rs).
+    if result_seq > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO merged_moments (workspace_id, moment_order) VALUES (?1, ?2)",
+            params![input.workspace_id, result_seq],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     let comparison = match &result {
         MergeTextFileResult::Write { comparison, .. }
         | MergeTextFileResult::BinaryWrite { comparison, .. }

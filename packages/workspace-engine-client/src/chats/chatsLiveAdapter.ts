@@ -4,7 +4,7 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -204,6 +204,10 @@ export class ChatsLiveAdapter {
   async startChannelThread(input: {
     workspaceId: string;
     channelId: string;
+    threadId?: string;
+    messageId?: string;
+    idempotencyKey?: string;
+    automation?: ChatMessageAutomationInput;
     title?: string;
     lane?: ChatThreadLane;
     author: ChatActor;
@@ -216,8 +220,8 @@ export class ChatsLiveAdapter {
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<{ thread: ChatThread; message: ChatMessage }> {
     this.assertWorkspace(input.workspaceId);
-    const threadId = this.createId("thread");
-    const messageId = this.createId("message");
+    const threadId = input.threadId ?? this.createId("thread");
+    const messageId = input.messageId ?? this.createId("message");
     return this.request(
       CHATS_METHOD.threadStart,
       {
@@ -228,7 +232,7 @@ export class ChatsLiveAdapter {
         ...(input.lane !== undefined ? { lane: input.lane } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
-        ...(input.author.kind === "agent" && input.authorOwnerDisplayName !== undefined
+        ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
           ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
           : {}),
         ...(input.authorUserId !== undefined
@@ -243,8 +247,11 @@ export class ChatsLiveAdapter {
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
+        ...(input.automation !== undefined
+          ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
       },
-      { idempotencyKey: `${threadId}:${messageId}` },
+      { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
     );
   }
 
@@ -330,6 +337,9 @@ export class ChatsLiveAdapter {
   async sendMessage(input: {
     workspaceId: string;
     threadId: string;
+    messageId?: string;
+    idempotencyKey?: string;
+    automation?: ChatMessageAutomationInput;
     author: ChatActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -341,7 +351,7 @@ export class ChatsLiveAdapter {
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<ChatMessage> {
     this.assertWorkspace(input.workspaceId);
-    const messageId = this.createId("message");
+    const messageId = input.messageId ?? this.createId("message");
     return this.request(
       CHATS_METHOD.messageSend,
       {
@@ -349,7 +359,7 @@ export class ChatsLiveAdapter {
         messageId,
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
-        ...(input.author.kind === "agent" && input.authorOwnerDisplayName !== undefined
+        ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
           ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
           : {}),
         ...(input.authorUserId !== undefined
@@ -367,8 +377,11 @@ export class ChatsLiveAdapter {
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
+        ...(input.automation !== undefined
+          ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
       },
-      { idempotencyKey: messageId },
+      { idempotencyKey: input.idempotencyKey ?? messageId },
     );
   }
 

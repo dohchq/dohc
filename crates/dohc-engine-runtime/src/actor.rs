@@ -41,6 +41,7 @@ mod ydoc;
 pub use capture::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
+pub use collections::CollectionReconciliation;
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
@@ -69,6 +70,32 @@ use tokio::sync::{mpsc, oneshot};
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Hears the Group automation claims a workspace's chat writes and relay
+/// passes commit, after commit. The host sets it when it opens the workspace.
+pub type AutomationClaimListener =
+    Arc<dyn Fn(&[dohc_engine_domain::AutomationClaim]) + Send + Sync>;
+
+/// The actor's one place to announce Group automation claims. Every handle
+/// shares it, and the latest listener replaces an earlier one.
+#[derive(Clone, Default)]
+pub(crate) struct ClaimAnnouncer(Arc<std::sync::RwLock<Option<AutomationClaimListener>>>);
+
+impl ClaimAnnouncer {
+    pub(crate) fn announce(&self, claims: &[dohc_engine_domain::AutomationClaim]) {
+        if claims.is_empty() {
+            return;
+        }
+        let listener = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(claims);
+        }
+    }
+}
 
 /// Physical channel capacity: the data bound plus one slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
@@ -140,6 +167,7 @@ pub struct WorkspaceActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    claims: ClaimAnnouncer,
 }
 
 impl WorkspaceActor {
@@ -159,7 +187,26 @@ impl WorkspaceActor {
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, work)
+        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, None, work)
+    }
+
+    pub(crate) fn spawn_root_bound(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+        now_ms: i64,
+        root_token: String,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, RuntimeError> {
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            false,
+            Some(root_token),
+            work,
+        )
     }
 
     /// Spawn an actor whose store connection is query-only and never runs the
@@ -170,7 +217,7 @@ impl WorkspaceActor {
         generation: u64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, 0, true, work)
+        Self::spawn_with_mode(db_path, identity, generation, 0, true, None, work)
     }
 
     fn spawn_with_mode(
@@ -179,6 +226,7 @@ impl WorkspaceActor {
         generation: u64,
         now_ms: i64,
         read_only: bool,
+        root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if read_only {
@@ -211,6 +259,7 @@ impl WorkspaceActor {
                     db_path,
                     now_ms,
                     read_only,
+                    root_token,
                     rx,
                     worker_state,
                     startup_tx,
@@ -229,6 +278,7 @@ impl WorkspaceActor {
                 close_permit,
                 state,
                 worker: Some(worker),
+                claims: ClaimAnnouncer::default(),
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -247,6 +297,7 @@ impl WorkspaceActor {
             identity: self.identity.clone(),
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
+            claims: self.claims.clone(),
         }
     }
 
@@ -323,9 +374,20 @@ pub struct ActorHandle {
     identity: EngineDbIdentity,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
+    claims: ClaimAnnouncer,
 }
 
 impl ActorHandle {
+    /// Hear every Group automation claim this workspace's chat writes and
+    /// relay passes commit. The latest listener replaces an earlier one.
+    pub fn listen_for_automation_claims(&self, listener: AutomationClaimListener) {
+        *self
+            .claims
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener);
+    }
+
     async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
@@ -404,11 +466,15 @@ fn debug_assert_sync_context() {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
+)]
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
     read_only: bool,
+    root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
@@ -432,6 +498,8 @@ fn worker_main(
 
     let mut store = match if read_only {
         EngineStore::open_read_only_counting(&db_path, work_count.clone())
+    } else if let Some(token) = &root_token {
+        EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
         EngineStore::open_counting(&db_path, now_ms, work_count.clone())
     } {

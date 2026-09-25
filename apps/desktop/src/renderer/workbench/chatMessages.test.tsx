@@ -141,6 +141,38 @@ describe("chat authorship display", () => {
     );
   });
 
+  it("marks an automation message with its lightning mark and badge, and opens the automation", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-auto",
+            threadId: "thread-1",
+            authorKind: "automation",
+            authorDisplayName: "Stamp the finish date",
+            authorOwnerDisplayName: "Ice",
+            body: "Finished Book hotel",
+            createdAtMs: 1_700_000_000_000,
+            automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("Stamp the finish date");
+    expect(author.dataset.authorKind).toBe("automation");
+    expect(screen.queryByTestId("test-chat-agent-badge")).toBeNull();
+    expect(screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open automation" }));
+    expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
+  });
+
   it("renders file chips without requiring a person or agent roster", () => {
     render(
       <ChatMessageList

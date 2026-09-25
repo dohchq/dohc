@@ -14,6 +14,7 @@ mod conflict_apply;
 mod conflict_outbox;
 mod conflict_resolve_v1;
 mod cursor;
+mod deferred;
 mod enrolment;
 mod error;
 mod file_search;
@@ -85,14 +86,16 @@ pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
     BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
-    KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
-    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
-    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, EpochRequest, EpochResponse,
+    KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
+    ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse,
+    RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
+    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
@@ -109,9 +112,10 @@ pub use ydoc_apply::{
     complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
     drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
     ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
-    open_sync_conflict_for_object, project_and_write_in_tx, project_ydoc_with_store,
-    reconcile_imported_resulting_head_in_tx, reconcile_local_resulting_head_in_tx,
-    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    live_session_has_drainable_deferred_ydoc, open_sync_conflict_for_object,
+    project_and_write_in_tx, project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
+    validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, lineage_originated_here, originate_ydoc_base_in_tx,

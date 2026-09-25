@@ -5,7 +5,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_lww_projection_tx;
@@ -16,10 +16,17 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
+
+mod direct_write;
 use crate::{
     ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
     ShareDisposition, SyncError, blob_ceiling,
 };
+pub use direct_write::{
+    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse,
+};
+use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushRequest {
@@ -202,6 +209,7 @@ pub struct SharedChannelRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelResponse {
+    pub own_origin_id: Option<String>,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -261,7 +269,7 @@ pub struct ShareBlobUploadRequest {
 /// skipped. The relay reads the base pair as a stated fact — both halves or
 /// neither — so an absent field and a null field must not look the same on the
 /// wire.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareProposalChange {
     /// The GRANTER's path for this file, or `None` for a file the recipient
@@ -567,6 +575,13 @@ pub trait RelayTransport {
         &self,
         req: ShareProposalSubmitRequest,
     ) -> Result<ShareProposalSubmitResponse, RelayError>;
+    /// POST one direct write to a Collection's own files. The relay answers
+    /// a stale base and a refusal as outcomes, not errors, because the
+    /// recipient shows each one and keeps going.
+    fn share_collection_write(
+        &self,
+        req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,6 +623,10 @@ pub enum SyncPassOutcome {
 
 pub struct RelaySyncClient<T> {
     transport: T,
+    /// Group automation claims this client's applies committed and nobody
+    /// took yet. A pass that fails after an apply committed leaves them here:
+    /// its retry finds the message stored and claims nothing again.
+    automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
 struct PendingBaseRelayRepair {
@@ -633,7 +652,28 @@ struct PendingDeferredRelayRepair {
 
 impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            automation_claims: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The Group automation claims this client's applies committed since the
+    /// last call, whether or not the pass that applied them finished.
+    pub fn take_automation_claims(&self) -> Vec<dohc_engine_domain::AutomationClaim> {
+        std::mem::take(
+            &mut *self
+                .automation_claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn keep_automation_claims(&self, claims: Vec<dohc_engine_domain::AutomationClaim>) {
+        self.automation_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(claims);
     }
 
     pub fn transport(&self) -> &T {
@@ -1210,6 +1250,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
+        let (queued, mut durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
         if let Some(cursor) = &current {
             if cursor.replication_epoch != identity.replication_epoch
@@ -1258,6 +1299,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
+        if !queued.is_empty() {
+            crate::deferred::check_redelivery(store, &ops)?;
+        }
+        let fetched_coordinates: BTreeSet<_> = ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
         self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
@@ -1271,11 +1325,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut changed_paths = BTreeMap::new();
         let mut record_facts = Vec::new();
         let mut retryable = Vec::new();
-        let mut deferred_origins = BTreeSet::new();
+        let mut completed = Vec::new();
+        let mut deferred_origins = durable_origins.clone();
         for op in &ordered {
             let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
             match routed {
-                Err(SyncError::RetryableState { .. }) => {
+                Err(SyncError::RetryableState { reason }) => {
+                    if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                        durable_origins.insert(op.origin_id.clone());
+                    }
                     deferred_origins.insert(op.origin_id.clone());
                     retryable.push(op);
                 }
@@ -1283,29 +1341,36 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     retryable.push(op);
                 }
                 Err(error) => return Err(local(error)),
-                Ok(outcome) => accumulate_pull_outcome(
-                    store,
-                    op,
-                    outcome,
-                    &mut applied,
-                    &mut refused,
-                    &mut skipped,
-                    &mut conflicts_opened,
-                    &mut changed_paths,
-                    &mut refusals,
-                    &mut sharing_declined,
-                    &mut record_facts,
-                )?,
+                Ok(outcome) => {
+                    completed.push(op);
+                    accumulate_pull_outcome(
+                        store,
+                        op,
+                        outcome,
+                        &mut applied,
+                        &mut refused,
+                        &mut skipped,
+                        &mut conflicts_opened,
+                        &mut changed_paths,
+                        &mut refusals,
+                        &mut sharing_declined,
+                        &mut record_facts,
+                        |claims| self.keep_automation_claims(claims),
+                    )?;
+                }
             }
         }
         while !retryable.is_empty() {
             let mut still_retryable = Vec::new();
-            let mut still_deferred_origins = BTreeSet::new();
+            let mut still_deferred_origins = durable_origins.clone();
             let mut made_progress = false;
             for op in retryable {
                 let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
                 match routed {
-                    Err(SyncError::RetryableState { .. }) => {
+                    Err(SyncError::RetryableState { reason }) => {
+                        if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                            durable_origins.insert(op.origin_id.clone());
+                        }
                         still_deferred_origins.insert(op.origin_id.clone());
                         still_retryable.push(op);
                     }
@@ -1317,6 +1382,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     Err(error) => return Err(local(error)),
                     Ok(outcome) => {
                         made_progress = true;
+                        completed.push(op);
                         accumulate_pull_outcome(
                             store,
                             op,
@@ -1329,6 +1395,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refusals,
                             &mut sharing_declined,
                             &mut record_facts,
+                            |claims| self.keep_automation_claims(claims),
                         )?;
                     }
                 }
@@ -1337,11 +1404,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !made_progress {
-                return Err(RelayError::Local("retryable-state".to_owned()));
+                if still_retryable
+                    .iter()
+                    .any(|op| !durable_origins.contains(&op.origin_id))
+                {
+                    return Err(RelayError::Local("retryable-state".to_owned()));
+                }
+                crate::deferred::retain(store, &identity, &still_retryable, faults)?;
+                break;
             }
             retryable = still_retryable;
         }
-        let settlements = match crate::moment_apply::pending::drain_and_claim(
+        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
             faults,
@@ -1357,7 +1431,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if settlements.report_id.is_some() {
             cache.clear();
         }
-        let has_more = has_more || settlements.has_more;
+        let replay_more = crate::deferred::claim_report(
+            store,
+            workspace_id,
+            &queued,
+            &completed,
+            &mut settlements.report_id,
+            faults,
+        )?;
+        let has_more = has_more || settlements.has_more || replay_more;
         for change in settlements.changes {
             insert_changed_path(&mut changed_paths, change);
         }
@@ -1406,7 +1488,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let pending_cursor = RelayCursor {
             cursor,
-            bootstrap_complete: bootstrap_complete || !has_more,
+            bootstrap_complete: bootstrap_complete
+                || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,
@@ -1723,6 +1806,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     [workspace_id],
                 )
                 .map_err(SyncError::persist)?;
+                // Direct-write marks name this origin's journal positions, which
+                // a recovered origin starts over.
+                tx.execute(
+                    "DELETE FROM share_direct_write_state WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM share_direct_write_marks WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM share_direct_write_plan WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
                 usize::try_from(preserved_ops).map_err(|_| SyncError::CoordinateDiverged)
             })
             .map_err(local)?;
@@ -1749,9 +1849,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPullOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id).map_err(local)?;
-        let own_echo = identity
-            .as_ref()
-            .map(|value| format!("share:{share_id}:{}", value.origin_id));
         let mut cursor = crate::read_share_cursor(
             store,
             workspace_id,
@@ -1770,6 +1867,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         let fetched = page.ops.len();
+        let own_echo = page.own_origin_id;
         let ops = page.ops;
         cursor = page.next_cursor;
 
@@ -1810,7 +1908,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
                     match primary {
-                        ApplyDisposition::Applied(_) => applied += 1,
+                        ApplyDisposition::Applied(claims) => {
+                            applied += 1;
+                            self.keep_automation_claims(claims);
+                        }
                         ApplyDisposition::Refused(refusal) => {
                             push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                         }
@@ -2023,7 +2124,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scanned = read_share_proposal_scan_position(store, workspace_id, share_id)?;
         let submit_through =
             local_max_origin_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
-        let mut scan = collect_share_proposal_changes(
+        // A change the direct lane already wrote to the granter's files is
+        // not offered again. Its later edits are, based on what it wrote. A
+        // file a direct write still carries stops the scan, so this position
+        // never passes a change the relay may yet refuse.
+        let skips = ScanSkips {
+            settled: read_direct_write_marks(store, workspace_id, share_id)?
+                .into_iter()
+                .filter(|(_, mark)| mark.delivered_through >= 0)
+                .map(|(object_id, mark)| (object_id, mark.delivered_through))
+                .collect(),
+            stop_at: read_direct_write_open_objects(store, workspace_id, share_id)?,
+        };
+        let scan = collect_share_proposal_changes(
             store,
             workspace_id,
             granted,
@@ -2031,8 +2144,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             scanned,
             submit_through,
             max_read_bytes,
+            &skips,
         )?;
-        if scan.changes.is_empty() {
+        let mut changes: Vec<ShareProposalChange> =
+            scan.changes.into_iter().map(|net| net.change).collect();
+        if changes.is_empty() {
             // Nothing to offer, but this window is read. Recording it keeps
             // the next submit from re-reading ops it already decided about.
             write_share_proposal_scan_position(
@@ -2048,15 +2164,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 ..ShareProposalSubmitOutcome::default()
             });
         }
-        self.upload_proposed_blobs(store, share_id, &mut scan.changes)?;
+        self.upload_proposed_blobs(store, share_id, &mut changes, &mut BTreeMap::new())?;
         let response = self
             .transport
             .share_proposal_submit(ShareProposalSubmitRequest {
                 share_id: share_id.to_owned(),
                 submit_id: submit_id.to_owned(),
-                ops: scan.changes.clone(),
+                ops: changes.clone(),
             })?;
-        if response.proposal_id.is_empty() || response.ops != scan.changes.len() {
+        if response.proposal_id.is_empty() || response.ops != changes.len() {
             return Err(RelayError::InvalidResponse);
         }
         write_share_proposal_scan_position(
@@ -2067,7 +2183,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
         )?;
         Ok(ShareProposalSubmitOutcome {
-            submitted: scan.changes.len(),
+            submitted: changes.len(),
             proposal_id: Some(response.proposal_id),
             skipped_outside_share: scan.skipped_outside_share,
             more_pending: scan.more_pending,
@@ -2083,13 +2199,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// stored `payloadAfterByteLength` is null would otherwise be offered with
     /// a length nobody measured, and the relay writes that number into the
     /// granter's own moment at accept.
+    ///
+    /// `uploaded` holds the blobs already sent in this operation, with their
+    /// byte lengths, so a blob several changes name travels once.
     fn upload_proposed_blobs(
         &self,
         store: &EngineStore,
         share_id: &str,
         changes: &mut [ShareProposalChange],
+        uploaded: &mut BTreeMap<String, i64>,
     ) -> Result<(), RelayError> {
-        let mut uploaded: BTreeMap<String, i64> = BTreeMap::new();
         for change in changes {
             let Some(sha256) = change.after_blob_sha256.clone() else {
                 continue;
@@ -2230,7 +2349,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
-                        ApplyDisposition::Applied(_) => {}
+                        ApplyDisposition::Applied(claims) => self.keep_automation_claims(claims),
                         ApplyDisposition::Refused(_) | ApplyDisposition::Skipped => {
                             skipped += 1;
                             continue;
@@ -2478,7 +2597,7 @@ fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usi
     }
 }
 
-fn collect_blob_refs(
+pub(crate) fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();
@@ -3562,9 +3681,29 @@ fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::Sha
     named
 }
 
+/// One file's net change in a scan, with the object it belongs to and the
+/// first and last journal positions it consolidates.
+struct NetChange {
+    object_id: String,
+    first_seq: i64,
+    last_seq: i64,
+    change: ShareProposalChange,
+}
+
+/// What the other lane decided, which a scan reads past or stops at.
+struct ScanSkips {
+    /// Per object, the journal position through which the other lane already
+    /// decided its ops. Those ops are read past; a later op for the same
+    /// object starts a change based on what that lane decided.
+    settled: BTreeMap<String, i64>,
+    /// Objects the other lane is still carrying. The scan stops at the first
+    /// op of one, as it stops at its bound.
+    stop_at: BTreeSet<String>,
+}
+
 /// What one scan of this replica's journal found.
 struct ShareProposalScan {
-    changes: Vec<ShareProposalChange>,
+    changes: Vec<NetChange>,
     /// The journal position this scan read through, and the position the
     /// submit records once the relay accepts it. Below `submit_through`
     /// exactly when the change bound stopped the scan early.
@@ -3629,6 +3768,9 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// reports the position it stopped at, so the next submit resumes from exactly
 /// there. Folding more ops into files it already holds is not what the bound
 /// counts, so no file is ever offered half consolidated.
+///
+/// `skips` says what the other lane decided (see `ScanSkips`).
+#[allow(clippy::too_many_arguments)]
 fn collect_share_proposal_changes(
     store: &EngineStore,
     workspace_id: &str,
@@ -3637,9 +3779,10 @@ fn collect_share_proposal_changes(
     scanned_seq: i64,
     submit_through: i64,
     max_read_bytes: usize,
+    skips: &ScanSkips,
 ) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
-    let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
+    let mut by_object: BTreeMap<String, (ShareProposalChange, i64, i64)> = BTreeMap::new();
     let mut outside_share: BTreeSet<String> = BTreeSet::new();
     let mut scanned_through = scanned_seq;
     let mut more_pending = false;
@@ -3656,9 +3799,26 @@ fn collect_share_proposal_changes(
             if op.origin_seq > submit_through {
                 break 'pages;
             }
+            // An open write stops the scan at its file's first op past what
+            // is already settled; a settled op is read past as usual.
+            if op.op_kind == "moment.append"
+                && let Some(object_id) = string_field(&op.payload, "objectId")
+                && skips.stop_at.contains(object_id)
+                && skips
+                    .settled
+                    .get(object_id)
+                    .is_none_or(|through| op.origin_seq > *through)
+            {
+                more_pending = true;
+                break 'pages;
+            }
             if op.op_kind == "moment.append"
                 && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
                 && !outside_share.contains(&object_id)
+                && skips
+                    .settled
+                    .get(&object_id)
+                    .is_none_or(|through| op.origin_seq > *through)
             {
                 if !proposal_paths_within_grant(&op.payload, granted) {
                     // One op outside the grant takes the whole file out of
@@ -3688,19 +3848,21 @@ fn collect_share_proposal_changes(
                         )));
                     }
                     let mut change = proposed_change(&op);
+                    let mut first_seq = op.origin_seq;
                     match by_object.get(&object_id) {
                         // The base stays the first moment's before side: what
                         // the recipient started from, which is what the
                         // granter has to resolve against its own log.
-                        Some(held) => {
+                        Some((held, held_first, _)) => {
                             change.based_on_path.clone_from(&held.based_on_path);
                             change
                                 .based_on_blob_sha256
                                 .clone_from(&held.based_on_blob_sha256);
+                            first_seq = *held_first;
                         }
                         None => order.push(object_id.clone()),
                     }
-                    by_object.insert(object_id, change);
+                    by_object.insert(object_id, (change, first_seq, op.origin_seq));
                 }
             }
             scanned_through = op.origin_seq;
@@ -3711,7 +3873,7 @@ fn collect_share_proposal_changes(
     for object_id in order {
         // A file collected and then taken out of the grant by a later op is
         // gone from `by_object` but still named here.
-        let Some(mut change) = by_object.remove(&object_id) else {
+        let Some((mut change, first_seq, last_seq)) = by_object.remove(&object_id) else {
             continue;
         };
         // A half-stated base names a file without saying what the recipient
@@ -3737,7 +3899,12 @@ fn collect_share_proposal_changes(
             // apply.
             continue;
         }
-        changes.push(change);
+        changes.push(NetChange {
+            object_id,
+            first_seq,
+            last_seq,
+            change,
+        });
     }
     Ok(ShareProposalScan {
         changes,
@@ -4297,28 +4464,30 @@ fn replay_share_write<T: RelayTransport>(
         ));
     }
     let deduped = {
-        let mut versioned = VersionedTextStore::new(store);
         if content_kind == "binary" {
-            versioned
-                .write_binary(
-                    &WriteBinary {
-                        workspace_id: workspace_id.to_owned(),
-                        version_id: version_id.to_owned(),
-                        object_id: format!("object-share-{key}"),
-                        path: path.to_owned(),
-                        bytes,
-                        moment_id: format!("moment-share-{key}"),
-                        metadata_origin: "sync".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: envelope.recorded_at_ms,
-                        request_id: Some(request_id.clone()),
-                    },
-                    faults,
-                )
-                .map_err(domain)?
-                .deduped
+            let input = WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: format!("object-share-{key}"),
+                path: path.to_owned(),
+                bytes,
+                moment_id: format!("moment-share-{key}"),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: envelope.recorded_at_ms,
+                request_id: Some(request_id.clone()),
+            };
+            replay_share_change(
+                store,
+                workspace_id,
+                faults,
+                |tx| dohc_engine_domain::write_binary_in_tx(tx, &input),
+                |result| result.deduped,
+            )
+            .map_err(domain)?
+            .deduped
         } else {
             // These bytes already matched the sha the op named, so they are
             // the content the granter shared. The op calling them text is the
@@ -4331,26 +4500,29 @@ fn replay_share_write<T: RelayTransport>(
                     },
                 )
             })?;
-            versioned
-                .write_text(
-                    &WriteText {
-                        workspace_id: workspace_id.to_owned(),
-                        version_id: version_id.to_owned(),
-                        object_id: format!("object-share-{key}"),
-                        path: path.to_owned(),
-                        text,
-                        moment_id: format!("moment-share-{key}"),
-                        metadata_origin: "sync".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: envelope.recorded_at_ms,
-                        request_id: Some(request_id),
-                    },
-                    faults,
-                )
-                .map_err(domain)?
-                .deduped
+            let input = WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: format!("object-share-{key}"),
+                path: path.to_owned(),
+                text,
+                moment_id: format!("moment-share-{key}"),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: envelope.recorded_at_ms,
+                request_id: Some(request_id),
+            };
+            replay_share_change(
+                store,
+                workspace_id,
+                faults,
+                |tx| dohc_engine_domain::write_text_in_tx(tx, &input),
+                |result| result.deduped,
+            )
+            .map_err(domain)?
+            .deduped
         }
     };
     if !deduped {
@@ -4365,6 +4537,31 @@ fn replay_share_write<T: RelayTransport>(
         },
     );
     Ok(())
+}
+
+/// Commit one share-view replay, and count it as a change from another
+/// computer in the same transaction when it changed the store. The replay's
+/// request record makes a repeat a deduped no-op that counts nothing.
+fn replay_share_change<T>(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+    change: impl FnOnce(&Transaction<'_>) -> Result<T, DomainError>,
+    deduped: impl Fn(&T) -> bool,
+) -> Result<T, DomainError> {
+    let outcome = store.write_with(faults, |tx| {
+        let result = change(tx)?;
+        if !deduped(&result) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
+        }
+        Ok::<_, DomainError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(DomainError::Storage(StorageError::persist_public(
+            std::io::Error::other("crash fault fired before ack"),
+        ))),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4406,24 +4603,25 @@ fn replay_share_delete(
         return Ok(());
     };
     let key = replay_id(share_id, envelope, "delete", path);
-    let result = {
-        let mut versioned = VersionedTextStore::new(store);
-        versioned.delete_text_file(
-            &DeleteTextFile {
-                workspace_id: workspace_id.to_owned(),
-                version_id: version_id.to_owned(),
-                path: path.to_owned(),
-                moment_id: format!("moment-share-{key}"),
-                request_id: Some(format!("share-view:{key}")),
-                metadata_origin: "sync".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: envelope.recorded_at_ms,
-            },
-            faults,
-        )
+    let input = DeleteTextFile {
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        path: path.to_owned(),
+        moment_id: format!("moment-share-{key}"),
+        request_id: Some(format!("share-view:{key}")),
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: envelope.recorded_at_ms,
     };
+    let result = replay_share_change(
+        store,
+        workspace_id,
+        faults,
+        |tx| dohc_engine_domain::delete_text_in_tx(tx, &input),
+        |result| result.deduped,
+    );
     match result {
         Ok(value) => {
             if !value.deduped {
@@ -4509,6 +4707,7 @@ fn accumulate_pull_outcome(
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    keep_automation_claims: impl FnOnce(Vec<dohc_engine_domain::AutomationClaim>),
 ) -> Result<(), RelayError> {
     let ApplyOutcome {
         primary,
@@ -4527,6 +4726,7 @@ fn accumulate_pull_outcome(
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
             record_facts.extend(routed.record_facts);
+            keep_automation_claims(routed.automation_claims);
             for change in routed.materialization_changes {
                 insert_changed_path(changed_paths, change);
             }

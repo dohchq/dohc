@@ -139,6 +139,41 @@ describe("Collection schema contract vectors", () => {
     expect(({} as { name?: unknown }).name).toBeUndefined();
   });
 
+  it("drops each view reference that sorts, groups, or dates by a button", () => {
+    const parsed = parseCollectionSchema([
+      "fields:",
+      "  Due:",
+      "    type: date",
+      "  Mark paid:",
+      "    type: button",
+      "views:",
+      "  - name: Board",
+      "    kind: board",
+      "    groupBy: Mark paid",
+      "    visibleFields: [Mark paid]",
+      "  - name: Calendar",
+      "    kind: calendar",
+      "    dateField: Mark paid",
+      "    sort: [{ field: Due, direction: asc }, { field: Mark paid, direction: desc }]",
+    ].join("\n"));
+
+    expect(parsed.status).toBe("degraded");
+    expect(parsed.reasons).toEqual([
+      { code: "unsupported-field-reference", path: "/views/0/groupBy" },
+      { code: "unsupported-field-reference", path: "/views/1/sort/1/field" },
+      { code: "unsupported-field-reference", path: "/views/1/dateField" },
+    ]);
+    expect(parsed.schema.views.map(({ groupBy, sort, visibleFields, dateField }) => ({
+      groupBy,
+      sort,
+      visibleFields,
+      dateField,
+    }))).toEqual([
+      { groupBy: null, sort: [], visibleFields: ["Mark paid"], dateField: null },
+      { groupBy: null, sort: [{ field: "Due", direction: "asc" }], visibleFields: null, dateField: null },
+    ]);
+  });
+
   it.each(schemaLimitVectors)("matches $name", ({
     itemCount,
     expectedItemCount,

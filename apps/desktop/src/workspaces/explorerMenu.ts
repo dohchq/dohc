@@ -50,8 +50,10 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   // has no folder object, so an empty folder is nothing the recipient could
   // send. `ShareViewFiles` therefore exposes no empty-folder operation.
   const canCreateFolder = canWrite && !isSharedView;
-  // A collection is a folder with a schema file, plus an engine-backed
-  // surface. It needs both the folder write and the workspace engine.
+  // A document Collection is a folder with a schema file. A share view that
+  // takes writes can make one: the schema file is the Collection's first
+  // file, and the folder comes with it (ADR 0013).
+  const canCreateCollection = canWrite;
 
   if (scope.isMountPath) {
     return [
@@ -74,14 +76,8 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
       ...(canWrite
         ? [
             item("New File", "new-file"),
-            ...(canCreateFolder
-              ? [
-                  item("New Folder", "new-folder"),
-                  ...(canCreateFolder
-                    ? [item("New Collection…", "new-collection")]
-                    : []),
-                ]
-              : []),
+            ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
+            ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
             separator,
             item("Import Files…", "import-files"),
           ]
@@ -98,14 +94,8 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
     ...(canWrite && scope.kind === "folder"
       ? [
           item("New File", "new-file"),
-          ...(canCreateFolder
-            ? [
-                item("New Folder", "new-folder"),
-                ...(canCreateFolder
-                  ? [item("New Collection…", "new-collection")]
-                  : []),
-              ]
-            : []),
+          ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
+          ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer
           // passes the folder as importWorkspaceFiles' targetDir, re-validated
           // main-side before any copy).

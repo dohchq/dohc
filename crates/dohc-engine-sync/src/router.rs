@@ -17,6 +17,9 @@ pub struct RoutedApply {
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// Group automation claims the applied messages took, for the
+    /// post-commit `automation.claimed` wake.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -146,7 +149,13 @@ pub fn apply_replication_envelope(
         cache.clear();
     }
     match route {
-        OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
+        OwnedRoute::Chat => map_applied(
+            crate::apply_chat_envelope(store, envelope, faults),
+            |automation_claims| RoutedApply {
+                automation_claims,
+                ..RoutedApply::default()
+            },
+        ),
         OwnedRoute::LiveAudit => plain(crate::live_audit::apply_audit_envelope(
             store, envelope, faults,
         )),
