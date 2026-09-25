@@ -153,6 +153,16 @@ struct ShareProposalSubmitParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDirectPushParams {
+    workspace_id: String,
+    share_id: String,
+    /// Required, for the same reason the submit requires it: the grant scopes
+    /// what this replica may write, and its level decides whether it may.
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -162,6 +172,29 @@ struct GrantedSelectorParams {
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
     access: String,
+}
+
+fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
+    match &write.result {
+        dohc_engine_sync::DirectWriteResult::Written => json!({
+            "paths": write.paths,
+            "result": "written",
+        }),
+        dohc_engine_sync::DirectWriteResult::Stale {
+            path,
+            current_blob_sha256,
+        } => json!({
+            "paths": write.paths,
+            "result": "stale",
+            "stalePath": path,
+            "currentBlobSha256": current_blob_sha256,
+        }),
+        dohc_engine_sync::DirectWriteResult::Refused { reason } => json!({
+            "paths": write.paths,
+            "result": "refused",
+            "reason": reason,
+        }),
+    }
 }
 
 fn relay_cursor_json(cursor: &RelayCursor) -> Value {
@@ -342,6 +375,13 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             // more to offer; the engine did not count what is left.
             "morePending": outcome.more_pending,
         }),
+        // Each direct write and how it ended. A stale or refused write is an
+        // answer, not a failure: the recipient shows it and can send the
+        // change as a proposal.
+        RelayOperationOutcome::DirectWritesPushed(outcome) => json!({
+            "writes": outcome.writes.iter().map(direct_write_json).collect::<Vec<_>>(),
+            "morePending": outcome.more_pending,
+        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
@@ -518,7 +558,9 @@ impl EngineService {
     ) -> Result<RelayOperationOutcome, WireError> {
         let reservation = if matches!(
             operation,
-            RelayOperation::Push { .. } | RelayOperation::SubmitShareProposal { .. }
+            RelayOperation::Push { .. }
+                | RelayOperation::SubmitShareProposal { .. }
+                | RelayOperation::PushDirectWrites { .. }
         ) {
             self.relay_sync_admission()
                 .map(|(_, admission)| admission.reserve())
@@ -1090,6 +1132,38 @@ impl EngineService {
             .await?;
         relay_outcome_json(outcome)
     }
+
+    /// Write this replica's changes to a Collection's own files directly into
+    /// the granter's workspace (ADR 0013). Takes the same pinned selector the
+    /// submit takes; the client writes nothing below `edit` or on a version
+    /// share.
+    pub(super) async fn share_direct_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareDirectPushParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushDirectWrites {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted,
+                    max_read_bytes: self
+                        .relay_sync_admission()
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
+                },
+                "share.direct.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -1234,6 +1308,55 @@ mod tests {
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
+    }
+
+    #[test]
+    fn direct_push_outcome_json_states_each_write_and_how_it_ended() {
+        let value = relay_outcome_json(RelayOperationOutcome::DirectWritesPushed(
+            dohc_engine_sync::DirectWritePushOutcome {
+                writes: vec![
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/packing/collection.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Written,
+                    },
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/ideas/collection.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Stale {
+                            path: "trip/ideas".to_owned(),
+                            current_blob_sha256: None,
+                        },
+                    },
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/packing/automations.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Refused {
+                            reason: "changes an automation with a personal step".to_owned(),
+                        },
+                    },
+                ],
+                more_pending: true,
+            },
+        ))
+        .expect("serialize direct push outcome");
+        assert_eq!(
+            value,
+            json!({
+                "writes": [
+                    {"paths": ["trip/packing/collection.yaml"], "result": "written"},
+                    {
+                        "paths": ["trip/ideas/collection.yaml"],
+                        "result": "stale",
+                        "stalePath": "trip/ideas",
+                        "currentBlobSha256": null,
+                    },
+                    {
+                        "paths": ["trip/packing/automations.yaml"],
+                        "result": "refused",
+                        "reason": "changes an automation with a personal step",
+                    },
+                ],
+                "morePending": true,
+            }),
+        );
     }
 
     #[test]
