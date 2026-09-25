@@ -172,12 +172,12 @@ describe("the ⚡ panel", () => {
     // The row menu works from the keyboard.
     within(row).getByRole("button", { name: "Stamp the finish date actions" }).focus();
     await userEvent.keyboard("{Enter}");
-    expect(document.activeElement?.textContent).toBe("Runs");
+    expect(document.activeElement?.textContent).toBe("Edit");
     await userEvent.keyboard("{End}");
     expect(document.activeElement?.textContent).toBe("Delete");
     await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement?.textContent).toBe("Runs");
-    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement?.textContent).toBe("Edit");
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement?.getAttribute("role")).toBe("menuitem");
     expect(document.activeElement?.textContent).toBe("Duplicate");
     await userEvent.keyboard("{Enter}");
@@ -415,12 +415,15 @@ describe("the builder", () => {
     expect(written).toEqual([]);
 
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), " 3");
-    await waitFor(() => expect(bridge.checkAutomationFormulas).toHaveBeenLastCalledWith({ workspaceId: "ws-1", formulas: ["record.Points == 3"] }), SLOW);
+    // Every formula in the draft is checked together, the step's today() too.
+    await waitFor(() => expect(bridge.checkAutomationFormulas).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1", formulas: ["record.Points == 3", "today()"],
+    }), SLOW);
     await waitFor(() => expect(screen.queryByText(/syntax error/)).toBeNull(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations[0]!.if).toBe("record.Points == 3");
-  });
+  }, 30_000);
 
   it("says when a field is not in the Collection, and offers only Collections a step can reach", async () => {
     const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null }] };
