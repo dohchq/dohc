@@ -24,7 +24,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
   const settings = deferred<{ zoom: number }>();
   const settingsRequested = deferred();
   const created = deferred<Window>();
-  const loaded = deferred();
+  const loaded = deferred<boolean>();
   const activated = deferred<string>();
   let zoom = 0;
   let current: Window | undefined;
@@ -90,6 +90,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       reconcileCloud: vi.fn(() => { log.push("cloud"); }),
       startUpdates: vi.fn(() => { log.push("updates"); }),
       updateAfterStartupFailure: vi.fn(async () => { log.push("update-check"); return false; }),
+      updateAfterWindowLoadFailure: vi.fn(async () => { log.push("window-update-check"); return false; }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -188,7 +189,7 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.workspaces.openPath).toHaveBeenNthCalledWith(1, "launch", undefined);
     expect(f.dependencies.workspaces.openPath).toHaveBeenNthCalledWith(2, "pending", undefined);
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
-    f.loaded.resolve();
+    f.loaded.resolve(true);
     expect(await f.activated.promise).toBe("pending");
     await lateOpened.promise;
     expect(f.dependencies.workspaces.openPath).toHaveBeenLastCalledWith("late", { id: 1, zoom: 1.5 });
@@ -204,7 +205,7 @@ describe("desktop bootstrap", () => {
     f.settings.resolve({ zoom: 1 });
     await f.created.promise;
     expect(f.dependencies.services.startUpdates).not.toHaveBeenCalled();
-    f.loaded.resolve();
+    f.loaded.resolve(true);
     await updating.promise;
     expect(f.dependencies.bootstrap.startEngine).toHaveBeenCalledOnce();
     expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
@@ -226,8 +227,42 @@ describe("desktop bootstrap", () => {
     f.settings.resolve({ zoom: 1 });
     f.engine.resolve(true);
     await opening.promise;
-    f.loaded.resolve();
+    f.loaded.resolve(true);
     await updating.promise;
+    expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("checks for an update when the first window fails to load, without activating it", async () => {
+    const checked = deferred();
+    const f = fixture((d) => {
+      d.runtime.argv.push("--open-workspace", "launch");
+      d.services.updateAfterWindowLoadFailure = vi.fn(async () => { checked.resolve(); return false; });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(true);
+    await ready;
+    f.loaded.resolve(false);
+    await checked.promise;
+    expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
+    expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
+    expect(f.app.quit).not.toHaveBeenCalled();
+  });
+
+  it("starts updates after a delay when the first window never finishes loading", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(true);
+    await ready;
+    expect(f.dependencies.services.startUpdates).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
   });
 
@@ -244,7 +279,7 @@ describe("desktop bootstrap", () => {
     f.engine.resolve(false);
     await ready;
     expect(f.log.slice(f.log.indexOf("first-window") + 1)).toEqual(
-      restarting ? ["update-check"] : ["update-check", "quit"],
+      restarting ? ["updates", "update-check"] : ["updates", "update-check", "quit"],
     );
     expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
   });
@@ -263,7 +298,7 @@ describe("desktop bootstrap", () => {
     await ready;
     expect(f.dependencies.bootstrap.reportFailure).toHaveBeenCalledWith(failure);
     expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(
-      restarting ? ["report-failure", "update-check"] : ["report-failure", "update-check", "quit"],
+      restarting ? ["report-failure", "updates", "update-check"] : ["report-failure", "updates", "update-check", "quit"],
     );
   });
 
@@ -375,7 +410,7 @@ describe("desktop open intents", () => {
     });
     await boot(f);
     expect(f.dependencies.workspaces.openPath).toHaveBeenCalledTimes(3);
-    f.loaded.resolve();
+    f.loaded.resolve(true);
     expect(await f.activated.promise).toBe(absolute);
   });
 

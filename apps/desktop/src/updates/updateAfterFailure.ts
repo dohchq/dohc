@@ -8,8 +8,9 @@ export const FAILURE_UPDATE_BOUNDS: UpdateWaitBounds = {
 };
 
 // "startup": dohc could not start and quits unless it restarts into an update.
-// "renderer": a window stopped reloading after repeated crashes.
-export type UpdateFailure = "startup" | "renderer";
+// "window-crash": a window stopped reloading after repeated crashes.
+// "window-load": the first window failed to load.
+export type UpdateFailure = "startup" | "window-crash" | "window-load";
 
 /**
  * Returns one check shared by every failure that arrives while it runs. It
@@ -19,6 +20,9 @@ export type UpdateFailure = "startup" | "renderer";
  */
 export function createUpdateAfterFailure(dependencies: {
   controller(): Promise<Pick<AutoUpdateController, "awaitUpdate"> | null>;
+  // Shows that a download is running until the signal aborts. Resolves when
+  // the notice closes, by the signal or by the person.
+  showDownloading(failure: UpdateFailure, version: string, signal: AbortSignal): Promise<void>;
   confirmRestart(failure: UpdateFailure, version: string): Promise<boolean>;
   install(): Promise<{ accepted: boolean; cancelled?: boolean }>;
   bounds?: UpdateWaitBounds;
@@ -26,7 +30,18 @@ export function createUpdateAfterFailure(dependencies: {
   let running: Promise<boolean> | null = null;
   async function run(failure: UpdateFailure): Promise<boolean> {
     const controller = await dependencies.controller();
-    const version = await controller?.awaitUpdate(dependencies.bounds ?? FAILURE_UPDATE_BOUNDS);
+    if (!controller) return false;
+    const notice = new AbortController();
+    // The person closing the notice stops the wait; the caller's exit runs.
+    const closed = Promise.withResolvers<null>();
+    const version = await Promise.race([
+      controller.awaitUpdate(dependencies.bounds ?? FAILURE_UPDATE_BOUNDS, (found) => {
+        void dependencies.showDownloading(failure, found, notice.signal).then(() => {
+          if (!notice.signal.aborted) closed.resolve(null);
+        });
+      }),
+      closed.promise,
+    ]).finally(() => notice.abort());
     if (!version) return false;
     if (!(await dependencies.confirmRestart(failure, version))) return false;
     const result = await dependencies.install();

@@ -265,12 +265,15 @@ describe("electron updater actions", () => {
         updater.emit("update-available", { version: "1.2.4" });
       });
       const controller = (await startWith(updater))!;
-      const waiting = controller.awaitUpdate(bounds);
+      const onDownloading = vi.fn();
+      const waiting = controller.awaitUpdate(bounds, onDownloading);
       await vi.waitFor(() => expect(controller.state().status).toBe("available"));
+      expect(onDownloading).toHaveBeenCalledWith("1.2.4");
       updater.emit("download-progress", { percent: 50 });
       updater.emit("update-downloaded", { version: "1.2.4" });
       await expect(waiting).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).toHaveBeenCalledOnce();
+      expect(onDownloading).toHaveBeenCalledOnce();
     });
 
     it.each([

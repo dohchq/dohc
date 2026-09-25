@@ -40,7 +40,11 @@ export type AutoUpdateController = {
   checkForUpdates: () => Promise<UpdateCheckResult>;
   // Checks now, or joins the check already running. Resolves with the
   // downloaded version, or null when none downloads within the bounds.
-  awaitUpdate: (bounds: UpdateWaitBounds) => Promise<string | null>;
+  // onDownloading runs once, when the feed offers a version to download.
+  awaitUpdate: (
+    bounds: UpdateWaitBounds,
+    onDownloading?: (version: string) => void,
+  ) => Promise<string | null>;
   installUpdate: () => Promise<UpdateActionResult>;
   stop: () => void;
 };
@@ -308,7 +312,10 @@ export async function startAutoUpdates(options: {
     }
   };
 
-  const awaitUpdate = (bounds: UpdateWaitBounds): Promise<string | null> =>
+  const awaitUpdate = (
+    bounds: UpdateWaitBounds,
+    onDownloading?: (version: string) => void,
+  ): Promise<string | null> =>
     new Promise((resolve) => {
       let downloading = false;
       let done = false;
@@ -329,6 +336,7 @@ export async function startAutoUpdates(options: {
           downloading = true;
           clearTimeout(timer);
           timer = setTimeout(() => finish(null), bounds.downloadMs);
+          onDownloading?.(state.version);
           return;
         }
         if (!checkInFlight && state.status !== "checking") finish(null);

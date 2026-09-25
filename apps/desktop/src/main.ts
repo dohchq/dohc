@@ -3784,8 +3784,21 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         preloadArguments: devToolsPreloadArguments(devToolsGranted),
       }),
     ),
-    whenLoaded: (window) => new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", resolve);
+    whenLoaded: (window) => new Promise<boolean>((resolve) => {
+      const contents = window.webContents;
+      const settle = (loaded: boolean) => {
+        contents.off("did-finish-load", onLoad);
+        contents.off("did-fail-load", onFail);
+        resolve(loaded);
+      };
+      const onLoad = () => settle(true);
+      const onFail = (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+        // ERR_ABORTED (-3) is a load that another navigation replaced; that
+        // one still finishes or fails on its own.
+        if (isMainFrame && errorCode !== -3) settle(false);
+      };
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-fail-load", onFail);
     }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
@@ -3858,6 +3871,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reconcileCloud: () => { activity.reconcileCloud(); },
     startUpdates: () => { void startUpdates(); },
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
+    updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
@@ -4007,7 +4021,7 @@ const senderWorkspaceAuthority = {
 // window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
 const exitRounds = createExitRounds<BrowserWindow>({
-  participants: () => workspaceWindows.allLive(),
+  participants: () => workspaceWindows.answering(),
   participantId: (window) => window.webContents.id,
   send: (window, message) => {
     if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
@@ -4060,17 +4074,36 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
 
 // A failing build checks the feed before it gives up, so a person on a bad
 // release can still reach the release that fixes it.
+const WINDOW_FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
+  "window-crash": "This dohc window keeps crashing.",
+  "window-load": "This dohc window could not load.",
+};
 const updateAfterFailure = createUpdateAfterFailure({
   controller: startUpdates,
+  // Downloads can take minutes with nothing else on screen, so a native box
+  // says one is running. Closing it stops the wait.
+  showDownloading: async (failure: UpdateFailure, version, signal) => {
+    await dialog.showMessageBox({
+      type: "info",
+      message: failure === "startup" ? `Downloading update ${version}.` : WINDOW_FAILURE_MESSAGES[failure],
+      detail: failure === "startup"
+        ? "When it finishes, you can restart dohc on the new version."
+        : `dohc is downloading update ${version}. When it finishes, you can restart dohc on the new version.`,
+      buttons: [failure === "startup" ? "Quit" : "Not now"],
+      noLink: true,
+      signal,
+    });
+  },
   confirmRestart: async (failure: UpdateFailure, version) => {
-    const renderer = failure === "renderer";
+    const startup = failure === "startup";
     const { response } = await dialog.showMessageBox({
       type: "info",
-      message: renderer ? "This dohc window keeps crashing." : `Update ${version} is downloaded.`,
-      detail: renderer
-        ? `Update ${version} is downloaded. dohc closes and opens again on the new version.`
-        : "dohc closes and opens again on the new version.",
-      buttons: ["Restart now", renderer ? "Not now" : "Quit"],
+      message: startup ? `Update ${version} is downloaded.` : WINDOW_FAILURE_MESSAGES[failure],
+      // A downloaded update also installs on quit (autoInstallOnAppQuit).
+      detail: startup
+        ? "Restart now to open dohc on the new version. If you quit, the update installs as dohc closes."
+        : `Update ${version} is downloaded. dohc closes and opens again on the new version.`,
+      buttons: ["Restart now", startup ? "Quit" : "Not now"],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -4081,7 +4114,7 @@ const updateAfterFailure = createUpdateAfterFailure({
 });
 
 function afterRendererCrashLoop(): void {
-  void updateAfterFailure("renderer");
+  void updateAfterFailure("window-crash");
 }
 
 // The owner of the user settings file: every save, zoom step, reset, and
