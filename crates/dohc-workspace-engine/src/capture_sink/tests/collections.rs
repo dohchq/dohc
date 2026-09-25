@@ -575,10 +575,11 @@ fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
     ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
     sink.reconcile_collections().expect("first adoption pass");
     let canonical_padding = "x".repeat(MAX_TEXT_BYTES - 64);
+    // Canonical trailing newlines avoid retaining a second copy of the padding.
     seed_captured_richdoc_lineage_from_markdown(
         &sink,
         "tasks/oversized.md",
-        format!("---\npadding: {canonical_padding}\n---"),
+        format!("---\npadding: {canonical_padding}\n---\n\n"),
     );
     let moments_before = moment_count(&db, "tasks/oversized.md");
     let updates_before = ydoc_update_count_for_object(&db, "tasks/oversized.md");

@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { frontmatterEditsRefused, setFrontmatterValue } from './frontmatter.js'
+import { frontmatterEditsRefused, parseFrontmatter, setFrontmatterValue } from './frontmatter.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 import { createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import frontmatterFixtures from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
@@ -40,7 +40,7 @@ type Sample = {
   concurrent?: [[string, unknown], [string, unknown]]
   // The settle must keep the frontmatter block exactly as written.
   keeps?: boolean
-  checkImport?: boolean; editsRefused?: boolean
+  checkImport?: boolean; checkBody?: boolean; editsRefused?: boolean
 }
 // The frontmatter block as written, read with a pattern and not a YAML loader,
 // so a fault both loaders share cannot rewrite the expectation.
@@ -77,10 +77,14 @@ const settleSamples: Sample[] = [
     'cr-after-colon': 'a:\r\r\n',
     'cr-after-question': '?\r\r\n',
     'cr-before-first-entry': '\r\r\na: [\n',
+  }).map(([name, yaml]) => ({
+    name: `preserve-unreadable-${name}`, markdown: `---\n${yaml}---\n\nBody`, keeps: true, checkImport: true,
+  })),
+  ...Object.entries({
     'lf-before-colon': 'a\n: [\n',
     'crlf-before-colon': 'a\r\n: [\r\n',
   }).map(([name, yaml]) => ({
-    name: `body-unreadable-${name}`, markdown: `---\n${yaml}---\n\nBody`, checkImport: true,
+    name: `body-unreadable-${name}`, markdown: `---\n${yaml}---\n\nBody`, checkBody: true,
   })),
   ...Object.entries({
     flow: '{a: 1, b: .nan}',
@@ -204,7 +208,7 @@ const samples: Sample[] = [
   ...numericSamples,
   ...frontmatterFixtures.vectors.map(vector => ({ name: `public-frontmatter-${vector.name}`, markdown: vector.markdown })),
 ]
-type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string; sourceMarkdown?: string; editsRefused?: boolean }
+type Vector = { name: string; bytes: number[]; markdown: string; registrationAccepted: boolean; keptFrontmatter?: string; sourceMarkdown?: string; bodyMarkdown?: string; editsRefused?: boolean }
 const validate = createLiveMarkdownRegistrationValidator({
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000,
@@ -249,6 +253,7 @@ if (process.env.DOHC_WRITE_BOOTSTRAP_VECTORS === '1') {
         return {
           name: sample.name, bytes: [...bytes], markdown: yDocToMarkdown(decoded), registrationAccepted: admitted(bytes),
           ...(sample.checkImport ? { sourceMarkdown: sample.markdown, editsRefused: sample.editsRefused } : {}),
+          ...(sample.checkBody ? { bodyMarkdown: sample.markdown } : {}),
           ...(sample.keeps ? { keptFrontmatter: WRITTEN_BLOCK.exec(sample.markdown)![0] } : {}),
         }
       } finally { decoded.destroy() }
@@ -289,6 +294,9 @@ describe('shared bootstrap projections', () => {
     try {
       Y.applyUpdate(doc, bytes)
       expect(yDocToMarkdown(doc)).toBe(vector.markdown)
+      if (vector.bodyMarkdown !== undefined) {
+        expect(parseFrontmatter(vector.bodyMarkdown, false)).toEqual({ meta: {}, body: vector.bodyMarkdown })
+      }
       if (vector.editsRefused !== undefined) expect(frontmatterEditsRefused(doc)).toBe(vector.editsRefused)
       if (vector.sourceMarkdown !== undefined) {
         const imported = markdownToYDoc(vector.sourceMarkdown)

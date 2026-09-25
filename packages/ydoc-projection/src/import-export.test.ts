@@ -244,6 +244,9 @@ describe('Y.Doc markdown import/export', () => {
     for (const markdown of [
       `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.`,
       '---\nvalue: [unterminated\n---\nBody remains.',
+      '---\na:\r\r\n---\nBody remains.',
+      '---\n?\r\r\n---\nBody remains.',
+      '---\n\r\r\na: [\n---\nBody remains.',
     ]) {
       const restored = markdownToYDoc(markdown)
       try {
@@ -255,7 +258,8 @@ describe('Y.Doc markdown import/export', () => {
         expect(yDocToMarkdown(restored)).toBe(markdown)
         // Setting a key replaces the unreadable block with canonical frontmatter.
         restored.getMap('frontmatter').set('title', 'Plan')
-        expect(yDocToMarkdown(restored)).toBe('---\ntitle: Plan\n---\n\nBody remains.')
+        const canonical = '---\ntitle: Plan\n---\n\nBody remains.'
+        expect(yDocToMarkdown(restored)).toBe(markdown.includes('\r\n') ? canonical.replaceAll('\n', '\r\n') : canonical)
       } finally {
         restored.destroy()
       }

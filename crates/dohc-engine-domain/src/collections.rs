@@ -1544,11 +1544,7 @@ const MAX_FRONTMATTER_ALIASES: usize = 256;
 /// copy its prefix into every tagged node, a second document's start marker,
 /// or a carriage return that does not end a line.
 fn frontmatter_yaml_is_refused(yaml: &str) -> bool {
-    let bytes = yaml.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .any(|(index, byte)| *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
+    has_lone_carriage_return(yaml)
         || yaml.split_inclusive('\n').any(|line| {
             ["%TAG", "---"].iter().any(|marker| {
                 line.strip_prefix(marker).is_some_and(|rest| {
@@ -1556,6 +1552,14 @@ fn frontmatter_yaml_is_refused(yaml: &str) -> bool {
                 })
             })
         })
+}
+
+fn has_lone_carriage_return(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
 }
 
 /// One top-level entry of a frontmatter block.
@@ -1952,8 +1956,9 @@ fn frontmatter_block(
 
 /// A frontmatter block that neither loader reads, up to and including its
 /// closing delimiter line, when its first entry looks like a mapping key: `key:`
-/// or `?` at the start of a line. A settle keeps such a block byte for byte
-/// instead of reading it as body Markdown. The desktop applies the same rule
+/// or `?` at the start of a line, or the block contains a lone carriage return.
+/// A settle keeps such a block byte for byte instead of reading it as body
+/// Markdown. The desktop applies the same rule
 /// (`unreadableFrontmatterPrefix` in packages/ydoc-projection/src/frontmatter.ts).
 #[must_use]
 pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
@@ -1969,9 +1974,10 @@ pub fn unreadable_frontmatter_prefix(markdown: &str) -> Option<&str> {
     for line in lines {
         end += line.len();
         if is_frontmatter_delimiter(line) {
-            return entry
-                .is_some_and(looks_like_mapping_entry)
-                .then(|| &markdown[..end]);
+            let prefix = &markdown[..end];
+            return (entry.is_some_and(looks_like_mapping_entry)
+                || has_lone_carriage_return(prefix))
+            .then_some(prefix);
         }
         let content = line
             .strip_suffix("\r\n")

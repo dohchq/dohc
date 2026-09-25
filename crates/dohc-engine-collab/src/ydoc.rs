@@ -6632,6 +6632,13 @@ fn main() {}
         ))
         .unwrap();
         for row in fixtures.as_array().unwrap() {
+            if let Some(markdown) = row["bodyMarkdown"].as_str() {
+                // Compare frontmatter loading without the limited test Markdown parser.
+                let (values, prefix, body) = split_markdown_frontmatter(markdown);
+                assert!(values.is_empty(), "{}", row["name"]);
+                assert!(prefix.is_none(), "{}", row["name"]);
+                assert_eq!(body, markdown, "{}", row["name"]);
+            }
             let Some(source) = row["sourceMarkdown"].as_str() else {
                 continue;
             };
@@ -6650,6 +6657,14 @@ fn main() {}
                     "{}",
                     row["name"]
                 );
+                if let Some(kept) = row["keptFrontmatter"].as_str() {
+                    assert!(source.starts_with(kept), "{}", row["name"]);
+                    assert!(
+                        doc.project_richdoc().unwrap().starts_with(kept),
+                        "{}",
+                        row["name"]
+                    );
+                }
                 if let Some(refused) = row["editsRefused"].as_bool() {
                     assert_eq!(doc.frontmatter_edits_refused(), refused, "{}", row["name"]);
                     if refused {
@@ -6756,12 +6771,18 @@ fn main() {}
     }
 
     #[test]
-    fn documents_without_frontmatter_keep_no_frontmatter_source() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "\n\n# Title\n")
-            .unwrap();
-        let meta = doc.doc.get_or_insert_map(ROOT_META);
-        assert!(!meta.contains_key(&doc.doc.transact(), FRONTMATTER_SOURCE_META_KEY));
+    fn documents_without_frontmatter_or_with_canonical_frontmatter_keep_no_source() {
+        for markdown in ["\n\n# Title\n", "---\npadding: xxx\n---\n\n"] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .unwrap();
+            let meta = doc.doc.get_or_insert_map(ROOT_META);
+            let txn = doc.doc.transact();
+            assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
+            assert!(!meta
+                .keys(&txn)
+                .any(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
+        }
     }
 
     #[test]

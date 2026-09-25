@@ -331,8 +331,9 @@ function readFrontmatterBlock(markdown: string): FrontmatterBlock | null | undef
 /**
  * A frontmatter block that neither loader reads, up to and including its
  * closing delimiter line, when its first entry looks like a mapping key:
- * `key:` or `?` at the start of a line. A settle keeps such a block byte
- * for byte instead of reading it as body Markdown. The engine applies the
+ * `key:` or `?` at the start of a line, or the block contains a lone carriage
+ * return. A settle keeps such a block byte for byte instead of reading it
+ * as body Markdown. The engine applies the
  * same rule (`unreadable_frontmatter_prefix` in
  * crates/dohc-engine-domain/src/collections.rs).
  */
@@ -343,7 +344,7 @@ function unreadableFrontmatterPrefix(markdown: string): string | undefined {
   const entry = (text.match(/[^\n]*\n/gu) ?? [])
     .map(line => line.replace(/\r?\n$/u, ''))
     .find(line => !/^[ \t]*(?:#|$)/u.test(line))
-  return entry !== undefined && looksLikeMappingEntry(entry)
+  return (entry !== undefined && looksLikeMappingEntry(entry)) || /\r(?!\n)/u.test(text)
     ? open + text + closeLine
     : undefined
 }
