@@ -461,9 +461,12 @@ export function AutomationsPanel(props: {
       });
   };
   const revealHolds = () => {
+    const epoch = scope.current();
     void bridge()
       .revealAutomationHolds({ workspaceId })
-      .catch((error: unknown) => onError("Couldn't open the automations folder.", error));
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("Couldn't open the automations folder.", error);
+      });
   };
 
   const allow = (automationId: string, definitionHash: string, step: number, seq: number) => {

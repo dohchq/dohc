@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -228,6 +228,22 @@ describe("the ⚡ panel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Open file" }));
     expect(onOpenFile).toHaveBeenCalledWith("Tasks/automations.yaml");
     expect(bridge.writeCollectionAutomations).not.toHaveBeenCalled();
+  });
+
+  it("drops an Open folder failure that answers after the workspace changed", async () => {
+    const { bridge } = makeBridge(read([summary(stamp)]), [], { holdsUnreadable: true });
+    let fail: (error: unknown) => void = () => undefined;
+    bridge.revealAutomationHolds.mockImplementationOnce(() => new Promise<undefined>((_resolve, reject) => { fail = reject; }));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<Panel onError={onError} />);
+    await user.click(within(await screen.findByTestId("automation-holds-unreadable")).getByRole("button", { name: "Open folder" }));
+    rerender(<Panel workspaceId="ws-2" onError={onError} />);
+    await waitFor(() => expect(bridge.listCollectionAutomations).toHaveBeenCalledWith({ workspaceId: "ws-2", collectionPath: "Tasks" }));
+    await act(async () => {
+      fail(new Error("The folder is gone."));
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("offers Reset holds and Open folder when dohc cannot read which steps were allowed", async () => {
