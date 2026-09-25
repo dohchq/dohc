@@ -6754,10 +6754,12 @@ fn main() {}
                 assert_eq!(doc.encode_full_state(), before, "{}", vector["name"]);
                 assert_eq!(doc.project_richdoc().unwrap(), markdown);
             } else {
-                result.unwrap();
+                assert!(result.is_ok(), "{}: {result:?}", vector["name"]);
                 assert_eq!(
                     doc.project_richdoc().unwrap(),
-                    vector["expected"].as_str().unwrap()
+                    vector["expected"].as_str().unwrap(),
+                    "{}",
+                    vector["name"]
                 );
             }
         }

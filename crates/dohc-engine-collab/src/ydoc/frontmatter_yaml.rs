@@ -318,11 +318,23 @@ pub(super) fn kept(
     }
     let entries = block.entries.as_ref()?;
     let yaml = block.yaml;
-    let crlf = |entry: &str| {
+    let indent = entries.first().map_or("", |first| {
+        let line = &yaml[first.line..];
+        &line[..line.bytes().take_while(|byte| *byte == b' ').count()]
+    });
+    let render = |entry: &str| {
+        let mut indented = ProjectionBuffer::new();
+        for line in entry.split_inclusive('\n') {
+            if line != "\n" {
+                indented.push_str(indent).ok()?;
+            }
+            indented.push_str(line).ok()?;
+        }
+        let indented = indented.into_string();
         if block.open.ends_with("\r\n") {
-            entry.replace('\n', "\r\n")
+            Some(indented.replace('\n', "\r\n"))
         } else {
-            entry.to_owned()
+            Some(indented)
         }
     };
     let mut added: Vec<&String> = rendered
@@ -338,26 +350,27 @@ pub(super) fn kept(
     for (index, entry) in entries.iter().enumerate() {
         let end = entries.get(index + 1).map_or(yaml.len(), |next| next.line);
         let region = &yaml[entry.line..end];
-        let (text, trivia) = region.split_at(entry_text_end(region, entry.kept_blank_lines));
+        let (text, trivia) =
+            region.split_at(entry_text_end(region, entry.kept_blank_lines, indent.len()));
         if let Some(current) = rendered.get(&entry.key) {
             if !written.contains(&entry.key) {
                 kept.extend(
                     lead.split_inclusive('\n')
                         .filter(|line| line.trim().is_empty()),
                 );
-                kept.push_str(&crlf(current));
+                kept.push_str(&render(current)?);
             } else if parsed.get(entry.key.as_str()) == Some(&Some(current.clone())) {
                 kept.push_str(lead);
                 kept.push_str(text);
             } else {
                 kept.push_str(lead);
-                kept.push_str(&crlf(current));
+                kept.push_str(&render(current)?);
             }
         }
         lead = trivia;
     }
     for key in added {
-        kept.push_str(&crlf(&rendered[key]));
+        kept.push_str(&render(&rendered[key])?);
     }
     kept.push_str(lead);
     if kept.is_empty() {
@@ -392,14 +405,16 @@ fn rendered_entries(value: &serde_json::Map<String, Value>) -> BTreeMap<&str, Op
 }
 
 /// Where an entry's own text ends: before its trailing blank lines and
-/// column-0 comments, which belong to the entry below it, except the blank
-/// lines a keep-chomped block scalar keeps.
-fn entry_text_end(region: &str, kept_blank_lines: usize) -> usize {
+/// comments at or above the mapping's indentation, which belong to the entry
+/// below it, except the blank lines a keep-chomped block scalar keeps.
+fn entry_text_end(region: &str, kept_blank_lines: usize, indent: usize) -> usize {
     let mut start = region.len();
     while start > 0 {
         let line_start = region[..start - 1].rfind('\n').map_or(0, |index| index + 1);
         let line = region[line_start..start].trim_end_matches(['\r', '\n']);
-        if line_start == 0 || !(line.trim().is_empty() || line.starts_with('#')) {
+        let content = line.trim_start_matches(' ');
+        let comment = content.starts_with('#') && line.len() - content.len() <= indent;
+        if line_start == 0 || !(line.trim().is_empty() || comment) {
             break;
         }
         start = line_start;

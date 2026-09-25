@@ -478,28 +478,28 @@ export function keptFrontmatter(
     if (readsAsCurrent(parsed) && block.keys.every(isWritten)) return source
     const entries = rootKeyEntries(block.yaml)
     if (entries === undefined || entries.length !== block.keys.length) return undefined
-    const crlf = (entry: string): string =>
-      block.open.endsWith('\r\n') ? entry.replaceAll('\n', '\r\n') : entry
+    const indent = mappingIndent(block.yaml, entries)
+    const render = (entry: string): string => renderEntry(entry, indent, block.open.endsWith('\r\n'))
     // Comments above the first key belong to it, like those above any other.
     let kept = entries.length === 0 ? block.yaml : ''
     let lead = entries.length === 0 ? '' : block.yaml.slice(0, entries[0]!.line)
     block.keys.forEach((key, index) => {
       const entry = entries[index]!
       const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
-      const split = entryTextEnd(region, entry.keptBlankLines)
+      const split = entryTextEnd(region, entry.keptBlankLines, indent.length)
       if (Object.hasOwn(current, key) && !isWritten(key)) {
         kept += (lead.match(/[^\n]*\n/gu) ?? []).filter(line => line.trim() === '').join('')
-        kept += crlf(rendered.get(key)!)
+        kept += render(rendered.get(key)!)
       } else if (Object.hasOwn(current, key)) {
         kept += lead
         kept += parsed.get(key) === rendered.get(key)
           ? region.slice(0, split)
-          : crlf(rendered.get(key)!)
+          : render(rendered.get(key)!)
       }
       lead = region.slice(split)
     })
     for (const key of Object.keys(orderFrontmatter(current))) {
-      if (!Object.hasOwn(block.value, key)) kept += crlf(rendered.get(key)!)
+      if (!Object.hasOwn(block.value, key)) kept += render(rendered.get(key)!)
     }
     kept += lead
     if (kept === '') return ''
@@ -658,6 +658,7 @@ function withRenamedEntries(
     const block = readFrontmatterBlock(source)
     const entries = block ? rootKeyEntries(block.yaml) : undefined
     if (!block || entries === undefined || entries.length !== block.keys.length) return source
+    const indent = mappingIndent(block.yaml, entries)
     let yaml = block.yaml.slice(0, entries[0]?.line ?? block.yaml.length)
     block.keys.forEach((key, index) => {
       const region = block.yaml.slice(entries[index]!.line, entries[index + 1]?.line ?? block.yaml.length)
@@ -666,9 +667,9 @@ function withRenamedEntries(
         yaml += region
         return
       }
-      const split = entryTextEnd(region, entries[index]!.keptBlankLines)
+      const split = entryTextEnd(region, entries[index]!.keptBlankLines, indent.length)
       const entry = frontmatterYaml({ [to]: current[to] })
-      yaml += `${block.open.endsWith('\r\n') ? entry.replaceAll('\n', '\r\n') : entry}${region.slice(split)}`
+      yaml += `${renderEntry(entry, indent, block.open.endsWith('\r\n'))}${region.slice(split)}`
     })
     return `${block.open}${yaml}${block.closing}`
   } catch {
@@ -681,6 +682,15 @@ function renderedEntries(values: Record<string, unknown>): Map<string, string> {
 }
 
 type RootKeyEntry = { line: number; keptBlankLines: number }
+
+function mappingIndent(text: string, entries: RootKeyEntry[]): string {
+  return entries.length === 0 ? '' : /^ */u.exec(text.slice(entries[0]!.line))![0]
+}
+
+function renderEntry(entry: string, indent: string, crlf: boolean): string {
+  const indented = entry.replace(/^(?=.)/gmu, indent)
+  return crlf ? indented.replaceAll('\n', '\r\n') : indented
+}
 
 /**
  * Where each top-level key's line starts, in document order, with the blank
@@ -733,15 +743,16 @@ function rootKeyEntries(text: string): RootKeyEntry[] | undefined {
 
 /**
  * Where an entry's own text ends: before its trailing blank lines and
- * column-0 comments, which belong to the entry below it, except the blank
- * lines a keep-chomped block scalar keeps.
+ * comments at or above the mapping's indentation, which belong to the entry
+ * below it, except the blank lines a keep-chomped block scalar keeps.
  */
-function entryTextEnd(region: string, keptBlankLines: number): number {
+function entryTextEnd(region: string, keptBlankLines: number, indent: number): number {
   let start = region.length
   while (start > 0) {
     const lineStart = region.lastIndexOf('\n', start - 2) + 1
     const line = region.slice(lineStart, start).replace(/\r?\n$/u, '')
-    if (lineStart === 0 || !(line.trim() === '' || line.startsWith('#'))) break
+    const commentIndent = /^ *(?=#)/u.exec(line)?.[0].length
+    if (lineStart === 0 || !(line.trim() === '' || (commentIndent !== undefined && commentIndent <= indent))) break
     start = lineStart
   }
   for (let kept = 0; kept < keptBlankLines; kept += 1) {
