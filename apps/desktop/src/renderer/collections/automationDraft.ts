@@ -134,6 +134,7 @@ export function defaultValueFor(field: FieldDefinition | undefined): AutomationV
   if (field?.type === "date") return { kind: "formula", expression: "today()" };
   if (field?.type === "checkbox") return { kind: "literal", value: true };
   if (field?.type === "select") return { kind: "literal", value: field.options[0] ?? "" };
+  if (field?.type === "multi-select") return { kind: "literal", value: [] };
   return { kind: "literal", value: "" };
 }
 

@@ -13,6 +13,8 @@ import type {
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
+import { writeAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { expressionProblem } from "../../automations/automationPlan";
 import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
@@ -23,6 +25,7 @@ const FIELDS: FieldDefinition[] = [
   { name: "Status", type: "select", options: ["Doing", "Done"] },
   { name: "Finished on", type: "date" },
   { name: "Points", type: "number" },
+  { name: "Tags", type: "multi-select", options: ["urgent", "later", "home"] },
 ];
 // The builder checks formulas a moment after typing stops; a loaded machine
 // can take longer than the default wait.
@@ -94,12 +97,14 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       path: collectionPath, status: "valid", reasons: [], recordCount: 0,
       schema: { name: null, description: null, views: [], fields: collectionPath === "Log" ? [{ name: "Entry", type: "text" }] : [] },
     })),
-    // Main names a syntax error only for a formula that ends in "==", and
-    // refuses an automation named "Too long" as the file contract would.
-    checkCollectionAutomation: vi.fn(async ({ automation, formulas }: { automation: Automation; formulas: string[] }) => ({
-      diagnostics: automation.name === "Too long" ? [{ code: "too-long" as const, path: "/automations/0/name" }] : [],
-      formulaProblems: formulas.map((formula) => (formula.trim().endsWith("==") ? "Unexpected end of input." : null)),
-    })),
+    // Main's check, for real: the file contract's writer and the formula parser.
+    checkCollectionAutomation: vi.fn(async ({ automation, formulas }: { automation: Automation; formulas: string[] }) => {
+      const written = writeAutomationsFile([{ status: "valid", automation }]);
+      return {
+        diagnostics: written.status === "refused" ? written.diagnostics : [],
+        formulaProblems: formulas.map(expressionProblem),
+      };
+    }),
     onAutomationFailuresChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
       failureListeners.push(listener);
       return () => undefined;
@@ -123,6 +128,8 @@ function Panel(props: {
   onNotice?: (message: string, undo?: () => void) => void;
   onError?: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onOpenFile?: (path: string) => void;
+  closeAsk?: number;
+  onClose?: () => void;
 }) {
   const onError = props.onError ?? (() => undefined);
   const workspaceId = props.workspaceId ?? "ws-1";
@@ -134,7 +141,8 @@ function Panel(props: {
       automations={automations}
       fields={props.fields ?? FIELDS}
       focus={props.focus ?? null}
-      onClose={() => undefined}
+      closeAsk={props.closeAsk ?? 0}
+      onClose={props.onClose ?? (() => undefined)}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
       onError={onError}
       onNotice={props.onNotice ?? (() => undefined)}
@@ -433,7 +441,7 @@ describe("the builder", () => {
     await openBuilder(user);
     await user.selectOptions(screen.getByRole("combobox", { name: "Condition" }), "formula");
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), "record.Points ==");
-    expect(await screen.findByText("This formula has a syntax error. Unexpected end of input.", undefined, SLOW)).toBeTruthy();
+    expect(await screen.findByText("This formula has a syntax error. Unexpected token.", undefined, SLOW)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(written).toEqual([]);
 
@@ -464,9 +472,9 @@ describe("the builder", () => {
     expect(screen.getByRole("combobox", { name: "Step 2, field 1" })).toBeTruthy();
     await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Title");
     await user.clear(screen.getByRole("textbox", { name: "Name" }));
-    await user.type(screen.getByRole("textbox", { name: "Name" }), "Too long");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "=Stamp");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("This is too long to save.")).toBeTruthy();
+    expect(await screen.findByText("Only a value can be a formula, so this cannot start with =.")).toBeTruthy();
     expect(written).toEqual([]);
   });
 
@@ -627,5 +635,59 @@ describe("the builder", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove step 1" })));
     await user.click(screen.getByRole("button", { name: "Set fields" }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 2, field 1" })));
+  });
+
+  it("keeps a multi-select field's value a list", async () => {
+    const { written } = makeBridge(read([summary(stamp)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 1, field 1" }), "Tags");
+    await user.selectOptions(screen.getByRole("listbox", { name: "Step 1, Tags" }), ["urgent", "home"]);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.do).toEqual([
+      { kind: "set", values: [{ field: "Tags", value: { kind: "literal", value: ["urgent", "home"] } }], records: null, operation: null },
+    ]);
+  });
+
+  it("checks a Try again from the toast against the file again, and never writes over a change made since", async () => {
+    const { bridge, written, writeResults, replaceFile } = makeBridge(read([summary(stamp)]));
+    writeResults.push({ status: "conflict" });
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("automations.yaml changed while you were editing.", null, expect.any(Function)));
+    const tryAgain = onError.mock.calls[0]![2] as () => void;
+
+    // Someone switched it off meanwhile.
+    replaceFile(read([summary({ ...stamp, enabled: false })]));
+    await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBeGreaterThan(2));
+    tryAgain();
+    await waitFor(() => expect(onError).toHaveBeenLastCalledWith(
+      '"Stamp the finish date!" changed in automations.yaml while you were editing, so dohc did not save. Save again to replace it with yours.',
+      null,
+    ));
+    expect(written).toHaveLength(1);
+  });
+
+  it("asks before the page closes the panel over changes, and keeps no draft once they are discarded", async () => {
+    makeBridge(read([summary(stamp)]));
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const { rerender, unmount } = render(<Panel onClose={onClose} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    rerender(<Panel onClose={onClose} closeAsk={1} />);
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(<Panel />);
+    expect(await screen.findByTestId("automation-stamp")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
   });
 });

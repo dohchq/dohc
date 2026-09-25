@@ -330,6 +330,8 @@ export function AutomationsPanel(props: {
   automations: ReturnType<typeof useCollectionAutomations>;
   /** This Collection's fields, for the builder. */
   fields: readonly FieldDefinition[];
+  /** Rises each time the page's header asks the panel to close. */
+  closeAsk?: number;
   /** A notice asked to open one automation's runs; `seq` rises with each ask. */
   focus: { automationId: string; seq: number } | null;
   onClose: () => void;
@@ -405,6 +407,10 @@ export function AutomationsPanel(props: {
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
 
+  useEffect(() => {
+    if (props.closeAsk) leave(props.onClose);
+  }, [props.closeAsk]);
+
   const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, onError, onQueued: () => void load() });
 
   /**
@@ -418,11 +424,13 @@ export function AutomationsPanel(props: {
       onSaved: () => void = () => undefined,
       agreed = false,
       onNotSaved: () => void = () => undefined,
+      // What the toast's Try again runs, when it must check more than the file hash.
+      retry?: () => void,
     ) => {
       const current = fileRef.current;
       const editable = current === null || current.status === "unavailable" ? null : editableOf(current);
       if (editable === null) return;
-      const again = () => save(change, onSaved, agreed, onNotSaved);
+      const again = retry ?? (() => save(change, onSaved, agreed, onNotSaved));
       const epoch = scope.current();
       setSaving(true);
       void bridge()
@@ -557,18 +565,20 @@ export function AutomationsPanel(props: {
    * at the end, and goes back to the list once the file has it. When the
    * file's copy is no longer the one editing started from, someone else
    * changed or deleted it: nothing is saved, and the next Save replaces
-   * theirs on purpose.
+   * theirs on purpose. A Try again from the toast checks again against the
+   * file as it is then, even after the builder closed.
    */
-  const saveEdited = (automation: Automation) => {
-    const open = editingRef.current;
-    const listed = editable?.automations;
+  const saveEdited = (automation: Automation, open: Editing | null = editingRef.current) => {
+    const current = fileRef.current;
+    const listed = current === null || current.status === "unavailable" ? undefined : editableOf(current)?.automations;
     if (!open || !listed) return;
+    const stillOpen = editingRef.current?.session === open.session;
     const { original } = open;
     const now = original === null ? undefined : listed.find((entry) => entry.id === original.id);
     const stopLeaving = () => setLeaving(null);
     if (original !== null && now === undefined) {
       stopLeaving();
-      setEditing({ ...open, original: null });
+      if (stillOpen) setEditing({ ...open, original: null });
       onError(`"${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`, null);
       return;
     }
@@ -576,7 +586,7 @@ export function AutomationsPanel(props: {
       (original === null && listed.some((entry) => entry.id === automation.id))) {
       stopLeaving();
       const theirs = now ?? listed.find((entry) => entry.id === automation.id) ?? null;
-      setEditing({ ...open, original: theirs, baseline: theirs ?? open.baseline });
+      if (stillOpen) setEditing({ ...open, original: theirs, baseline: theirs ?? open.baseline });
       onError(`"${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`, null);
       return;
     }
@@ -585,6 +595,8 @@ export function AutomationsPanel(props: {
         ? [...automations, automation]
         : automations.map((entry) => (entry.id === original.id ? automation : entry)),
       () => {
+        if (!stillOpen) return;
+        forgetDraft();
         setEditing(null);
         const then = leavingRef.current;
         setLeaving(null);
@@ -592,7 +604,13 @@ export function AutomationsPanel(props: {
       },
       false,
       stopLeaving,
+      () => saveEdited(automation, open),
     );
+  };
+  // A draft saved or discarded is not kept when the panel goes away.
+  const forgetDraft = () => {
+    latestDraft.current = null;
+    editingRef.current = null;
   };
   const leavingRef = useRef(leaving);
   leavingRef.current = leaving;
@@ -670,6 +688,7 @@ export function AutomationsPanel(props: {
             readOnly={editable === null}
             leaveRequested={leaving !== null}
             onLeave={() => {
+              forgetDraft();
               const then = leaving;
               setLeaving(null);
               then?.();

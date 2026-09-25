@@ -92,6 +92,7 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "control-characters": "The name has characters dohc cannot show.",
   "too-many-steps": "An automation can have at most 25 steps.",
   "if-too-deep": "If steps can sit at most three deep.",
+  "unexpected-formula-marker": "Only a value can be a formula, so this cannot start with =.",
 };
 
 /** Where a file contract diagnostic belongs in the builder, and what it says. */
@@ -269,11 +270,25 @@ function ValueInput(props: {
           </option>
         ))}
       </select>
-      {kind === "value" ? (
+      {kind === "value" && props.field?.type === "multi-select" ? (
+        // A multi-select field holds a list, so its value is several choices.
+        <select
+          aria-label={props.label}
+          multiple
+          value={props.value?.kind === "literal" && Array.isArray(props.value.value) ? props.value.value.map(String) : []}
+          onChange={(event) => props.onChange({
+            kind: "literal",
+            value: [...event.target.selectedOptions].map((option) => option.value),
+          })}
+          className={selectClass}
+        >
+          {props.field.options.map((option) => <option key={option} value={option}>{option}</option>)}
+        </select>
+      ) : kind === "value" ? (
         <LiteralInput
           label={props.label}
           type={type}
-          options={props.field?.type === "multi-select" ? props.field.options : []}
+          options={[]}
           text={literalText(props.value)}
           onChange={props.onChange}
         />
@@ -484,8 +499,12 @@ export function AutomationBuilder(props: {
       return editable ? { ...editable, values: numbered(targetOf(step), rows) } : step;
     }),
   };
-  const automationKey = JSON.stringify(automation);
-  const dirty = automationKey !== JSON.stringify(props.baseline);
+  const dirty = JSON.stringify(automation) !== JSON.stringify(props.baseline);
+  // What Save writes: a draft without a name takes its sentence, and a new
+  // one an id from its name. Main checks exactly this.
+  const finalName = automation.name.trim() || sentenceText(automationSentence(automation)).slice(0, MAX_NAME_LENGTH);
+  const candidate: Automation = { ...automation, name: finalName, id: isNew ? idFor(finalName, props.takenIds) : automation.id };
+  const automationKey = JSON.stringify(candidate);
   useEffect(() => {
     props.onDraftChange({ automation, dirty });
   }, [automationKey]);
@@ -548,7 +567,7 @@ export function AutomationBuilder(props: {
   useEffect(() => {
     const epoch = scope.current();
     const timer = setTimeout(() => {
-      void check(automation, automationKey)
+      void check(candidate, automationKey)
         .then((answer) => {
           if (scope.isCurrent(epoch)) setChecked(answer);
         })
@@ -620,7 +639,7 @@ export function AutomationBuilder(props: {
       const epoch = scope.current();
       setChecking(true);
       try {
-        answer = await check(automation, automationKey);
+        answer = await check(candidate, automationKey);
       } catch (error) {
         if (scope.isCurrent(epoch)) onError("dohc could not check this automation.", error, () => void save());
         return false;
@@ -631,8 +650,7 @@ export function AutomationBuilder(props: {
       setChecked(answer);
     }
     if (answer.diagnostics.length > 0 || answer.formulas.size > 0) return false;
-    const name = automation.name.trim() || sentenceText(automationSentence(automation)).slice(0, MAX_NAME_LENGTH);
-    props.onSave({ ...automation, name, id: isNew ? idFor(name, props.takenIds) : automation.id });
+    props.onSave(candidate);
     return true;
   };
 

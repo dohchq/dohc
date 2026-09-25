@@ -228,6 +228,9 @@ export function CollectionPage({
     if (automationsOpen) void reloadAutomations();
   }, [automationsOpen]);
   // Closing forgets a notice's ask, so the next open shows the list.
+  // The header's button asks the panel to close, so a draft with changes
+  // asks first; `seq` rises with each ask.
+  const [closeAsk, setCloseAsk] = useState(0);
   const closeAutomations = useCallback(() => {
     setAutomationsOpen(false);
     setPanelFocus(null);
@@ -464,6 +467,7 @@ export function CollectionPage({
       automations={automations}
       fields={schema.fields}
       focus={panelFocus}
+      closeAsk={closeAsk}
       onClose={closeAutomations}
       onOpenFile={onOpenFile}
       onError={onError}
@@ -485,7 +489,7 @@ export function CollectionPage({
       <SecondaryButton
         data-testid="collection-automations-button"
         aria-pressed={automationsOpen}
-        onClick={() => (automationsOpen ? closeAutomations() : setAutomationsOpen(true))}
+        onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
         className={`flex items-center gap-1.5${automationsOpen ? " bg-panel-2 text-ink" : ""}`}
       >
         <Zap size={12} aria-hidden />
