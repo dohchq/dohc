@@ -68,7 +68,7 @@ async function fixture(app = "fundraiser") {
   async function result(name: string, input: AppBackendJson = {}, context: Context = "friend", appId?: string) {
     return (await call(name, input, context, appId)).result as Result;
   }
-  const field = (table: string, column: string) => definition.tables.find(t => t.sqlName === table)!.fields.find(f => f.sqlColumn === column)!.fieldId;
+  const field = (table: string, column: string) => definition.tables.find(t => t.sqlName === table)!.fields.find(f => f.type !== "button" && f.sqlColumn === column)!.fieldId;
   return { host, db, scope, definition, revision, binding, operation, call, result, field };
 }
 
