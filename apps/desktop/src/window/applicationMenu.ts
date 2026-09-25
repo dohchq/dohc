@@ -110,7 +110,7 @@ export function buildMenuTemplate(options: {
           ),
           visible: false,
         },
-        command("Quick Open", "quick-open", "CommandOrControl+P"),
+        command("Go To", "quick-open", "CommandOrControl+P"),
         command(
           "New Editor Group Right",
           "new-editor-group-right",
