@@ -805,17 +805,21 @@ export function frontmatterBlockFor(
 }
 
 /**
- * A live document's frontmatter block as its file holds it: the text recorded
- * from the file when there is one, or else the canonical block its values
- * write, which a file without recorded text holds.
+ * A live document's frontmatter block as its file holds it. Once a settle has
+ * written every edit (`settled`), that is the block the settle wrote. Until
+ * then, it is the text recorded from the file, or the canonical block of the
+ * values when no text was recorded.
  */
-export function frontmatterAsWritten(doc: Y.Doc): string {
-  const source = doc.getMap<unknown>('meta').get(FRONTMATTER_SOURCE_META_KEY)
-  if (typeof source === 'string') return source
+export function frontmatterAsWritten(doc: Y.Doc, settled: boolean): string {
+  const frontmatter = doc.getMap<unknown>('frontmatter')
+  const meta = doc.getMap<unknown>('meta')
+  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  if (typeof source === 'string' && !settled) return source
   try {
-    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(doc.getMap<unknown>('frontmatter'))), undefined, '', '\n')
+    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(frontmatter)), source, '', '\n', writtenFrontmatterKeys(frontmatter, meta))
   } catch {
-    return ''
+    // A refused settle leaves the file as it was.
+    return typeof source === 'string' ? source : ''
   }
 }
 

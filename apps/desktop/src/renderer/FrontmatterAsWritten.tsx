@@ -15,8 +15,15 @@ const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 // receives all of it, so a person sees all of it here. It opens when the
 // properties do not show every line as written: a comment, an anchor, a hidden
 // key, a block that does not read, or anything else.
+//
+// A live document's file changes only when the engine saves. `saved` says the
+// engine has saved every edit; until then the file still holds the text
+// recorded from it.
 export function FrontmatterAsWritten(
-  props: ({ markdown: string; ydoc?: never } | { ydoc: Y.Doc; markdown?: never }) & {
+  props: (
+    | { markdown: string; ydoc?: never; saved?: never }
+    | { ydoc: Y.Doc; saved: boolean; markdown?: never }
+  ) & {
     propertiesShown: boolean;
   },
 ) {
@@ -35,12 +42,12 @@ export function FrontmatterAsWritten(
 
   const leading = ydoc ? null : (LEADING_BLOCK.exec(props.markdown ?? "")?.[0] ?? "");
   const block = useMemo(() => {
-    if (ydoc) return frontmatterAsWritten(ydoc);
+    if (ydoc) return frontmatterAsWritten(ydoc, props.saved === true);
     if (!leading) return "";
     return leadingFrontmatter(leading)?.text ?? "";
     // revision re-reads the observed maps after a shared write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leading, ydoc, revision]);
+  }, [leading, ydoc, props.saved, revision]);
   const text = block.replace(/\r\n/g, "\n").replace(/\n+$/, "");
   const open = useMemo(() => !props.propertiesShown || !everyLineShown(text), [props.propertiesShown, text]);
   if (!text) return null;

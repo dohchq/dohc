@@ -12,11 +12,16 @@ export function splitFrontmatter(markdown: string): { block: string; body: strin
   return { block, body: markdown.slice(block.length) };
 }
 
-/** A live document's frontmatter block as its file holds it, following shared edits. */
+/**
+ * A live document's frontmatter text recorded from its file, following shared
+ * edits. A recipient cannot tell when the owner's engine saves, so a changed
+ * value can show stale until that engine next reads the file; the text still
+ * holds every comment the file can hold.
+ */
 export function useFrontmatterAsWritten(doc: Y.Doc): string {
-  const [block, setBlock] = useState(() => frontmatterAsWritten(doc));
+  const [block, setBlock] = useState(() => frontmatterAsWritten(doc, false));
   useEffect(() => {
-    const update = () => setBlock(frontmatterAsWritten(doc));
+    const update = () => setBlock(frontmatterAsWritten(doc, false));
     const maps = [doc.getMap("frontmatter"), doc.getMap("meta")];
     update();
     for (const map of maps) map.observe(update);

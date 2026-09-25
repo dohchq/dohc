@@ -2016,7 +2016,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} />
               </Suspense>
             )}
-            <FrontmatterAsWritten ydoc={engine.doc} propertiesShown={!readOnly} />
+            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState === "saved"} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}

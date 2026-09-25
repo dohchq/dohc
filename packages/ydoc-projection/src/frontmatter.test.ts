@@ -59,30 +59,30 @@ describe('frontmatterAsWritten', () => {
     const block = '---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\nbase: &shared !!str x\ncopy: *shared\n---\n\n'
     const doc = markdownToYDoc(`${block}Body`)
     try {
-      expect(frontmatterAsWritten(doc)).toBe(block)
+      expect(frontmatterAsWritten(doc, false)).toBe(block)
     } finally { doc.destroy() }
   })
 
   it('holds a block of only comments', () => {
     const doc = markdownToYDoc('---\n# only a note\n---\n\nBody')
     try {
-      expect(frontmatterAsWritten(doc)).toBe('---\n# only a note\n---\n\n')
+      expect(frontmatterAsWritten(doc, false)).toBe('---\n# only a note\n---\n\n')
     } finally { doc.destroy() }
   })
 
   it('holds a block that does not read, which the body leaves out', () => {
     const doc = markdownToYDoc('---\ntitle: [unclosed\n# note\n---\n\nBody')
     try {
-      expect(frontmatterAsWritten(doc)).toBe('---\ntitle: [unclosed\n# note\n---\n\n')
+      expect(frontmatterAsWritten(doc, false)).toBe('---\ntitle: [unclosed\n# note\n---\n\n')
     } finally { doc.destroy() }
   })
 
   it('writes values without kept text as a settle would', () => {
     const doc = markdownToYDoc('Body')
     try {
-      expect(frontmatterAsWritten(doc)).toBe('')
+      expect(frontmatterAsWritten(doc, false)).toBe('')
       setFrontmatterValue(doc, 'status', 'draft')
-      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: draft\n---\n\n')
+      expect(frontmatterAsWritten(doc, false)).toBe('---\nstatus: draft\n---\n\n')
     } finally { doc.destroy() }
   })
 
@@ -90,9 +90,24 @@ describe('frontmatterAsWritten', () => {
     const doc = markdownToYDoc('---\nstatus: draft # delete drafts\n---\n\nBody')
     try {
       setFrontmatterValue(doc, 'status', 'ready')
-      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: draft # delete drafts\n---\n\n')
+      expect(frontmatterAsWritten(doc, false)).toBe('---\nstatus: draft # delete drafts\n---\n\n')
       doc.getMap('meta').set('dohcFrontmatterSource', '---\nstatus: ready # delete drafts\n---\n\n')
-      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: ready # delete drafts\n---\n\n')
+      expect(frontmatterAsWritten(doc, false)).toBe('---\nstatus: ready # delete drafts\n---\n\n')
+    } finally { doc.destroy() }
+  })
+
+  it('is the block a settle writes once every edit is settled, through a second edit', () => {
+    const doc = markdownToYDoc('---\n# keep me\nstatus: draft # delete drafts\nowner: ice # owner note\n---\n\nBody')
+    try {
+      setFrontmatterValue(doc, 'status', 'ready')
+      const first = frontmatterAsWritten(doc, true)
+      expect(first).toBe('---\n# keep me\nstatus: ready\nowner: ice # owner note\n---\n\n')
+      expect(yDocToMarkdown(doc)).toBe(`${first}Body`)
+
+      setFrontmatterValue(doc, 'owner', 'sam')
+      const second = frontmatterAsWritten(doc, true)
+      expect(second).toBe('---\n# keep me\nstatus: ready\nowner: sam\n---\n\n')
+      expect(yDocToMarkdown(doc)).toBe(`${second}Body`)
     } finally { doc.destroy() }
   })
 })

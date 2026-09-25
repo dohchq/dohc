@@ -267,6 +267,33 @@ describe("engine markdown source view", () => {
     expect(asWritten.querySelector("details")?.open).toBe(true);
   });
 
+  it("shows the frontmatter the file holds through an in-app save", async () => {
+    const user = userEvent.setup();
+    const markdown = "---\ntitle: Plan\nstatus: draft # delete drafts\n---\n\n# Plan\n";
+    const { bridgeMock, pushSaveState } = makeEngineBridge(markdown);
+    const open = bridgeMock.openEngineYDocSession.getMockImplementation();
+    const engineDoc = projectMarkdownToYDoc(markdown);
+    bridgeMock.openEngineYDocSession.mockImplementation(async (payload) => {
+      await open?.(payload);
+      return { available: true, initialUpdate: Y.encodeStateAsUpdate(engineDoc), lineageGeneration: 1 };
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("pre")?.textContent;
+    expect(asWritten()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
+
+    const status = await screen.findByLabelText("Property status value");
+    await user.clear(status);
+    await user.type(status, "ready");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    // Until the engine saves, the file still holds the comment.
+    expect(asWritten()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
+
+    act(() => pushSaveState("saved", 999));
+    await waitFor(() => expect(asWritten()).toBe("---\ntitle: Plan\nstatus: ready\n---"));
+  });
+
   it("keeps the frontmatter as written closed when the properties show every line", async () => {
     await renderEngineDoc();
     const asWritten = await screen.findByTestId("frontmatter-as-written");
