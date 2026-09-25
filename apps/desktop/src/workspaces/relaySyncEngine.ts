@@ -1,4 +1,6 @@
 import {
+  RelayApiVersionError,
+  type RelayApiUpdate,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayUnreachableError,
@@ -86,6 +88,10 @@ export interface CloudSyncSnapshot {
   pendingChangeCount: number;
   conflictCount: number;
   authExpired: boolean;
+  // Sync stopped because the relay does not serve this build's relay API
+  // version. Names the side that must update; sync starts again after dohc
+  // restarts on a version the relay serves.
+  updateRequired?: RelayApiUpdate;
   sharingDeclined: SharingDeclined[];
   ownerAdmissionPending?: OwnerAdmissionPending[];
   syncFailure: CloudSyncFailure | null;
@@ -119,6 +125,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let conflictCount = 0;
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
+  let updateRequired: RelayApiUpdate | null = null;
   let authExpired = false;
   let syncFailure: CloudSyncFailure | null = null;
   let retrying = false;
@@ -195,6 +202,15 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       authExpired = true;
       stopped = true;
       // The expired sign-in is the state now; an older failure is not.
+      syncFailure = null;
+      clearTimers();
+      emitChange();
+      return;
+    }
+    // Retrying cannot help until one side updates, so sync stops and says which.
+    if (error instanceof RelayApiVersionError) {
+      updateRequired = error.update;
+      stopped = true;
       syncFailure = null;
       clearTimers();
       emitChange();
@@ -436,6 +452,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         pendingChangeCount,
         conflictCount,
         authExpired,
+        ...(updateRequired ? { updateRequired } : {}),
         ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         syncFailure: syncFailure ? { ...syncFailure } : null,

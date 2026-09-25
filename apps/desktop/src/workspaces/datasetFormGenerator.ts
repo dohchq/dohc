@@ -73,7 +73,6 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   return { files: {
     ...frontend,
     "dohc.json": JSON.stringify({ type: "site", title }, null, 2) + "\n",
-    "app.publish.json": JSON.stringify({ entryPath: `${input.appRoot}/frontend.js`,
-      inputs: ["frontend.js", "frontend.css"].map(path => `${input.appRoot}/${path}`), packageMap: {}, dataset: binding }, null, 2) + "\n",
+    "app.publish.json": JSON.stringify({ entryPath: "frontend.js", inputs: ["frontend.js", "frontend.css"], packageMap: {}, dataset: binding }, null, 2) + "\n",
   } };
 }

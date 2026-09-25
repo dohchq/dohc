@@ -290,6 +290,35 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("reads an engine stopped on the relay API version as disconnected, naming the side to update", async () => {
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      snapshot: () => ({
+        syncFailure: null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 2,
+        conflictCount: 0,
+        authExpired: false,
+        updateRequired: "server" as const,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    const status = await activity.open(workspace());
+    expect(status.state).toBe("cloud-disconnected");
+    expect(status.updateRequired).toBe("server");
+    await activity.stopAll();
+  });
+
   // Failed-join rollback (0P-C gate fix): close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
   // A pass someone asked for reads as syncing, not as the failure it may

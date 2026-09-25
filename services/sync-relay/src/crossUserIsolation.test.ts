@@ -28,7 +28,7 @@ import {
 // MU-C5 — the consolidated cross-user isolation sweep. The per-lane suites
 // (MU-C0 authorship, MU-C1 presence, MU-C2 reactions, MU-C3 DMs, MU-C4 shared
 // channels) each proved one invariant against one surface. This file proves the
-// cross-cutting invariants hold together — across path shares and chat-channel
+// cross-cutting invariants hold together — across path shares and chat
 // shares AND DMs at once — using planted SENTINEL values so a leak is a literal
 // substring match, not an inference. It deliberately does not re-run the
 // per-lane matrices; it is the sentinel proof that ties them together.
@@ -110,7 +110,7 @@ function memberAppend(
 // ---------------------------------------------------------------------------
 
 describe("MU-C5 · byte-identical denial across every share-scoped route", () => {
-  it("denies a non-recipient identically to an absent share, on path, chat-channel, AND DM shares", async () => {
+  it("denies a non-recipient identically to an absent share, on path, chat, AND DM shares", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -179,7 +179,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
 
     for (const [kind, shareId] of [
       ["path", pathShare],
-      ["chat-channel", chatShare],
+      ["chat", chatShare],
       ["dm", dmShare],
     ] as const) {
       expect(
@@ -290,7 +290,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       ),
     );
     expect(refused.status).toBe(400);
-    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_channel" });
+    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_chat" });
 
     const absentId = "never-existed";
     const absent = {
@@ -389,7 +389,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       ),
     );
     expect(refused.status).toBe(400);
-    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_channel" });
+    expect(await json(refused)).toMatchObject({ ok: false, code: "invalid_chat" });
 
     const absent = await denialBytes(
       await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
@@ -474,7 +474,7 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
 });
 
 describe("MU-C5 · revocation closes read and append byte-identically", () => {
-  it("after revoke, a chat-channel share read and member append both match an absent share", async () => {
+  it("after revoke, a chat share read and member append both match an absent share", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -538,7 +538,7 @@ describe("MU-C5 · revocation closes read and append byte-identically", () => {
 });
 
 describe("MU-C5 · served payloads leak no planted sentinel across every op kind", () => {
-  it("excludes every internal SENTINEL-* value from path/version and chat-channel served views", async () => {
+  it("excludes every internal SENTINEL-* value from path/version and chat served views", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -723,7 +723,7 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
 
     // Two shares to the same member, covering all served op kinds:
     //   - a version share (workspace.init, version.create, moment.append)
-    //   - a chat-channel share (channel/thread/message/reaction for one channel)
+    //   - a chat share (channel/thread/message/reaction for one channel)
     const versionShare = await createShare(h, {
       recipientUserId: MEMBER,
       paths: ["docs"],

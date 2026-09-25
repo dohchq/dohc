@@ -170,6 +170,18 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
             return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
         }
+        RuntimeError::Relay(RelayError::ApiVersionTooOld) => {
+            return WireError::new(
+                ErrorCode::ProtocolVersionUnsupported,
+                "relay-api-version-too-old",
+            );
+        }
+        RuntimeError::Relay(RelayError::ApiVersionTooNew) => {
+            return WireError::new(
+                ErrorCode::ProtocolVersionUnsupported,
+                "relay-api-version-too-new",
+            );
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
@@ -287,6 +299,9 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::SelfShare => ErrorCode::SelfShare,
         RelayError::AmbiguousSelector => ErrorCode::AmbiguousSelector,
         RelayError::InvalidChannel => ErrorCode::InvalidChannel,
+        RelayError::ApiVersionTooOld | RelayError::ApiVersionTooNew => {
+            ErrorCode::ProtocolVersionUnsupported
+        }
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
         // A served share op the engine cannot replay is the relay's response
         // failing validation, which is the code that already says so. The
@@ -938,6 +953,18 @@ mod tests {
             let wire = map_runtime(RuntimeError::Relay(relay));
             assert_eq!(wire.code, ErrorCode::Overloaded);
             assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
+        }
+        for (relay, message) in [
+            (RelayError::ApiVersionTooOld, "relay-api-version-too-old"),
+            (RelayError::ApiVersionTooNew, "relay-api-version-too-new"),
+        ] {
+            let wire = map_runtime(RuntimeError::Relay(relay));
+            assert_eq!(wire.code, ErrorCode::ProtocolVersionUnsupported);
+            assert_eq!(
+                wire.message, message,
+                "the desktop reads which side must update"
+            );
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
         }
         let permanent_limit = map_runtime(RuntimeError::Relay(RelayError::QuotaExceeded));
         assert_eq!(permanent_limit.code, ErrorCode::QuotaExceeded);

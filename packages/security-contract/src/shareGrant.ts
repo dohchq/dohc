@@ -28,7 +28,7 @@ type ShareGrantRecordBase = {
 export type ShareGrantRecord = ShareGrantRecordBase &
   (
     | { kind: "file"; access: ShareAccess }
-    | { kind: "chat-channel"; access: ChatShareAccess }
+    | { kind: "chat"; access: ChatShareAccess }
   );
 
 export type LinkCredentialRecord = {
@@ -116,7 +116,7 @@ export function isShareGrantRecord(value: unknown): value is ShareGrantRecord {
   switch (value.kind) {
     case "file":
       return isShareAccessValue(value.access);
-    case "chat-channel":
+    case "chat":
       return isChatShareAccessValue(value.access);
     default:
       return false;

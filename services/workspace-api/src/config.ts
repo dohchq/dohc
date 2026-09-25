@@ -39,6 +39,8 @@ export interface WorkspaceApiConfig {
   trustedProxies: Set<string>;
   /** The device-approval impersonation seam (development and test only). */
   testAuthSeam: boolean;
+  /** Accept crash reports on POST /api/crash-reports. Off unless DOHC_CRASH_REPORTS=1. */
+  crashReports: boolean;
 }
 
 const DEFAULT_PORT = 1786;
@@ -115,6 +117,7 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     emailTransport,
     trustedProxies: readTrustedProxies(env.DOHC_AUTH_TRUSTED_PROXIES),
     testAuthSeam,
+    crashReports: readSwitch(env.DOHC_CRASH_REPORTS, "DOHC_CRASH_REPORTS"),
   };
 }
 
@@ -124,6 +127,13 @@ function readTrustedProxies(value: string | undefined): Set<string> {
   } catch (error) {
     throw new ConfigError(error instanceof Error ? error.message : String(error));
   }
+}
+
+function readSwitch(value: string | undefined, name: string): boolean {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed === "" || trimmed === "0") return false;
+  if (trimmed === "1") return true;
+  throw new ConfigError(`${name} must be 0 or 1, got "${value}".`);
 }
 
 function readPort(value: string | undefined): number {

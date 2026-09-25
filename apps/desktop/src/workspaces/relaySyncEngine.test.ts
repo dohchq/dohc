@@ -1,4 +1,5 @@
 import {
+  RelayApiVersionError,
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   RelayUnreachableError,
@@ -934,6 +935,48 @@ describe("relaySyncEngine", () => {
     expect(pullMock).not.toHaveBeenCalled();
     sync.queueSync();
     expect(sync.snapshot().pendingChangeCount).toBe(0);
+  });
+
+  it.each(["push", "pull"] as const)(
+    "stops syncing and names the side to update when the relay refuses this API version on %s",
+    async (step) => {
+      (step === "push" ? pushMock : pullMock).mockImplementation(async () => {
+        throw new RelayApiVersionError("app");
+      });
+      const changes = vi.fn();
+      const sync = engine({ capture: capture(), onChange: changes });
+      await expect(sync.start()).rejects.toBeInstanceOf(RelayApiVersionError);
+      expect(sync.snapshot().updateRequired).toBe("app");
+      expect(sync.snapshot().syncFailure).toBeNull();
+      expect(changes).toHaveBeenCalled();
+      const calls = pushMock.mock.calls.length + pullMock.mock.calls.length;
+      // No backoff retry and no new pass: retrying cannot help until dohc updates.
+      sync.queueSync();
+      sync.queuePull();
+      await sync.retryNow({ countsAsAttempt: true });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(pushMock.mock.calls.length + pullMock.mock.calls.length).toBe(calls);
+      await sync.stop();
+    },
+  );
+
+  it("replaces an earlier sync failure with the update the server asks for", async () => {
+    let refuse = false;
+    pullMock.mockImplementation(async () => {
+      if (refuse) throw new RelayApiVersionError("server");
+      throw new Error("network");
+    });
+    const sync = engine({ capture: capture() });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sync.snapshot().syncFailure?.attempts).toBe(3);
+    refuse = true;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(sync.snapshot().updateRequired).toBe("server");
+    expect(sync.snapshot().syncFailure).toBeNull();
+    await sync.stop();
   });
 });
 

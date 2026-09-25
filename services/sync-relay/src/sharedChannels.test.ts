@@ -21,7 +21,7 @@ import {
 } from "./testing";
 
 // MU-C4 shared channels — the route-level adversarial suite for the
-// bidirectional chat-channel grant: the member append route, the chat branch
+// bidirectional chat grant: the member append route, the chat branch
 // of the fail-closed share filter, read-write vs read-only enforcement, and
 // revocation. PR-18 posture throughout: server-derived identity, fail-closed
 // filters, byte-identical generic 404s for every unauthorized probe.
@@ -122,7 +122,7 @@ async function createChannelShare(
   expect(response.status).toBe(200);
   const created = await json(response);
   expect(created).toMatchObject({
-    selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+    selector: { kind: "chat", channelWireId: SHARED_WIRE },
     access: access ?? "read-write",
     grantId: expect.any(String),
     generation: 1,
@@ -326,7 +326,7 @@ describe("a group share is one grant for the channel and its folder", () => {
       ),
     );
     expect(dm.status).toBe(400);
-    expect((await json(dm)).code).toBe("invalid_channel");
+    expect((await json(dm)).code).toBe("invalid_chat");
     const agent = await h(
       request(
         OWNER,
@@ -335,7 +335,7 @@ describe("a group share is one grant for the channel and its folder", () => {
       ),
     );
     expect(agent.status).toBe(400);
-    expect((await json(agent)).code).toBe("invalid_channel");
+    expect((await json(agent)).code).toBe("invalid_chat");
     // A wire the log has not named yet could become a direct message later
     // and carry the folder grant with it, so a group needs a known channel.
     const unknown = await h(
@@ -346,7 +346,7 @@ describe("a group share is one grant for the channel and its folder", () => {
       ),
     );
     expect(unknown.status).toBe(400);
-    expect((await json(unknown)).code).toBe("invalid_channel");
+    expect((await json(unknown)).code).toBe("invalid_chat");
     // The general channel is personal to each workspace, as a chat share or
     // as a group.
     for (const body of [
@@ -355,7 +355,7 @@ describe("a group share is one grant for the channel and its folder", () => {
     ]) {
       const general = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
       expect(general.status).toBe(400);
-      expect((await json(general)).code).toBe("invalid_channel");
+      expect((await json(general)).code).toBe("invalid_chat");
     }
     const empty = await h(
       request(
@@ -371,10 +371,10 @@ describe("a group share is one grant for the channel and its folder", () => {
 
 describe("shared channels (MU-C4)", () => {
   // A damaged row loses its selector, and with it the KIND that routes it to
-  // the right manager. Without the kind surviving, a damaged chat-channel
+  // the right manager. Without the kind surviving, a damaged chat
   // grant surfaced in the path/version share lists as an unreadable path
   // share — the wrong manager, offering the wrong actions.
-  it("still says a damaged row is a chat-channel grant", async () => {
+  it("still says a damaged row is a chat grant", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
@@ -386,7 +386,7 @@ describe("shared channels (MU-C4)", () => {
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
         selectorJson: JSON.stringify({
-          kind: "chat-channel",
+          kind: "chat",
           channelWireId: "",
         }),
         createdAtMs: 1000,
@@ -413,8 +413,8 @@ describe("shared channels (MU-C4)", () => {
     expect(row?.selector, "a damaged row carries no selector").toBeNull();
     expect(
       row?.selectorKind,
-      "a damaged chat-channel grant surfaces in the path/version share lists",
-    ).toBe("chat-channel");
+      "a damaged chat grant surfaces in the path/version share lists",
+    ).toBe("chat");
   });
 
   it("marks a chat selector with file access as damaged and keeps the share revocable", async () => {
@@ -427,7 +427,7 @@ describe("shared channels (MU-C4)", () => {
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
         selectorJson: JSON.stringify({
-          kind: "chat-channel",
+          kind: "chat",
           channelWireId: SHARED_WIRE,
         }),
         createdAtMs: 1000,
@@ -454,7 +454,7 @@ describe("shared channels (MU-C4)", () => {
       expect.objectContaining({
         shareId: "share-damaged-chat-access",
         selector: null,
-        selectorKind: "chat-channel",
+        selectorKind: "chat",
         access: "edit",
         damaged: true,
         revokedAtMs: null,
@@ -468,7 +468,7 @@ describe("shared channels (MU-C4)", () => {
       expect.objectContaining({
         shareId: "share-damaged-chat-access",
         selector: null,
-        selectorKind: "chat-channel",
+        selectorKind: "chat",
         access: "edit",
         damaged: true,
       }),
@@ -487,7 +487,7 @@ describe("shared channels (MU-C4)", () => {
     ).toMatchObject({
       shareId: "share-damaged-chat-access",
       selector: null,
-      selectorKind: "chat-channel",
+      selectorKind: "chat",
       access: "edit",
       damaged: true,
       generation: 2,
@@ -495,7 +495,7 @@ describe("shared channels (MU-C4)", () => {
     });
   });
 
-  it("creates a chat-channel grant (read-write default) and echoes the selector on both sides", async () => {
+  it("creates a chat grant (read-write default) and echoes the selector on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
@@ -506,7 +506,7 @@ describe("shared channels (MU-C4)", () => {
     >;
     expect(granted[0]).toMatchObject({
       shareId,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      selector: { kind: "chat", channelWireId: SHARED_WIRE },
       access: "read-write",
       grantId: expect.any(String),
       generation: 1,
@@ -518,7 +518,7 @@ describe("shared channels (MU-C4)", () => {
     expect(received[0]).toMatchObject({
       shareId,
       granterUserId: OWNER,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      selector: { kind: "chat", channelWireId: SHARED_WIRE },
       access: "read-write",
       grantId: expect.any(String),
       generation: 1,
@@ -553,7 +553,7 @@ describe("shared channels (MU-C4)", () => {
       request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: MEMBER_A, channelWireId: "" })),
     );
     expect(empty.status).toBe(400);
-    expect((await json(empty)).code).toBe("invalid_channel");
+    expect((await json(empty)).code).toBe("invalid_chat");
     const badAccess = await h(
       request(
         OWNER,
@@ -1069,7 +1069,7 @@ describe("shared channels (MU-C4)", () => {
     expect(served).not.toContain("device-123");
   });
 
-  it("never serves a blob through a chat-channel share (chat ops are blob-free)", async () => {
+  it("never serves a blob through a chat share (chat ops are blob-free)", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);

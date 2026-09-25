@@ -19,6 +19,12 @@ const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
   "cloud-disconnected": "bg-subtle",
 };
 
+// Sync stopped until one side updates, so the title bar names that side.
+export const UPDATE_REQUIRED_LABEL: Record<NonNullable<SyncStatusResult["updateRequired"]>, string> = {
+  app: "Update dohc to sync",
+  server: "Server needs an update",
+};
+
 // Owner live delivery is its own fact, beside the local save state and never
 // folded into it: a saved file says nothing about whether live editing is
 // running, so "active" here never reads as synced or up to date.
@@ -49,6 +55,9 @@ export function WorkspaceSyncStatus({ syncStatus }: {
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
+  const shownLabel = syncStatus?.updateRequired
+    ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
+    : label;
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.
   const liveDelivery = syncStatus?.ownerLiveDelivery;
@@ -61,12 +70,12 @@ export function WorkspaceSyncStatus({ syncStatus }: {
         data-testid="sync-status"
         data-state={state ?? "unknown"}
         role="status"
-        aria-label={label}
-        title={label}
+        aria-label={shownLabel}
+        title={shownLabel}
         className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted"
       >
         <span aria-hidden className={`inline-block size-1.5 rounded-full ${state ? SYNC_DOT[state] : "bg-subtle"}`} />
-        <span>{label}</span>
+        <span>{shownLabel}</span>
       </span>
       {liveDelivery && liveLabel ? (
         <span

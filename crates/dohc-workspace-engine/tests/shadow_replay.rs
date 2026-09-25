@@ -19,6 +19,7 @@ fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Va
         workspace,
         deadline_ms: None,
         idempotency_key: Some(format!("shadow-{id}")),
+        progress: false,
         params,
     }
 }

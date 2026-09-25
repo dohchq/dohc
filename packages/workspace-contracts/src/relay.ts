@@ -110,6 +110,29 @@ export class RelayKeyEnvelopeMissingError extends Error {
   }
 }
 
+// Which side must update when the relay does not serve the relay API version
+// this build speaks. "app" means the relay needs a newer dohc; "server" means
+// the relay is older than this dohc.
+export type RelayApiUpdate = "app" | "server";
+
+export const RELAY_API_VERSION_CAUSE: Readonly<Record<RelayApiUpdate, string>> = {
+  app: "This server needs a newer version of dohc.",
+  server: "This server runs an older version of dohc.",
+};
+
+export class RelayApiVersionError extends Error {
+  constructor(readonly update: RelayApiUpdate) {
+    super(
+      `${RELAY_API_VERSION_CAUSE[update]} ${
+        update === "app"
+          ? "Update dohc, then try again."
+          : "Ask the person who runs it to update it."
+      }`,
+    );
+    this.name = "RelayApiVersionError";
+  }
+}
+
 export interface RecoverRelayOriginResult {
   // The diverged origin id the relay is authoritative for; it is retired
   // locally (never pushed again) but its ops stay as shared history.
