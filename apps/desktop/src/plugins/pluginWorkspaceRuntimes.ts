@@ -86,9 +86,17 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   }
 
   start(): Promise<void> {
-    this.startPromise ??= this.pipeline.start().finally(() => {
-      this.startSettled = true;
-    });
+    this.startPromise ??= this.pipeline
+      .start()
+      .then(() => {
+        // Discovery has landed: drain once. Claims whose plugin was removed
+        // while the app was closed have no other wake-up, and this drain
+        // settles them failed so they reach the owner.
+        this.automations.notifyClaimed();
+      })
+      .finally(() => {
+        this.startSettled = true;
+      });
     return this.startPromise;
   }
 

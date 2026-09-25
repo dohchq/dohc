@@ -467,7 +467,7 @@ export function ChatsView(props: {
   // The user settings the add-agent form writes, and the save that persists
   // them. Absent in embedded surfaces, which then offer no add-agent form.
   userSettings?: DesktopUserSettings | null;
-  onSaveUserSettings?: (settings: DesktopUserSettings) => Promise<void>;
+  onSaveUserSettings?: (settings: DesktopUserSettings, base: DesktopUserSettings) => Promise<void>;
   // What the agent reaches: the workspace folder its runner is started in.
   workspacePath?: string;
   // Ephemeral presence/typing transport, present only under collaboration.

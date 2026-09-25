@@ -57,6 +57,7 @@ import {
   PluginSettingsResult,
   PluginSizesResult,
   PluginUninstallPreflightResult,
+  NoticesChangedEvent,
   SearchResultsEvent,
   ShareHandoffStatus,
   StartPluginPanelResult,
@@ -66,6 +67,7 @@ import {
   UpdateStateEvent,
   WorkbenchMenuCommand,
   WorkspaceSummary,
+  noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
   parseInvokePluginPanelSdkPayloadForIpc,
@@ -586,6 +588,11 @@ const bridge: DohcDesktopBridge = {
   setUserSettings: (payload: SetUserSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
+  reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
+  getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
+  openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
+  openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>
+    ipcRenderer.invoke(CHANNELS.openWorkspaceSettingsFile, payload),
   getWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.getWorkspaceSettings, payload),
   setWorkspaceSettings: (payload: SetWorkspaceSettingsPayload) =>
@@ -666,6 +673,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceSearchOperations, invoke),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
+  ...operationBridge(noticeOperations, invoke),
+  onNoticesChanged: (listener) =>
+    onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

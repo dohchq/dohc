@@ -505,8 +505,10 @@ describe("desktop engine restart coordination", () => {
       expect(daemon!.currentClient()).toBe(replacement);
       expect(f.created).toHaveLength(3);
       expect(f.dependencies.launchMarks.daemonReady).toHaveBeenCalledOnce();
+      // The recreated plugin runtime drained once at its start; the claim wakes it again.
+      const woken = f.created[2]!.parts.automations.notifyClaimed.mock.calls.length;
       replacement.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
-      expect(f.created[2]!.parts.automations.notifyClaimed).toHaveBeenCalledOnce();
+      expect(f.created[2]!.parts.automations.notifyClaimed).toHaveBeenCalledTimes(woken + 1);
     } finally { held.resolve(); await restarting; await f.close(); }
   });
 
@@ -650,6 +652,8 @@ describe("desktop engine composed sessions and events", () => {
       await f.engine.start(); await f.states.get("workspace")!.pluginRuntimes.ensure(workspace);
       const original = f.created[0]!.parts;
       const current = f.created.at(-1)!.parts;
+      // The runtime drained once when it started; each pending claim wakes it once more.
+      const drainedAtStart = current.automations.notifyClaimed.mock.calls.length;
       const payload = { workspaceId: "workspace", collectionPath: "tasks", recordId: "record", author: null,
         timestamp: 10, actorKind: "human", onBehalfOf: null, depth: 0, source: { originId: "origin", originSeq: 1 } };
       f.client.emit("record.updated", payload);
@@ -659,13 +663,13 @@ describe("desktop engine composed sessions and events", () => {
       expect(current.workspaceEvents.handleRecordEvent).toHaveBeenCalledWith({ name: "record.updated",
         data: { collectionPath: "tasks", recordId: "record", author: null, timestamp: 10, actorKind: "human",
           onBehalfOf: null, depth: 0, source: { originId: "origin", originSeq: 1 } } });
-      expect(current.automations.notifyClaimed).toHaveBeenCalledOnce();
+      expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
       expect(f.dependencies.notifyAutomationFailuresChanged).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
       f.client.emit("record.updated", payload);
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(current.workspaceEvents.handleRecordEvent).toHaveBeenCalledOnce();
-      expect(current.automations.notifyClaimed).toHaveBeenCalledOnce();
+      expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
       vi.useFakeTimers();
       f.client.emit("capture.momentRecorded", { workspaceId: "workspace", paths: ["notes.md"], appliedCount: 1, notOwnedCount: 0 });
       await vi.advanceTimersByTimeAsync(100);

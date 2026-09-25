@@ -274,6 +274,7 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  noticesChanged: "desktop:notices-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
@@ -341,6 +342,10 @@ export const CHANNELS = {
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
+  reloadUserSettings: "desktop:reload-user-settings",
+  getUserSettingsFilePath: "desktop:get-user-settings-file-path",
+  openUserSettingsFile: "desktop:open-user-settings-file",
+  openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",
   getWorkspaceSettings: "desktop:get-workspace-settings",
   setWorkspaceSettings: "desktop:set-workspace-settings",
   resetWorkspaceSettings: "desktop:reset-workspace-settings",

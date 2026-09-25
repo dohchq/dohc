@@ -18,6 +18,12 @@ import type {
   AgentNotificationKind,
 } from "./agentNotifications";
 
+type NoticeAction = {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+};
+
 type Notice = {
   // Sync/update notices use a fixed id; agent notices carry their own
   // per-(workspace, run, kind) id.
@@ -25,11 +31,7 @@ type Notice = {
   tone: "danger" | "warning" | "success" | "neutral";
   title: string;
   body: string;
-  action?: {
-    label: string;
-    onClick: () => void;
-    disabled?: boolean;
-  };
+  actions?: readonly NoticeAction[];
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
   onDismiss?: () => void;
@@ -51,13 +53,15 @@ export interface WorkspaceErrorNotice {
   details: string;
   atMs: number;
   canRetry: boolean;
+  // A step that fixes the cause, such as opening the file it names.
+  actionLabel?: string;
   seen: boolean;
 }
 
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
-// cap and the two engine-minted failure reasons a failed claim can carry.
+// cap, and the failure reason the reaper records for a run that did not
+// finish. A chain stop is a flag on the failure, not a reason text.
 const AUTOMATION_CHAIN_DEPTH_CAP = 4;
-const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
 const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
 
 /** An error text as one sentence: the handler's message rarely ends one. */
@@ -109,7 +113,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  if (failure.error === AUTOMATION_CHAIN_STOPPED) {
+  if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
@@ -225,6 +229,7 @@ export function NoticeCenter(props: {
   // pushing the workspace around.
   workspaceErrors?: readonly WorkspaceErrorNotice[];
   onRetryWorkspaceError?: (id: string) => void;
+  onWorkspaceErrorAction?: (id: string) => void;
   onHideWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Owner live delivery: the shell's trusted retry command, and the way into
@@ -450,10 +455,10 @@ export function NoticeCenter(props: {
         body: "Review them to choose what to keep.",
         ...(props.onReviewShareChanges
           ? {
-              action: {
+              actions: [{
                 label: "Review",
                 onClick: () => props.onReviewShareChanges?.(sent.proposalId),
-              },
+              }],
             }
           : {}),
         Icon: GitPullRequestArrow,
@@ -471,14 +476,20 @@ export function NoticeCenter(props: {
         tone: error.tone ?? "danger",
         title: error.message,
         body: "",
-        ...(error.canRetry && props.onRetryWorkspaceError
-          ? {
-              action: {
+        actions: [
+          ...(error.actionLabel && props.onWorkspaceErrorAction
+            ? [{
+                label: error.actionLabel,
+                onClick: () => props.onWorkspaceErrorAction?.(error.id),
+              }]
+            : []),
+          ...(error.canRetry && props.onRetryWorkspaceError
+            ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
-              },
-            }
-          : {}),
+              }]
+            : []),
+        ],
         ...(props.onDismissWorkspaceError
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
@@ -514,7 +525,7 @@ export function NoticeCenter(props: {
         tone: "warning",
         title: liveDelivery.title,
         body: liveDelivery.body,
-        ...(liveDeliveryAction ? { action: liveDeliveryAction } : {}),
+        ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
         copyText: liveDeliveryDetails,
         Icon: RefreshCw,
       });
@@ -529,7 +540,7 @@ export function NoticeCenter(props: {
         title: OWNER_LIVE_REFUSALS_TITLE,
         body: OWNER_LIVE_REFUSALS_BODY,
         ...(onOpenLiveDocuments
-          ? { action: { label: "Live documents", onClick: onOpenLiveDocuments } }
+          ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }] }
           : {}),
         copyText: refusalsDetails,
         Icon: AlertTriangle,
@@ -543,7 +554,7 @@ export function NoticeCenter(props: {
         title: "Shared files need repair",
         body:
           "Some shared files are not current in this folder. Refresh the shared view to repair them.",
-        action: { label: "Refresh", onClick: props.onRefreshShareView },
+        actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
         Icon: AlertTriangle,
       });
     }
@@ -559,7 +570,7 @@ export function NoticeCenter(props: {
         body:
           props.conflictSummaries[0] ??
           "Both copies are safe. Review the differences to choose what stays.",
-        action: { label: "Review", onClick: props.onOpenConflicts },
+        actions: [{ label: "Review", onClick: props.onOpenConflicts }],
         Icon: AlertTriangle,
       });
     } else if (state === "cloud-disconnected") {
@@ -606,12 +617,12 @@ export function NoticeCenter(props: {
           : ENGINE_STORE_UPDATE_NEXT_STEP,
         ...(rebuild
           ? {
-              action: {
+              actions: [{
                 label: "Rebuild",
                 onClick: () => {
                   if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
                 },
-              },
+              }],
             }
           : {}),
         Icon: AlertTriangle,
@@ -622,7 +633,7 @@ export function NoticeCenter(props: {
         tone: "warning",
         title: "History paused",
         body: "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
-        action: { label: "Open History", onClick: props.onOpenHistory },
+        actions: [{ label: "Open History", onClick: props.onOpenHistory }],
         Icon: AlertTriangle,
       });
     }
@@ -656,7 +667,7 @@ export function NoticeCenter(props: {
         tone: "success",
         title: "Agent running",
         body: "Workspace changes from this run will be attributed in history.",
-        action: { label: "Open History", onClick: props.onOpenHistory },
+        actions: [{ label: "Open History", onClick: props.onOpenHistory }],
         Icon: Bot,
       });
     }
@@ -667,16 +678,18 @@ export function NoticeCenter(props: {
         tone: "neutral",
         title: "Update ready",
         body: updateActionError ?? updateState.message,
-        action: updateState.canInstall
+        ...(updateState.canInstall
           ? {
-              label: installPending ? "Restarting" : "Restart",
-              onClick: () => {
-                if (props.onRestartToUpdate) props.onRestartToUpdate();
-                else void installUpdate();
-              },
-              disabled: installPending,
+              actions: [{
+                label: installPending ? "Restarting" : "Restart",
+                onClick: () => {
+                  if (props.onRestartToUpdate) props.onRestartToUpdate();
+                  else void installUpdate();
+                },
+                disabled: installPending,
+              }],
             }
-          : undefined,
+          : {}),
         Icon: Download,
       });
     } else if (updateActionError) {
@@ -685,7 +698,7 @@ export function NoticeCenter(props: {
         tone: "danger",
         title: "Update failed",
         body: updateActionError,
-        action: { label: "Open Settings", onClick: props.onOpenSettings },
+        actions: [{ label: "Open Settings", onClick: props.onOpenSettings }],
         Icon: AlertTriangle,
       });
     }
@@ -700,6 +713,7 @@ export function NoticeCenter(props: {
     props.onDismissAutomationFailure,
     props.workspaceErrors,
     props.onRetryWorkspaceError,
+    props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
@@ -766,6 +780,16 @@ export function NoticeCenter(props: {
               <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
                 {errorToast.message}
               </span>
+              {errorToast.actionLabel && props.onWorkspaceErrorAction ? (
+                <button
+                  type="button"
+                  data-testid="workspace-shell-error-action"
+                  onClick={() => props.onWorkspaceErrorAction?.(errorToast.id)}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  {errorToast.actionLabel}
+                </button>
+              ) : null}
               {errorToast.canRetry && props.onRetryWorkspaceError ? (
                 <button
                   type="button"
@@ -988,20 +1012,21 @@ export function NoticeCenter(props: {
                       <span className="truncate text-[12px] font-medium text-ink">
                         {notice.title}
                       </span>
-                      {notice.action ? (
+                      {(notice.actions ?? []).map((action, index) => (
                         <button
+                          key={action.label}
                           type="button"
-                          disabled={notice.action.disabled}
+                          disabled={action.disabled}
                           onClick={() => {
                             toggleRef.current?.focus({ preventScroll: true });
-                            notice.action?.onClick();
+                            action.onClick();
                             setOpen(false);
                           }}
-                          className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                          className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50`}
                         >
-                          {notice.action.label}
+                          {action.label}
                         </button>
-                      ) : null}
+                      ))}
                       {notice.copyText !== undefined ? (
                         <CopyDetailsButton
                           iconOnly
@@ -1016,7 +1041,7 @@ export function NoticeCenter(props: {
                           data-testid={`notice-${notice.id}-dismiss`}
                           aria-label="Dismiss notice"
                           onClick={() => notice.onDismiss?.()}
-                          className={`${notice.action ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
+                          className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink`}
                         >
                           <X size={11} aria-hidden />
                         </button>

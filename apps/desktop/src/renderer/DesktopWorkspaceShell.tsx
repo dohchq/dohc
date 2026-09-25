@@ -71,6 +71,7 @@ import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
+import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
@@ -793,10 +794,19 @@ export function DesktopWorkspaceShell(props: {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSettingsFileNotice,
     showSuccessNotice,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   } = useShellError(workspaceId);
+  const onWorkspaceSettingsRead = useSettingsFileNotices({
+    workspaceId,
+    workspaceIsReady,
+    userSettings: props.userSettings,
+    show: showSettingsFileNotice,
+    reportError: showShellError,
+  });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
   // outlives the panel, so its Try again reopens the connection dialog with
@@ -4257,8 +4267,8 @@ export function DesktopWorkspaceShell(props: {
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
   const saveUserSettingsFromChats = useCallback(
-    async (settings: DesktopUserSettings) => {
-      await bridge().setUserSettings({ settings });
+    async (settings: DesktopUserSettings, base: DesktopUserSettings) => {
+      await bridge().setUserSettings({ settings, base });
     },
     [],
   );
@@ -4376,6 +4386,7 @@ export function DesktopWorkspaceShell(props: {
         ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
+        ...(error.action ? { actionLabel: error.action.label } : {}),
         seen: error.seen,
       })),
     [shellErrors, reportFacts],
@@ -4760,6 +4771,7 @@ export function DesktopWorkspaceShell(props: {
               onRestartToUpdate={openRestartPrompt}
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
+              onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
@@ -5953,6 +5965,7 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
             onError={showShellError}
+            onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

@@ -55,7 +55,13 @@ export interface CloudSyncEngineOptions {
   // gate (including materialization and cursor commit). Follow-up projection
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
-  afterSuccessfulPull?: () => Promise<void>;
+  // `recovered` is true for the first successful pass after a failed one,
+  // which is when the relay answers again.
+  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs before each pull request is sent, and must finish any durable write
+  // it needs before it returns. The function it returns runs when that pull
+  // ends, whatever the outcome.
+  pullStarting?: () => () => void;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -225,6 +231,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
       async (materializePage) => {
+        const pull = async () => {
+          const ended = options.pullStarting?.();
+          try {
+            return await operations.pull(materializePage);
+          } finally {
+            ended?.();
+          }
+        };
         // A join-bootstrap engine is pull-only until its first pull succeeds:
         // a fresh join must never append ops before it has the remote state.
         if (!bootstrapPass) {
@@ -241,7 +255,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           }
         }
         try {
-          return await operations.pull(materializePage);
+          return await pull();
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // A pull can find that this machine's local origin disagrees with its
@@ -251,7 +265,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           if (!bootstrapPass) {
             await push();
           }
-          return operations.pull(materializePage);
+          return pull();
         }
       },
     );
@@ -261,7 +275,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     bootstrapPullPending = false;
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull();
+        await options.afterSuccessfulPull({ recovered: syncFailure !== null });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }

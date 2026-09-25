@@ -15,13 +15,22 @@ import type { PluginPipelinePluginStatus } from "./pluginStatusProjection";
 function claimOf(overrides: Partial<AutomationClaim> = {}): AutomationClaim {
   return {
     claimId: "claim-1",
-    automationId: "hello-plugin/triage",
+    automationId: "plugin:hello-plugin/triage",
     trigger: { originId: "origin-a", originSeq: 7 },
     recordId: "rec_1",
     collectionPath: "tasks",
     depth: 0,
+    change: {
+      kind: "changed",
+      authorOriginId: null,
+      actorKind: "human",
+      onBehalfOf: null,
+      fields: [],
+      fieldsOmitted: 0,
+    },
     state: "running",
     attempts: 1,
+    run: 1,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
     ...overrides,
@@ -54,6 +63,8 @@ interface Harness {
   errors: Array<{ context: string; error: unknown }>;
   pendingClaims: AutomationClaim[];
   claimFailures: string[];
+  /** Every plugin id the executor asked for declarations. */
+  declarationsAsked: string[];
 }
 
 function harness(input: {
@@ -68,7 +79,13 @@ function harness(input: {
   const adapter = input.engine?.adapter ?? {
     subscribeAutomation: vi.fn(async () => ({ subscribed: true })),
     unsubscribeAutomation: vi.fn(async () => ({ unsubscribed: true })),
-    claimNextAutomation: vi.fn(async () => pendingClaims.shift() ?? null),
+    // The engine serves the oldest pending claim under the asked prefix.
+    claimNextAutomation: vi.fn(async (input: { automationIdPrefix: string }) => {
+      const index = pendingClaims.findIndex((claim) =>
+        claim.automationId.startsWith(input.automationIdPrefix),
+      );
+      return index < 0 ? null : (pendingClaims.splice(index, 1)[0] ?? null);
+    }),
     settleAutomationClaim: vi.fn(
       async (settle: { claimId: string; state: string }) =>
         claimOf({ claimId: settle.claimId }),
@@ -77,15 +94,18 @@ function harness(input: {
   const runs: Harness["runs"] = [];
   const errors: Harness["errors"] = [];
   const claimFailures: string[] = [];
+  const declarationsAsked: string[] = [];
   const automations = new PluginAutomations({
     onClaimFailed: (automationId) => {
       claimFailures.push(automationId);
     },
     withAdapter: (work) => work(adapter as unknown as AutomationEngineAdapter),
-    declaredAutomations: () =>
-      input.discoveryPending
+    declaredAutomations: (pluginId) => {
+      declarationsAsked.push(pluginId);
+      return input.discoveryPending
         ? undefined
-        : (input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }]),
+        : (input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }]);
+    },
     proveReadable: input.proveReadable ?? (async () => undefined),
     runOnPlugin:
       input.runOnPlugin ??
@@ -97,7 +117,15 @@ function harness(input: {
       errors.push({ context, error });
     },
   });
-  return { automations, adapter, runs, errors, pendingClaims, claimFailures };
+  return {
+    automations,
+    adapter,
+    runs,
+    errors,
+    pendingClaims,
+    claimFailures,
+    declarationsAsked,
+  };
 }
 
 describe("PluginAutomations", () => {
@@ -177,8 +205,9 @@ describe("PluginAutomations", () => {
     h.automations.handlePipelineStatus(statusEvent());
     await vi.waitFor(() => {
       expect(h.adapter.subscribeAutomation).toHaveBeenCalledWith({
-        automationId: "hello-plugin/triage",
+        automationId: "plugin:hello-plugin/triage",
         path: "tasks",
+        kinds: ["added", "changed"],
       });
     });
 
@@ -188,7 +217,7 @@ describe("PluginAutomations", () => {
     h.automations.handlePipelineStatus(statusEvent({ status: "disabled" }));
     await vi.waitFor(() => {
       expect(h.adapter.unsubscribeAutomation).toHaveBeenCalledWith({
-        automationId: "hello-plugin/triage",
+        automationId: "plugin:hello-plugin/triage",
         path: "tasks",
       });
     });
@@ -230,7 +259,7 @@ describe("PluginAutomations", () => {
     ).toBeUndefined();
   });
 
-  it("exposes the run's authority — automation id, owner, depth + 1 — only while the handler runs, and only to its own plugin", async () => {
+  it("exposes the run's authority — automation id, run, owner, depth + 1 — only while the handler runs, and only to its own plugin", async () => {
     const h = harness({
       runOnPlugin: async () => {
         const run = h.automations.activeRun({
@@ -239,7 +268,8 @@ describe("PluginAutomations", () => {
         });
         expect(run).toEqual({
           claimId: "claim-1",
-          automationId: "hello-plugin/triage",
+          automationId: "plugin:hello-plugin/triage",
+          run: 1,
           onBehalfOf: "local",
           depth: 1,
           writes: 0,
@@ -288,22 +318,87 @@ describe("PluginAutomations", () => {
     });
     expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
     // The failure surface's poke fires after the settle committed.
-    expect(h.claimFailures).toEqual(["hello-plugin/triage"]);
+    expect(h.claimFailures).toEqual(["plugin:hello-plugin/triage"]);
   });
 
   it("settles a claim whose automation is no longer installed as failed", async () => {
     const h = harness();
-    // No registration at all: the claim's automation resolves to nothing.
-    h.pendingClaims.push(claimOf({ automationId: "gone-plugin/auto" }));
+    // No registration at all: the claim's automation resolves to nothing,
+    // as for a plugin removed while the app was closed.
+    h.pendingClaims.push(claimOf({ automationId: "plugin:gone-plugin/auto" }));
     h.automations.notifyClaimed();
     await vi.waitFor(() => {
       expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
         claimId: "claim-1",
         state: "failed",
-        error: 'No installed plugin declares automation "gone-plugin/auto".',
+        error: 'No installed plugin declares automation "plugin:gone-plugin/auto".',
       });
     });
     expect(h.runs).toEqual([]);
+  });
+
+  it("resolves a scoped plugin by its whole name before it registers", async () => {
+    const h = harness();
+    // "@acme/tools" declares triage but has not registered yet: its claim
+    // waits instead of settling failed as undeclared.
+    h.pendingClaims.push(claimOf({ automationId: "plugin:@acme/tools/triage" }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation.mock.calls.length).toBeGreaterThan(1),
+    );
+    expect(h.declarationsAsked).toEqual(["@acme/tools"]);
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+    expect(h.runs).toEqual([]);
+  });
+
+  it("drains only the plugin namespace and leaves other executors' claims alone", async () => {
+    const h = harness();
+    h.pendingClaims.push(
+      claimOf({ claimId: "claim-collection", automationId: "collection:tasks#stamp" }),
+    );
+    h.automations.notifyClaimed();
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
+    );
+    await h.automations.dispose();
+    expect(
+      new Set(
+        h.adapter.claimNextAutomation.mock.calls.map(
+          ([input]) => (input as { automationIdPrefix: string }).automationIdPrefix,
+        ),
+      ),
+    ).toEqual(new Set(["plugin:"]));
+    expect(h.pendingClaims.map((claim) => claim.claimId)).toEqual([
+      "claim-collection",
+    ]);
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+  });
+
+  it("gives a retried claim's writes the new run, so its keys differ from the failed run's", async () => {
+    const runs: Array<number | undefined> = [];
+    const h = harness({
+      runOnPlugin: async (_pluginId, params) => {
+        runs.push(
+          h.automations.activeRun({
+            claimId: params.claimId,
+            pluginId: "hello-plugin",
+          })?.run,
+        );
+        return "completed";
+      },
+    });
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() =>
+      expect(h.adapter.subscribeAutomation).toHaveBeenCalled(),
+    );
+    // The same claim served after a crash requeue (run 1 again), then after
+    // the owner's retry (run 2).
+    h.pendingClaims.push(claimOf({ attempts: 2, run: 1 }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() => expect(runs).toEqual([1]));
+    h.pendingClaims.push(claimOf({ attempts: 3, run: 2 }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() => expect(runs).toEqual([1, 2]));
   });
 
   // (a) A host refusal ("dohc is still working on plugin ...") is the run
@@ -347,10 +442,10 @@ describe("PluginAutomations", () => {
     expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
   });
 
-  // (b) Startup ordering: claimNext is workspace-wide but `registered`
-  // fills per plugin. A claim whose installed plugin has not registered yet
-  // must not settle failed, and the drain must stop rather than run younger
-  // claims past it.
+  // (b) Startup ordering: claimNext serves every plugin claim, but
+  // `registered` fills per plugin. A claim whose installed plugin has not
+  // registered yet must not settle failed, and the drain must stop rather
+  // than run younger claims past it.
   it("holds a claim that arrives before the plugin pipeline's first discovery pass", async () => {
     const h = harness({ discoveryPending: true });
     h.pendingClaims.push(claimOf({ claimId: "claim-early" }));
@@ -374,7 +469,7 @@ describe("PluginAutomations", () => {
     h.automations.handlePipelineStatus(statusEvent());
     await vi.waitFor(() => expect(h.errors).toHaveLength(1));
     expect(h.adapter.subscribeAutomation).not.toHaveBeenCalled();
-    expect(h.errors[0]?.context).toContain("hello-plugin/triage");
+    expect(h.errors[0]?.context).toContain("plugin:hello-plugin/triage");
     expect(String((h.errors[0]?.error as Error).message)).toContain("cannot read tasks");
   });
 
@@ -388,16 +483,16 @@ describe("PluginAutomations", () => {
     );
 
     h.pendingClaims.push(
-      claimOf({ claimId: "claim-later", automationId: "later-plugin/triage" }),
+      claimOf({ claimId: "claim-later", automationId: "plugin:later-plugin/triage" }),
       claimOf({ claimId: "claim-hello" }),
     );
     h.automations.notifyClaimed();
     await vi.waitFor(() =>
       expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
     );
-    // The later-plugin claim is held (never settled, never run), and the
-    // drain goes on: hello-plugin's claim runs now. A plugin that never
-    // registers this session must not stall every other automation.
+    // The later-plugin claim stays pending (never taken, never run), and
+    // hello-plugin's claim runs now. A plugin that never registers this
+    // session must not stall every other automation.
     await vi.waitFor(() => {
       expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
         claimId: "claim-hello",
@@ -483,7 +578,7 @@ describe("PluginAutomations", () => {
 
     await h.automations.dispose();
     expect(h.adapter.unsubscribeAutomation).toHaveBeenCalledWith({
-      automationId: "hello-plugin/triage",
+      automationId: "plugin:hello-plugin/triage",
       path: "tasks",
     });
     const drained = h.adapter.claimNextAutomation.mock.calls.length;
