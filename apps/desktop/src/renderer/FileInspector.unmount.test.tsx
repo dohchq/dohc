@@ -4633,6 +4633,82 @@ describe("markdown editor unmount flush", () => {
     }
   });
 
+  // The same early edit in a duplicate pane whose read answered after a newer
+  // one. The shared document refuses the older read, so saving the edit would
+  // put text built on the older read under the newer content hash.
+  it("sets aside an early edit built on a read the document already moved past", async () => {
+    type ReadResult = { text: string; truncated: false; contentHash: string };
+    const newerHash = "2".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<ReadResult>((resolve) => { resolveNewer = resolve; });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    const capture = vi.spyOn(orphanedDraftsModule, "captureOrphanedDraft");
+    const olderCell = () =>
+      (screen.queryAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+        .find((input) => input.value === "1");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const view = render(
+        <>
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+        </>,
+      );
+      await waitFor(() =>
+        expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+      );
+      await act(async () => {
+        resolveNewer({ text: "a\n2", truncated: false, contentHash: newerHash });
+        await newer;
+      });
+      const buffer = getSharedLocalDocument(
+        documentVersionKey("ws-1", "data/table.csv", undefined),
+      );
+      await waitFor(() => expect(buffer.getSnapshot().body).toBe("a\n2"));
+
+      // Edit the older pane the moment its cells appear, before its effects.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The older pane's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = olderCell();
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          fireEvent.change(cell, { target: { value: "10" } });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      // Outside act, so React commits the table and runs its effects in
+      // separate tasks, as it does in the app.
+      resolveOlder({ text: "a\n1", truncated: false, contentHash: "1".repeat(64) });
+      await edited;
+
+      expect(capture).toHaveBeenCalledWith("ws-1", "data/table.csv", "a\n10");
+      expect(buffer.getSnapshot()).toMatchObject({ body: "a\n2", contentHash: newerHash });
+      await waitFor(() =>
+        expect(
+          (screen.getAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+            .map((input) => input.value),
+        ).toEqual(["2", "2"]),
+      );
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      capture.mockRestore();
+    }
+  });
+
   it("round-trips quoted CSV cells through the existing codec", () => {
     const text = [
       "name,note,quote",

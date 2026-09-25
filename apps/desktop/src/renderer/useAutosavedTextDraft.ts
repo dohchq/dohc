@@ -567,6 +567,19 @@ export function useAutosavedTextDraft(props: {
       latestDraft.current === latestSnapshot.current.body
     ) {
       acceptLandedRead();
+      // The shared document can refuse that read because a later read or a
+      // peer draft already moved it on. Publishing then would save this edit
+      // under the newer content hash and overwrite the newer text, so the edit
+      // is set aside and the surface shows the document as it now stands.
+      const shared = props.localBuffer.getSnapshot();
+      if (shared.initialized && shared.body !== latestDraft.current) {
+        captureOrphanedDraft(props.workspaceId, props.path, next);
+        valueRevision.current += 1;
+        setDraft(shared.body);
+        latestDraft.current = shared.body;
+        setSaveState(shared.saveState);
+        return;
+      }
     }
     setDraft(next);
     latestDraft.current = next;
