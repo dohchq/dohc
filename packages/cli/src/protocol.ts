@@ -722,7 +722,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
-const cliResultSchemas = {
+export const cliResultSchemas = {
   dataset: DatasetResult,
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
