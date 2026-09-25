@@ -30,17 +30,18 @@ export function sqlTokens(sql:string):Array<{value:string;quoted:boolean;literal
   return tokens;
 }
 /**
- * Whether SQLite would prepare a statement from `sql`. SQLite skips whitespace, comments, and semicolons, and
- * Node's binding passes the text up to its first NUL. Node 24.16's `node:sqlite` can crash the process after
- * preparing text with no statement, so a caller refuses such text before `prepare`.
+ * Whether SQLite would prepare a statement from `sql`. Node's binding passes the text up to its first NUL, and
+ * SQLite's tokenizer skips whitespace, the UTF-8 byte order mark, comments, and semicolons. Node 24.16's
+ * `node:sqlite` can crash the process after preparing text with no statement, so a caller refuses such text
+ * before `prepare`. This also skips a vertical tab, which SQLite skips only after other whitespace, so it can
+ * refuse text SQLite would reject anyway, but never pass text with no statement.
  */
 export function hasStatement(sql:string):boolean {
-  for(let index=0;index<sql.length;) {
-    const char=sql[index];
-    if(char==="\0") return false;
-    if(char===";" || " \t\n\v\f\r".includes(char)) index++;
-    else if(sql.startsWith("--",index)) { const end=sql.indexOf("\n",index); if(end<0) return false; index=end+1; }
-    else if(sql.startsWith("/*",index)) { const end=sql.indexOf("*/",index+2); if(end<0) return false; index=end+2; }
+  const end=sql.indexOf("\0"), text=end<0 ? sql : sql.slice(0,end);
+  for(let index=0;index<text.length;) {
+    if(" \t\n\v\f\r;\uFEFF".includes(text[index])) index++;
+    else if(text.startsWith("--",index)) { const close=text.indexOf("\n",index); if(close<0) return false; index=close+1; }
+    else if(text.startsWith("/*",index)) { const close=text.indexOf("*/",index+2); if(close<0) return false; index=close+2; }
     else return true;
   }
   return false;

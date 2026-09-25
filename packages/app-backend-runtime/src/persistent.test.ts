@@ -225,13 +225,17 @@ describe("persistent dataset worker",()=>{
         return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
       };
       const worker=await open({},launch);
-      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1"];
+      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1",
+        "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"];
+      // Each input's own outcome, so one that reaches SQLite shows. Five rounds of 24 queries stay under the 128-statement limit.
       const source=`globalThis.operations={run(ctx){
-        const refused=new Set();
-        for(let round=0;round<12;round++) for(const sql of ${JSON.stringify(empty)}.concat(['SELECT missing FROM items'])) {
-          try { ctx.db.query(sql); } catch (error) { if(sql.startsWith('SELECT')) continue; refused.add(error.message); }
-        }
-        return [...refused];
+        const inputs=${JSON.stringify(empty)}, outcomes=inputs.map(()=>[]);
+        for(let round=0;round<5;round++) inputs.forEach((sql,index)=>{
+          try { (round%2 ? ctx.db.execute : ctx.db.query)(sql); outcomes[index].push('prepared'); }
+          catch (error) { outcomes[index].push(error.message); }
+          try { ctx.db.query('SELECT missing FROM items'); } catch {}
+        });
+        return outcomes;
       }}`;
       const results=[];
       for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
@@ -239,7 +243,8 @@ describe("persistent dataset worker",()=>{
       const [code,signal]=await exit;
       // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
       expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
-      expect(results).toEqual(Array.from({length:4},()=>["SQL statement is empty."]));
+      const refused=Array.from({length:5},()=>"SQL statement is empty.");
+      expect(results).toEqual(Array.from({length:4},()=>empty.map(()=>refused)));
     });
   });
 

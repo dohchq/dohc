@@ -58,10 +58,11 @@ describe("reusable guest evaluator", () => {
   });
 
   it("finds a statement only where SQLite would prepare one", () => {
-    for (const sql of ["", " \t\v\f\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1", " \0SELECT 1"]) {
+    for (const sql of ["", " \t\v\f\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1", " \0SELECT 1",
+      "-- note\0\nSELECT 1", "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"]) {
       expect(hasStatement(sql), JSON.stringify(sql)).toBe(false);
     }
-    for (const sql of ["SELECT 1", "-- note\nSELECT 1", "/* note */SELECT 1", ";SELECT 1", "SELECT 1\0", "x"]) {
+    for (const sql of ["SELECT 1", "-- note\nSELECT 1", "/* note */SELECT 1", ";SELECT 1", "SELECT 1\0", "x", "\uFEFFSELECT 1"]) {
       expect(hasStatement(sql), JSON.stringify(sql)).toBe(true);
     }
   });
@@ -70,13 +71,13 @@ describe("reusable guest evaluator", () => {
     await withDatabase(async db => {
       const result = await evaluate(db, request(`
         const messages = [];
-        for (const sql of ['', '  ', ';', '-- note', '/* note */']) {
+        for (const sql of ['', '  ', ';', '-- note', '/* note */', '\\uFEFF', '\\uFEFF;-- note', ' \\uFEFF/* note */;\\uFEFF']) {
           try { ctx.db.query(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
           try { ctx.db.execute(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
         }
         return messages;
       `), { persistentConnection: true });
-      expect(JSON.parse(result.resultJson)).toEqual(Array.from({ length: 10 }, () => "SQL statement is empty."));
+      expect(JSON.parse(result.resultJson)).toEqual(Array.from({ length: 16 }, () => "SQL statement is empty."));
     });
   });
 
