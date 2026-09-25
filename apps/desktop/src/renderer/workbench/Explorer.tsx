@@ -1014,13 +1014,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   useEffect(() => {
-    if (!revealPath || !renderIndexByPath.has(revealPath)) return;
+    if (!revealPath) return;
+    // A path the tree does not list never gets a row; drop the request so it
+    // cannot take focus later when that path appears.
+    if (!fileByPath.has(revealPath) && !isFolderPath(revealPath)) {
+      onRevealed?.();
+      return;
+    }
+    if (!renderIndexByPath.has(revealPath)) return;
     setFilesExpanded(true);
     setSelection(new Set([revealPath]));
     setAnchorPath(revealPath);
     focusRow(revealPath);
     onRevealed?.();
-  }, [focusRow, onRevealed, renderIndexByPath, revealPath]);
+  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPath]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {

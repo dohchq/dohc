@@ -110,7 +110,7 @@ describe("SitePreviewPage", () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShowSource={onShowSource} />);
 
     await screen.findByTestId("site-preview-frame");
-    fireEvent.click(screen.getByRole("button", { name: "Show source in Explorer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show in Explorer" }));
 
     expect(onShowSource).toHaveBeenCalledTimes(1);
   });

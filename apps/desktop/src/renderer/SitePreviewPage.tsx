@@ -585,8 +585,8 @@ export function SitePreviewPage(props: {
           {props.onShowSource ? (
             <IconButton
               data-testid="site-preview-show-source"
-              aria-label="Show source in Explorer"
-              title="Show source in Explorer"
+              aria-label="Show in Explorer"
+              title="Show in Explorer"
               onClick={props.onShowSource}
               className="size-7"
             >

@@ -63,7 +63,7 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
         });
     }
 
-    await page.getByRole("button", { name: "Show source in Explorer" }).click();
+    await page.getByRole("button", { name: "Show in Explorer" }).click();
     const tree = page.getByTestId("file-tree");
     await expect(tree.locator('[data-testid="tree-row"][data-path="demo"]')).toBeFocused();
     await expect(

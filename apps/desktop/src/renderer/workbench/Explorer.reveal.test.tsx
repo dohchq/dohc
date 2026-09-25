@@ -70,6 +70,15 @@ describe("Explorer reveal", () => {
     expect(onRevealed).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a reveal for a path the tree does not list", () => {
+    const onRevealed = vi.fn();
+    render(<Explorer {...explorerProps({ revealPath: "apps/gone", onRevealed })} />);
+
+    expect(onRevealed).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByTestId("tree-row").some((candidate) => candidate === document.activeElement))
+      .toBe(false);
+  });
+
   it("waits until the shell's expansion renders the row", () => {
     const onRevealed = vi.fn();
     const props = explorerProps({ revealPath: "apps/reading-list", onRevealed });
