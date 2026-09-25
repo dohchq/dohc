@@ -15324,7 +15324,7 @@ describe("file transfers", () => {
     await importIntoNotes(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "Imported notes/one.md and notes/two.md before the import stopped. Import only the files that are still missing.",
+      "Imported one.md and two.md before the import stopped. Import only the files that are still missing.",
     );
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
 
@@ -15356,7 +15356,7 @@ describe("file transfers", () => {
     await importIntoNotes(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "Imported notes/one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
+      "Imported one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
     );
     expect(toast.textContent).not.toContain("EACCES");
     await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
@@ -15367,6 +15367,31 @@ describe("file transfers", () => {
 
     await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
     expect(bridge.importWorkspaceFiles).toHaveBeenLastCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" });
+  });
+
+  // A notice's message is cut at 500 characters. Long names must not cut off
+  // the failure or the instruction; the report still lists every file.
+  it("keeps the failure and the instruction whole with long file names, and lists every file in Copy details", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const imported = ["notes/" + long("one"), "notes/" + long("two"), "notes/" + long("three")];
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported,
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("four"), code: "EACCES", detail: "EACCES: permission denied" },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toMatch(/Imported one-n+…? and 2 more before the import stopped\./);
+    expect(toast.textContent).toContain("or write to this folder. Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    for (const path of imported) expect(copied).toContain(`Imported: ${path}`);
   });
 
   it("keeps the skipped count when the first copy fails", async () => {

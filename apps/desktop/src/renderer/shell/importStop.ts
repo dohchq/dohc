@@ -7,26 +7,39 @@ type ImportStop = NonNullable<ImportWorkspaceFilesResult["stop"]>;
 // already in those words.
 export function importStopSentence(stop: ImportStop): string {
   if (stop.reason) return stop.reason;
+  const file = shortName(stop.file);
   switch (stop.code) {
     case "EACCES":
     case "EPERM":
-      return `dohc isn't allowed to read ${stop.file} or write to this folder.`;
+      return `dohc isn't allowed to read ${file} or write to this folder.`;
     case "ENOSPC":
       return "The disk is full.";
     // The source or the destination folder can be the missing side.
     case "ENOENT":
-      return `dohc could not find ${stop.file} or this folder anymore.`;
+      return `dohc could not find ${file} or this folder anymore.`;
     default:
-      return `dohc could not copy ${stop.file}.`;
+      return `dohc could not copy ${file}.`;
   }
 }
 
-// Up to three paths by name, then how many more, for a sentence a person
-// reads: "a.md and b.md", "a.md, b.md, and c.md", "a.md, b.md, c.md, and 2 more".
+// A notice's message is cut at 500 characters, and a file name can run to
+// 255, so a sentence shows at most one name, and shortens it. The whole list
+// goes into Copy details.
+const SHORT_NAME_MAX_CHARS = 60;
+
+function shortName(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const chars = [...name];
+  return chars.length <= SHORT_NAME_MAX_CHARS
+    ? name
+    : `${chars.slice(0, SHORT_NAME_MAX_CHARS - 1).join("")}…`;
+}
+
+// The files that landed, for a sentence a person reads: "a.md",
+// "a.md and b.md", or "a.md and 4 more".
 export function namedPaths(paths: readonly string[]): string {
-  const shown = paths.slice(0, 3);
-  const more = paths.length - shown.length;
-  if (more > 0) return `${shown.join(", ")}, and ${more} more`;
-  if (shown.length <= 2) return shown.join(" and ");
-  return `${shown.slice(0, -1).join(", ")}, and ${shown.at(-1)}`;
+  const first = shortName(paths[0] ?? "");
+  if (paths.length === 1) return first;
+  if (paths.length === 2) return `${first} and ${shortName(paths[1]!)}`;
+  return `${first} and ${paths.length - 1} more`;
 }

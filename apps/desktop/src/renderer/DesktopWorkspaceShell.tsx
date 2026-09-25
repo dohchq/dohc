@@ -2092,7 +2092,7 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
           message: `Could not import files${skippedSuffix}. ${importStopSentence(outcome.stop)}`,
-          detail: outcome.stop.detail,
+          details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
           retry,
           kind: "import-files",
         });
@@ -2108,7 +2108,11 @@ export function DesktopWorkspaceShell(props: {
               : `Imported ${namedPaths(outcome.imported)} before the import stopped.${
                   outcome.stop ? ` ${importStopSentence(outcome.stop)}` : ""
                 } Import only the files that are still missing.`,
-          detail: outcome.stop?.detail,
+          // The message names at most two files; the report names them all.
+          details: [
+            ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
+            ...outcome.imported.map((path) => ["Imported", path] as const),
+          ],
           retry,
           kind: "import-files",
         });
@@ -4428,7 +4432,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         details: errorDetails([
           [error.tone === "success" ? "Notice" : "Error", error.message],
-          ["Cause", error.detail],
+          ...(error.details ?? []),
           ...reportFacts(),
         ]),
         atMs: error.atMs,

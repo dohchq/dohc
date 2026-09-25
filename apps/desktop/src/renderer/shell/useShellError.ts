@@ -20,9 +20,9 @@ export interface ShellError {
   tone?: "success";
   id: string;
   message: string;
-  // A technical cause for a report. It goes into Copy details, not the text
-  // a person reads.
-  detail?: string;
+  // Facts for a report, one "label: value" line each, such as a technical
+  // cause. They go into Copy details, not the text a person reads.
+  details?: ReadonlyArray<readonly [label: string, value: string]>;
   retry: (() => void) | null;
   kind?: ShellErrorKind;
   atMs: number;
@@ -120,20 +120,20 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
-  // A failure already worded for the person. A raw cause, when there is
-  // one, goes into Copy details only. A kind makes a newer message replace
+  // A failure already worded for the person. Report facts, such as a raw
+  // cause, go into Copy details only. A kind makes a newer message replace
   // the row of an older one, such as one import's result replacing the last.
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
-      detail?: string | undefined;
+      details?: ReadonlyArray<readonly [label: string, value: string]>;
       retry?: (() => void) | null;
       kind?: ShellErrorKind;
     }) =>
       push({
         message: failure.message,
         retry: failure.retry ?? null,
-        ...(failure.detail ? { detail: failure.detail } : {}),
+        ...(failure.details?.length ? { details: failure.details } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
       }),
     [push],

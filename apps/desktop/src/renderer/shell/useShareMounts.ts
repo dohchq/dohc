@@ -75,8 +75,13 @@ export function useShareMounts(
   // Share mounts: pull every mount's share once (quietly — offline or
   // signed-out refreshes are no-ops main-side). `announce` adds the visible
   // summary for the explicit "Refresh Share(s)" menu action.
+  // Announced refreshes share one Notices row, so only the newest may write
+  // it: an older one that finishes late must not replace a newer failure.
+  const announcedRefreshToken = useRef(0);
   const refreshShareMounts = useCallback(
     async (announce = false) => {
+      const token = announce ? ++announcedRefreshToken.current : null;
+      const newest = () => token !== null && token === announcedRefreshToken.current;
       let results: Array<{
         label: string;
         status: "updated" | "unchanged" | "ended" | "damaged";
@@ -85,7 +90,7 @@ export function useShareMounts(
       try {
         results = (await bridge().refreshShareMounts({ workspaceId })).results;
       } catch (error) {
-        if (announce) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
+        if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
       }
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
@@ -94,7 +99,7 @@ export function useShareMounts(
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (!announce) return;
+      if (!newest()) return;
       // A share dohc cannot read is a failure the person has to act on. Each
       // refresh's summary replaces the last one's row, so a clean refresh
       // clears an earlier failure.

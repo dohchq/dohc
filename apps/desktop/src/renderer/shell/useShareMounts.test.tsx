@@ -65,3 +65,34 @@ it("reports every announced share refresh under one kind", async () => {
   expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), "share-refresh");
   vi.unstubAllGlobals();
 });
+
+// A refresh that finishes after a newer one must not replace the newer
+// one's row: here the older success would erase the newer failure.
+it("lets only the newest announced refresh write its summary", async () => {
+  let finishFiles!: () => void;
+  const filesListed = new Promise<void>((done) => { finishFiles = done; });
+  const refresh = vi.fn()
+    .mockResolvedValueOnce({ results: [{ label: "alex", status: "updated", changedPaths: 1 }] })
+    .mockRejectedValueOnce(new Error("relay down"));
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const reportShellError = vi.fn();
+  const showSuccessNotice = vi.fn();
+  const refreshFiles = vi.fn().mockReturnValueOnce(filesListed).mockResolvedValue(undefined);
+  // Stable arguments: a new mounts array each render would re-commit forever.
+  const mounts = [{ shareId: "share-1", label: "alex", granterEmail: null }];
+  const refreshRegistry = vi.fn().mockResolvedValue([]);
+  const onPathsChanged = vi.fn();
+  const { result } = renderHook(() => useShareMounts(
+    "ws-1", mounts, refreshRegistry, onPathsChanged, refreshFiles, reportShellError, showSuccessNotice,
+  ));
+
+  let older!: Promise<void>;
+  act(() => { older = result.current.refreshShareMounts(true); });
+  await vi.waitFor(() => expect(refreshFiles).toHaveBeenCalledTimes(1));
+  await act(async () => { await result.current.refreshShareMounts(true); });
+  expect(reportShellError).toHaveBeenCalledWith("Couldn't refresh shares.", expect.any(Error), null, "share-refresh");
+
+  await act(async () => { finishFiles(); await older; });
+  expect(showSuccessNotice).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});

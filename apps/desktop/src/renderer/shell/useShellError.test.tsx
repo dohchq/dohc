@@ -45,12 +45,12 @@ describe("useShellError", () => {
     act(() =>
       result.current.reportShellFailure({
         message: "Could not import files. The disk is full.",
-        detail: "ENOSPC: no space left on device, copyfile 'a.md'",
+        details: [["Cause", "ENOSPC: no space left on device, copyfile 'a.md'"]],
       }),
     );
     expect(result.current.shellErrors[0]).toMatchObject({
       message: "Could not import files. The disk is full.",
-      detail: "ENOSPC: no space left on device, copyfile 'a.md'",
+      details: [["Cause", "ENOSPC: no space left on device, copyfile 'a.md'"]],
       retry: null,
     });
   });
