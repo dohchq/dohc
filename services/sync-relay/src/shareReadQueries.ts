@@ -7,6 +7,7 @@ import {
   isChatChannelSelector,
   isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
+  pathVisibleThroughShare,
   targetVersionId,
   visibleSharePath,
   type AnyShareSelector,
@@ -20,6 +21,7 @@ import {
   type SyncRelayLogRow,
   type SyncRelayStorage,
 } from "./storage";
+import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
 
 // One accountless response may scan this many raw log rows for admitted ops.
@@ -46,7 +48,8 @@ export function createShareReadQueries(
     | "listObjectMomentLogRowsByBlob"
     | "listVersionCreateLogRowsByBlob"
     | "getBlob"
-    | "linkRevisionBlobByteLength"
+    | "currentObjectBlobByteLength"
+    | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
   >,
   linkFreshnessPageSize: number,
@@ -397,12 +400,26 @@ export function createShareReadQueries(
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
       if (!decision.allowed || !decision.blobSha256s.includes(sha256)) continue;
       for (const objectId of revisionObjectIds(selector, row, sha256)) {
-        const byteLength = storage.linkRevisionBlobByteLength({
+        // The object must have stayed where this share admits it since the
+        // revision: a delete, or any path the filter refuses, withdraws it.
+        const laterPaths = storage.laterObjectMomentPaths({
+          workspaceId,
+          versionId,
+          objectId,
+          afterRelaySeq: row.relaySeq,
+          limit: LINK_REVISION_SCAN_LIMIT + 1,
+        });
+        if (
+          laterPaths.length > LINK_REVISION_SCAN_LIMIT ||
+          laterPaths.some((path) => path === null || !pathVisibleThroughShare(selector, path))
+        ) {
+          continue;
+        }
+        const byteLength = storage.currentObjectBlobByteLength({
           workspaceId,
           versionId,
           selectorPaths: selector.paths,
           objectId,
-          revisionRelaySeq: row.relaySeq,
           sha256,
           epochLogFloor,
         });

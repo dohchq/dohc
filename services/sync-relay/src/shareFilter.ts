@@ -546,7 +546,7 @@ export function parseStoredAnyShareSelectorJson(
 // classified engine-tracked right now. The current-state fold rejects path
 // aliases, so replay must reject the same rows instead of serving a spelling
 // the current endpoint will never contain.
-function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
+export function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
   return isCanonicalSharePath(path) && visibleSharePath(selector, path) !== null;
 }
 

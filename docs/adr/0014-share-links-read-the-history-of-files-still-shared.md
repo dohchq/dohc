@@ -13,7 +13,7 @@ The relay serves a blob to a link when the blob is a current file of the share, 
 - A log row above the workspace's epoch floor names the blob as the content after a write or rename, or as a fork-snapshot file of a pinned version.
 - The link's share filter admits that row, with the grant's effective selector and version. A snapshot file must sit at a selected path.
 - The row's object is the current file at a selected path now: the object's latest moment in the version set that path's current file, above the epoch floor.
-- The object has stayed in the share since that row: no later moment of the object deleted it or put it outside the selector.
+- The object has stayed in the share since that row: no later moment of the object deleted it or put it at a path the share filter refuses. The filter refuses a path outside the selector, a path that is not canonical, and a path the engine does not track, such as a secret file.
 
 The relay re-checks the capability, its generation, and revocation on every read, as it does for current files. A hash from the log grants nothing by itself.
 

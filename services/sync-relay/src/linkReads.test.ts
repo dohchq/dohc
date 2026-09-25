@@ -3756,6 +3756,49 @@ describe("relay capability reads", () => {
     }
   });
 
+  it("withdraws history when a file passes through a path the share never admits", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    const latest = "# latest\n";
+    await putBlob(h, replacement);
+    const latestSha = await putBlob(h, latest);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", replacement, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/.env", replacement, 1_400, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: replacement,
+      }),
+      moment(5, "docs/shared.md", replacement, 1_500, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/.env",
+        beforeContent: replacement,
+      }),
+      moment(6, "docs/shared.md", latest, 1_600, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: replacement,
+      }),
+    ]);
+
+    const current = await h(linkRequest(seeded.capability, `/sync/link/blobs/${latestSha}`));
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(latest);
+    expect(
+      await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`)),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
   it("withdraws history on a move out and does not restore it on a move back in", async () => {
     const storage = await newStorage();
     const h = handler(storage);

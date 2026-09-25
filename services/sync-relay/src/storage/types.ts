@@ -747,15 +747,21 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): SyncRelayLogRow[];
-  linkRevisionBlobByteLength(input: {
+  currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
-    revisionRelaySeq: number;
     sha256: string;
     epochLogFloor: number;
   }): number | null;
+  laterObjectMomentPaths(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    afterRelaySeq: number;
+    limit: number;
+  }): Array<string | null>;
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;

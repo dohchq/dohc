@@ -1088,16 +1088,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return currentFilesStorage.listLinkRevisionLogRows(this, input);
   }
 
-  linkRevisionBlobByteLength(input: {
+  currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
-    revisionRelaySeq: number;
     sha256: string;
     epochLogFloor: number;
   }): number | null {
-    return currentFilesStorage.linkRevisionBlobByteLength(this, input);
+    return currentFilesStorage.currentObjectBlobByteLength(this, input);
+  }
+
+  laterObjectMomentPaths(input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    afterRelaySeq: number;
+    limit: number;
+  }): Array<string | null> {
+    return currentFilesStorage.laterObjectMomentPaths(this, input);
   }
 
   fetchLogPageDescending(input: {
