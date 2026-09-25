@@ -2324,7 +2324,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 7,
+        ordinal: 8,
         id: "v2-chat-automation-author",
         sql: V2_CHAT_AUTOMATION_AUTHOR_DDL,
         sets_user_version: None,
