@@ -47,10 +47,6 @@ nav { padding: 24px 16px; border-right: 1px solid #d6d0c3; background: #efeae0; 
 .markdown h1, .markdown h2, .markdown h3 { margin-top: 1.7em; font-family: Georgia, serif; }
 .markdown pre { overflow: auto; border: 1px solid #d6d0c3; border-radius: 8px; padding: 16px; background: #efeae0; }
 .markdown code { font-family: ui-monospace, monospace; font-size: .88em; }
-.source-text { margin: 0; overflow: auto; border: 1px solid #d6d0c3; border-radius: 8px; padding: 16px; background: #efeae0; font-family: ui-monospace, monospace; font-size: 13px; line-height: 1.55; tab-size: 2; }
-.frontmatter { max-width: 760px; margin: 0 auto 32px; }
-.frontmatter .source-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.frontmatter-note { border-radius: 3px; background: #e6dcc4; color: #272923; }
 .markdown img, .preview-image { display: block; max-width: 100%; height: auto; margin: 24px auto; }
 .markdown a, .download-card a { color: #3f6249; text-underline-offset: 3px; }
 .excalidraw-view { width: 100%; height: min(720px, calc(100vh - 190px)); min-height: 420px; overflow: hidden; border: 1px solid #d6d0c3; border-radius: 10px; background: #fff; }

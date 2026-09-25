@@ -596,15 +596,20 @@ export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): vo
   patchFrontmatter(doc, new Map([[key, value]]))
 }
 
+function frontmatterValues(frontmatter: Y.Map<unknown>): Record<string, unknown> {
+  const values = nullPrototypeRecord()
+  for (const [key, value] of frontmatter) {
+    values[key] = value !== null && typeof value === 'object'
+      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
+  }
+  return values
+}
+
 /** Validate a whole property edit before changing any Y.Map item. */
 export function patchFrontmatter(doc: Y.Doc, values: ReadonlyMap<string, unknown>, remove: readonly string[] = []): void {
   const frontmatter = doc.getMap<unknown>('frontmatter')
   const meta = doc.getMap<unknown>('meta')
-  const current = nullPrototypeRecord()
-  for (const [key, value] of frontmatter) {
-    current[key] = value !== null && typeof value === 'object'
-      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
-  }
+  const current = frontmatterValues(frontmatter)
   for (const key of remove) delete current[key]
   for (const [key, value] of values) current[key] = value
   const candidate = frontmatterBlockFor(current, meta.get(FRONTMATTER_SOURCE_META_KEY), '', '\n', writtenFrontmatterKeys(frontmatter, meta))
@@ -785,6 +790,21 @@ export function frontmatterBlockFor(
   if (Object.keys(frontmatter).length === 0) return ''
   const block = `---\n${frontmatterYaml(frontmatter)}---${body.startsWith('\n') ? '\n' : '\n\n'}`
   return lineEnding === '\n' ? block : block.replaceAll('\n', '\r\n')
+}
+
+/**
+ * A live document's frontmatter block as its file holds it: the text a settle
+ * writes, or the kept text when the values no longer settle into it.
+ */
+export function frontmatterAsWritten(doc: Y.Doc): string {
+  const frontmatter = doc.getMap<unknown>('frontmatter')
+  const meta = doc.getMap<unknown>('meta')
+  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  try {
+    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(frontmatter)), source, '', '\n', writtenFrontmatterKeys(frontmatter, meta))
+  } catch {
+    return typeof source === 'string' ? source : ''
+  }
 }
 
 /**

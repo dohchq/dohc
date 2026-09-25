@@ -57,7 +57,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { FrontmatterComments } from "./FrontmatterComments";
+import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -104,9 +104,6 @@ const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 
-const RAW_FRONTMATTER_RE =
-  /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
-
 type MarkdownEditorComponent = ForwardRefExoticComponent<
   MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
 >;
@@ -147,13 +144,9 @@ function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
   body: string;
 } {
-  const match = RAW_FRONTMATTER_RE.exec(markdown);
-  if (!match) return { frontmatter: null, body: markdown };
-  const parsed = parseFrontmatter(markdown);
-  if (parsed.body === markdown) {
-    return { frontmatter: null, body: markdown };
-  }
-  return { frontmatter: match[1] ?? "", body: parsed.body };
+  const { body } = parseFrontmatter(markdown);
+  if (body === markdown) return { frontmatter: null, body };
+  return { frontmatter: markdown.slice(0, markdown.length - body.length), body };
 }
 
 export function markdownEditorBody(markdown: string): string {
@@ -2024,7 +2017,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} />
               </Suspense>
             )}
-            <FrontmatterComments ydoc={engine.doc} />
+            <FrontmatterAsWritten ydoc={engine.doc} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2247,7 +2240,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
               </Suspense>
             ) : null}
-            <FrontmatterComments markdown={draft} />
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2334,7 +2327,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
               </Suspense>
             ) : null}
-            <FrontmatterComments markdown={draft} />
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
           </div>
           <div
             ref={readDocumentRef}
