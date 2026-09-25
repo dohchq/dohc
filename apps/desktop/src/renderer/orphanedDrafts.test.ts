@@ -868,3 +868,16 @@ it.each(['[{"text":"old recovery"}]', 'arbitrary old bytes'])("leaves obsolete a
   expect(localStorage.length).toBe(1);
   localStorage.clear();
 });
+
+it("preserves text across restarts when both the stored id and timestamp need repair", async () => {
+  localStorage.clear();
+  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}both-invalid`;
+  localStorage.setItem(key, '{"id":1e999,"workspaceId":"ws","path":"a.md","text":"keep both repairs","capturedAtMs":0}');
+  const first = await relaunch(1_800_000_000_000);
+  expect(draftsFor(first.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep both repairs"]);
+  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+  const second = await relaunch(1_800_000_000_001);
+  expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep both repairs"]);
+  expect(second.atRiskOrphanedDraftIds()).toEqual([]);
+  localStorage.clear();
+});

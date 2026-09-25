@@ -50,7 +50,7 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
         durableRaw = undefined;
         try {
           if (localStorage.getItem(key) === raw) {
-            const normalized = JSON.stringify({ ...row, capturedAtMs });
+            const normalized = JSON.stringify({ ...row, id, capturedAtMs });
             localStorage.setItem(key, normalized);
             durableRaw = normalized;
           }
