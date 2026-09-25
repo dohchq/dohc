@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { DatabaseSync, constants } from "node:sqlite";
 import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC, StaticLifetime } from "quickjs-emscripten";
-import type { JSValue, JSValuePointer, QuickJSWASMModule } from "quickjs-emscripten";
+import type { JSValue, JSValuePointer, QuickJSHandle, QuickJSWASMModule } from "quickjs-emscripten";
 import { AppBackendRuntimeError, boundedText } from "./protocol.js";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
@@ -167,8 +167,26 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
   const attachedFileIds = new Set<string>();
   // Made before the guest runs, so a callback can refuse a copy that does not fit without allocating.
   const limitHandle = vm.newError(memoryLimit), limitError: JSValue = new StaticLifetime(limitHandle.value as JSValuePointer, runtime);
-  const reply = (text: string) => room(text) ? vm.newString(text) : { error: limitError };
-  const fail = (message: string) => ({ error: room(message) ? vm.newError(message) : limitError });
+  // A copy that does not fit, or that QuickJS could not finish, answers with the limit error instead.
+  const copy = (text: string): QuickJSHandle | undefined => {
+    if (!room(text)) return undefined;
+    const value = vm.newString(text);
+    if (value.value === 0) return undefined;
+    if (vm.typeof(value) === "string") return value;
+    value.dispose();
+    return undefined;
+  };
+  const reply = (text: string) => copy(text) ?? { error: limitError };
+  // The error object comes first: making it can grow QuickJS's shape table by more than the message needs.
+  const fail = (message: string) => {
+    const error = vm.newError();
+    if (error.value === 0) return { error: limitError };
+    const text = vm.typeof(error) === "object" ? copy(message) : undefined;
+    if (!text) { error.dispose(); return { error: limitError }; }
+    vm.setProp(error, "message", text);
+    text.dispose();
+    return { error };
+  };
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
       if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
@@ -206,6 +224,8 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
       return fail(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.");
     }
   });
+  // Nothing frees the runtime: the instance and its memory are dropped with the operation. Freeing it would only run
+  // QuickJS's leak assertions, and some of QuickJS's out-of-memory paths fail them.
   try {
     const query = callback(false), execute = callback(true);
     vm.setProp(vm.global, "__query", query);
@@ -269,7 +289,9 @@ function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: Gues
         return {resultJson:boundedText(vm.getString(result.value), request.limits.resultBytes, "Operation result"),attachedFileIds:[...attachedFileIds]};
       } finally { result.value.dispose(); }
     } finally { invoke.dispose(); }
-  } finally {
-    limitHandle.dispose(); vm.dispose(); runtime.dispose();
+  } catch (error) {
+    // A trap or a failed QuickJS assertion ends the operation's instance, and the operation's code caused it.
+    if (error instanceof WebAssembly.RuntimeError) throw guestFailure("App operation failed.");
+    throw error;
   }
 }

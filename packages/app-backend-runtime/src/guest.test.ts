@@ -172,4 +172,35 @@ describe("guest memory", () => {
       expect((await evaluate(db, request("return ctx.db.query('SELECT * FROM items')[0].value.length;"), persistent)).resultJson).toBe(String(200 * 1024));
     });
   });
+
+  it("answers a failed database call with a readable error however full the shape table and memory are", async () => {
+    await withDatabase(async db => {
+      const limit = "App operation needed more than its 24 MiB memory limit, so it stopped.";
+      // Many shapes make QuickJS's shape table large. Each step frees a little memory and fails a query with a 1 KiB message.
+      const body = `const sql = 'SELECT ' + 'c'.repeat(1000) + ' FROM items';
+        const shapes = []; for (let i = 0; i < 20000; i++) shapes.push({ ['p' + i]: i });
+        let limited = 0, named = 0, other = 0, steps = 0;
+        let held = [];
+        try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}
+        try { for (;;) held.push(new Uint8Array(4096)); } catch {}
+        try { for (;;) held.push([1]); } catch {}
+        for (; steps < 100 && held.length; steps++) {
+          held.length -= 1;
+          // The operation's own code can run out of memory too, so only a query's error is counted.
+          try {
+            try { ctx.db.query(sql); other++; }
+            catch (error) {
+              const message = error.message;
+              if (message === ${JSON.stringify(limit)}) limited++;
+              else if (typeof message === 'string' && message.startsWith('no such column: ccc')) named++;
+              else other++;
+            }
+          } catch {}
+        }
+        held = null;
+        return { limited: limited > 0, named: named > 0, other, shapes: shapes.length, rows: ctx.db.query('SELECT count(*) AS n FROM items') };`;
+      expect(JSON.parse((await evaluate(db, request(body), { persistentConnection: true })).resultJson))
+        .toEqual({ limited: true, named: true, other: 0, shapes: 20000, rows: [{ n: 0 }] });
+    });
+  });
 });
