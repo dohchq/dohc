@@ -283,6 +283,10 @@ export function NoticeCenter(props: {
   // waits for someone who can edit the Collection to allow it.
   automationHolds?: readonly AutomationHoldNotice[];
   onAllowAutomationHold?: (hold: AutomationHoldNotice) => void;
+  // dohc could not read which steps were allowed, so every automation waits.
+  automationHoldsUnreadable?: boolean;
+  onResetAutomationHolds?: () => void;
+  onRevealAutomationHolds?: () => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -524,6 +528,19 @@ export function NoticeCenter(props: {
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
+    if (props.automationHoldsUnreadable) {
+      next.push({
+        id: "automation-holds-unreadable",
+        tone: "warning",
+        title: "Automations are waiting",
+        body: "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.",
+        Icon: AlertTriangle,
+        actions: [
+          ...(props.onResetAutomationHolds ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }] : []),
+          ...(props.onRevealAutomationHolds ? [{ label: "Open folder", onClick: props.onRevealAutomationHolds }] : []),
+        ],
+      });
+    }
     for (const hold of props.automationHolds ?? []) {
       const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
       next.push({
@@ -532,7 +549,7 @@ export function NoticeCenter(props: {
         title: `Automation "${hold.automationName}" is waiting`,
         body: hold.stoppedFor
           ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
-          : `A step in ${hold.collection} can now ${reach}, which it could not before. Allow it to run?`,
+          : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
         Icon: AlertTriangle,
         ...(props.onAllowAutomationHold
           ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }
@@ -761,6 +778,9 @@ export function NoticeCenter(props: {
     props.automationFailures,
     props.automationHolds,
     props.onAllowAutomationHold,
+    props.automationHoldsUnreadable,
+    props.onResetAutomationHolds,
+    props.onRevealAutomationHolds,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,

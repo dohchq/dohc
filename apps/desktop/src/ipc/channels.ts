@@ -282,6 +282,8 @@ export const CHANNELS = {
   confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
   writeCollectionAutomations: "desktop:write-collection-automations",
   listAutomationHolds: "desktop:list-automation-holds",
+  resetAutomationHolds: "desktop:reset-automation-holds",
+  revealAutomationHolds: "desktop:reveal-automation-holds",
   automationHoldsChanged: "desktop:automation-holds-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.

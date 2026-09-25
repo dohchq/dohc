@@ -29,12 +29,15 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     readText: async () => options.file === undefined ? null : { text: options.file, truncated: false, contentHash: sha256(options.file) },
     createFile,
     writeText,
+    showItemInFolder: () => undefined,
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
       workspaceId: WORKSPACE_ID, collectionPath: "Tasks", ...payload,
     });
-  return { write, createFile, writeText };
+  const call = (channel: string, payload: Record<string, unknown>) =>
+    handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
+  return { write, call, createFile, writeText };
 }
 
 describe("writing automations.yaml from the panel", () => {
@@ -72,6 +75,13 @@ describe("writing automations.yaml from the panel", () => {
 
   it("answers unavailable in a shared view, whose automations run on the owner's computer", async () => {
     await expect(fixture({ sharedView: true }).write({ expectedContentHash: null, automations: [stamp] }))
+      .resolves.toEqual({ status: "unavailable" });
+  });
+});
+
+describe("reading a Collection's automation runs", () => {
+  it("answers unavailable in a shared view, as the list does", async () => {
+    await expect(fixture({ sharedView: true }).call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
       .resolves.toEqual({ status: "unavailable" });
   });
 });

@@ -1,4 +1,4 @@
-import { readdir, writeFile } from "node:fs/promises";
+import { appendFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -11,7 +11,7 @@ function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: numb
     version: 1, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
-    superseded: false, settled, compacted: false,
+    created: [], superseded: false, settled, compacted: false,
     outcome: state === null ? null : state === "done" ? { state } : { state, error: "No.", run: 1 },
   };
 }
@@ -22,7 +22,7 @@ describe("the automation run store", () => {
     const store = createAutomationRunStore(root);
     const saved = run("atc_one", null, 1);
     await store.save(saved);
-    await store.save({ ...saved, definitionHash: "fedcba9876543210" });
+    await store.save({ ...saved, definitionHash: "fedcba9876543210", keySeed: "fedcba9876543210-1" });
     const { runs, unreadable } = await store.runsOf(AUTOMATION, "atc_one");
     expect(unreadable).toBe(false);
     expect(runs).toHaveLength(2);
@@ -99,5 +99,41 @@ describe("the automation run store", () => {
     }
     expect(kept).toHaveLength(100);
     expect(kept[0]).toBe("atc_old005");
+  });
+
+  it("appends each effect after the plan, and a line a crash cut short counts as not recorded", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    const saved = { ...run("atc_one", null, 1), applied: [] };
+    await store.save(saved);
+    const effect = { ordinal: 0, writes: [{ kind: "field" as const, recordId: "rec_a", path: "Tasks/a.md", field: "A", before: null, after: 1 }] };
+    await store.appendEffect(saved, effect);
+    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_b", path: "Log/b.md" });
+    const folder = join(root, ".dohc", "automations", "runs");
+    const [automationFolder] = await readdir(folder);
+    const progress = (await readdir(join(folder, automationFolder!))).find((file) => file.endsWith(".progress.jsonl"))!;
+    await appendFile(join(folder, automationFolder!, progress), '{"kind":"effect","ordinal":2,"wri');
+    const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(read!.applied).toEqual([effect]);
+    expect(read!.created).toEqual([{ ordinal: 1, recordId: "rec_b", path: "Log/b.md" }]);
+    // The next effect starts on a line of its own.
+    await store.appendEffect(saved, { ...effect, ordinal: 2 });
+    const [again] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(again!.applied.map((entry) => entry.ordinal)).toEqual([0, 2]);
+  });
+
+  it("reads runs without making folders", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    await expect(store.runsOf(AUTOMATION, "atc_none")).resolves.toEqual({ runs: [], unreadable: false });
+    await expect(readdir(join(root, ".dohc"))).rejects.toThrow();
+  });
+
+  it("tells a missing reach file from one it cannot read", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
+    await writeFile(await store.reachVerdictsPath(), "{ torn");
+    await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
   });
 });

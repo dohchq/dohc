@@ -17,6 +17,7 @@ export function useAutomationHolds(
   reportShellError: (fallback: string, error: unknown) => void,
 ) {
   const [automationHolds, setAutomationHolds] = useState<AutomationHoldNotice[]>([]);
+  const [automationHoldsUnreadable, setAutomationHoldsUnreadable] = useState(false);
   const token = useRef(0);
   const reads = useRef(0);
   const reload = useCallback(async (asked: number) => {
@@ -24,11 +25,13 @@ export function useAutomationHolds(
     const result = await bridge().listAutomationHolds({ workspaceId });
     if (asked !== token.current || read !== reads.current) return;
     setAutomationHolds(result.holds);
+    setAutomationHoldsUnreadable(result.unreadable);
   }, [workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady) return;
     const asked = ++token.current;
     setAutomationHolds([]);
+    setAutomationHoldsUnreadable(false);
     void reload(asked).catch(() => undefined);
     const unsubscribe = bridge().onAutomationHoldsChanged((event) => {
       if (event.workspaceId !== workspaceId || asked !== token.current) return;
@@ -59,5 +62,26 @@ export function useAutomationHolds(
     },
     [workspaceId, reload, reportShellError],
   );
-  return { automationHolds, allowAutomationHold };
+  const resetAutomationHolds = useCallback(() => {
+    const asked = token.current;
+    void bridge()
+      .resetAutomationHolds({ workspaceId })
+      .then(async (result) => {
+        if (asked !== token.current) return;
+        if (result.status === "roster-unknown") {
+          reportShellError("Couldn't reset automation holds.", new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."));
+          return;
+        }
+        await reload(asked);
+      })
+      .catch((error: unknown) => {
+        if (asked === token.current) reportShellError("Couldn't reset automation holds.", error);
+      });
+  }, [workspaceId, reload, reportShellError]);
+  const revealAutomationHolds = useCallback(() => {
+    void bridge()
+      .revealAutomationHolds({ workspaceId })
+      .catch((error: unknown) => reportShellError("Couldn't open the automations folder.", error));
+  }, [workspaceId, reportShellError]);
+  return { automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds };
 }

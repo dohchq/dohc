@@ -469,6 +469,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
   listAutomationHolds: (payload) =>
     ipcRenderer.invoke(CHANNELS.listAutomationHolds, payload),
+  resetAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resetAutomationHolds, payload),
+  revealAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revealAutomationHolds, payload),
   onAutomationFailuresChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {

@@ -77,6 +77,9 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.automationFailures ? { automationFailures: props.automationFailures } : {})}
       {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
       {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
+      {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
+      {...(props.onResetAutomationHolds ? { onResetAutomationHolds: props.onResetAutomationHolds } : {})}
+      {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
     />
   );
 }
@@ -138,6 +141,22 @@ describe("automation failure notices", () => {
     const stopped = screen.getByTestId("notice-automation-failure-collection:Projects/Tasks#nudge");
     expect(stopped.textContent).toContain('"nudge" did not run. Open Projects/Tasks/automations.yaml to shorten the chain.');
     expect(document.body.textContent).not.toContain("plugin's source");
+  });
+
+  it("says every automation waits when dohc cannot read the allowed steps, and offers a way back", async () => {
+    const onResetAutomationHolds = vi.fn();
+    const onRevealAutomationHolds = vi.fn();
+    renderNotices({ automationHoldsUnreadable: true, onResetAutomationHolds, onRevealAutomationHolds });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-automation-holds-unreadable");
+    expect(notice.textContent).toContain("Automations are waiting");
+    await userEvent.click(within(notice).getByRole("button", { name: "Reset holds" }));
+    // An action closes the panel, so open it again for the other one.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const again = await screen.findByTestId("notice-automation-holds-unreadable");
+    await userEvent.click(within(again).getByRole("button", { name: "Open folder" }));
+    expect(onResetAutomationHolds).toHaveBeenCalledOnce();
+    expect(onRevealAutomationHolds).toHaveBeenCalledOnce();
   });
 
   it("asks once to allow a step that reaches more only because an editor left", async () => {
