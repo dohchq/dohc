@@ -1423,7 +1423,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let pending_cursor = RelayCursor {
             cursor,
-            bootstrap_complete: bootstrap_complete || !has_more,
+            bootstrap_complete: bootstrap_complete
+                || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,

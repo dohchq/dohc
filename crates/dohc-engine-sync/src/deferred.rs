@@ -50,6 +50,20 @@ pub(crate) fn read(
     })
 }
 
+pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d
+         LEFT JOIN replication_peers a ON a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id
+         WHERE d.workspace_id=?1 AND d.origin_seq>COALESCE(a.acked_seq,-1))",
+                [workspace],
+                |row| row.get(0),
+            )
+        })
+        .map_err(local)
+}
+
 pub(crate) fn check_redelivery(
     store: &EngineStore,
     ops: &[ReplicationEnvelope],
