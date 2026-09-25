@@ -3842,8 +3842,10 @@ mod tests {
 
     #[test]
     fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
+        // The settle keeps the blank lines under frontmatter, so the lexical
+        // variant the projector changes sits between two body blocks.
         const ORIGINAL: &str =
-            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
 
         let sender = dohc_engine_collab::Ydoc::wire();
@@ -3891,7 +3893,9 @@ mod tests {
         remote
             .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &injected_source)
             .expect("plant source metadata");
-        remote.frontmatter_set("status", "current canonical value");
+        remote
+            .frontmatter_set("status", "current canonical value")
+            .unwrap();
 
         let receiver = dohc_engine_collab::Ydoc::wire();
         receiver
@@ -3923,7 +3927,7 @@ mod tests {
         const ORIGINAL: &str =
             "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
         const RECORD_ID: &str = "01j00000000000000000000000";
-        const PLANTED: &str = "# bytes the canonical document never represented\n";
+        const PLANTED: &str = "---\nid: 01j00000000000000000000000\n---\n\n# bytes the canonical document never represented\n";
 
         let remote = dohc_engine_collab::Ydoc::wire();
         remote

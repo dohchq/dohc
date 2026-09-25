@@ -1,8 +1,14 @@
+import {
+  frontmatterEditsRefused,
+  markdownFrontmatterEditsRefused,
+  patchFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
 import {
   applyFrontmatter,
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromMeta,
   type FrontmatterEntry,
@@ -114,28 +120,47 @@ function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> 
   return values;
 }
 
+/** Each renamed property's old key and new key. */
+function renamedKeys(
+  previousEntries: FrontmatterEntry[],
+  nextEntries: FrontmatterEntry[],
+): Map<string, string> {
+  const previous = valuesByEditableKey(previousEntries);
+  const next = valuesByEditableKey(nextEntries);
+  const renamed = new Map<string, string>();
+  for (const entry of nextEntries) {
+    const to = propertyKey(entry);
+    if (entry.sourceKey !== undefined && to !== null && entry.sourceKey !== to
+      && previous.has(entry.sourceKey) && !next.has(entry.sourceKey)) {
+      renamed.set(entry.sourceKey, to);
+    }
+  }
+  return renamed;
+}
+
 function applySharedFrontmatterPatch(
-  map: Y.Map<unknown>,
+  doc: Y.Doc,
   previousEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
 ) {
   const previous = valuesByEditableKey(previousEntries);
   const next = valuesByEditableKey(nextEntries);
 
-  for (const key of previous.keys()) {
-    if (!next.has(key)) map.delete(key);
-  }
+  const remove = [...previous.keys()].filter(key => !next.has(key));
+  const values = new Map<string, unknown>();
   for (const [key, value] of next) {
     if (!previous.has(key) || !Object.is(previous.get(key), value)) {
-      map.set(key, value);
+      values.set(key, value);
     }
   }
+  patchFrontmatter(doc, values, remove);
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
   const [ydocRevision, setYdocRevision] = useState(0);
+  const [editRefused, setEditRefused] = useState(false);
   const sourceEntries = useMemo(() => {
     if (ydoc) {
       return frontmatterEntriesFromMeta(mapToObject(ydoc.getMap(FRONTMATTER_FIELD)));
@@ -156,20 +181,31 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   useEffect(() => {
     setEntries(editableEntries(sourceEntries));
+    setEditRefused(false);
   }, [sourceEntries]);
 
+  // An unsplittable block cannot change one property without
+  // rewriting the others, so the panel refuses edits before any write.
+  const locked = ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body);
+
   function commit(next: FrontmatterEntry[]) {
+    if (locked) return;
     const previous = editableEntries(sourceEntries);
     setEntries(next);
     if (hasDuplicateKeys(next)) return;
-    if (ydoc) {
-      ydoc.transact(() => {
-        const map = ydoc.getMap(FRONTMATTER_FIELD);
-        applySharedFrontmatterPatch(map, previous, next);
-      });
-      return;
+    try {
+      if (ydoc) {
+        applySharedFrontmatterPatch(ydoc, previous, next);
+      } else {
+        props.onChange?.(
+          applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
+        );
+      }
+      setEditRefused(false);
+    } catch {
+      setEntries(previous);
+      setEditRefused(true);
     }
-    props.onChange?.(applyFrontmatter(body, buildProperties(sourceEntries, next)));
   }
 
   function setKey(index: number, key: string) {
@@ -198,6 +234,15 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
       aria-label="Properties"
     >
       <div className="dohc-page-properties__inner">
+        {locked || editRefused ? (
+          <span
+            data-testid="properties-locked"
+            className="dohc-page-properties__flag"
+            title={FRONTMATTER_EDIT_REFUSED_MESSAGE}
+          >
+            Edit in text
+          </span>
+        ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
           const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
@@ -209,6 +254,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 value={entry.key}
                 placeholder="Property"
                 spellCheck={false}
+                readOnly={locked}
                 onChange={(event) => setKey(index, event.target.value)}
                 onBlur={() => commit(entries)}
                 className={`dohc-page-properties__key${
@@ -238,6 +284,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   value={entry.value}
                   placeholder="Empty"
                   spellCheck={false}
+                  readOnly={locked}
                   onChange={(event) => setValue(index, event.target.value)}
                   className="dohc-page-properties__value"
                 />

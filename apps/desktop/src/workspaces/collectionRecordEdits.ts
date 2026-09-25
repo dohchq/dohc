@@ -12,6 +12,11 @@ import {
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
+import {
+  frontmatterEditsRefused,
+  patchFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter";
+import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../renderer/markdown/frontmatter";
 
 import {
   readWorkspaceText,
@@ -273,6 +278,7 @@ export async function setCollectionRecordFields(
         // Every field already holds its value; nothing to journal or settle.
         return { path: input.recordPath, replaced };
       }
+      if (frontmatterEditsRefused(scratch)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
       // Setting a map key always emits an update, so the transaction assigns it.
       let update!: Uint8Array;
       const captureUpdate = (encoded: Uint8Array): void => {
@@ -280,9 +286,7 @@ export async function setCollectionRecordFields(
       };
       scratch.on("update", captureUpdate);
       try {
-        scratch.transact(() => {
-          for (const [field, value] of changed) frontmatter.set(field, value);
-        });
+        patchFrontmatter(scratch, new Map(changed));
       } finally {
         scratch.off("update", captureUpdate);
       }

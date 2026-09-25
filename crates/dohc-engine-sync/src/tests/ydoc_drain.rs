@@ -576,11 +576,13 @@ fn drained_parked_update_derives_its_record_facts() {
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
 
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
-        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let filler = local
+            .frontmatter_set("padding", &format!("{index}"))
+            .unwrap();
         let outcome = dohc_engine_collab::record_local_update(
             &mut engine,
             &mut cache,
@@ -697,11 +699,13 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
 
     let mut cache = dohc_engine_collab::WriterDocCache::new();
     for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
-        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let filler = local
+            .frontmatter_set("padding", &format!("{index}"))
+            .unwrap();
         let outcome = dohc_engine_collab::record_local_update(
             &mut engine,
             &mut cache,
@@ -908,7 +912,7 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
 
     let remote = dohc_engine_collab::Ydoc::wire();
     remote.apply(&base).expect("remote sees base");
-    let remote_update = remote.frontmatter_set("title", "Remote");
+    let remote_update = remote.frontmatter_set("title", "Remote").unwrap();
     let update_sha = engine
         .put_binary_blob(&remote_update)
         .expect("store remote update");

@@ -305,12 +305,23 @@ fn ensure_collection_record_id_on_store(
             markdown,
         ) {
             Ok(update) => update,
-            Err(CollabError::ProjectionTooLarge { .. } | CollabError::UpdateTooLarge { .. }) => {
+            Err(
+                CollabError::ProjectionTooLarge { .. }
+                | CollabError::UpdateTooLarge { .. }
+                | CollabError::FrontmatterEditRefused,
+            ) => {
                 return Ok(None);
             }
             Err(error) => return Err(error.into()),
         },
-        None => doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id),
+        // An unsplittable block cannot take a key without rewriting
+        // the others; adoption declines until the file is edited.
+        None if doc.frontmatter_edits_refused() => return Ok(None),
+        None => match doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id) {
+            Ok(update) => update,
+            Err(CollabError::FrontmatterEditRefused) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        },
     };
     let lineage_claim_id = ydoc_record_update_on_store(
         store,
