@@ -439,10 +439,15 @@ export function createShareRosters(dependencies: {
     const overlapped = () => state.noAnswer === null && pulledSinceListing(workspaceId, state);
     if (overlapped()) await refresh(workspaceId);
     save(workspaceId, state);
+    return await known(workspaceId, state, overlapped());
+  }
+
+  // What this computer knows now, with no listing.
+  async function known(workspaceId: string, state: RosterState, overlapped: boolean): Promise<ReachRoster> {
     const entry = dependencies.findWorkspace(workspaceId);
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && (overlapped() || stale(workspaceId, state))) {
+    if (entry.remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
       const next = state.markFailed
         ? "Check that your disk has free space, then try again."
         : noAnswer?.next ?? "Try again in a moment.";
@@ -520,6 +525,14 @@ export function createShareRosters(dependencies: {
     },
 
     forRun,
+
+    /**
+     * What the roster says now, without listing again, for showing reach.
+     * Runs use `forRun`, which lists again when the roster is stale.
+     */
+    cached(workspaceId: string): Promise<ReachRoster> {
+      return known(workspaceId, stateFor(workspaceId), false);
+    },
 
     /** Which automation steps would stop if this share were created. */
     async shareImpact(

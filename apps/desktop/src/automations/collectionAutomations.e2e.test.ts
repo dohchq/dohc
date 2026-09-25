@@ -22,8 +22,9 @@ import { CollectionAutomations, type CollectionAutomationEngine } from "./collec
 // the automation's own attributed writes.
 
 const engine = requireEngineBinaryOrSkip();
-const evaluator = createAutomationFormulaEvaluator();
-afterAll(() => evaluator.close());
+const sharedEvaluator = createAutomationFormulaEvaluator();
+afterAll(() => sharedEvaluator.close());
+const evaluator = sharedEvaluator.forWorkspace("collection-automation-e2e");
 
 async function harness(automations: string, run: (context: {
   root: string;
@@ -77,6 +78,7 @@ async function harness(automations: string, run: (context: {
     writeText: async () => ({ status: "conflict" }),
     pathExists: (path) => stat(join(root, path)).then(() => true, () => false),
     roster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
+    cachedRoster: async () => ({ kind: "owner", ownerUserId: null, grants: [] }),
     evaluator,
     store: createAutomationRunStore(root),
     onFailuresChanged: () => undefined,

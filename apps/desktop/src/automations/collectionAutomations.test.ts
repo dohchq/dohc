@@ -4,24 +4,26 @@ import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, ChangeAttributionWire } from "@dohc/workspace-engine-client";
-import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
+import { derivedRecordId, type CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { localIsoTime } from "./automationPlan";
+import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
-import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, type CollectionAutomationEngine } from "./collectionAutomations";
+import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, UNREADABLE_REACH, type CollectionAutomationEngine } from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
 // Formulas run in the real evaluator.
 
-const evaluator = createAutomationFormulaEvaluator();
-afterAll(() => evaluator.close());
+const sharedEvaluator = createAutomationFormulaEvaluator();
+afterAll(() => sharedEvaluator.close());
+const evaluator = sharedEvaluator.forWorkspace("workspace");
 
 const OWNER: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [] };
 const editor = (email: string, paths: string[]): RosterGrant => ({
@@ -206,9 +208,11 @@ async function world(options: {
       const path = relative(root, absolutePath).replaceAll("\\", "/");
       authored.push({ path, author });
       await mkdir(dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, text, { flag: writeOptions?.createOnly ? "wx" : "w" });
-      // The engine adopts the file under the id its frontmatter names.
-      const id = /id: (rec_[a-z2-7]+)/.exec(text)![1]!;
+      const requested = /id: (rec_[a-z2-7]+)/.exec(text)![1]!;
+      // The engine adopts the file under the id its frontmatter names, or a
+      // new one it writes into the file when that id is taken.
+      const id = occupied.has(requested) ? `rec_${"reminted".padEnd(26, "a")}` : requested;
+      await writeFile(absolutePath, text.replace(requested, id), { flag: writeOptions?.createOnly ? "wx" : "w" });
       records.set(id, { id, path, collection: dirname(path).replaceAll("\\", "/"), doc: new Y.Doc() });
       queueMicrotask(() => { for (const listener of settleListeners) listener([path]); });
       return { resolvedAbsolutePath: absolutePath };
@@ -223,8 +227,11 @@ async function world(options: {
   let updates = 0;
   const resumable: Array<ReadonlySet<string> | null> = [];
   const baseStore = createAutomationRunStore(root);
-  let failSaveAt: number | null = null;
+  let failRecordAt: number | null = null;
+  // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
+  const occupied = new Set<string>();
   let saves = 0;
+  let records_ = 0;
   const store: AutomationRunStore = {
     ...baseStore,
     prune: async (automationId, resumableClaims) => {
@@ -235,8 +242,12 @@ async function world(options: {
     },
     save: async (run) => {
       saves += 1;
-      if (saves === failSaveAt) throw new Error("The disk is full.");
       await baseStore.save(run);
+    },
+    appendEffect: async (run, applied) => {
+      records_ += 1;
+      if (records_ === failRecordAt) throw new Error("The disk is full.");
+      await baseStore.appendEffect(run, applied);
     },
   };
   const failuresChanged: string[] = [];
@@ -269,6 +280,7 @@ async function world(options: {
       return { status: "written" };
     },
     pathExists: (path) => stat(join(root, path)).then(() => true, () => false),
+    cachedRoster: async () => roster,
     roster: async () => {
       rosterCalls += 1;
       const current = roster;
@@ -322,7 +334,10 @@ async function world(options: {
     idleDrains: () => idleDrains,
     setRoster: (next: ReachRoster) => { roster = next; },
     beforeNextRoster: (hook: () => Promise<void>) => { beforeRoster = hook; },
-    failSaveAt: (index: number) => { failSaveAt = saves + index; },
+    failRecordAt: (index: number) => { failRecordAt = records_ + index; },
+    saves: () => saves,
+    effectRecords: () => records_,
+    occupy: (id: string) => { occupied.add(id); },
     failOpenAt: (index: number) => { failOpenAt = opens + index; },
   };
 }
@@ -500,8 +515,8 @@ describe("Collection automations", () => {
   it("resumes a run that stopped after a write landed but before it was recorded, without a second increment", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
-    // The plan saves first; the second save records step 1, after its write landed.
-    w.failSaveAt(2);
+    // Step 1's record fails after its write landed.
+    w.failRecordAt(1);
     const claim = w.claim(TASKS, task);
     await w.executor.open();
     await w.settledClaim(claim);
@@ -641,7 +656,7 @@ describe("Collection automations", () => {
       formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
     const w = await world({
       automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
-      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })),
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace"),
     });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const claims = Array.from({ length: TIMEOUTS_BEFORE_SWITCH_OFF }, () => w.claim("collection:Tasks#slow", task));
@@ -660,7 +675,6 @@ describe("Collection automations", () => {
       automations: { Tasks: "  - id: calc\n    name: Calc\n    when: {field-changed: Status}\n    do: [{set: {X: '=1 + 1'}}]\n" },
       evaluator: {
         evaluate: async (id, scope, formulas) => (calls += 1) === 1 ? "busy" : await evaluator.evaluate(id, scope, formulas),
-        close: async () => undefined,
       },
     });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
@@ -855,7 +869,7 @@ describe("Collection automations", () => {
       formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
     const w = await world({
       automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
-      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })),
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace"),
     });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const first = w.claim("collection:Tasks#slow", task);
@@ -995,7 +1009,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: notify } });
     await w.executor.open();
     await w.executor.automationsIn("Tasks");
-    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual([]);
+    await expect(w.baseStore.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
   });
   it("passes a waiting claim by in later drains until what it waits for clears", async () => {
     const w = await world({ automations: {
@@ -1024,7 +1038,7 @@ describe("Collection automations", () => {
       formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
     const w = await world({
       automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
-      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })),
+      evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace"),
     });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const first = [w.claim("collection:Tasks#slow", task), w.claim("collection:Tasks#slow", task)];
@@ -1174,8 +1188,11 @@ describe("Collection automations", () => {
     const folder = join(w.root, ".dohc", "automations", "runs");
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) {
+        if (!file.endsWith(".json")) continue;
         const saved = JSON.parse(await readFile(join(folder, automation, file), "utf8")) as { definitionHash: string };
-        if (saved.definitionHash === hashA) await rm(join(folder, automation, file));
+        if (saved.definitionHash !== hashA) continue;
+        await rm(join(folder, automation, file));
+        await rm(join(folder, automation, file.replace(/\.json$/, ".progress.jsonl")), { force: true });
       }
     }
     // A comes back, and a restart under it is confirmed.
@@ -1187,5 +1204,108 @@ describe("Collection automations", () => {
     // The restart added its own record instead of taking the first run's.
     expect([...w.records.values()].filter((record) => record.collection === "Log")).toHaveLength(2);
     expect(w.fieldsOf(task)).toMatchObject({ Count: 4, Note: "done" });
+  });
+  it("waits instead of failing when the engine restarts in the middle of a write, and resumes after", async () => {
+    let pauseNext = true;
+    const paused = Promise.withResolvers<void>();
+    const w = await world({
+      automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" },
+      withRecordWrites: (signal) => {
+        if (!pauseNext) return Promise.resolve();
+        pauseNext = false;
+        // The engine restarts while this write waits on it.
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("The write stopped.")), { once: true });
+          w_.executor.pauseForEngineRestart();
+          paused.resolve();
+        });
+      },
+    });
+    const w_ = w;
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await paused.promise;
+    expect(claim.state).toBe("running");
+    w.executor.resumeAfterEngineRestart();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({ state: "done" });
+    expect(claim.error).toBeUndefined();
+    expect(w.fieldsOf(task).Seen).toBe(true);
+    const [run] = (await w.baseStore.runsOf("collection:Tasks#seen", claim.claimId)).runs;
+    expect(run!.outcome).toEqual({ state: "done" });
+  });
+
+  it("keeps every automation waiting when the saved verdicts cannot be read, until the holds are reset and allowed", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    await mkdir(join(w.root, ".dohc", "automations"), { recursive: true });
+    await writeFile(join(w.root, ".dohc", "automations", "reach.json"), "{ torn");
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`));
+    expect(w.executor.holdState()).toEqual({ holds: [], unreadable: true });
+    expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
+    // Nothing overwrote the file dohc could not read.
+    expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
+
+    await expect(w.executor.resetHolds()).resolves.toBe("reset");
+    const { holds, unreadable } = w.executor.holdState();
+    expect(unreadable).toBe(false);
+    expect(holds).toMatchObject([{ automationId: "collection:Tasks#seen", step: 0, stoppedFor: null }]);
+    await w.executor.confirmReach({ automationId: holds[0]!.automationId, definitionHash: holds[0]!.definitionHash, step: 0, seq: holds[0]!.seq });
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task).Seen).toBe(true);
+  });
+
+  it("resumes an added record under the id the engine gave it when its fields failed to save", async () => {
+    const log = "  - id: log\n    name: Log\n    when: {field-changed: Status}\n    do: [{add-record: {Title: Logged}, collection: Log}]\n";
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: log } });
+    const parsed = parseAutomationsFile(`version: 1\nautomations:\n${log}`);
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("Not a valid automation.");
+    const claim = w.claim("collection:Tasks#log", w.addRecord("Tasks", "one", { Status: "Done" }));
+    // The derived id is taken, so the engine adopts the new file under another.
+    w.occupy(derivedRecordId(stepKey(claim.claimId, `${definitionHash(parsed.entries[0].automation)}-1`, 0)));
+    w.failures.openSession = 1;
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    await w.executor.retry({ automationId: "collection:Tasks#log", claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state !== "pending" && claim.state !== "running");
+    expect(claim.error).toBeUndefined();
+    const added = [...w.records.values()].filter((record) => record.collection === "Log");
+    expect(added.map((record) => record.id)).toEqual([`rec_${"reminted".padEnd(26, "a")}`]);
+    expect(w.fieldsOf(added[0]!)).toEqual({ Title: "Logged" });
+  });
+
+  it("writes the plan once and records each effect after it", async () => {
+    const w = await world({ automations: { Tasks: "  - id: three\n    name: Three\n    when: {field-changed: Status}\n    do: [{set: {A: 1}}, {set: {B: 2}}, {set: {C: 3}}]\n" } });
+    const claim = w.claim("collection:Tasks#three", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    // The plan before the first write, and the outcome after the last.
+    expect(w.saves()).toBe(2);
+    expect(w.effectRecords()).toBe(3);
+  });
+
+  it("shows reach from the roster it has, without listing again", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    await w.executor.open();
+    await w.until(() => w.idleDrains() >= 1);
+    const listings = w.rosterCalls();
+    await w.executor.automationsIn("Tasks");
+    expect(w.rosterCalls()).toBe(listings);
+  });
+
+  it("fails a claim for an automation this version cannot run, with the reason the panel shows", async () => {
+    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    when: {schedule: day, timezone: UTC}\n    do: [{find: 'true', as: all}]\n" } });
+    const claim = w.claim("collection:Tasks#later", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim).toMatchObject({
+      state: "failed",
+      error: "dohc can run automations that start from a record change. Other triggers come later.",
+    });
+    expect(w.journaled).toEqual([]);
   });
 });

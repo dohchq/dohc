@@ -9,12 +9,15 @@ import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-v
 import {
   ConfirmCollectionAutomationStepPayload,
   ListAutomationHoldsPayload,
+  ResetAutomationHoldsPayload,
+  RevealAutomationHoldsPayload,
   ListCollectionAutomationRunsPayload,
   ListCollectionAutomationsPayload,
   RetryCollectionAutomationPayload,
   WriteCollectionAutomationsPayload,
   type ConfirmCollectionAutomationStepResult,
   type ListAutomationHoldsResult,
+  type ResetAutomationHoldsResult,
   type CreateWorkspaceFilePayload,
   type ListCollectionAutomationRunsResult,
   type ListCollectionAutomationsResult,
@@ -50,6 +53,8 @@ export function registerCollectionAutomationsIpc<
   readText(rootPath: string, relativePath: string): Promise<{ text: string; truncated: boolean; contentHash: string | null } | null>;
   createFile(event: Event, payload: CreateWorkspaceFilePayload): Promise<unknown>;
   writeText(event: Event, payload: WriteWorkspaceTextPayload): Promise<{ status: "written"; contentHash: string } | { status: "conflict" }>;
+  /** Shows a file in the system's file manager. */
+  showItemInFolder(path: string): void;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
@@ -74,7 +79,9 @@ export function registerCollectionAutomationsIpc<
     assertTrustedSender(event);
     const input = ListCollectionAutomationRunsPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionAutomationRunsResult> =>
-      ({ runs: await operation.state.collectionAutomations.runs(input.automationId) }));
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : { status: "listed", runs: await operation.state.collectionAutomations.runs(input.automationId) });
   });
 
   // Try again. The executor wakes its drain and the failure notices after
@@ -90,7 +97,26 @@ export function registerCollectionAutomationsIpc<
     assertTrustedSender(event);
     const input = ListAutomationHoldsPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationHoldsResult> =>
-      ({ holds: dependencies.sharedViewOf(input.workspaceId) ? [] : operation.state.collectionAutomations.holds() }));
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { holds: [], unreadable: false }
+        : operation.state.collectionAutomations.holdState());
+  });
+
+  // After the saved verdicts could not be read: hold every step the roster
+  // allows now, so each asks for Allow again.
+  registerHandler(CHANNELS.resetAutomationHolds, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResetAutomationHoldsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ResetAutomationHoldsResult> =>
+      ({ status: await operation.state.collectionAutomations.resetHolds() }));
+  });
+
+  registerHandler(CHANNELS.revealAutomationHolds, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevealAutomationHoldsPayload.parse(payload);
+    await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) => {
+      dependencies.showItemInFolder(await operation.state.collectionAutomations.reachVerdictsPath());
+    });
   });
 
   registerHandler(CHANNELS.confirmCollectionAutomationStep, async (event, payload) => {

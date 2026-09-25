@@ -77,9 +77,10 @@ export type CollectionAutomationRunOutcome =
   // The claim's run already failed here; the engine handed it out again
   // without a Try again, so only its settle is left.
   | { kind: "failed-before"; error: string }
-  // Leave the claim for a later drain: the evaluator is busy, or the engine
-  // is not answering.
-  | { kind: "wait"; reason: "busy" | "engine" };
+  // Leave the claim for a later drain: the evaluator is busy, the engine is
+  // not answering, or a pause or close stopped the run. A stopped run's
+  // progress is saved, so the next drain resumes it.
+  | { kind: "wait"; reason: "busy" | "engine" | "stopped" };
 
 export interface CollectionAutomationRunInput {
   claim: AutomationClaim;
@@ -87,11 +88,14 @@ export interface CollectionAutomationRunInput {
   collection: ReachCollection;
   /** Who can edit what now; the executor waits while it is unknown. */
   roster: Exclude<ReachRoster, { kind: "unknown" }>;
-  /** Aborts at the run's deadline, or when the executor stops. */
+  /** Aborts at the run's deadline, or when the executor stops. Every write receives it. */
   signal: AbortSignal;
+  /** Aborts when the executor stops for an engine restart or a close: the run waits instead of failing. */
+  stopped: AbortSignal;
 }
 
 const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
+const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -184,8 +188,9 @@ export async function runCollectionAutomation(
     try {
       planned = await plan(dependencies, input, keySeed);
     } catch (error) {
-      return failed(errorText(error));
+      return input.stopped.aborted ? stopped : failed(errorText(error));
     }
+    if (input.stopped.aborted) return stopped;
     if (planned.kind === "stop") return planned.outcome;
     const now = dependencies.nowMs();
     run = {
@@ -198,14 +203,14 @@ export async function runCollectionAutomation(
       updatedAtMs: now,
       plan: planned.steps,
       applied: [],
+      created: [],
       superseded: false,
       settled: false,
       compacted: false,
       outcome: null,
     };
-    // The run is saved again after every effect, so the plan with every
-    // effect recorded must fit, and one that does not is refused before
-    // anything is written.
+    // The plan with every effect recorded must fit what the store reads
+    // back, and one that does not is refused before anything is written.
     if (Buffer.byteLength(JSON.stringify({ ...run, applied: projectedProgress(run.plan ?? []) })) > RUN_PLAN_BUDGET_BYTES) {
       return failed("This run would change more data than dohc can save for it. Narrow its Find steps, or split it into smaller automations.");
     }
@@ -214,6 +219,8 @@ export async function runCollectionAutomation(
     await store.save(run);
   }
   const outcome = await applyPlan(dependencies, input, run, resumed);
+  // A stopped run keeps its progress and no outcome; the next drain resumes it.
+  if (outcome.kind === "wait") return outcome;
   if (outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.error, run: claim.run };
   } else {
@@ -317,6 +324,7 @@ async function applyPlan(
   const effects = (run.plan ?? []).flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
   const firstUnrecorded = run.applied.length;
   for (let index = firstUnrecorded; index < effects.length; index += 1) {
+    if (input.stopped.aborted) return stopped;
     if (signal.aborted) return failed(DEADLINE_ERROR, true);
     const { ordinal, effect } = effects[index]!;
     // After a stop, records may have changed while the run waited, so every
@@ -327,11 +335,13 @@ async function applyPlan(
     try {
       writes = await applyEffect(dependencies, { run, author, signal, ordinal }, effect, mode);
     } catch (error) {
+      if (input.stopped.aborted) return stopped;
       return signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
     }
-    run.applied.push({ ordinal, writes });
+    const applied = { ordinal, writes };
+    await dependencies.store.appendEffect(run, applied);
+    run.applied.push(applied);
     run.updatedAtMs = dependencies.nowMs();
-    await dependencies.store.save(run);
   }
   return { kind: "done" };
 }
@@ -405,15 +415,23 @@ async function applyEffect(
 
   if (effect.kind === "add") {
     // The record's id comes from the claim and step, so an earlier attempt's
-    // record is found again instead of added twice.
+    // record is found again instead of added twice. When the engine gave the
+    // file another id, the one this run recorded is the one to find.
+    const known = run.created.find((entry) => entry.ordinal === ordinal);
     const created = await dependencies.withRecordWrites(signal, (edit) =>
       createCollectionRecord(edit, {
         collectionPath: effect.collectionPath,
         name: effect.name,
         author,
-        recordId: effect.recordId,
+        recordId: known?.recordId ?? effect.recordId,
       }),
     );
+    if (!known || known.recordId !== created.recordId || known.path !== created.path) {
+      // Saved before its fields, so a failed seed resumes on this record.
+      const entry = { ordinal, recordId: created.recordId, path: created.path };
+      await dependencies.store.recordCreated(run, entry);
+      run.created = [...run.created.filter((existing) => existing.ordinal !== ordinal), entry];
+    }
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
     const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];
     if (fields.length === 0) return writes;

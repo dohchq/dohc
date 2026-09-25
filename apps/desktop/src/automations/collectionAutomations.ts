@@ -101,8 +101,10 @@ export interface CollectionAutomationsOptions {
   /** Replaces a text file whose content still hashes to `expectedContentHash`. */
   writeText(relativePath: string, text: string, expectedContentHash: string): Promise<{ status: "written" | "conflict" }>;
   pathExists(relativePath: string): Promise<boolean>;
-  /** Who can edit what in this workspace, for the reach check. */
+  /** Who can edit what in this workspace, listed again when stale, for a run's reach check. */
   roster(): Promise<ReachRoster>;
+  /** What the roster says now, without listing again, for showing reach. */
+  cachedRoster(): Promise<ReachRoster>;
   evaluator: AutomationFormulaEvaluator;
   store: AutomationRunStore;
   /** A claim settled failed, or a retry cleared one: the failure notices re-read. */
@@ -157,6 +159,16 @@ export interface CollectionAutomationHold {
   /** The editor whose reach stopped the step before. */
   stoppedFor: string | null;
 }
+
+/** Steps waiting for a current editor, and whether dohc could read which steps were allowed. */
+export interface CollectionAutomationHolds {
+  holds: CollectionAutomationHold[];
+  /** reach.json cannot be read, so every automation waits until someone resets the holds. */
+  unreadable: boolean;
+}
+
+export const UNREADABLE_REACH =
+  "dohc cannot read which automation steps were allowed, so every automation waits. Reset holds in Notices to allow each step again.";
 
 export interface CollectionAutomationRun {
   claimId: string;
@@ -235,6 +247,11 @@ export class CollectionAutomations {
   private readonly waitingFor = new Map<string, WaitReason>();
   /** The held steps the notices last showed. */
   private publishedHolds: string[] = [];
+  /**
+   * The saved verdicts could not be read. No step can be treated as seen
+   * before, so every run waits until someone resets the holds.
+   */
+  private verdictsUnreadable = false;
   /** Claims a Try again is changing; they wait until it is done. */
   private readonly retrying = new Set<string>();
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
@@ -270,11 +287,12 @@ export class CollectionAutomations {
     const current = () => generation === this.generation;
     this.opened ??= this.enqueue(async () => {
       const subscriptions = await this.options.store.readSubscriptions();
-      const verdicts = await this.options.store.readReachVerdicts();
+      const { verdicts, unreadable } = await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
       this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
       this.timeouts = timeouts;
+      this.verdictsUnreadable = unreadable;
       for (const verdict of verdicts) {
         this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step), verdict);
         this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
@@ -351,7 +369,7 @@ export class CollectionAutomations {
    */
   rosterChanged(): void {
     if (this.state !== "open") return;
-    void this.options.roster()
+    void this.options.cachedRoster()
       .then((roster) => roster.kind === "unknown" ? undefined : this.recordVerdicts(roster, this.everyAutomation()))
       .catch((error: unknown) => this.options.onError("check who can edit automations", error))
       .finally(() => this.clearWaits("roster", "held"));
@@ -396,7 +414,7 @@ export class CollectionAutomations {
     const indexed = this.files.get(collectionPath);
     if (!indexed) return { status: "missing" };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const roster = await this.options.roster();
+    const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupportedReason(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionPath, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -415,6 +433,7 @@ export class CollectionAutomations {
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
       const summary = { valid: true as const, automation, definitionHash: hash, unsupported: unsupportedReason(automation) };
+      if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
       if (roster.kind === "unknown") {
         return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
       }
@@ -430,6 +449,44 @@ export class CollectionAutomations {
       return { ...summary, reach: { kind: "checked", steps } };
     });
     return { status: "read", contentHash: indexed.contentHash, automations };
+  }
+
+  /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
+  holdState(): CollectionAutomationHolds {
+    return { holds: this.holds(), unreadable: this.verdictsUnreadable };
+  }
+
+  /**
+   * Starts the verdicts again after they could not be read: every step the
+   * roster allows now is held for Allow, and every other is stopped.
+   */
+  async resetHolds(): Promise<"reset" | "roster-unknown"> {
+    await this.ready();
+    const roster = await this.options.cachedRoster();
+    if (roster.kind === "unknown") return "roster-unknown";
+    await this.updateVerdicts(() => {
+      this.verdicts.clear();
+      for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
+        const collection = collectionNamed(collectionPath);
+        const hash = definitionHash(automation);
+        const steps = reachStepsOf(automation, collection, collectionNamed);
+        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: [], steps }).forEach((reach, step) => {
+          this.verdicts.set(reachVerdictKey(automationId, hash, step), {
+            automationId, definitionHash: hash, step,
+            ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
+            seq: ++this.verdictSeq,
+          });
+        });
+      }
+      this.verdictsUnreadable = false;
+    }, true);
+    this.clearWaits("held");
+    return "reset";
+  }
+
+  /** Where the verdicts are saved, for a person to look at. */
+  reachVerdictsPath(): Promise<string> {
+    return this.options.store.reachVerdictsPath();
   }
 
   /** Every step that waits for a current editor to allow it, one per step. */
@@ -458,6 +515,7 @@ export class CollectionAutomations {
   async confirmReach(input: { automationId: string; definitionHash: string; step: number; seq: number }): Promise<"confirmed" | "changed"> {
     await this.ready();
     const confirmed = await this.updateVerdicts(() => {
+      if (this.verdictsUnreadable) return false;
       const key = reachVerdictKey(input.automationId, input.definitionHash, input.step);
       const stored = this.verdicts.get(key);
       if (stored?.verdict !== "held" || stored.seq !== input.seq) return false;
@@ -627,11 +685,12 @@ export class CollectionAutomations {
    * any. A step that starts or stops waiting for a current editor raises
    * the hold notices once.
    */
-  private updateVerdicts<T>(update: () => T): Promise<T> {
+  private updateVerdicts<T>(update: () => T, save = false): Promise<T> {
     const next = this.verdictChain.then(async () => {
       const before = this.verdictSeq;
       const result = update();
-      if (this.verdictSeq !== before) {
+      // Nothing overwrites a file dohc could not read until someone resets it.
+      if (!this.verdictsUnreadable && (save || this.verdictSeq !== before)) {
         // An edited automation starts its verdicts again, so the old
         // definition's go.
         const hashes = new Map(this.everyAutomation().map(({ automationId, automation }) => [automationId, definitionHash(automation)]));
@@ -650,7 +709,9 @@ export class CollectionAutomations {
 
   /** Raises the hold notices when the held steps differ from what they last showed. */
   private publishHolds(): void {
-    const held = this.holds().map((hold) => reachVerdictKey(hold.automationId, hold.definitionHash, hold.step)).sort();
+    const held = this.verdictsUnreadable
+      ? ["unreadable"]
+      : this.holds().map((hold) => reachVerdictKey(hold.automationId, hold.definitionHash, hold.step)).sort();
     if (isDeepStrictEqual(held, this.publishedHolds)) return;
     this.publishedHolds = held;
     this.options.onHoldsChanged();
@@ -671,6 +732,8 @@ export class CollectionAutomations {
    */
   private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations: readonly OwnedAutomation[]): Promise<boolean> {
     return await this.updateVerdicts(() => {
+      // Without the saved verdicts every step waits.
+      if (this.verdictsUnreadable) return automations.length > 0;
       let held = false;
       for (const { automationId, collectionPath, automation } of automations) {
         const collection = collectionNamed(collectionPath);
@@ -831,8 +894,14 @@ export class CollectionAutomations {
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
+    const unsupported = automation === null ? null : unsupportedReason(automation);
+    // A claim this version cannot run fails with the reason the panel shows,
+    // so it reaches the failure notice and a later version's Try again runs it.
+    if (id !== null && unsupported !== null && claim.collectionPath === id.collectionPath) {
+      return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
+    }
     if (
-      id === null || automation === null || !automation.enabled || unsupportedReason(automation) !== null ||
+      id === null || automation === null || !automation.enabled ||
       // A change in a Collection inside this one: the subscription's path
       // covers it, and the automation does not.
       claim.collectionPath !== id.collectionPath
@@ -962,6 +1031,7 @@ export class CollectionAutomations {
         collection: collectionNamed(collectionPath),
         roster,
         signal: controller.signal,
+        stopped,
       }).catch((error: unknown): CollectionAutomationRunOutcome => ({
         kind: "failed",
         error: errorText(error),

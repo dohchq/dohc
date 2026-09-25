@@ -3210,7 +3210,8 @@ function createCollectionAutomationsFor(
       writeWorkspaceText(rootPath, path, text, expectedContentHash),
     pathExists: (path) => lstat(join(rootPath, path)).then(() => true, () => false),
     roster: () => shareRosters.forRun(workspaceId),
-    evaluator: automationEvaluator,
+    cachedRoster: () => shareRosters.cached(workspaceId),
+    evaluator: automationEvaluator.forWorkspace(workspaceId),
     store: createAutomationRunStore(rootPath),
     onFailuresChanged: () => notifyAutomationFailuresChanged(workspaceId),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
@@ -4644,6 +4645,7 @@ function registerIpcHandlers(): void {
     readText: readWorkspaceTextIfPresent,
     createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
+    showItemInFolder: (path) => shell.showItemInFolder(path),
   });
 
   registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

@@ -14,7 +14,7 @@ import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type {
-  CollectionAutomationHold,
+  CollectionAutomationHolds,
   CollectionAutomationRetry,
   CollectionAutomationRun,
   CollectionAutomationsFile,
@@ -5183,7 +5183,10 @@ export const ListCollectionAutomationRunsPayload = z.object({
   automationId: COLLECTION_AUTOMATION_ID,
 });
 export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
-export type ListCollectionAutomationRunsResult = { runs: CollectionAutomationRun[] };
+// A shared view keeps no runs: its automations run on the owner's computer.
+export type ListCollectionAutomationRunsResult =
+  | { status: "listed"; runs: CollectionAutomationRun[] }
+  | { status: "unavailable" };
 
 // Try again for a failed run. `startOver` confirms running an automation
 // that changed since the run began from its first step.
@@ -5211,7 +5214,15 @@ export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "cha
 // Steps waiting for a current editor to allow them, one notice each.
 export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
 export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
-export type ListAutomationHoldsResult = { holds: CollectionAutomationHold[] };
+export type ListAutomationHoldsResult = CollectionAutomationHolds;
+
+// After the saved verdicts could not be read, hold every step the roster
+// allows now. "roster-unknown" means dohc cannot check who can edit yet.
+export const ResetAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ResetAutomationHoldsPayload = z.infer<typeof ResetAutomationHoldsPayload>;
+export type ResetAutomationHoldsResult = { status: "reset" | "roster-unknown" };
+export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
 
 // Replaces the file's automations with these, over the content the panel
 // read (null when the file did not exist).
@@ -6498,6 +6509,8 @@ export interface DohcDesktopBridge
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
+  resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
+  revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
   writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
