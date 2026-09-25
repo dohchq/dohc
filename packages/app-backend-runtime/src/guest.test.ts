@@ -126,7 +126,9 @@ describe("guest memory", () => {
     await withDatabase(async db => {
       const many = (count: number) => `const held = []; for (let i = 0; i < ${count}; i++) held.push(new Uint8Array(1 << 20)); return held.length;`;
       const strings = "const held = []; for (let i = 0; i < 64; i++) held.push('x'.repeat(1 << 20) + i); return held.length;";
-      for (const body of [many(64), strings, "return new Uint8Array(64 << 20).length;", "return new Uint8Array(2 ** 30).length;"]) {
+      for (const body of [many(64), strings, "return new Uint8Array(64 << 20).length;", "return new Uint8Array(2 ** 30).length;",
+        // Emscripten refuses to grow memory past 2 GiB before it asks the memory.
+        "return new ArrayBuffer(2 ** 31 - 1).byteLength;"]) {
         await expect(evaluate(db, request(body), { persistentConnection: true }))
           .rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
       }
@@ -155,9 +157,19 @@ describe("guest memory", () => {
         .rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
       await expect(evaluate(db, request(`${fill} throw new Error('later');`), persistent))
         .rejects.toThrow(/^App operation needed more than its 24 MiB memory limit, so it stopped\.$/);
-      // While the memory is full, the database answers with the limit instead of a result.
-      const read = `${fill} let message = 'read'; try { ctx.db.query('SELECT * FROM items'); } catch (error) { message = error.message; } held = null; return message;`;
-      expect(JSON.parse((await evaluate(db, request(read), persistent)).resultJson)).toBe("App operation needed more than its 24 MiB memory limit, so it stopped.");
+      // A query whose result does not fit answers with the limit before the host copies it.
+      db.prepare("INSERT INTO items VALUES(1, ?)").run("x".repeat(200 * 1024));
+      const read = `let held = [];
+        try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}
+        try { for (;;) held.push(new Uint8Array(4096)); } catch {}
+        held.length -= 25;
+        let message = 'read';
+        try { ctx.db.query('SELECT * FROM items'); } catch (error) { message = error.message; }
+        held = null;
+        return [message, ctx.db.query('SELECT length(value) AS size FROM items')];`;
+      expect(JSON.parse((await evaluate(db, request(read), persistent)).resultJson))
+        .toEqual(["App operation needed more than its 24 MiB memory limit, so it stopped.", [{ size: 200 * 1024 }]]);
+      expect((await evaluate(db, request("return ctx.db.query('SELECT * FROM items')[0].value.length;"), persistent)).resultJson).toBe(String(200 * 1024));
     });
   });
 });

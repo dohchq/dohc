@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { DatabaseSync, constants } from "node:sqlite";
-import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC } from "quickjs-emscripten";
-import type { QuickJSWASMModule } from "quickjs-emscripten";
+import { newQuickJSWASMModuleFromVariant, newVariant, RELEASE_SYNC, StaticLifetime } from "quickjs-emscripten";
+import type { JSValue, JSValuePointer, QuickJSWASMModule } from "quickjs-emscripten";
 import { AppBackendRuntimeError, boundedText } from "./protocol.js";
 import type { AppOperationRefusal, ChildRequest } from "./protocol.js";
 
@@ -99,17 +99,42 @@ let quickjsCode: Promise<WebAssembly.Module> | undefined;
 const compiledQuickJS = () => quickjsCode ??= readFile(createRequire(createRequire(import.meta.url).resolve("quickjs-emscripten"))
   .resolve("@jitl/quickjs-wasmfile-release-sync/wasm")).then(bytes => WebAssembly.compile(bytes));
 
+interface QuickJS { module: QuickJSWASMModule; exhausted(): boolean; room(text: string): boolean }
+interface Allocator { _malloc(bytes: number): number; _free(pointer: number): void }
+
 /**
  * A QuickJS instance with a new memory, so no operation reads memory that an earlier one freed.
  * QuickJS's own memory limit cannot count allocations in this build, so the memory's fixed size is the limit.
  */
-async function newQuickJS(memoryBytes: number): Promise<{module: QuickJSWASMModule; exhausted(): boolean}> {
-  const pages = memoryBytes / WASM_PAGE_BYTES, memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
-  let exhausted = false;
-  // The memory starts at its limit, so QuickJS's allocator asks it to grow only when an operation needs more.
-  memory.grow = () => { exhausted = true; throw new RangeError("The app operation memory is full."); };
-  const module = await newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmModule: await compiledQuickJS(), wasmMemory: memory }));
-  return { module, exhausted: () => exhausted };
+async function newQuickJS(memoryBytes: number): Promise<QuickJS> {
+  const pages = memoryBytes / WASM_PAGE_BYTES, wasmMemory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+  const code = await compiledQuickJS();
+  let exhausted = false, allocator: Allocator | undefined;
+  const emscriptenModule = {
+    // The memory starts at its limit. Emscripten asks to resize it only when an allocation does not fit,
+    // and refuses a resize past 2 GiB without asking the memory, so the resize import records every refusal.
+    instantiateWasm(imports: WebAssembly.Imports, onSuccess: (instance: WebAssembly.Instance) => void) {
+      const glue = imports.a as Record<string, unknown>;
+      const resizes = Object.keys(glue).filter(name => typeof glue[name] === "function" && /\.grow\(/.test(String(glue[name])));
+      if (resizes.length !== 1) throw new Error("QuickJS's memory resize import changed.");
+      glue[resizes[0]] = () => { exhausted = true; return false; };
+      return WebAssembly.instantiate(code, imports).then(instance => { onSuccess(instance); return instance.exports; });
+    },
+    postRun: [(loaded: Allocator) => { allocator = loaded; }],
+  };
+  const module = await newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmMemory, emscriptenModule }));
+  const heap = allocator;
+  if (!heap) throw new Error("QuickJS did not start.");
+  return {
+    module, exhausted: () => exhausted,
+    // The FFI copies a host string into the guest without checking its allocations: first as UTF-8, then as a
+    // guest string of up to twice its length. One free block of three times its size holds both.
+    room(text) {
+      const pointer = heap._malloc(3 * Buffer.byteLength(text) + 4096);
+      if (pointer) heap._free(pointer);
+      return pointer !== 0;
+    },
+  };
 }
 
 // The trusted caller owns the transaction and clears authorization before host metadata writes.
@@ -127,7 +152,7 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
   return run(await newQuickJS(request.limits.memoryBytes), db, request, options);
 }
 
-function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boolean}, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
+function run({module, exhausted, room}: QuickJS, db: DatabaseSync, request: GuestRequest, options: GuestOptions): {resultJson: string; attachedFileIds: string[]} {
   const runtime = module.newRuntime();
   runtime.setMaxStackSize(request.limits.stackBytes);
   const deadline = performance.now() + request.limits.evaluationMs;
@@ -140,11 +165,10 @@ function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boole
   let statements = 0;
   let refusal: AppOperationRefusal | undefined;
   const attachedFileIds = new Set<string>();
-  // With the memory full, the FFI copies a new string through a null pointer, so a callback answers with an error instead.
-  const reply = (text: string) => {
-    if (!exhausted()) { const value = vm.newString(text); if (!exhausted()) return value; }
-    return { error: vm.newError(memoryLimit) };
-  };
+  // Made before the guest runs, so a callback can refuse a copy that does not fit without allocating.
+  const limitHandle = vm.newError(memoryLimit), limitError: JSValue = new StaticLifetime(limitHandle.value as JSValuePointer, runtime);
+  const reply = (text: string) => room(text) ? vm.newString(text) : { error: limitError };
+  const fail = (message: string) => ({ error: room(message) ? vm.newError(message) : limitError });
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
       if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
@@ -179,7 +203,7 @@ function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boole
       }
       return reply(output);
     } catch (error) {
-      return { error: vm.newError(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.") };
+      return fail(error instanceof Error ? error.message.slice(0, 1024) : "App database operation failed.");
     }
   });
   try {
@@ -188,16 +212,16 @@ function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boole
     vm.setProp(vm.global, "__execute", execute);
     query.dispose(); execute.dispose();
     const refuse = vm.newFunction("refuse", (code, message) => {
-      if (vm.typeof(code) !== "string" || vm.typeof(message) !== "string") return {error: vm.newError("Invalid refusal.")};
+      if (vm.typeof(code) !== "string" || vm.typeof(message) !== "string") return fail("Invalid refusal.");
       const copiedCode = vm.getString(code), copiedMessage = vm.getString(message);
-      if (!/^[a-z][a-z0-9_]{0,63}$/.test(copiedCode) || Buffer.byteLength(copiedMessage) > 1024) return {error:vm.newError("Invalid refusal.")};
+      if (!/^[a-z][a-z0-9_]{0,63}$/.test(copiedCode) || Buffer.byteLength(copiedMessage) > 1024) return fail("Invalid refusal.");
       refusal ??= {code:copiedCode,message:copiedMessage};
-      return {error:vm.newError("App operation refused.")};
+      return fail("App operation refused.");
     });
     const attach = vm.newFunction("attach", fileId => {
-      if (request.readOnly || vm.typeof(fileId) !== "string") return {error:vm.newError("File attachment is unavailable.")};
+      if (request.readOnly || vm.typeof(fileId) !== "string") return fail("File attachment is unavailable.");
       const id=vm.getString(fileId), file=request.files.find(file=>file.fileId===id);
-      if (!file) return {error:vm.newError("Unknown app file.")};
+      if (!file) return fail("Unknown app file.");
       attachedFileIds.add(id);
       return reply(JSON.stringify(file));
     });
@@ -246,6 +270,6 @@ function run({module, exhausted}: {module: QuickJSWASMModule; exhausted(): boole
       } finally { result.value.dispose(); }
     } finally { invoke.dispose(); }
   } finally {
-    vm.dispose(); runtime.dispose();
+    limitHandle.dispose(); vm.dispose(); runtime.dispose();
   }
 }
