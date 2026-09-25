@@ -20,11 +20,11 @@ const stamp: Automation = {
   id: "stamp",
   name: "Stamp the finish date",
   enabled: true,
-  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
   if: null,
-  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null }],
+  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null, operation: null }],
 };
-const nudge: Automation = { ...stamp, id: "nudge", name: "Nudge the owner", when: { kind: "record-added" } };
+const nudge: Automation = { ...stamp, id: "nudge", name: "Nudge the owner", when: { kind: "record-added", table: null } };
 
 function summary(automation: Automation, overrides: Partial<ValidAutomationSummary> = {}): ValidAutomationSummary {
   return {

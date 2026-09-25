@@ -5,9 +5,9 @@ const automation = (overrides: Partial<Automation>): Automation => ({
   id: "stamp",
   name: "Stamp the finish date",
   enabled: true,
-  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
   if: null,
-  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null }],
+  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null, operation: null }],
   ...overrides,
 });
 
@@ -20,12 +20,12 @@ describe("an automation in plain words", () => {
 
   it("shows formulas as code and counts the steps it does not list", () => {
     const parts = automationSentence(automation({
-      when: { kind: "record-added" },
+      when: { kind: "record-added", table: null },
       if: 'record.Priority == "High"',
       do: [
-        { kind: "set", values: [{ field: "Due", value: { kind: "formula", expression: 'dateAdd(today(), 3, "days")' } }], records: null },
-        { kind: "add-record", values: [], collection: "Projects/Log", as: null },
-        { kind: "set", values: [{ field: "Owner", value: { kind: "literal", value: null } }], records: null },
+        { kind: "set", values: [{ field: "Due", value: { kind: "formula", expression: 'dateAdd(today(), 3, "days")' } }], records: null, operation: null },
+        { kind: "add-record", values: [], collection: "Projects/Log", as: null, operation: null },
+        { kind: "set", values: [{ field: "Owner", value: { kind: "literal", value: null } }], records: null, operation: null },
       ],
     }));
     expect(sentenceText(parts)).toBe(
@@ -39,8 +39,8 @@ describe("an automation in plain words", () => {
 
   it("names a cleared field and a change to any of several fields", () => {
     expect(sentenceText(automationSentence(automation({
-      when: { kind: "record-changed", fields: ["Status", "Owner", "Due"] },
-      do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: null } }], records: null }],
+      when: { kind: "record-changed", fields: ["Status", "Owner", "Due"], table: null },
+      do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: null } }], records: null, operation: null }],
     })))).toBe("When Status, Owner or Due changes, clear Done on");
   });
 });
