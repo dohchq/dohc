@@ -535,7 +535,7 @@ export function NoticeCenter(props: {
           : `A step in ${hold.collection} can now ${reach}, which it could not before. Allow it to run?`,
         Icon: AlertTriangle,
         ...(props.onAllowAutomationHold
-          ? { action: { label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) } }
+          ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }
           : {}),
       });
     }

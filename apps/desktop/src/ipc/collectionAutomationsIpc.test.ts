@@ -8,9 +8,9 @@ const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const stamp = {
   id: "stamp", name: "Stamp", enabled: true,
-  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+  when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
   if: null,
-  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null }],
+  do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null, operation: null }],
 };
 
 function fixture(options: { file?: string; sharedView?: boolean } = {}) {

@@ -209,6 +209,8 @@ export function unsupportedReason(automation: Automation): string | null {
   if (!RECORD_TRIGGERS.has(automation.when.kind)) {
     return "dohc can run automations that start from a record change. Other triggers come later.";
   }
+  const DATASET = "dohc cannot run automations on dataset tables and operations yet.";
+  if ("table" in automation.when && automation.when.table !== null) return DATASET;
   const steps = orderSteps(automation.do);
   const bindings = bindingsOf(steps);
   let finds = 0;
@@ -226,6 +228,7 @@ export function unsupportedReason(automation: Automation): string | null {
       case "run-file":
         return "dohc cannot run code steps yet.";
       case "find": {
+        if (step.operation !== null) return DATASET;
         finds += 1;
         const query = findQueryOf(step.condition);
         if ("problem" in query) return query.problem;
@@ -236,6 +239,7 @@ export function unsupportedReason(automation: Automation): string | null {
         break;
       case "set":
       case "add-record":
+        if (step.operation !== null) return DATASET;
         formulas += step.values.filter((entry) => isFormula(entry.value)).length;
         if (step.kind === "set" && step.records !== null && step.values.some((entry) => isFormula(entry.value)) &&
           bindings.get(step.records)?.kind === "find") {
