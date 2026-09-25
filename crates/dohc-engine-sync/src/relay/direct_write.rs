@@ -417,7 +417,7 @@ fn plan_direct_writes<'a>(
             }
             let is_automations = other_name == COLLECTION_AUTOMATIONS_FILE;
             if !is_automations
-                && !(is_markdown(other_name) && records.len() < MAX_NEW_COLLECTION_RECORDS)
+                && (!is_markdown(other_name) || records.len() >= MAX_NEW_COLLECTION_RECORDS)
             {
                 continue;
             }

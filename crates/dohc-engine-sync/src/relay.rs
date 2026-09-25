@@ -3740,10 +3740,10 @@ fn collect_share_proposal_changes(
             if op.op_kind == "moment.append"
                 && let Some(object_id) = string_field(&op.payload, "objectId")
                 && skips.stop_at.contains(object_id)
-                && !skips
+                && skips
                     .settled
                     .get(object_id)
-                    .is_some_and(|through| op.origin_seq <= *through)
+                    .is_none_or(|through| op.origin_seq > *through)
             {
                 more_pending = true;
                 break 'pages;
@@ -3751,10 +3751,10 @@ fn collect_share_proposal_changes(
             if op.op_kind == "moment.append"
                 && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
                 && !outside_share.contains(&object_id)
-                && !skips
+                && skips
                     .settled
                     .get(&object_id)
-                    .is_some_and(|through| op.origin_seq <= *through)
+                    .is_none_or(|through| op.origin_seq > *through)
             {
                 if !proposal_paths_within_grant(&op.payload, granted) {
                     // One op outside the grant takes the whole file out of
