@@ -2168,6 +2168,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_AUTOMATION_CHANGE_FACTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 6,
+        id: "v2-relay-bootstrap-complete",
+        sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -2408,6 +2414,10 @@ mod tests {
                 "v2-automation-change-facts",
                 "664e71f126144d9f2e90379cf12a84952dd768f765070bfbc62a0e0989a78f9c",
             ),
+            (
+                "v2-relay-bootstrap-complete",
+                "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2549,6 +2559,34 @@ mod tests {
                 "{claim_id} upgrades to a first-run changed claim: {claims:?}"
             );
         }
+    }
+
+    #[test]
+    fn existing_relay_cursors_keep_bootstrap_complete_when_upgraded() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-relay-bootstrap-complete")
+            .expect("bootstrap tracking migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("schema before bootstrap tracking");
+        conn.execute(
+            "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
+             VALUES ('ws','42','epoch','stream')",
+            [],
+        )
+        .expect("existing cursor");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+        let cursor: (String, bool) = conn
+            .query_row(
+                "SELECT cursor,bootstrap_complete FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("upgraded cursor");
+        assert_eq!(cursor, ("42".to_owned(), true));
     }
 
     #[test]
