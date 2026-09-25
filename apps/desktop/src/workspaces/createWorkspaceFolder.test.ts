@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceFolder, resetFailedJoinFolder } from "./createWorkspaceFolder";
@@ -11,6 +11,27 @@ beforeEach(async () => {
 });
 
 describe("createWorkspaceFolder", () => {
+  it.each([false, true])("refuses linked metadata before creating or adopting a manifest (manifest present: %s)", async (hasManifest) => {
+    const root = join(base, "linked-workspace");
+    const outside = join(base, "outside");
+    await mkdir(root);
+    await mkdir(outside);
+    const manifestPath = join(outside, "manifest.json");
+    const manifest = JSON.stringify({
+      version: 1,
+      workspaceId: "outside-workspace",
+      kind: "personal",
+      mode: "local-first",
+    });
+    if (hasManifest) await writeFile(manifestPath, manifest);
+    await symlink(outside, join(root, ".dohc"), process.platform === "win32" ? "junction" : "dir");
+
+    await expect(createWorkspaceFolder({ rootPath: root, kind: "personal" })).rejects.toThrow();
+
+    expect(await readdir(outside)).toEqual(hasManifest ? ["manifest.json"] : []);
+    if (hasManifest) expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+  });
+
   it("creates a fresh workspace with only its manifest", async () => {
     const root = join(base, "personal");
     const created = await createWorkspaceFolder({ rootPath: root, kind: "personal" });

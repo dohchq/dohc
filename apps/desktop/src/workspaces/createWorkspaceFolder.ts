@@ -8,6 +8,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -25,12 +26,13 @@ type ManifestState =
   | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] }
   | { kind: "blocked"; reason: string };
 
-async function inspectManifest(rootPath: string): Promise<ManifestState> {
+async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   let raw: string;
   try {
-    raw = await readFile(join(rootPath, ".dohc", "manifest.json"), "utf8");
-  } catch {
-    return { kind: "absent" };
+    raw = await readFile(join(metadataDir, "manifest.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    throw error;
   }
   let parsed: unknown;
   try {
@@ -92,7 +94,9 @@ export async function createWorkspaceFolder(input: {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
   }
 
-  const state = await inspectManifest(input.rootPath);
+  await mkdir(input.rootPath, { recursive: true });
+  const metadataDir = await resolveWorkspaceMetadataDir(input.rootPath);
+  const state = await inspectManifest(metadataDir);
   if (state.kind === "blocked") {
     throw new Error(state.reason);
   }
@@ -112,11 +116,10 @@ export async function createWorkspaceFolder(input: {
     kind: input.kind,
   });
 
-  await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
   // an unexpected file that appeared between the check and the write.
   await writeFile(
-    join(input.rootPath, ".dohc", "manifest.json"),
+    join(metadataDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: "wx" },
   );
