@@ -421,12 +421,15 @@ export function LinkMenu({
 
 /** Small, self-contained bubble-menu button (matches the styling of
  *  MarkdownEditor's inline BubbleButton helper without needing that helper
- *  exported) — active whenever the selection sits inside a link. */
+ *  exported). `active` is whether the selection sits inside a link; the
+ *  toolbar reads it from the editor's state. */
 export function LinkBubbleButton({
   editor,
+  active,
   onOpen,
 }: {
   editor: Editor;
+  active: boolean;
   onOpen: (state: LinkMenuState) => void;
 }) {
   return (
@@ -434,7 +437,7 @@ export function LinkBubbleButton({
       type="button"
       aria-label="Link"
       title="Link (Cmd+K)"
-      className={`dohc-bubble-menu__button${editor.isActive("link") ? " is-active" : ""}`}
+      className={`dohc-bubble-menu__button${active ? " is-active" : ""}`}
       onClick={() => onOpen(computeLinkMenuState(editor.view))}
     >
       <LinkIcon size={14} aria-hidden />

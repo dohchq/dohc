@@ -191,6 +191,7 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
                 workspace: Some(handle.clone()),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: json!({}),
             },
             input,

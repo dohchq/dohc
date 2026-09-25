@@ -13,10 +13,20 @@ type Listener = (...args: unknown[]) => void;
 
 function fakeUpdater() {
   const listeners = new Map<string, Listener[]>();
+  let channel: string | undefined;
   const updater = {
     autoDownload: false,
     autoInstallOnAppQuit: false,
-    channel: undefined as string | undefined,
+    get channel(): string | undefined {
+      return channel;
+    },
+    // electron-updater's channel setter also turns allowDowngrade on. The
+    // double does the same, so a controller that sets the channel after
+    // refusing downgrades fails here as it would in a packaged build.
+    set channel(value: string | undefined) {
+      channel = value;
+      this.allowDowngrade = true;
+    },
     allowPrerelease: undefined as boolean | undefined,
     allowDowngrade: undefined as boolean | undefined,
     forceDevUpdateConfig: undefined as boolean | undefined,

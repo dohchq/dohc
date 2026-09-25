@@ -195,7 +195,7 @@ describe("markdown document opening state", () => {
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
-      (screen.getByTestId("page-title") as HTMLInputElement).readOnly,
+      (screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly,
     ).toBe(true);
 
     // The open answers: the session is live, and the same keystroke now goes
@@ -712,7 +712,7 @@ describe("markdown document opening state", () => {
       .mockImplementationOnce(() => heldFirst)
       .mockImplementationOnce(() => heldSecond);
     await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "First title" } });
     await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
@@ -789,7 +789,7 @@ describe("markdown document opening state", () => {
       flush = next;
     };
     const view = await renderLegacyMarkdown(bridge, registerFlush);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local title" } });
     fireEvent.blur(title);
@@ -837,7 +837,7 @@ describe("markdown document opening state", () => {
     expect(flushSettled).toBe(false);
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External title",
       ),
     );
@@ -853,7 +853,7 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
-    const recoveredTitle = screen.getByTestId("page-title") as HTMLInputElement;
+    const recoveredTitle = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(recoveredTitle);
     fireEvent.change(recoveredTitle, { target: { value: "Fresh title" } });
     fireEvent.blur(recoveredTitle);
@@ -1133,7 +1133,7 @@ describe("markdown document opening state", () => {
     });
     bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
     const view = await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local" } });
     fireEvent.blur(title);
@@ -1154,7 +1154,7 @@ describe("markdown document opening state", () => {
       resolveSecondRead();
       await heldSecondRead;
     });
-    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
       "Local",
     );
 
@@ -1168,7 +1168,7 @@ describe("markdown document opening state", () => {
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
     ).not.toBe("saved");
-    expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
       "Local",
     );
 
@@ -1177,7 +1177,7 @@ describe("markdown document opening state", () => {
       await heldThirdRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External",
       ),
     );
@@ -1226,7 +1226,7 @@ describe("markdown document opening state", () => {
     });
     bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldWrite);
     const view = await renderLegacyMarkdown(bridge);
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Local" } });
     fireEvent.blur(title);
@@ -1260,7 +1260,7 @@ describe("markdown document opening state", () => {
       await heldThirdRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "External",
       ),
     );
@@ -1298,7 +1298,7 @@ describe("markdown document opening state", () => {
     await renderLegacyMarkdown(bridge);
 
     const editTitle = async () => {
-      const title = screen.getByTestId("page-title") as HTMLInputElement;
+      const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
       fireEvent.focus(title);
       fireEvent.change(title, { target: { value: "Local" } });
       fireEvent.blur(title);
@@ -1311,7 +1311,7 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
     );
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Base",
       ),
     );
@@ -2080,7 +2080,7 @@ describe("markdown document opening state", () => {
     );
 
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value, "read-mode reset: drop the capture's setDraft/setSavedBody/ latestDraft reset. The title keeps painting the set-aside edit and the next property save writes the set-aside document.").toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value, "read-mode reset: drop the capture's setDraft/setSavedBody/ latestDraft reset. The title keeps painting the set-aside edit and the next property save writes the set-aside document.").toBe(
         "",
       ),
     );
@@ -2176,7 +2176,7 @@ describe("markdown document opening state", () => {
       await switchedRead;
     });
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "New baseline",
       ),
     );
@@ -2225,7 +2225,7 @@ describe("markdown document opening state", () => {
     );
     bridge.answerNotEngineBacked();
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Old",
       ),
     );
@@ -2266,7 +2266,7 @@ describe("markdown document opening state", () => {
     );
 
     await waitFor(() =>
-      expect((screen.getByTestId("page-title") as HTMLInputElement).value).toBe(
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).value).toBe(
         "Peer",
       ),
     );

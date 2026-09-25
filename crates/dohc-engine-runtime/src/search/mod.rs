@@ -604,6 +604,10 @@ pub fn search_workspace_page(
 struct ChatSearchFragment {
     path: String,
     title: String,
+    /// The thread projection's lines for this row, line for line, so a hit's
+    /// line number points into the projection. Search shows a matched line as
+    /// its preview, so the projection's Markdown heading markers are left out:
+    /// an author reads "Sam", not "## Sam".
     text: String,
     line_offset: usize,
     source_bytes: usize,
@@ -715,9 +719,9 @@ fn hydrate_chat_search_fragment(
 
     if message_id == THREAD_HEADER_MESSAGE_ID {
         let text = if linked_object_id.is_some() {
-            format!("# {title}\n\nRead-only chat projection.\n\nLinked file: unavailable\n")
+            format!("{title}\n\nRead-only chat projection.\n\nLinked file: unavailable\n")
         } else {
-            format!("# {title}\n\nRead-only chat projection.\n")
+            format!("{title}\n\nRead-only chat projection.\n")
         };
         let source_bytes = metadata_bytes.saturating_add(text.len());
         if source_bytes > CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET {
@@ -774,7 +778,7 @@ fn hydrate_chat_search_fragment(
     Ok(ChatHydration::Ready(ChatSearchFragment {
         path,
         title,
-        text: format!("## {author}\n\n{body}"),
+        text: format!("{author}\n\n{body}"),
         line_offset,
         source_bytes,
     }))

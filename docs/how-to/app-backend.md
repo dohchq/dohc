@@ -58,6 +58,7 @@ Keep app code and Collection views on the same dataset. They do not need separat
 ## Connect the app
 
 Put `app.publish.json` in the app folder. Declare the frontend entry, source inputs, and a `dataset` binding.
+Write each path relative to the app folder, so the folder can move. Start a path with `../` to include a file beside the folder.
 The binding names `datasetId`, the approved `revision` and `revisionSha256`, and permitted `operationIds`.
 Use the [fundraiser declaration](../../examples/fundraiser/app.publish.json) as an example.
 No private app database path or backend capability is declared.
@@ -154,7 +155,7 @@ Other input and result fields remain excluded. Choose **Undo edit** to restore t
 
 Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
-Run `dohc dataset --help` for the supported command fields.
+Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 
 ## Change fields and rules
 

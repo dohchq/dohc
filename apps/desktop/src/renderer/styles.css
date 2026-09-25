@@ -299,6 +299,11 @@ body {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+/* While a menu is open (useDismiss), a press on the titlebar must reach the
+ * page so it can close the menu. */
+:root[data-menu-open] .titlebar-drag {
+  -webkit-app-region: no-drag;
+}
 
 /* Tiptap document editor (E4): warm paper with one shared writing axis, dense
  * enough for daily work. --dohc-editor-measure is shared by the title, body
@@ -2565,7 +2570,11 @@ body {
 }
 
 .dohc-page-identity__title {
+  display: block;
   width: 100%;
+  field-sizing: content;
+  resize: none;
+  overflow: hidden;
   border: 0;
   background: transparent;
   padding: 0;

@@ -203,10 +203,16 @@ export function CsvView({
 
   useEffect(() => {
     if (raw) return;
+    // Compare with the newest draft, not this render's. A busy renderer can
+    // deliver a cell edit before this effect runs for the render that showed
+    // the table, and the edit has already recorded its own text as the table's
+    // identity. Reading this render's draft then reparsed the old text, then
+    // the edit's own output, and dropped the row offsets.
+    const text = draftRef.current.getDraft();
     const identity = tableDraftIdentity.current;
-    if (identity.text === draft.draft && identity.delimiter === delimiter) return;
-    const nextRows = delimitedTextCodec.parse(draft.draft, delimiter);
-    tableDraftIdentity.current = { text: draft.draft, delimiter };
+    if (identity.text === text && identity.delimiter === delimiter) return;
+    const nextRows = delimitedTextCodec.parse(text, delimiter);
+    tableDraftIdentity.current = { text, delimiter };
     rowsRef.current = nextRows;
     setRowsState(nextRows);
   }, [delimiter, draft.draft, raw]);

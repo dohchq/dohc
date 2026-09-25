@@ -5,7 +5,7 @@ import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
-import type { Node as ProseMirrorNode, Slice } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode, ResolvedPos, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { ChevronDown } from "lucide-react";
 import {
@@ -383,7 +383,7 @@ export function selectBlock(editor: Editor | null, pos: number): void {
 
 // ── block context menu ─────────────────────────────────────────────────────
 
-type BlockMenuTurnIntoId =
+export type BlockMenuTurnIntoId =
   | "paragraph"
   | "heading-1"
   | "heading-2"
@@ -538,19 +538,28 @@ export function topLevelBlockPos(editor: Editor | null): number | null {
 }
 
 /**
- * Which turn-into entry describes the block the selection currently sits in
- * — drives the bubble menu's turn-into button label/highlight. Mirrors the
- * same node-type checks `isBlockControlTarget` and `turnBlockInto` use.
+ * Which turn-into entry describes the block a position sits in — the bubble
+ * menu's turn-into label, for the selection's start, which is the block
+ * `turnBlockInto` converts. It reads only the position's ancestors, so it
+ * costs the same anywhere in a document. Headings win over lists, and lists
+ * over quotes, as in the block menu.
  */
-export function activeTurnIntoId(editor: Editor | null): BlockMenuTurnIntoId {
-  if (!editor) return "paragraph";
-  if (editor.isActive("heading", { level: 1 })) return "heading-1";
-  if (editor.isActive("heading", { level: 2 })) return "heading-2";
-  if (editor.isActive("heading", { level: 3 })) return "heading-3";
-  if (editor.isActive("bulletList")) return "bulleted-list";
-  if (editor.isActive("orderedList")) return "numbered-list";
-  if (editor.isActive("taskList")) return "task-list";
-  if (editor.isActive("blockquote")) return "quote";
+export function turnIntoIdAt($pos: ResolvedPos): BlockMenuTurnIntoId {
+  const ancestors = new Set<string>();
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node.type.name === "heading") {
+      const level = node.attrs.level;
+      if (level === 1) return "heading-1";
+      if (level === 2) return "heading-2";
+      if (level === 3) return "heading-3";
+    }
+    ancestors.add(node.type.name);
+  }
+  if (ancestors.has("bulletList")) return "bulleted-list";
+  if (ancestors.has("orderedList")) return "numbered-list";
+  if (ancestors.has("taskList")) return "task-list";
+  if (ancestors.has("blockquote")) return "quote";
   return "paragraph";
 }
 
@@ -717,7 +726,14 @@ export function resolveTurnIntoDropdown(
  * order, and conversion behavior stay identical between the two entry
  * points; only the trigger and layout differ.
  */
-export function TurnIntoMenu({ editor }: { editor: Editor }) {
+export function TurnIntoMenu({
+  editor,
+  activeId,
+}: {
+  editor: Editor;
+  // The selection toolbar reads this from the editor's state.
+  activeId: BlockMenuTurnIntoId;
+}) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(0);
   const [dropdown, setDropdown] = useState<TurnIntoDropdownPosition>({
@@ -727,7 +743,6 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const activeId = activeTurnIntoId(editor);
   const activeIndex = TURN_INTO_ENTRIES.findIndex((entry) => entry.id === activeId);
   const activeEntry = TURN_INTO_ENTRIES[activeIndex] ?? TURN_INTO_ENTRIES[0]!;
 

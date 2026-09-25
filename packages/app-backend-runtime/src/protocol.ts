@@ -22,7 +22,8 @@ export const DEFAULT_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   queryBytes: 256 * 1024,
   queryRows: 1000,
   statements: 128,
-  memoryBytes: 16 * 1024 * 1024,
+  // An operation's whole WebAssembly memory. QuickJS itself uses about 5 MiB of it.
+  memoryBytes: 24 * 1024 * 1024,
   stackBytes: 256 * 1024,
   evaluationMs: 1000,
   deadlineMs: 8000,
@@ -136,6 +137,8 @@ export function runtimeLimits(input: Partial<RuntimeLimits> = {}): RuntimeLimits
     }
     limits[key as keyof RuntimeLimits] = value!;
   }
+  // QuickJS needs 16 MiB of memory to start. Whole MiB let an operation's error name its limit exactly.
+  if (limits.memoryBytes < 16 * 1024 * 1024 || limits.memoryBytes % (1024 * 1024)) throw new Error("Invalid app runtime limit.");
   return limits;
 }
 

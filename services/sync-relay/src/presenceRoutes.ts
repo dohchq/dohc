@@ -140,7 +140,7 @@ export function createPresenceRoutes(
     // The share + topic gate, run before joining and re-run after a parked
     // long-poll wakes (respondPresence's reauthorize): a revoke that lands
     // while a recipient's poll is parked fails closed on wake instead of
-    // leaking one final snapshot. The resolver lets a chat-channel grant
+    // leaking one final snapshot. The resolver lets a chat grant
     // admit a `chat:thread:<threadId>` topic for a thread BOUND (earliest
     // binding, forge-resistant) to the granted channel — the same authority
     // the durable chat filter uses; bare wire presence also resolves kind

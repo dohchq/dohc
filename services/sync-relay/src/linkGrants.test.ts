@@ -2491,7 +2491,7 @@ describe("owner link inventory and impact preconditions", () => {
         shareId: "share-damaged",
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
-        selectorJson: JSON.stringify({ kind: "chat-channel", channelWireId: 42 }),
+        selectorJson: JSON.stringify({ kind: "chat", channelWireId: 42 }),
         createdAtMs: 3_000,
       },
       grant: {
@@ -2593,7 +2593,7 @@ describe("owner link inventory and impact preconditions", () => {
       grantId: "link-damaged",
       selector: null,
       damaged: true,
-      selectorKind: "chat-channel",
+      selectorKind: "chat",
       access: "view",
       generation: 1,
       status: "active",
@@ -5467,7 +5467,7 @@ describe("relay link grants", () => {
         shareId: "share-chat",
         workspaceId: WORKSPACE,
         granterUserId: OWNER,
-        selectorJson: JSON.stringify({ kind: "chat-channel", channelWireId: "general" }),
+        selectorJson: JSON.stringify({ kind: "chat", channelWireId: "general" }),
         createdAtMs: 2_020,
       },
       grant: {
