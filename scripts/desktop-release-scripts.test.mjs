@@ -704,6 +704,22 @@ test("release verification rejects changed bytes, version, and legacy updater me
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /size or SHA-512/);
 });
 
+test("verify-desktop-release-artifacts reports its verdict when run as a command", async () => {
+  const { options, name } = await artifactFixture();
+  const args = Object.entries(options).flatMap(([key, value]) => [`--${key}`, value]);
+  const { stdout } = await runReleaseScript("verify-desktop-release-artifacts.mjs", args);
+  const result = JSON.parse(stdout);
+  assert.equal(result.status, "passed");
+  assert.equal(result.version, options.version);
+  assert.deepEqual(result.artifacts.map((artifact) => artifact.name), [name]);
+
+  await writeFile(join(options.directory, name), "different package bytes!");
+  await assert.rejects(
+    runReleaseScript("verify-desktop-release-artifacts.mjs", args),
+    (error) => error.code === 1 && /size or SHA-512/.test(error.stderr),
+  );
+});
+
 test("release verification rejects missing installers and wrong update architecture", async () => {
   const fixture = await artifactFixture("mac", "arm64");
   await rm(join(fixture.options.directory, "dohc-0.1.0-mac-arm64.dmg"));
