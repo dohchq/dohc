@@ -724,7 +724,7 @@ function makeBaseBridge(
     dismissAutomationFailure: vi.fn(
       async (_payload: DismissAutomationFailurePayload) => undefined,
     ),
-    listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: false })),
+    listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
     resetAutomationHolds: vi.fn(async () => ({ status: "reset" as const })),
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),

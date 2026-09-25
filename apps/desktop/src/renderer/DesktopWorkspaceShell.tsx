@@ -3990,6 +3990,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
+    automationStops, dismissAutomationStops,
   } = useAutomationHolds(
     workspaceId,
     workspaceIsReady,
@@ -4941,6 +4942,8 @@ export function DesktopWorkspaceShell(props: {
               onResetAutomationHolds={resetAutomationHolds}
               onRevealAutomationHolds={revealAutomationHolds}
               {...sentNoticeProps}
+              automationStops={automationStops}
+              onDismissAutomationStops={dismissAutomationStops}
             />
           }
         />

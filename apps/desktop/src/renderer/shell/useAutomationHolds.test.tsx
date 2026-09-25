@@ -15,7 +15,7 @@ const hold = (workspace: string): AutomationHoldNotice => ({
 
 it("never lets an Allow that finishes after a workspace switch repaint the new workspace's holds", async () => {
   const confirmed = Promise.withResolvers<{ status: "confirmed" }>();
-  const listAutomationHolds = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ holds: [hold(workspaceId)] }));
+  const listAutomationHolds = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ holds: [hold(workspaceId)], stops: [] }));
   vi.stubGlobal("dohcDesktop", {
     listAutomationHolds,
     onAutomationHoldsChanged: () => () => undefined,
@@ -44,7 +44,7 @@ it("keeps the newest list when an older read in the same workspace answers last"
   const answers: Array<(holds: AutomationHoldNotice[]) => void> = [];
   const listeners: Array<(event: { workspaceId: string }) => void> = [];
   vi.stubGlobal("dohcDesktop", {
-    listAutomationHolds: () => new Promise((resolve) => answers.push((holds) => resolve({ holds }))),
+    listAutomationHolds: () => new Promise((resolve) => answers.push((holds) => resolve({ holds, stops: [] }))),
     onAutomationHoldsChanged: (listener: (event: { workspaceId: string }) => void) => {
       listeners.push(listener);
       return () => undefined;
@@ -57,4 +57,24 @@ it("keeps the newest list when an older read in the same workspace answers last"
   await act(async () => { answers[1]!([]); });
   await act(async () => { answers[0]!([hold("Trip")]); });
   expect(result.current.automationHolds).toEqual([]);
+});
+
+it("dismisses the stopped steps by the verdicts it showed, then reads the notices again", async () => {
+  const stop = { ...hold("Trip"), seq: 7 };
+  const listAutomationHolds = vi.fn(async () => ({ holds: [], stops: [stop] }));
+  const dismissAutomationStops = vi.fn(async () => undefined);
+  vi.stubGlobal("dohcDesktop", {
+    listAutomationHolds,
+    onAutomationHoldsChanged: () => () => undefined,
+    dismissAutomationStops,
+  });
+  const { result } = renderHook(() => useAutomationHolds("Trip", true, vi.fn()));
+  await act(async () => undefined);
+  expect(result.current.automationStops).toEqual([stop]);
+  await act(async () => { result.current.dismissAutomationStops([stop]); });
+  expect(dismissAutomationStops).toHaveBeenCalledWith({
+    workspaceId: "Trip",
+    stops: [{ automationId: stop.automationId, definitionHash: stop.definitionHash, step: 0, seq: 7 }],
+  });
+  expect(listAutomationHolds).toHaveBeenCalledTimes(2);
 });

@@ -7,7 +7,9 @@ import {
 } from "@dohc/workspace-contracts/automations";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
+  AutomationShareImpactPayload,
   ConfirmCollectionAutomationStepPayload,
+  DismissAutomationStopsPayload,
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
@@ -16,6 +18,7 @@ import {
   ListCollectionFieldMarksPayload,
   RetryCollectionAutomationPayload,
   WriteCollectionAutomationsPayload,
+  type AutomationShareImpactResult,
   type ConfirmCollectionAutomationStepResult,
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
@@ -100,7 +103,7 @@ export function registerCollectionAutomationsIpc<
     const input = ListAutomationHoldsPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationHoldsResult> =>
       dependencies.sharedViewOf(input.workspaceId)
-        ? { holds: [], unreadable: false }
+        ? { holds: [], stops: [], unreadable: false }
         : operation.state.collectionAutomations.holdState());
   });
 
@@ -119,6 +122,29 @@ export function registerCollectionAutomationsIpc<
     await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation) => {
       dependencies.showItemInFolder(await operation.state.collectionAutomations.reachVerdictsPath());
     });
+  });
+
+  registerHandler(CHANNELS.dismissAutomationStops, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DismissAutomationStopsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<void> => {
+      if (!dependencies.sharedViewOf(input.workspaceId)) await operation.state.collectionAutomations.dismissStops(input.stops);
+    });
+  });
+
+  // Asked by the share dialog before it makes a share. Only the owner's
+  // computer makes shares, so a shared view stops nothing.
+  registerHandler(CHANNELS.automationShareImpact, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AutomationShareImpactPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<AutomationShareImpactResult> =>
+      ({
+        stops: dependencies.sharedViewOf(input.workspaceId)
+          ? []
+          : await operation.state.collectionAutomations.shareImpact({
+              paths: input.paths, versionId: null, access: input.access, recipientEmail: input.recipientEmail,
+            }),
+      }));
   });
 
   // A shared view holds no executor, so it has no marks: the owner's
