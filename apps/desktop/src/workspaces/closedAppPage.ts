@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { parse as parseScript } from "acorn";
 import { defaultTreeAdapter, parse as parseHtml, serialize, serializeOuter, type DefaultTreeAdapterTypes } from "parse5";
-import { APP_PAGE_MAX_SCRIPTS, appPageProblem, type AppPage } from "@dohc/app-browser/document";
+import { APP_PAGE_MAX_SCRIPTS, appPageProblem, unsafeInlineScript, type AppPage } from "@dohc/app-browser/document";
 
 type Element = DefaultTreeAdapterTypes.Element;
 type ParentNode = DefaultTreeAdapterTypes.ParentNode;
@@ -56,11 +56,6 @@ const kinds = {
   stylesheet: { test: [".css"], words: "a stylesheet", allowed: "a .css" },
   image: { test: [...imageTypes.keys()], words: "an image", allowed: "a PNG, JPEG, GIF, WebP, or AVIF" },
 } as const;
-
-/** Script text that would end or re-escape its <script> element when placed inline. */
-export function unsafeInlineScript(source: string): boolean {
-  return /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
-}
 
 /** Null marks a data block, which stays in the page as inert markup. */
 function scriptKind(element: Element): "classic" | "module" | "skip" | null {
@@ -237,7 +232,8 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
   };
   /** A captured script file, checked so it can sit inline in the page. */
   const scriptFile = (path: string, late: boolean) => {
-    const source = classicScript(text(inputs.get(path)!.bytes), path, late);
+    // The HTML parser turns CRLF and CR into LF before a script runs and before its hash is checked, so the hash must cover that text.
+    const source = classicScript(text(inputs.get(path)!.bytes).replace(/\r\n?/g, "\n"), path, late);
     if (unsafeInlineScript(source)) throw new Error(`${path} contains </script> or <!-- with <script>, which would end the script early in the page. Split the text, for example "<" + "/script>".`);
     return source;
   };
@@ -356,7 +352,16 @@ export function compileClosedAppPage(entry: string, inputs: ReadonlyMap<string, 
   }
 
   const finish = (css: readonly string[], moduleCss: string): AppPage => {
-    for (const [index, element] of styleElements.entries()) setText(element, css[index] ?? "");
+    // esbuild keeps custom property values as written, so compiled CSS can still hold </style>, which would end the element early.
+    const safeCss = (value: string, label: string) => {
+      if (/<\/style/i.test(value)) throw new Error(`${label} contains </style>, which would end the stylesheet early in the page. Write it as \\3c/style instead.`);
+      return value;
+    };
+    for (const [index, element] of styleElements.entries()) {
+      const sheet = stylesheets[index]!;
+      setText(element, safeCss(css[index] ?? "", sheet.startsWith(pageInput) ? sheet.slice(pageInput.length) : `A <style> in ${entry}`));
+    }
+    safeCss(moduleCss, `The CSS that module scripts in ${entry} import`);
     // CSS that module scripts import lands last in <head>, as a bundler injects it.
     if (moduleCss) {
       const element = defaultTreeAdapter.createElement("style", spaces.html as DefaultTreeAdapterTypes.Element["namespaceURI"], []);

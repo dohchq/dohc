@@ -6,7 +6,8 @@ import { join, posix } from "node:path";
 import { parse } from "acorn";
 import * as esbuild from "esbuild";
 import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
-import { compileClosedAppPage, documentWrite, pageInput, pageNamespace, unsafeInlineScript } from "./closedAppPage.ts";
+import { unsafeInlineScript } from "@dohc/app-browser/document";
+import { compileClosedAppPage, documentWrite, pageInput, pageNamespace } from "./closedAppPage.ts";
 
 export interface ClosedAppInput {
   path: string;

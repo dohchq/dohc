@@ -340,6 +340,36 @@ describe("closed app compiler", () => {
         .rejects.toThrow("site/index.html is 40 KB once its images are embedded. A published page can be at most 20 KB. The largest image is site/big.png (30 KB). Use smaller images.");
     });
 
+    describe("CSS that would end its <style> element", () => {
+      const injection = ":root { --x: </style><script>window.ran = 1</script><style>; }";
+      const template = "<template><script>window.ran = 1</script></template>";
+
+      it("refuses a page stylesheet that esbuild prints with </style> in a custom property", async () => {
+        await expect(page(`<link rel="stylesheet" href="theme.css">${template}`, file("site/theme.css", injection)))
+          .rejects.toThrow("site/theme.css contains </style>, which would end the stylesheet early in the page. Write it as \\3c/style instead.");
+        await expect(page(`<style>${injection.replace("</style>", "<\\/style>")}</style>${template}`)).resolves.toBeTruthy();
+      });
+
+      it("refuses CSS that a module script imports with </style> in a custom property", async () => {
+        await expect(page(`<script type="module">import "./theme.css";</script>${template}`, file("site/theme.css", injection)))
+          .rejects.toThrow("The CSS that module scripts in site/index.html import contains </style>, which would end the stylesheet early in the page.");
+      });
+    });
+
+    it("hashes script files as the parser reads them, with CRLF and CR turned into LF", async () => {
+      const result = await page('<script src="crlf.js"></script><script defer src="cr.js"></script>',
+        file("site/crlf.js", "window.a = 1;\r\nwindow.b = 2;\r\n"), file("site/cr.js", "window.c = 3;\rwindow.d = 4;"));
+      expect(record(result).scripts).toEqual(expect.arrayContaining(["window.a = 1;\nwindow.b = 2;\n", "window.c = 3;\nwindow.d = 4;"]));
+      expect(JSON.stringify(record(result))).not.toContain("\\r");
+      const { window, document, runModules } = await open(result);
+      try {
+        runModules();
+        const texts = [...document.scripts].map(script => script.textContent);
+        expect(texts).toEqual(expect.arrayContaining(["window.a = 1;\nwindow.b = 2;\n", "window.c = 3;\nwindow.d = 4;"]));
+        expect([(window as unknown as { b?: number }).b, (window as unknown as { d?: number }).d]).toEqual([2, 4]);
+      } finally { window.close(); }
+    });
+
     it("refuses a page without a doctype, which a tab would show in quirks mode", async () => {
       await expect(compileClosedApp({ entryPath: "site/index.html", bounds, inputs: [file("site/index.html", "<p>No doctype</p>")] }))
         .rejects.toThrow("site/index.html has no <!doctype html>, so a browser shows it in quirks mode. Published apps always use standards mode. Add <!doctype html> as its first line.");

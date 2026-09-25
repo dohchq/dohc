@@ -34,7 +34,7 @@ export const APP_PAGE_MAX_SCRIPTS = 256;
 const exact = (row: unknown, keys: readonly string[]): row is Record<string, unknown> =>
   !!row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).sort().join() === [...keys].sort().join();
 /** Text that would end or re-escape a <script> element it sits in. */
-const unsafeInlineScript = (source: string) => /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
+export const unsafeInlineScript = (source: string) => /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
 
 /**
  * The one check on a page record, run by the compiler on what it emits and by
