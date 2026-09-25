@@ -6,6 +6,18 @@ const origin = "https://share.example.test";
 const secret = "A".repeat(43);
 const clients: Client[] = [];
 afterEach(async () => {await Promise.all(clients.splice(0).map(client => client.close()));});
+const [first, second] = ["a".repeat(64), "b".repeat(64)];
+const moment = (relaySeq: number, payload: Record<string, unknown>) =>
+  ({relaySeq, originSeq: relaySeq, opKind: "moment.append", recordedAtMs: relaySeq * 1000, payload: {versionId: "main", metadata: {origin: "sync"}, payloadBeforeBlobSha256: null, ...payload}});
+const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops: [
+  {relaySeq: 7, originSeq: 7, opKind: "workspace.init", recordedAtMs: 7000, payload: {}},
+  moment(8, {operation: "write", payloadAfterPath: "doc.md", payloadAfterBlobSha256: first}),
+  moment(9, {operation: "write", payloadBeforePath: "doc.md", payloadBeforeBlobSha256: first, payloadAfterPath: "doc.md", payloadAfterBlobSha256: second}),
+  moment(10, {operation: "rename", payloadBeforePath: "doc.md", payloadBeforeBlobSha256: second, payloadAfterPath: "plan.md", payloadAfterBlobSha256: second}),
+  moment(11, {operation: "write", payloadAfterPath: "cat.png", payloadAfterBlobSha256: first, payloadAfterContentKind: "binary"}),
+  moment(12, {operation: "delete", path: "plan.md", payloadBeforePath: "plan.md", payloadBeforeBlobSha256: second}),
+]};
+
 function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text") {
   const calls: Request[] = [];
   let revoked = false;
@@ -24,6 +36,7 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (revoked) return new Response(null, {status: 401});
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
       if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
+      if (path === "/sync/link/log") return Response.json(logPage);
       if (path.startsWith("/sync/link/blobs/")) return new Response("hello", {headers: {"content-type": "text/plain"}});
       if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
@@ -153,4 +166,21 @@ it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-c
   expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: "a".repeat(64)}})).toMatchObject({
     structuredContent: {ok: true, encoding: contentKind === "binary" ? "base64" : "utf8", content: contentKind === "binary" ? Buffer.from("hello").toString("base64") : "hello"},
   });
+});
+
+it("lists the link log as changes through the browser's log route", async () => {
+  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  expect((await client.callTool({name: "dohc_list_changes", arguments: {since: 7, limit: 50}})).structuredContent).toEqual({ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, changes: [
+    {recordedAtMs: 8000, operation: "write", path: "doc.md", blobSha256: first, contentKind: "text"},
+    {recordedAtMs: 9000, operation: "write", path: "doc.md", blobSha256: second, contentKind: "text", beforeBlobSha256: first},
+    {recordedAtMs: 10000, operation: "rename", path: "plan.md", beforePath: "doc.md", blobSha256: second, contentKind: "text", beforeBlobSha256: second},
+    {recordedAtMs: 11000, operation: "write", path: "cat.png", blobSha256: first, contentKind: "binary"},
+    {recordedAtMs: 12000, operation: "delete", path: "plan.md", beforeBlobSha256: second},
+  ]});
+  const log = f.calls.filter(call => new URL(call.url).pathname === "/sync/link/log").map(call => new URL(call.url).search);
+  expect(log).toEqual(["?since=7&limit=50"]);
+  expect(await client.callTool({name: "dohc_list_changes", arguments: {limit: 501}})).toMatchObject({isError: true});
+  expect(f.calls.filter(call => new URL(call.url).pathname === "/sync/link/log")).toHaveLength(1);
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: second}})).toMatchObject({isError: true});
+  expect(f.calls.some(call => new URL(call.url).pathname.startsWith("/sync/link/blobs/"))).toBe(false);
 });
