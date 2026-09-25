@@ -105,6 +105,16 @@ describe("SitePreviewPage", () => {
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
   });
 
+  it("shows the app's source in Explorer from the header", async () => {
+    const onShowSource = vi.fn();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShowSource={onShowSource} />);
+
+    await screen.findByTestId("site-preview-frame");
+    fireEvent.click(screen.getByRole("button", { name: "Show source in Explorer" }));
+
+    expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
   it("prefers a development preview for an owned package site", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({
       ...site,

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Box,
   ExternalLink,
+  FolderCode,
   Globe2,
   Hammer,
   Play,
@@ -203,6 +204,7 @@ export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
   sharedView?: boolean;
+  onShowSource?: () => void;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
 }) {
@@ -579,6 +581,17 @@ export function SitePreviewPage(props: {
                 </>
               ) : null}
             </>
+          ) : null}
+          {props.onShowSource ? (
+            <IconButton
+              data-testid="site-preview-show-source"
+              aria-label="Show source in Explorer"
+              title="Show source in Explorer"
+              onClick={props.onShowSource}
+              className="size-7"
+            >
+              <FolderCode size={13} aria-hidden />
+            </IconButton>
           ) : null}
           {canShare ? (
             <IconButton

@@ -105,6 +105,10 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
+  // A path to select and focus once its row renders ("Show in Explorer").
+  // The shell expands its folders first; onRevealed clears the request.
+  revealPath?: string | null;
+  onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   onActivateTab: (groupId: string, path: string) => void;
   onCloseTab: (groupId: string, path: string) => void;
@@ -466,6 +470,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onOpenFile,
     onOpenCollection,
     onTogglePin,
+    revealPath,
+    onRevealed,
   } = props;
   const activeTab =
     props.editorGroups.find((group) => group.id === props.activeEditorGroup)?.activeTab ??
@@ -1006,6 +1012,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setAnchorPath(path);
     setFocusedPath(path);
   }, []);
+
+  useEffect(() => {
+    if (!revealPath || !renderIndexByPath.has(revealPath)) return;
+    setFilesExpanded(true);
+    setSelection(new Set([revealPath]));
+    setAnchorPath(revealPath);
+    focusRow(revealPath);
+    onRevealed?.();
+  }, [focusRow, onRevealed, renderIndexByPath, revealPath]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
