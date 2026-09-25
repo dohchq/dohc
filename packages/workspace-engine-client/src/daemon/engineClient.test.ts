@@ -1294,6 +1294,77 @@ describe("request progress", () => {
     return { peer, transport, requests };
   }
 
+  it.each([1, 2])("does not transmit when serialization pass %s consumes the deadline", async (pass) => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const stringify = JSON.stringify;
+    let serializations = 0;
+    const serializer = vi.spyOn(JSON, "stringify").mockImplementation((value, ...args) => {
+      const result = stringify(value, ...args);
+      if (value?.method === "serialization.expiry" && ++serializations === pass) clock.mockReturnValue(1100);
+      return result;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onProgress = vi.fn();
+    try {
+      const expired = transport.sendRequest({ ...request(1, "serialization.expiry"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
+      await nextImmediate();
+      expect(requests).toEqual([]);
+      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(vi.getTimerCount()).toBe(0);
+      peer.send({ type: "progress", id: 1 });
+      expect(onProgress).not.toHaveBeenCalled();
+      expect(peer.received.some(entry => entry.type === "cancel")).toBe(false);
+      const pending = Array.from({ length: 1024 }, (_, index) => transport.sendRequest(request(index + 2, "after.expiry")));
+      await nextImmediate();
+      expect(requests).toHaveLength(1024);
+      for (const wire of requests) peer.send({ type: "response", id: wire.id, result: null });
+      await Promise.all(pending);
+    } finally {
+      transport.close();
+      serializer.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("deducts serialization time from the wire deadline and response timer", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const stringify = JSON.stringify;
+    const serializer = vi.spyOn(JSON, "stringify").mockImplementation((value, ...args) => {
+      const result = stringify(value, ...args);
+      if (value?.method === "serialization.partial") clock.mockReturnValue(400);
+      return result;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onProgress = vi.fn();
+    try {
+      const pending = transport.sendRequest({ ...request(1, "serialization.partial"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
+      const settled = vi.fn();
+      void pending.then(settled);
+      await nextImmediate();
+      expect(requests[0]).toMatchObject({ deadlineMs: 700, progress: true });
+      peer.send({ type: "progress", id: requests[0]!.id });
+      expect(onProgress).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(699);
+      await nextImmediate();
+      expect(settled).not.toHaveBeenCalled();
+      clock.mockReturnValue(1100);
+      await vi.advanceTimersByTimeAsync(1);
+      await nextImmediate();
+      expect(settled).toHaveBeenCalledWith(expect.any(EngineRequestDeadlineError));
+      expect(vi.getTimerCount()).toBe(0);
+      peer.send({ type: "progress", id: requests[0]!.id });
+      expect(onProgress).toHaveBeenCalledTimes(1);
+    } finally {
+      transport.close();
+      serializer.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves queued progress through deadline adjustment while removing a cancelled peer", async () => {
     const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
     const clock = vi.spyOn(performance, "now").mockReturnValue(100);

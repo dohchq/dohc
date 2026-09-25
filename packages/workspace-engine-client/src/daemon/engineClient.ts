@@ -1100,6 +1100,8 @@ export class EngineClient implements EngineTransport {
     ordinary = false,
     onProgress?: () => void,
   ): Promise<Response> {
+    const deadlineMs = request.deadlineMs ?? null;
+    const expiresAt = deadlineMs === null ? null : performance.now() + deadlineMs;
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
       const cause = this.closeCause;
@@ -1149,8 +1151,6 @@ export class EngineClient implements EngineTransport {
       this.ordinaryRequests++;
       this.ordinaryRequestBytes += retainedBytes;
     }
-    const deadlineMs = request.deadlineMs ?? null;
-    const expiresAt = deadlineMs === null ? null : performance.now() + deadlineMs;
     const unsent = !writeInput ? new AbortController() : undefined;
     let transmitted = false;
     let writeTask: Promise<void> = Promise.resolve();
@@ -1188,7 +1188,7 @@ export class EngineClient implements EngineTransport {
                 if (!pending) return;
                 expire();
               });
-            }, deadlineMs)
+            }, Math.max(0, expiresAt! - performance.now()))
           : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
@@ -1218,6 +1218,10 @@ export class EngineClient implements EngineTransport {
           payload = JSON.stringify(captured);
         }
         const frame = encodeFrame(FrameType.Control, 0, Buffer.from(payload, "utf8"), this.maxFrameBytes);
+        if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
+          expire();
+          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
+        }
         transmitted = true;
         return frame;
       }, unsent?.signal).then(async () => {
