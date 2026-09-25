@@ -1620,8 +1620,11 @@ mod tests {
                 sent.starts_with("POST /sync/shares/share-1/collection-writes "),
                 "{sent}"
             );
-            assert!(sent.contains(r#""submitId":"direct-1""#), "{sent}");
-            assert!(sent.contains(r#""changes":[{"#), "{sent}");
+            let body: serde_json::Value =
+                serde_json::from_str(&sent[sent.find('{').expect("a JSON body")..])
+                    .expect("the body is JSON");
+            assert_eq!(body["submitId"], "direct-1", "{sent}");
+            assert_eq!(body["changes"].as_array().map(Vec::len), Some(1), "{sent}");
         }
     }
 
