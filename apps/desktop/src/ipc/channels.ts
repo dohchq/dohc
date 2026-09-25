@@ -294,6 +294,8 @@ export const CHANNELS = {
   readShareProposalFileContent: "desktop:read-share-proposal-file-content",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
+  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   listMyShareChanges: "desktop:list-my-share-changes",
   withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",

@@ -68,6 +68,8 @@ import type {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
+  PushShareDirectWritesResult,
+  ShareDirectWritesPushedEvent,
   WithdrawShareChangesResult,
   McpConfigResult,
   NoticeRow,
@@ -344,6 +346,7 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
@@ -625,6 +628,18 @@ function makeBaseBridge(
     ),
     withdrawShareChanges: vi.fn(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
+    ),
+    pushShareDirectWrites: vi.fn(
+      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+    ),
+    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
+      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    },
+    onShareDirectWritesPushed: vi.fn(
+      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+        directWritesPushedCallbacks.add(listener);
+        return () => directWritesPushedCallbacks.delete(listener);
+      },
     ),
     pickWorkspaceRoot: vi.fn(async () => null),
     mountShare: vi.fn(async () => {
@@ -8873,6 +8888,37 @@ describe("shared view send changes", () => {
         proposalId: "proposal-1",
       }),
     );
+  });
+
+  // After a save in an Edit share view, main pushes a Collection's own files
+  // straight to the owner. A write the relay refuses stays for Send changes,
+  // and its notice sends it.
+  it("shows a push main ran after a save and offers a refused write as a proposal", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: SHARE_VIEW.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-action"));
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+  });
+
+  it("pushes nothing from a share view that cannot write", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
+    await screen.findByTestId("shared-view-banner");
+    // It does not listen for pushes at all.
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 
   // What a submit did not take. Both are things the recipient would otherwise

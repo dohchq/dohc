@@ -4912,6 +4912,54 @@ export async function resolveSubmitShareChangesResult(
   }
 }
 
+export const PushShareDirectWritesPayload = z.object({
+  // The SHARE VIEW, resolved to its share and pinned grant in main, like
+  // SubmitShareChangesPayload.
+  workspaceId: WORKSPACE_ID,
+});
+export type PushShareDirectWritesPayload = z.infer<typeof PushShareDirectWritesPayload>;
+
+// A new Collection's batch is the largest write: its schema, an automations
+// file, and 500 records.
+const DirectWritePaths = z.array(z.string().min(1)).min(1).max(502);
+
+// How one direct write to a Collection's own files ended (ADR 0013). A stale
+// or refused write stays for Send changes.
+export const DirectWriteRow = z.discriminatedUnion("result", [
+  z.object({ result: z.literal("written"), paths: DirectWritePaths }),
+  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1) }),
+  z.object({ result: z.literal("refused"), paths: DirectWritePaths, reason: z.string() }),
+]);
+export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
+
+// One push's answer carries at most this many rows, over all its passes.
+export const MAX_DIRECT_WRITE_ROWS = MAX_SHARE_PROPOSAL_OPS;
+const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
+
+// What one push did. A failure is an ordinary result, for the reason a failed
+// submit is one: Electron does not carry custom Error properties across IPC.
+// `unavailable`: the relay does not take direct writes, so every change
+// waits for Send changes. `failed` keeps the writes answered before it;
+// `lasting` says trying again will not help, as when the grant is not Edit.
+export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
+  z.object({ status: z.literal("unavailable") }),
+  z.object({
+    status: z.literal("failed"),
+    writes: DirectWriteRows,
+    errorMessage: z.string(),
+    lasting: z.boolean(),
+  }),
+]);
+export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
+
+// A direct push main ran after a save in this share view finished.
+export const ShareDirectWritesPushedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  result: PushShareDirectWritesResult,
+});
+export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
+
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -6605,6 +6653,12 @@ export interface DohcDesktopBridge
   submitShareChanges(
     payload: SubmitShareChangesPayload,
   ): Promise<SubmitShareChangesResult>;
+  // Writes the share view's changes to a Collection's own files straight
+  // into the owner's workspace. Every other change waits for Send changes.
+  pushShareDirectWrites(
+    payload: PushShareDirectWritesPayload,
+  ): Promise<PushShareDirectWritesResult>;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;

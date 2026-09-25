@@ -111,6 +111,26 @@ describe("NewCollectionDialog", () => {
     expect(screen.queryByText("Storage unavailable")).toBeNull();
   });
 
+  it("makes only a document Collection from a share view", async () => {
+    bridgeMock.createWorkspaceFile.mockResolvedValue({ path: "trip/ideas/collection.yaml" });
+    const onCreated = vi.fn();
+    render(
+      <NewCollectionDialog
+        workspaceId="ws-1"
+        documentsOnly
+        onClose={() => undefined}
+        onCreated={onCreated}
+        onError={() => undefined}
+      />,
+    );
+    expect(screen.queryByLabelText("Data")).toBeNull();
+    expect(screen.queryByLabelText("Documents")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "trip/ideas" } });
+    fireEvent.click(screen.getByTestId("new-collection-create"));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith({ kind: "document", path: "trip/ideas" }));
+    expect(bridgeMock.dataset).not.toHaveBeenCalled();
+  });
+
   it("creates the schema through createWorkspaceFile from the chosen fields", async () => {
     bridgeMock.createWorkspaceFile.mockResolvedValue({
       path: "projects/tasks/collection.yaml",
