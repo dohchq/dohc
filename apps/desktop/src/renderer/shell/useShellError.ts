@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
+import type { ErrorDetailField } from "./copyDetails";
 
 export type ShellErrorKind =
   | "singleton-tab-split"
@@ -22,7 +23,7 @@ export interface ShellError {
   message: string;
   // Facts for a report, one "label: value" line each, such as a technical
   // cause. They go into Copy details, not the text a person reads.
-  details?: ReadonlyArray<readonly [label: string, value: string]>;
+  details?: ReadonlyArray<ErrorDetailField>;
   retry: (() => void) | null;
   kind?: ShellErrorKind;
   atMs: number;
@@ -126,7 +127,7 @@ export function useShellError(workspaceId: string) {
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
-      details?: ReadonlyArray<readonly [label: string, value: string]>;
+      details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
       kind?: ShellErrorKind;
     }) =>

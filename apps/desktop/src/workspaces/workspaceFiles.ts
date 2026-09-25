@@ -348,12 +348,13 @@ export interface ImportCopyOutcome {
 
 // Which file stopped an import, and why. A filesystem failure carries its
 // error code and raw text, for callers to put in the person's words and in a
-// report. A refusal dohc wrote itself carries that sentence as `reason`.
+// report. A refusal dohc makes itself carries its kind as `refusal`, and
+// callers word it, so every file name in the text is shortened the same way.
 export interface ImportStop {
   file: string;
   code?: string;
   detail?: string;
-  reason?: string;
+  refusal?: "dangling-link";
 }
 
 // The longest error text an import result carries; the IPC contract holds
@@ -562,16 +563,13 @@ async function classifyCopyEnoent(
   return target === "absent" ? "danglingLink" : "unexplained";
 }
 
-// What the user gets to read when their pick was a link to nothing. A bare
-// ENOENT would name a path that is still right there, so it says which part is
-// missing and gives the two steps in the order they work: the target has to
-// come back before the user can import it.
-//
-// The name goes last and once. This renders in a single-line truncate span
-// (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
-// it pushed both the reason and the instruction off the end of the line.
-function danglingLinkRefusal(source: string): string {
-  return `dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is ${basename(source)}.`;
+// The user picked a link to nothing. A bare ENOENT would name a path that is
+// still right there, so the import stops as a refusal of its own, and the
+// renderer says which part is missing and what to do.
+class DanglingLinkError extends Error {
+  constructor(source: string, options: { cause: unknown }) {
+    super(`The symbolic link ${basename(source)} points to a missing file.`, options);
+  }
 }
 
 // Why a trash ladder stopped before its next rung. Three outcomes, not two:
@@ -664,7 +662,7 @@ async function copyWithoutOverwrite(
         if (code === "ENOENT") {
           const enoent = await classifyCopyEnoent(source, absDir);
           if (enoent === "danglingLink") {
-            throw new Error(danglingLinkRefusal(source), { cause: error });
+            throw new DanglingLinkError(source, { cause: error });
           }
           if (enoent) throw error;
         }
@@ -713,10 +711,15 @@ export async function copyIntoWorkspace(
       const text = (error instanceof Error ? error.message : String(error))
         .trim()
         .slice(0, IMPORT_STOP_TEXT_MAX_CHARS);
-      const stop: ImportStop =
-        typeof code === "string" && code
-          ? { file: validated.normalized, code, ...(text ? { detail: text } : {}) }
-          : { file: validated.normalized, ...(text ? { reason: text } : {}) };
+      const stop: ImportStop = {
+        file: validated.normalized,
+        ...(error instanceof DanglingLinkError
+          ? { refusal: "dangling-link" as const }
+          : typeof code === "string" && code
+            ? { code }
+            : {}),
+        ...(text ? { detail: text } : {}),
+      };
       return {
         imported,
         skipped,

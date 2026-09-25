@@ -822,14 +822,14 @@ export const ImportWorkspaceFilesResult = z.object({
   // a second time.
   interrupted: z.literal(true).optional(),
   // An ordinary import stopped at a failed copy: the source file's name, and
-  // either the filesystem's error code with its raw text, which only goes
-  // into copied details, or a refusal dohc wrote itself (`reason`).
+  // either the filesystem's error code or a refusal dohc makes itself
+  // (`refusal`), with raw text that only goes into copied details.
   stop: z
     .object({
       file: z.string().min(1).max(4096),
       code: z.string().min(1).max(64).optional(),
       detail: z.string().min(1).max(500).optional(),
-      reason: z.string().min(1).max(500).optional(),
+      refusal: z.enum(["dangling-link"]).optional(),
     })
     .optional(),
 });

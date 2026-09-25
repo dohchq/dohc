@@ -72,7 +72,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
-import { importStopSentence, namedPaths } from "./shell/importStop";
+import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
@@ -2091,7 +2091,7 @@ export function DesktopWorkspaceShell(props: {
       // The first copy failed, so nothing landed.
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
-          message: `Could not import files${skippedSuffix}. ${importStopSentence(outcome.stop)}`,
+          message: fitImportMessage(`Could not import files${skippedSuffix}. `, importStopSentence(outcome.stop), ""),
           details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
           retry,
           kind: "import-files",
@@ -2105,13 +2105,15 @@ export function DesktopWorkspaceShell(props: {
           message:
             count === 0
               ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-              : `Imported ${namedPaths(outcome.imported)} before the import stopped.${
-                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : ""
-                } Import only the files that are still missing.`,
+              : fitImportMessage(
+                  `Imported ${namedPaths(outcome.imported)} before the import stopped.`,
+                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : "",
+                  " Import only the files that are still missing.",
+                ),
           // The message names at most two files; the report names them all.
           details: [
             ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
-            ...outcome.imported.map((path) => ["Imported", path] as const),
+            ...importedPathDetails(outcome.imported),
           ],
           retry,
           kind: "import-files",

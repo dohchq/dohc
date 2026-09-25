@@ -1261,8 +1261,8 @@ describe("import surfaces a vanished source instead of skipping it", () => {
         skipped: 0,
         stop: {
           file: "link.md",
-          reason:
-            "dohc did not import a symbolic link. The file it points to is missing. Restore that file. Then import it instead. The link is link.md.",
+          refusal: "dangling-link",
+          detail: "The symbolic link link.md points to a missing file.",
         },
       });
     } finally {

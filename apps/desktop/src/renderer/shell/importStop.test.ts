@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { importStopSentence, namedPaths } from "./importStop";
+import { errorDetails } from "./copyDetails";
+import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./importStop";
+import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
 
 describe("importStopSentence", () => {
   it("says why an import stopped in plain words, never the error code", () => {
@@ -19,9 +21,36 @@ describe("importStopSentence", () => {
     expect(importStopSentence({ file: "two.md" })).toBe("dohc could not copy two.md.");
   });
 
-  it("keeps a refusal dohc wrote itself as written", () => {
-    const reason = "dohc did not import a symbolic link. The file it points to is missing.";
-    expect(importStopSentence({ file: "link.md", reason })).toBe(reason);
+  it("words a dangling link with the steps in order, and shortens a long link name", () => {
+    expect(importStopSentence({ file: "link.md", refusal: "dangling-link" })).toBe(
+      "dohc did not import link.md, a symbolic link to a missing file. Restore that file, then import it instead.",
+    );
+    expect(importStopSentence({ file: `${"l".repeat(200)}.md`, refusal: "dangling-link" })).toBe(
+      `dohc did not import ${"l".repeat(59)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
+    );
+  });
+});
+
+describe("fitImportMessage", () => {
+  it("shortens the middle so the instruction at the end stays whole", () => {
+    const tail = " Import only the files that are still missing.";
+    expect(fitImportMessage("Imported a.md.", " short.", tail)).toBe(`Imported a.md. short.${tail}`);
+    const fitted = fitImportMessage("Imported a.md.", ` ${"x".repeat(600)}`, tail);
+    expect(fitted.length).toBe(SHELL_ERROR_MAX_CHARS);
+    expect(fitted.endsWith(`…${tail}`)).toBe(true);
+    expect(fitted.startsWith("Imported a.md. xxx")).toBe(true);
+  });
+});
+
+describe("importedPathDetails", () => {
+  it("keeps each landed path whole, up to 100 lines, then counts the rest", () => {
+    const deep = `${"folder/".repeat(100)}report.md`;
+    const details = importedPathDetails([deep]);
+    expect(errorDetails(details)).toBe(`Imported: ${deep}`);
+
+    const many = importedPathDetails(Array.from({ length: 103 }, (_, index) => `f${index}.md`));
+    expect(many).toHaveLength(101);
+    expect(errorDetails(many).split("\n").at(-1)).toBe("Imported: 3 more");
   });
 });
 

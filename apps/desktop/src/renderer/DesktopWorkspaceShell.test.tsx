@@ -15394,6 +15394,30 @@ describe("file transfers", () => {
     for (const path of imported) expect(copied).toContain(`Imported: ${path}`);
   });
 
+  // A dangling link's refusal names the link too. With long names, the
+  // instruction must still survive, and Copy keeps every path whole.
+  it("keeps the instruction whole when a long-named dangling link stops an import into a deep folder", async () => {
+    const long = (stem: string) => `${stem}-${"n".repeat(196)}.md`;
+    const deep = `${"nested-folder/".repeat(40)}${long("one")}`;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [deep, `notes/${long("two")}`],
+      skipped: 0,
+      interrupted: true,
+      stop: { file: long("link"), refusal: "dangling-link", detail: "The symbolic link points to a missing file." },
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("a symbolic link to a missing file. Restore that file, then import it instead.");
+    expect(toast.textContent).toContain(" Import only the files that are still missing.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
+  });
+
   it("keeps the skipped count when the first copy fails", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
