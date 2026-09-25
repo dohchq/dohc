@@ -39,6 +39,8 @@ import type {
   DismissAutomationFailurePayload,
   ListAutomationFailuresPayload,
   ListAutomationFailuresResult,
+  ListCollectionAutomationRunsResult,
+  ListCollectionAutomationsResult,
   RetryCollectionAutomationResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
@@ -730,6 +732,12 @@ function makeBaseBridge(
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
     onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+    listCollectionAutomations: vi.fn(
+      async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
+    ),
+    listCollectionAutomationRuns: vi.fn(
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
+    ),
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" }),
     ),
@@ -9483,7 +9491,7 @@ describe("automation failure notices", () => {
     expect(notice.textContent).toContain("2 failures so far.");
   });
 
-  it("tries a failed Collection automation again from its notice, and opens its Collection", async () => {
+  it("tries a failed Collection automation again from its notice, and opens its runs", async () => {
     const failure = {
       automationId: "collection:tasks#stamp", claimId: "atc_failed", chainStopped: false,
       name: "Stamp the finish date", error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
@@ -9495,6 +9503,10 @@ describe("automation failure notices", () => {
       collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
     }));
     bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
+    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [{
+      claimId: "atc_failed", state: "failed", error: failure.error, createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] });
     renderShell(bridge);
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
@@ -9511,6 +9523,41 @@ describe("automation failure notices", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     await user.click(within(await screen.findByTestId(noticeId)).getByRole("button", { name: "Open automation" }));
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(await screen.findByTestId("automation-run-atc_failed", undefined, { timeout: 15_000 })).toBeTruthy();
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId, automationId: failure.automationId,
+    });
+  });
+
+  it("moves an open panel to the next automation a notice opens", async () => {
+    const failure = (id: string, claimId: string) => ({
+      automationId: `collection:tasks#${id}`, claimId, chainStopped: false,
+      name: id, error: "The record is open elsewhere.", updatedAtMs: 5_000, generation: 1,
+    });
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [failure("first", "atc_first"), failure("second", "atc_second")] });
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
+      claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
+      error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
+      writes: [], definitionChanged: false, chainStopped: false, undone: false,
+    }] }));
+    renderShell(bridge);
+
+    const open = async (id: string) => {
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(within(await screen.findByTestId(`notice-automation-failure-collection:tasks#${id}`))
+        .getByRole("button", { name: "Open automation" }));
+    };
+    await open("first");
+    expect(await screen.findByTestId("automation-run-atc_first", undefined, { timeout: 15_000 })).toBeTruthy();
+    // The page cleared the first ask; the second still reaches the open panel.
+    await open("second");
+    expect(await screen.findByTestId("automation-run-atc_second")).toBeTruthy();
+    expect(screen.queryByTestId("automation-run-atc_first")).toBeNull();
   });
 
   it("toasts a Collection automation failure that arrives while the window is open, but not the ones it opened with", async () => {

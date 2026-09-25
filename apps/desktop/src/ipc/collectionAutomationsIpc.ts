@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import {
-  parseAutomationsFile,
-  writeAutomationsFile,
-  type Automation,
-} from "@dohc/workspace-contracts/automations";
+import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
   AutomationShareImpactPayload,
@@ -182,7 +178,9 @@ export function registerCollectionAutomationsIpc<
 
   // Saves the panel's automations over the file it read. Each automation
   // must read back from the written text as exactly itself, so anything the
-  // file contract refuses is refused here with its diagnostics.
+  // file contract refuses is refused here with its diagnostics. The writer
+  // drops comments and hand formatting, so a file it would lay out
+  // differently is rewritten only once the person agrees.
   registerHandler(CHANNELS.writeCollectionAutomations, async (event, payload) => {
     assertTrustedSender(event);
     const input = WriteCollectionAutomationsPayload.parse(payload);
@@ -199,21 +197,23 @@ export function registerCollectionAutomationsIpc<
         if (current.truncated || parsed.status !== "read" || parsed.entries.some((entry) => entry.status === "invalid")) {
           return { status: "unreadable" };
         }
+        const laidOut = writeAutomationsFile(parsed.entries);
+        if (!input.reformat && (laidOut.status !== "ok" || laidOut.text !== current.text)) return { status: "reformats" };
       }
       let written: ReturnType<typeof writeAutomationsFile>;
       try {
         // The writer reads its own text back, so a shape the file contract
         // would not produce is refused rather than written.
-        written = writeAutomationsFile(input.automations.map((automation) => ({
-          status: "valid",
-          automation: automation as unknown as Automation,
-        })));
+        written = writeAutomationsFile(input.automations.map((automation) => ({ status: "valid", automation })));
       } catch {
         return { status: "refused", diagnostics: [{ code: "changed-on-reread", path: "/automations" }] };
       }
       if (written.status === "refused") return { status: "refused", diagnostics: written.diagnostics };
+      // The index reads the new file before the panel lists it again.
+      const reindex = () => operation.state.collectionAutomations.handleWatcherEvents([{ operation: "update", path: relativePath }]);
       if (current === null) {
         await dependencies.createFile(event, { workspaceId: input.workspaceId, relativePath, initialText: written.text });
+        reindex();
         return { status: "written", contentHash: createHash("sha256").update(written.text).digest("hex") };
       }
       const result = await dependencies.writeText(event, {
@@ -222,7 +222,9 @@ export function registerCollectionAutomationsIpc<
         text: written.text,
         expectedContentHash: current.contentHash!,
       });
-      return result.status === "written" ? { status: "written", contentHash: result.contentHash } : { status: "conflict" };
+      if (result.status !== "written") return { status: "conflict" };
+      reindex();
+      return { status: "written", contentHash: result.contentHash };
     });
   });
 }

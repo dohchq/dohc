@@ -17,6 +17,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const createFile = vi.fn(async () => ({ path: "Tasks/automations.yaml" }));
   const writeText = vi.fn(async (_event: unknown, payload: { text: string }) => ({ status: "written" as const, contentHash: sha256(payload.text) }));
+  const reindexed: unknown[] = [];
   const fieldMarks = vi.fn(async (collectionPath: string) => [{ field: "Finished on", automations: [`Stamp in ${collectionPath}`] }]);
   const stop = {
     automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef", step: 0, seq: 3,
@@ -25,7 +26,7 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   const dismissStops = vi.fn(async () => undefined);
   const shareStop = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
   const shareImpact = vi.fn(async () => [shareStop]);
-  const executor = { fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+  const executor = { handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, holdState: () => ({ holds: [], stops: [stop], unreadable: false }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -43,13 +44,13 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
-      workspaceId: WORKSPACE_ID, collectionPath: "Tasks", ...payload,
+      workspaceId: WORKSPACE_ID, collectionPath: "Tasks", reformat: false, ...payload,
     });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
-  return { write, call, marks, stop, shareStop, fieldMarks, dismissStops, shareImpact, createFile, writeText };
+  return { write, call, marks, stop, shareStop, fieldMarks, dismissStops, shareImpact, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -98,6 +99,16 @@ describe("writing automations.yaml from the panel", () => {
     expect(text.initialText).toContain("- id: stamp");
     expect(text.initialText).toContain("Finished on: '=today()'");
     expect(result).toEqual({ status: "written", contentHash: sha256(text.initialText) });
+    expect(f.reindexed).toEqual([[{ operation: "update", path: "Tasks/automations.yaml" }]]);
+  });
+
+  it("asks before it lays out a file that has comments or hand formatting", async () => {
+    const file = "# Tasks\nversion: 1\nautomations: []\n";
+    const f = fixture({ file });
+    await expect(f.write({ expectedContentHash: sha256(file), automations: [stamp] })).resolves.toEqual({ status: "reformats" });
+    expect(f.writeText).not.toHaveBeenCalled();
+    await expect(f.write({ expectedContentHash: sha256(file), automations: [stamp], reformat: true }))
+      .resolves.toMatchObject({ status: "written" });
   });
 
   it("replaces the file only over the content the panel read", async () => {
