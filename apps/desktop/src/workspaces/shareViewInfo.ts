@@ -10,6 +10,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
+import { relayApiFetch } from "./sharedChannels";
 
 export interface ShareViewSelector {
   paths: string[];
@@ -62,7 +63,7 @@ async function shareFetch(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(shareUrl(relay, path), {
+  const response = await (relay.fetch ?? relayApiFetch())(shareUrl(relay, path), {
     ...init,
     headers,
   });

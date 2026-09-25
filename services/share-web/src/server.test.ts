@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { loadShareWebConfig } from "./config";
 import {
   createShareWebApplication,
@@ -236,6 +237,25 @@ describe("share-web sessions", () => {
     expect(exchanged.status).toBe(200);
     expect(receivedRelayExchangeKey).toBe(relayExchangeKey);
     expect(receivedClientAddress).toBe(clientAddress);
+  });
+
+  it("names the relay API version it speaks on a relay request, whatever the browser sent", async () => {
+    const versions: Array<string | null> = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      fetchRelay: async (relayRequest) => {
+        versions.push(relayRequest.headers.get(RELAY_API_VERSION_HEADER));
+        return Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
+      },
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 21).toString("base64url"),
+    });
+    const exchangeRequest = request("/api/exchange", exchange(SECRET_ALPHA));
+    exchangeRequest.headers.set(RELAY_API_VERSION_HEADER, "99");
+
+    expect((await handler(exchangeRequest)).status).toBe(200);
+    expect(versions).toEqual([String(RELAY_API_VERSION)]);
   });
 
   it.each(["/api/exchange", "/api/mcp/exchange"])("cancels a stalled relay exchange at the configured timeout for %s", async path => {
@@ -3938,6 +3958,7 @@ describe("share-web handoff adapter", () => {
     expect(capturedHeaders).toEqual({
       authorization: `LinkCapability ${CAP_ALPHA_1}`,
       "x-dohc-relay-exchange-key": HANDOFF_EXCHANGE_KEY,
+      [RELAY_API_VERSION_HEADER]: String(RELAY_API_VERSION),
     });
     expect(capturedBody).toBe("");
     const secretSurfaces = [

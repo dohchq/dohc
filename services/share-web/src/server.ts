@@ -11,6 +11,7 @@ import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
@@ -804,7 +805,7 @@ export function createShareWebApplication({
   publicRelayUrl,
   relayExchangeKey,
   publicHosts,
-  fetchRelay = (request) => fetch(request),
+  fetchRelay: sendToRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
   newSessionToken = () => randomBytes(32).toString("base64url"),
   newProfileSecret = () => randomBytes(32).toString("base64url"),
@@ -820,6 +821,12 @@ export function createShareWebApplication({
   publicEditRelease: releaseInput,
   appLaunch: appLaunchConfig,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  // Every relay request names the relay API version this build speaks.
+  const fetchRelay: RelayFetch = (request) => {
+    const headers = new Headers(request.headers);
+    headers.set(RELAY_API_VERSION_HEADER, String(RELAY_API_VERSION));
+    return sendToRelay(new Request(request, { headers }));
+  };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   if (publicEditRelease && !linkLiveConfig) throw new TypeError("Public Edit release requires configured link live limits.");
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {

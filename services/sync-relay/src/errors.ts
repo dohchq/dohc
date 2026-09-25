@@ -3,6 +3,8 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
+  api_version_too_new: 400,
+  api_version_too_old: 400,
   authorship_mismatch: 403,
   bad_request: 400,
   blob_missing: 422,
@@ -62,6 +64,8 @@ export const RELAY_ERRORS = Object.freeze(
 // kind, or which bound tripped would let a probing caller map the share.
 export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Object.freeze({
   ambiguous_selector: "a chat share must not also carry paths or versionId",
+  api_version_too_new: "this relay is older than the dohc that sent the request",
+  api_version_too_old: "this relay needs a newer dohc",
   authorship_mismatch: "chat op author does not match the authenticated actor",
   bad_request: "bad request",
   blob_missing: "log append references a blob not stored on the relay",

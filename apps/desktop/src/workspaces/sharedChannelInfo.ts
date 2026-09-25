@@ -7,6 +7,7 @@ import {
   ShareUnavailableError,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { relayApiFetch } from "./sharedChannels";
 
 export interface SharedChannelInfo {
   shareId: string;
@@ -30,7 +31,7 @@ async function shareFetch(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(shareUrl(relay, path), {
+  const response = await (relay.fetch ?? relayApiFetch())(shareUrl(relay, path), {
     ...init,
     headers,
   });

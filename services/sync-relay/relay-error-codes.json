@@ -1,5 +1,7 @@
 [
   { "code": "ambiguous_selector", "status": 400 },
+  { "code": "api_version_too_new", "status": 400 },
+  { "code": "api_version_too_old", "status": 400 },
   { "code": "authorship_mismatch", "status": 403 },
   { "code": "bad_request", "status": 400 },
   { "code": "blob_missing", "status": 422 },

@@ -20,7 +20,7 @@ import {
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
+import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -41,7 +41,7 @@ export function peekReceivedGrantKindForShare(
   const base = relay.baseUrl.replace(/\/+$/u, "");
   return peekReceivedGrantKind({
     fetchPage: async (since) => {
-      const response = await (relay.fetch ?? fetch)(
+      const response = await (relay.fetch ?? relayApiFetch())(
         `${base}/sync/shares/${encodeURIComponent(shareId)}/log?since=${since}&limit=200`,
         { headers: { authorization: `Bearer ${relay.token}` } },
       );
