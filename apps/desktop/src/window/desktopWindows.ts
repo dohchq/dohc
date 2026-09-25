@@ -32,6 +32,7 @@ interface DesktopWindowsDependencies {
   createMainWindow: typeof createMainWindowImplementation;
   // Handed to every renderer window's preload (dev-tools grant).
   preloadArguments?: readonly string[];
+  afterRendererCrashLoop?: () => void;
   readonly pluginSurfaces: { applyWebAppZoom(level: number): void };
   readonly rendererWorkspaceSessions: Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
@@ -357,6 +358,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     const window = followAppZoom(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         role: "manager",
         preloadArguments: dependencies.preloadArguments,
       }),
@@ -372,6 +374,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         preloadArguments: dependencies.preloadArguments,
       }),
     );

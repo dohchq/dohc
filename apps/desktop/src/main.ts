@@ -7,7 +7,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -134,6 +134,7 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
+import { createUpdateAfterFailure, type UpdateFailure } from "./updates/updateAfterFailure";
 import {
   createExitRounds,
   createQuitGuard,
@@ -499,6 +500,7 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
 }
 
 let autoUpdateController: AutoUpdateController | null = null;
+let autoUpdateStartup: Promise<AutoUpdateController | null> | null = null;
 
 // app.getAppPath() is unreliable here: when Electron is launched with a
 // direct script path (as the e2e harness does, and as a plain built binary
@@ -712,6 +714,7 @@ const desktopWindows = createDesktopWindows({
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  afterRendererCrashLoop,
   get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
@@ -3295,6 +3298,33 @@ function currentUpdateState(): UpdateStateEvent {
   );
 }
 
+// Auto-updates: packaged builds use electron-builder's baked app-update.yml
+// feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+// Failures are absorbed — updates must never take the app down. Starting
+// twice returns the first start.
+function startUpdates(): Promise<AutoUpdateController | null> {
+  autoUpdateStartup ??= startAutoUpdates({
+    isPackaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    // A restart already staged has no install left to make — quitAndInstall
+    // started its own quit on the first call and has none left to start.
+    // Main makes it, so the fact lives here and not in a renderer module a
+    // reload would reset. The quit is already approved:
+    // the IPC handler approves before asking the controller.
+    quitForStagedRestart: () => app.quit(),
+    onState: (_state, state) => {
+      broadcastUpdateState(state);
+    },
+  })
+    .then((controller) => {
+      autoUpdateController = controller;
+      broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+      return controller;
+    })
+    .catch(() => null);
+  return autoUpdateStartup;
+}
+
 function broadcastUpdateState(state: PublicUpdateState): void {
   const payload = parseUpdateStateForIpc(state);
   if (!payload) return;
@@ -3750,6 +3780,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        afterRendererCrashLoop,
         preloadArguments: devToolsPreloadArguments(devToolsGranted),
       }),
     ),
@@ -3825,29 +3856,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },
-    startUpdates: () => {
-      // Auto-updates: packaged builds use electron-builder's baked app-update.yml
-      // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
-      // Failures are absorbed — updates must never take the app down.
-      void startAutoUpdates({
-        isPackaged: app.isPackaged,
-        currentVersion: app.getVersion(),
-        // A restart already staged has no install left to make — quitAndInstall
-        // started its own quit on the first call and has none left to start.
-        // Main makes it, so the fact lives here and not in a renderer module a
-        // reload would reset. The quit is already approved:
-        // the IPC handler approves before asking the controller.
-        quitForStagedRestart: () => app.quit(),
-        onState: (_state, state) => {
-          broadcastUpdateState(state);
-        },
-      })
-        .then((controller) => {
-          autoUpdateController = controller;
-          broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
-        })
-        .catch(() => undefined);
-    },
+    startUpdates: () => { void startUpdates(); },
+    updateAfterStartupFailure: () => updateAfterFailure("startup"),
   },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
@@ -4042,6 +4052,37 @@ const quitGuard = createQuitGuard({
     app.quit();
   },
 });
+
+const installUpdate = createUpdateInstall<BrowserWindow>({
+  currentUpdateState, exitRounds, quitGuard,
+  get autoUpdateController() { return autoUpdateController; },
+});
+
+// A failing build checks the feed before it gives up, so a person on a bad
+// release can still reach the release that fixes it.
+const updateAfterFailure = createUpdateAfterFailure({
+  controller: startUpdates,
+  confirmRestart: async (failure: UpdateFailure, version) => {
+    const renderer = failure === "renderer";
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: renderer ? "This dohc window keeps crashing." : `Update ${version} is downloaded.`,
+      detail: renderer
+        ? `Update ${version} is downloaded. dohc closes and opens again on the new version.`
+        : "dohc closes and opens again on the new version.",
+      buttons: ["Restart now", renderer ? "Not now" : "Quit"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    return response === 0;
+  },
+  install: installUpdate,
+});
+
+function afterRendererCrashLoop(): void {
+  void updateAfterFailure("renderer");
+}
 
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
@@ -4796,7 +4837,7 @@ function registerIpcHandlers(): void {
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
+    assertTrustedSender, currentUpdateState, installUpdate,
     get autoUpdateController() { return autoUpdateController; },
   });
 

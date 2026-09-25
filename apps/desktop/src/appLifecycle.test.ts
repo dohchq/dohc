@@ -32,7 +32,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     lock = true;
     requestSingleInstanceLock = vi.fn(() => this.lock);
     whenReady = vi.fn(() => appReady.promise);
-    quit = vi.fn();
+    quit = vi.fn(() => { log.push("quit"); });
     exit = vi.fn();
   }
   const app = new App();
@@ -75,7 +75,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       prepareCli: vi.fn(() => undefined),
       registerHandlers: vi.fn(() => { log.push("handlers"); }),
       markFirstWindow: vi.fn(() => { log.push("first-window"); }),
-      reportFailure: vi.fn(),
+      reportFailure: vi.fn(() => { log.push("report-failure"); }),
     },
     services: {
       startCli: vi.fn(async () => { log.push("cli-start"); return cli; }),
@@ -89,6 +89,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       warmCredentials: vi.fn(async () => { log.push("credentials"); }),
       reconcileCloud: vi.fn(() => { log.push("cloud"); }),
       startUpdates: vi.fn(() => { log.push("updates"); }),
+      updateAfterStartupFailure: vi.fn(async () => { log.push("update-check"); return false; }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -140,7 +141,8 @@ describe("desktop bootstrap", () => {
     f.engine.resolve(true);
     await ready;
     expect(f.dependencies.services.startCli).toHaveBeenCalledOnce();
-    expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
+    expect(f.dependencies.services.updateAfterStartupFailure).not.toHaveBeenCalled();
+    expect(f.app.quit).not.toHaveBeenCalled();
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
   });
 
@@ -190,6 +192,79 @@ describe("desktop bootstrap", () => {
     expect(await f.activated.promise).toBe("pending");
     await lateOpened.promise;
     expect(f.dependencies.workspaces.openPath).toHaveBeenLastCalledWith("late", { id: 1, zoom: 1.5 });
+  });
+
+  it("starts updates once the window loads, while the engine handshake is still pending", async () => {
+    const updating = deferred();
+    const f = fixture((d) => {
+      d.services.startUpdates = vi.fn(() => { updating.resolve(); });
+    });
+    void f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    await f.created.promise;
+    expect(f.dependencies.services.startUpdates).not.toHaveBeenCalled();
+    f.loaded.resolve();
+    await updating.promise;
+    expect(f.dependencies.bootstrap.startEngine).toHaveBeenCalledOnce();
+    expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
+  });
+
+  it("starts updates while a launch workspace never finishes opening", async () => {
+    const opening = deferred();
+    const updating = deferred();
+    const f = fixture((d) => {
+      d.runtime.argv.push("--open-workspace", "stuck");
+      d.workspaces.openPath = vi.fn(() => {
+        opening.resolve();
+        return new Promise<string>(() => undefined);
+      });
+      d.services.startUpdates = vi.fn(() => { updating.resolve(); });
+    });
+    void f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(true);
+    await opening.promise;
+    f.loaded.resolve();
+    await updating.promise;
+    expect(f.dependencies.services.startUpdates).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("checks for an update before quitting when the daemon cannot start (restarting: %s)", async (restarting) => {
+    const f = fixture((d) => {
+      d.services.updateAfterStartupFailure = vi.fn(async () => {
+        f.log.push("update-check");
+        return restarting;
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(false);
+    await ready;
+    expect(f.log.slice(f.log.indexOf("first-window") + 1)).toEqual(
+      restarting ? ["update-check"] : ["update-check", "quit"],
+    );
+    expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("reports a bootstrap failure, then checks for an update before quitting (restarting: %s)", async (restarting) => {
+    const failure = new Error("handlers failed");
+    const f = fixture((d) => {
+      d.bootstrap.registerHandlers = () => { throw failure; };
+      d.services.updateAfterStartupFailure = vi.fn(async () => {
+        f.log.push("update-check");
+        return restarting;
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    await ready;
+    expect(f.dependencies.bootstrap.reportFailure).toHaveBeenCalledWith(failure);
+    expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(
+      restarting ? ["report-failure", "update-check"] : ["report-failure", "update-check", "quit"],
+    );
   });
 
   it("keeps activation and incoming paths deferred when the daemon cannot start", async () => {

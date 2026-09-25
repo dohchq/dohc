@@ -66,6 +66,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
     startUpdates(): void;
+    // Resolves true when the person chose to restart into a downloaded
+    // update, so the failed startup must not quit on its own.
+    updateAfterStartupFailure(): Promise<boolean>;
   };
   beforeQuit(event: QuitEvent): void;
   shutdown: {
@@ -189,8 +192,16 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     const window = windows.create();
     const windowLoaded = windows.whenLoaded(window);
     bootstrap.markFirstWindow();
+    // Updates start once the window loads, whether or not the engine and the
+    // launch workspaces ever finish, so a bad build can still reach the build
+    // that fixes it. Waiting for the load keeps the updater's module load off
+    // the engine handshake. A startup failure that comes first starts them.
+    void windowLoaded.then(() => services.startUpdates());
 
-    if (!(await engineStartup)) return;
+    if (!(await engineStartup)) {
+      await quitAfterStartupFailure();
+      return;
+    }
 
     cliServerStartup = services.startCli()
       .then(async (server) => {
@@ -222,7 +233,13 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     });
     bootstrapComplete = true;
     void services.warmCredentials().then(() => services.reconcileCloud());
-    services.startUpdates();
+  }
+
+  // Startup failure uses the ordinary quit path so drafts can veto it. A
+  // window may already hold edits: local reads and the plain editor never
+  // wait for the engine.
+  async function quitAfterStartupFailure(): Promise<void> {
+    if (!(await services.updateAfterStartupFailure())) app.quit();
   }
 
   return {
@@ -277,10 +294,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         dependencies.beforeQuit(event);
       });
 
-      const ready = app.whenReady().then(whenReady).catch((error: unknown) => {
+      const ready = app.whenReady().then(whenReady).catch(async (error: unknown) => {
         bootstrap.reportFailure(error);
-        // Startup failure uses the ordinary quit path so drafts can veto it.
-        app.quit();
+        await quitAfterStartupFailure();
       });
 
       app.on("window-all-closed", () => {
