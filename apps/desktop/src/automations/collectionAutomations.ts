@@ -201,7 +201,15 @@ export const UNREADABLE_REACH =
 export type CollectionAutomationStop = CollectionAutomationHold;
 
 /** A step a share would stop, for the share dialog to say before the share is made. */
-export type CollectionAutomationShareStop = Pick<CollectionAutomationHold, "automationName" | "collection" | "target" | "action">;
+export interface CollectionAutomationShareStop {
+  automationId: string;
+  automationName: string;
+  /** The full path of the Collection the automation belongs to. */
+  collectionPath: string;
+  /** The Collection the step reaches, by the name the UI shows. */
+  target: string;
+  action: "change" | "find";
+}
 
 export interface CollectionAutomationRun {
   claimId: string;
@@ -532,9 +540,13 @@ export class CollectionAutomations {
     return this.stepsWhere((verdict) => verdict.verdict === "held");
   }
 
-  /** Every step a narrower share stopped whose notice nobody dismissed, one per step. */
+  /**
+   * Every switched-on step a narrower share stopped whose notice nobody
+   * dismissed, one per step.
+   */
   stops(): CollectionAutomationStop[] {
-    return this.stepsWhere((verdict) => verdict.verdict === "stopped" && verdict.narrowed === true);
+    return this.stepsWhere((verdict, automation) =>
+      automation.enabled && verdict.verdict === "stopped" && verdict.narrowed === true);
   }
 
   /**
@@ -579,8 +591,9 @@ export class CollectionAutomations {
       const target = reach[index]?.steps[step];
       if (!owner || !target || !("collection" in target)) return [];
       return [{
+        automationId,
         automationName: owner.automation.name,
-        collection: collectionNamed(owner.collectionPath).name,
+        collectionPath: owner.collectionPath,
         target: target.collection.name,
         action: target.kind === "find-records" ? "find" : "change",
       }];
@@ -588,14 +601,14 @@ export class CollectionAutomations {
   }
 
   /** The steps whose stored verdict matches, with what their notice names. */
-  private stepsWhere(matches: (verdict: StoredReachVerdict) => boolean): CollectionAutomationHold[] {
+  private stepsWhere(matches: (verdict: StoredReachVerdict, automation: Automation) => boolean): CollectionAutomationHold[] {
     const steps: CollectionAutomationHold[] = [];
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const hash = definitionHash(automation);
       const collection = collectionNamed(collectionPath);
       reachStepsOf(automation, collection, collectionNamed).forEach((reach, step) => {
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
-        if (!stored || !matches(stored) || !("collection" in reach)) return;
+        if (!stored || !matches(stored, automation) || !("collection" in reach)) return;
         steps.push({
           automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
           collection: collection.name, target: reach.collection.name,

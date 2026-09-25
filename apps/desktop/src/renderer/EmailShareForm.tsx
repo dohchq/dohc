@@ -1,11 +1,7 @@
-import { Check, Copy, Zap } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type {
-  AutomationShareImpactResult,
-  CreateRelaySharePayload,
-  CreateRelayShareResult,
-  ShareAccess,
-} from "../ipc/bridgeContract";
+import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
+import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
@@ -29,27 +25,6 @@ const ACCESS_OPTIONS: ReadonlyArray<{
   },
 ];
 
-const OR = new Intl.ListFormat("en", { type: "disjunction" });
-
-/**
- * The one sentence the dialog says when a share would stop automation
- * steps, or null when it stops none. The recipient is the new editor whose
- * reach the steps would exceed.
- */
-export function automationShareWarning(
-  stops: AutomationShareImpactResult["stops"],
-  recipientEmail: string,
-): string | null {
-  if (stops.length === 0) return null;
-  const automations = new Map(stops.map((stop) => [JSON.stringify([stop.collection, stop.automationName]), stop]));
-  const reach = [...new Set(stops.map((stop) => `${stop.action === "find" ? "view" : "edit"} ${stop.target}`))];
-  const [only] = automations.values();
-  const what = automations.size === 1 && only
-    ? `the automation "${only.automationName}" in ${only.collection}`
-    : `${automations.size} automations`;
-  return `This share stops ${what}, because ${recipientEmail} cannot ${OR.format(reach)}.`;
-}
-
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
@@ -58,68 +33,63 @@ export function EmailShareForm(props: {
 }) {
   const [email, setEmail] = useState("");
   const [access, setAccess] = useState<ShareAccess>("view");
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "checking" | "creating">("idle");
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [invitationCopied, setInvitationCopied] = useState(false);
-  // The warning for the email and access it was checked against. Creating
-  // the same share again confirms it.
-  const [warning, setWarning] = useState<{ key: string; sentence: string } | null>(null);
   // RelayShareDialog keys this form by the canonical target. Switching panes
   // keeps pending work; changing the target unmounts and invalidates it.
   const requests = useRequestSequence([props.workspaceId]);
+  const automations = useAutomationShareCheck(props.workspaceId, props.target);
   useEffect(() => {
-    setCreated(null); setBusy(false); setError(null); setCopied(false); setInvitationCopied(false); setWarning(null);
+    setCreated(null); setPhase("idle"); setError(null); setCopied(false); setInvitationCopied(false);
   }, [props.workspaceId]);
 
+  const busy = phase !== "idle";
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
-  const shareKey = JSON.stringify([email.trim(), access]);
-  const shownWarning = warning?.key === shareKey ? warning.sentence : null;
+  const share = { recipientEmail: email.trim(), access };
+  const note = automations.noteFor(share);
 
-  // Edit on a Collection, or a folder holding one, can narrow what its
-  // automations reach. The first Create asks main which steps would stop;
-  // when some would, the form says so and waits for a second Create.
-  async function stopsAutomations(token: number, recipientEmail: string): Promise<boolean> {
-    if (access !== "edit" || props.target.kind !== "paths" || shownWarning !== null) return false;
-    let sentence: string | null = null;
-    try {
-      const impact = await bridge().automationShareImpact({
-        workspaceId: props.workspaceId, recipientEmail, paths: props.target.paths, access,
-      });
-      sentence = automationShareWarning(impact.stops, recipientEmail);
-    } catch {
-      // The warning is advice. After the share, the stopped steps' notice
-      // still names them.
+  // An edit during the automation check drops it, so Create always acts on
+  // the share on screen. Once the share is being made, the fields wait.
+  function edit(apply: () => void) {
+    if (phase === "checking") {
+      requests.next();
+      setPhase("idle");
     }
-    if (sentence === null || !requests.isCurrent(token)) return false;
-    setWarning({ key: shareKey, sentence });
-    return true;
+    apply();
   }
 
   async function createShare() {
     if (!canSubmit) return;
     const token = requests.next();
-    setBusy(true);
+    const current = () => requests.isCurrent(token);
+    const asked = { ...share };
     setError(null);
+    if (automations.asks(asked)) {
+      setPhase("checking");
+      if (!(await automations.mayShare(asked, current))) {
+        if (current()) setPhase("idle");
+        return;
+      }
+    }
+    setPhase("creating");
     try {
-      const recipientEmail = email.trim();
-      if (await stopsAutomations(token, recipientEmail)) return;
-      if (!requests.isCurrent(token)) return;
       const payload: CreateRelaySharePayload = {
         workspaceId: props.workspaceId,
-        recipientEmail,
-        access,
+        recipientEmail: asked.recipientEmail,
+        access: asked.access,
         ...(props.target.kind === "version"
           ? { versionId: props.target.versionId }
           : { paths: props.target.paths }),
       };
       const result = await bridge().createRelayShare(payload);
-      if (requests.isCurrent(token)) setCreated(result);
+      if (current()) setCreated(result);
     } catch (cause) {
-      if (requests.isCurrent(token)) setError(ipcErrorMessage(cause));
+      if (current()) setError(ipcErrorMessage(cause));
     } finally {
-      if (requests.isCurrent(token)) setBusy(false);
+      if (current()) setPhase("idle");
     }
   }
 
@@ -161,8 +131,9 @@ export function EmailShareForm(props: {
                   role="radio"
                   aria-checked={access === option.value}
                   data-testid={`share-access-${option.value}`}
-                  onClick={() => setAccess(option.value)}
-                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                  disabled={phase === "creating"}
+                  onClick={() => edit(() => setAccess(option.value))}
+                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors disabled:opacity-50 ${
                     access === option.value
                       ? "border-ink bg-panel-2 text-ink"
                       : "border-line bg-panel text-muted hover:text-ink"
@@ -195,7 +166,11 @@ export function EmailShareForm(props: {
               data-testid="share-email"
               type="email"
               value={email}
-              onChange={(event) => setEmail(event.currentTarget.value)}
+              disabled={phase === "creating"}
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                edit(() => setEmail(next));
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") void createShare();
               }}
@@ -204,23 +179,20 @@ export function EmailShareForm(props: {
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
           </label>
-          {shownWarning ? (
-            <p
-              data-testid="share-automation-warning"
-              role="status"
-              className="m-0 flex items-start gap-1.5 text-xs leading-relaxed text-warning"
-            >
-              <Zap size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
-              {shownWarning}
-            </p>
-          ) : null}
+          {note?.warning ? <AutomationShareNote note={note} /> : null}
           <PrimaryButton
             type="button"
             data-testid="share-create"
             disabled={!canSubmit}
             onClick={() => void createShare()}
           >
-            {busy ? "Creating share…" : shownWarning ? "Create share anyway" : "Create share"}
+            {phase === "checking"
+              ? "Checking automations…"
+              : phase === "creating"
+                ? "Creating share…"
+                : note?.warning
+                  ? "Create share anyway"
+                  : "Create share"}
           </PrimaryButton>
         </>
       ) : (
@@ -281,6 +253,7 @@ export function EmailShareForm(props: {
         </>
       )}
 
+      {note?.failed ? <AutomationShareNote note={note} /> : null}
       {error ? (
         <p data-testid="share-error" role="alert" className="m-0 text-xs text-danger">
           {error}

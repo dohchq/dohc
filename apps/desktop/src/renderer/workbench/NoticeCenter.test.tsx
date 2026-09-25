@@ -194,15 +194,26 @@ describe("automation failure notices", () => {
     expect(onDismissAutomationStops).toHaveBeenCalledWith([spend]);
     unmount();
 
-    const stops = [spend, stop("log", "Log", "Archive", "find")];
+    // Every automation it will dismiss is named, with its file, however many there are.
+    const stops = [
+      spend,
+      stop("log", "Log", "Archive", "find"),
+      { ...stop("tidy", "Tidy", "Budget", "change"), automationId: "collection:Home/Trip#tidy" },
+      stop("sum", "Sum", "Budget", "change"),
+    ];
     renderNotices({ automationStops: stops, onDismissAutomationStops });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const many = await screen.findByTestId("notice-automation-stops");
-    expect(many.textContent).toContain("2 automations stopped");
+    expect(many.textContent).toContain("4 automations stopped");
     expect(many.textContent).toContain(
-      '"Spend" in Trip: ana@dohc.test cannot edit Budget. "Log" in Trip: ana@dohc.test cannot view Archive.',
+      '"Spend" in Projects/Trip/automations.yaml: ana@dohc.test cannot edit Budget. ' +
+        '"Log" in Projects/Trip/automations.yaml: ana@dohc.test cannot view Archive. ' +
+        '"Tidy" in Home/Trip/automations.yaml: ana@dohc.test cannot edit Budget. ' +
+        '"Sum" in Projects/Trip/automations.yaml: ana@dohc.test cannot edit Budget. Open each file to change its steps.',
     );
     expect(screen.getAllByTestId("notice-automation-stops")).toHaveLength(1);
+    await userEvent.click(within(many).getByRole("button", { name: "Dismiss notice" }));
+    expect(onDismissAutomationStops).toHaveBeenLastCalledWith(stops);
   });
 });
 

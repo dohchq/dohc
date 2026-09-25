@@ -31,8 +31,10 @@ describe("reach verdicts", () => {
       .toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test" });
     // Reach comes back: the step waits for a current editor, as any widening does.
     expect(nextReachVerdict(narrowed, allowed, true)).toEqual({ verdict: "held", stoppedFor: "bob@dohc.test" });
-    // A switched-off automation's step, or one held and never run, stops without a notice.
+    // A switched-off automation's step, or one held and never run, stops without a notice,
+    // and switching an automation off ends the notice for its stopped step.
     expect(nextReachVerdict({ verdict: "allowed", stoppedFor: null }, stoppedByBob, false).narrowed).toBeUndefined();
+    expect(nextReachVerdict(narrowed, stoppedByBob, false)).toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test" });
     expect(nextReachVerdict({ verdict: "held", stoppedFor: "bob@dohc.test" }, stoppedByBob, true).narrowed).toBeUndefined();
   });
 });

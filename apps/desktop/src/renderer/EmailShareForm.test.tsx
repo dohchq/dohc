@@ -2,7 +2,8 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { automationShareWarning, EmailShareForm } from "./EmailShareForm";
+import { automationShareWarning } from "./automationShareCheck";
+import { EmailShareForm } from "./EmailShareForm";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 
@@ -32,12 +33,12 @@ afterEach(() => {
   cleanup();
 });
 
+const spend = { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" as const };
+
 describe("automation steps a share would stop", () => {
   it("says so in one sentence before an Edit share, and makes the share on the second Create", async () => {
     const user = userEvent.setup();
-    bridgeMock.automationShareImpact.mockResolvedValue({
-      stops: [{ automationName: "Spend", collection: "Trip", target: "Budget", action: "change" }],
-    });
+    bridgeMock.automationShareImpact.mockResolvedValue({ stops: [spend] });
     render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} visible onDone={() => {}} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await user.click(screen.getByTestId("share-access-edit"));
@@ -63,12 +64,34 @@ describe("automation steps a share would stop", () => {
     expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(1);
   });
 
-  it("asks nothing for a View share, and shares when the check itself fails", async () => {
+  it("drops a check still running when the share on screen changes, so Create never makes the old one", async () => {
+    const user = userEvent.setup();
+    let answer: (value: { stops: [] }) => void = () => undefined;
+    bridgeMock.automationShareImpact.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} visible onDone={() => {}} />);
+    await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
+    await user.click(screen.getByTestId("share-access-edit"));
+    await user.click(screen.getByTestId("share-create"));
+    expect(screen.getByTestId("share-create").textContent).toBe("Checking automations…");
+
+    await user.click(screen.getByTestId("share-access-view"));
+    await act(async () => answer({ stops: [] }));
+    expect(bridgeMock.createRelayShare).not.toHaveBeenCalled();
+    expect(screen.getByTestId("share-create").textContent).toBe("Create share");
+
+    await user.click(screen.getByTestId("share-create"));
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1", recipientEmail: "ana@dohc.test", access: "view", paths: ["Trip"],
+    });
+  });
+
+  it("asks nothing for a View share, and shares when the check itself fails, saying so", async () => {
     const user = userEvent.setup();
     render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} visible onDone={() => {}} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.automationShareImpact).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("share-automation-check-failed")).toBeNull();
     cleanup();
 
     bridgeMock.automationShareImpact.mockRejectedValue(new Error("dohc is still opening this workspace's automations."));
@@ -77,14 +100,22 @@ describe("automation steps a share would stop", () => {
     await user.click(screen.getByTestId("share-access-edit"));
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.createRelayShare).toHaveBeenCalledTimes(2);
+    expect((await screen.findByTestId("share-automation-check-failed")).textContent).toBe(
+      "dohc could not check which automations this share stops.",
+    );
   });
 
-  it("counts several automations and names each place they could not reach", () => {
+  it("names each automation by its Collection's full path, and each place it could not reach", () => {
     expect(automationShareWarning([
-      { automationName: "Spend", collection: "Trip", target: "Budget", action: "change" },
-      { automationName: "Spend", collection: "Trip", target: "Budget", action: "change" },
-      { automationName: "Log", collection: "Tasks", target: "Archive", action: "find" },
-    ], "ana@dohc.test")).toBe("This share stops 2 automations, because ana@dohc.test cannot edit Budget or view Archive.");
+      { ...spend, collectionPath: "Projects/Trip" },
+      { ...spend, collectionPath: "Projects/Trip" },
+      { automationId: "collection:Home/Trip#spend", automationName: "Spend", collectionPath: "Home/Trip", target: "Archive", action: "find" },
+    ], "ana@dohc.test")).toBe(
+      'This share stops the automations "Spend" in Projects/Trip and "Spend" in Home/Trip, because ana@dohc.test cannot edit Budget or view Archive.',
+    );
+    expect(automationShareWarning([spend], null)).toBe(
+      'This share stops the automation "Spend" in Trip, because anyone who opens this link cannot edit Budget.',
+    );
     expect(automationShareWarning([], "ana@dohc.test")).toBeNull();
   });
 });

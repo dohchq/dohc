@@ -158,34 +158,30 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   };
 }
 
-// How many stopped automations the notice names before it counts the rest.
-const STOPPED_AUTOMATIONS_NAMED = 3;
-
-// The one notice for every step a narrower share stopped: which automations
-// stopped, who cannot reach what, and where to change the steps.
+// The one notice for every step a narrower share stopped. It names each
+// automation it will dismiss, with its file, and who cannot reach what.
 function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
-  const automations = new Map<string, { name: string; collection: string; reasons: Set<string> }>();
+  const automations = new Map<string, { name: string; file: string; reasons: Set<string> }>();
   for (const stop of stops) {
+    const collection = collectionAutomationOf(stop.automationId)?.collection ?? stop.collection;
     const entry = automations.get(stop.automationId) ??
-      { name: stop.automationName, collection: stop.collection, reasons: new Set<string>() };
+      { name: stop.automationName, file: `${collection}/automations.yaml`, reasons: new Set<string>() };
     const who = stop.stoppedFor ?? "Someone you shared with";
     entry.reasons.add(`${who} cannot ${stop.action === "find" ? "view" : "edit"} ${stop.target}.`);
     automations.set(stop.automationId, entry);
   }
   const [only] = automations.values();
   if (automations.size === 1 && only) {
-    const path = collectionAutomationOf(stops[0]!.automationId)?.collection ?? only.collection;
     return {
       title: `Automation "${only.name}" stopped`,
-      body: `${[...only.reasons].join(" ")} Open ${path}/automations.yaml to change the step.`,
+      body: `${[...only.reasons].join(" ")} Open ${only.file} to change the step.`,
     };
   }
-  const named = [...automations.values()].slice(0, STOPPED_AUTOMATIONS_NAMED)
-    .map((entry) => `"${entry.name}" in ${entry.collection}: ${[...entry.reasons].join(" ")}`);
-  const more = automations.size - named.length;
+  const named = [...automations.values()]
+    .map((entry) => `"${entry.name}" in ${entry.file}: ${[...entry.reasons].join(" ")}`);
   return {
     title: `${automations.size} automations stopped`,
-    body: `${named.join(" ")}${more > 0 ? ` ${more} more stopped too.` : ""} Open each Collection's automations.yaml to change its steps.`,
+    body: `${named.join(" ")} Open each file to change its steps.`,
   };
 }
 

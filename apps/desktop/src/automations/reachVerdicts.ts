@@ -40,8 +40,8 @@ type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed">;
  */
 export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach, switchedOn: boolean): Verdict {
   if (!reach.allowed) {
-    const narrowed = (previous?.verdict === "allowed" && switchedOn) ||
-      (previous?.verdict === "stopped" && previous.narrowed === true);
+    const narrowed = switchedOn &&
+      (previous?.verdict === "allowed" || (previous?.verdict === "stopped" && previous.narrowed === true));
     return { verdict: "stopped", stoppedFor: reach.person ?? null, ...(narrowed ? { narrowed: true } : {}) };
   }
   if (previous?.verdict === "stopped" || previous?.verdict === "held") {

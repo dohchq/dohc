@@ -1437,8 +1437,9 @@ describe("Collection automations", () => {
     const share = { paths: ["Trip"], versionId: null, access: "edit" as const, recipientEmail: "ana@dohc.test" };
     // A switched-off automation stops nothing it was doing.
     await expect(w.executor.shareImpact(share)).resolves.toEqual([
-      { automationName: "Spend", collection: "Trip", target: "Budget", action: "change" },
+      { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" },
     ]);
+    await expect(w.executor.shareImpact({ ...share, recipientEmail: null })).resolves.toHaveLength(1);
     await expect(w.executor.shareImpact({ ...share, access: "view" })).resolves.toEqual([]);
 
     // Ana gets Edit on Trip. Her reach stops the step, and one notice says so.
@@ -1467,5 +1468,33 @@ describe("Collection automations", () => {
     await restarted.open();
     await restarted.automationsIn("Trip");
     expect(restarted.stops()).toEqual([]);
+  });
+
+  it("ends the notice for a stopped step when its automation is switched off, and does not raise it again", async () => {
+    const spend = [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n");
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
+    await w.executor.open();
+    await w.executor.automationsIn("Trip");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Trip"])] });
+    w.executor.rosterChanged();
+    await w.until(() => w.executor.stops().length === 1);
+
+    await w.writeAutomations("Trip", spend.replace("    name: Spend", "    name: Spend\n    enabled: false"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Trip/automations.yaml" }]);
+    await w.until(() => !w.subscriptions.has("collection:Trip#spend"));
+    expect(w.executor.stops()).toEqual([]);
+    // Reading the verdicts records them under the switched-off definition.
+    await w.executor.automationsIn("Trip");
+    // Switched on again, it is still stopped, and the ⚡ panel says so; the notice is not raised again.
+    await w.writeAutomations("Trip", spend);
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Trip/automations.yaml" }]);
+    await w.until(() => w.subscriptions.has("collection:Trip#spend"));
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.stops()).toEqual([]);
   });
 });

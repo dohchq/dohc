@@ -5244,10 +5244,11 @@ export const DismissAutomationStopsPayload = z.object({
 export type DismissAutomationStopsPayload = z.infer<typeof DismissAutomationStopsPayload>;
 
 // The automation steps a share with these paths and access would stop,
-// asked before the share is made.
+// asked before the share is made. `recipientEmail` is null for a link,
+// which makes an editor of whoever opens it.
 export const AutomationShareImpactPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  recipientEmail: EMAIL_STRING,
+  recipientEmail: EMAIL_STRING.nullable(),
   paths: z.array(PATH_STRING).min(1).max(100),
   access: SHARE_ACCESS,
 });
