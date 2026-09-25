@@ -42,19 +42,21 @@ type LookupUserDisplayName = (
   userId: string,
 ) => Promise<string | null> | string | null;
 
+// The account's display name, or null when it has none or the lookup fails
+// or runs past its deadline.
 export async function accountDisplayName(
   lookupUserDisplayName:
     | LookupUserDisplayName
     | undefined,
   userId: string,
-): Promise<string> {
-  if (!lookupUserDisplayName) return "Unnamed";
+): Promise<string | null> {
+  if (!lookupUserDisplayName) return null;
 
   let lookup: Promise<string | null>;
   try {
     lookup = Promise.resolve(lookupUserDisplayName(userId));
   } catch {
-    return "Unnamed";
+    return null;
   }
 
   let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -67,9 +69,9 @@ export async function accountDisplayName(
       deadline.unref();
     });
     const lookedUpName = await Promise.race([lookup, deadlineResult]);
-    return normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
+    return normalizeDiscussionDisplayName(lookedUpName);
   } catch {
-    return "Unnamed";
+    return null;
   } finally {
     if (deadline) clearTimeout(deadline);
   }
@@ -560,10 +562,10 @@ export function createDiscussionRoutes(
         "read",
         input.workspaceId,
       );
-      const displayName = await accountDisplayName(
+      const displayName = (await accountDisplayName(
         lookupUserDisplayName,
         actor.userId,
-      );
+      )) ?? "Unnamed";
       const result = storage.appendAuthenticatedDiscussionMessage({
         shareId,
         authorUserId: actor.userId,

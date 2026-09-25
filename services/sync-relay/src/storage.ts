@@ -531,6 +531,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     noticeStorage.markNotices(this, input);
   }
 
+  noticeShareReceived(input: noticeStorage.NoticeShareReceivedInput): void {
+    noticeStorage.noticeShareReceived(this, input);
+  }
+
+  pendingShareNotices(recipientUserId: string) {
+    return noticeStorage.pendingShareNotices(this, recipientUserId);
+  }
+
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
     return publicationStorage.publishAppPublication(this, input);
   }

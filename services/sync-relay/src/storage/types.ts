@@ -574,6 +574,8 @@ export interface SyncRelayStorage {
   postNotice(input: import("./notices").PostNoticeInput): void;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   markNotices(input: import("./notices").MarkNoticesInput): void;
+  noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
+  pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
   acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
