@@ -281,7 +281,7 @@ export const CHANNELS = {
   retryCollectionAutomation: "desktop:retry-collection-automation",
   undoCollectionAutomationRun: "desktop:undo-collection-automation-run",
   listAutomationTargets: "desktop:list-automation-targets",
-  checkAutomationFormulas: "desktop:check-automation-formulas",
+  checkCollectionAutomation: "desktop:check-collection-automation",
   confirmCollectionAutomationStep: "desktop:confirm-collection-automation-step",
   writeCollectionAutomations: "desktop:write-collection-automations",
   listAutomationHolds: "desktop:list-automation-holds",

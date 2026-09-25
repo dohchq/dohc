@@ -184,8 +184,7 @@ import {
 } from "./workspaces/WorkspaceRegistry";
 import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
 import { CollectionAutomations } from "./automations/collectionAutomations";
-import { createAutomationFormulaEvaluator, formulaSyntaxProblems } from "./automations/automationEvaluatorHost";
-import { localIsoTime } from "./automations/automationPlan";
+import { createAutomationFormulaEvaluator } from "./automations/automationEvaluatorHost";
 import { createAutomationRunStore } from "./automations/automationRunStore";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import {
@@ -4649,7 +4648,6 @@ function registerIpcHandlers(): void {
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
-    checkFormulas: (sources) => formulaSyntaxProblems(automationEvaluator, sources, localIsoTime(Date.now())),
   });
 
   registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

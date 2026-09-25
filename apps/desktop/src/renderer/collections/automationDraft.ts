@@ -1,5 +1,5 @@
 import type { CollectionFieldType, FieldDefinition } from "@dohc/workspace-contracts";
-import type { Automation, AutomationValue } from "./automationSentence";
+import type { Automation, AutomationStep, AutomationValue } from "./automationSentence";
 
 // The builder's model of the parts a person edits without writing a
 // formula: "Only if" conditions as rows, and each value as a kind plus what
@@ -100,17 +100,27 @@ export function valueKindsFor(type: CollectionFieldType | null, allowAny: boolea
   ];
 }
 
-/** A literal as the field's type stores it, from what was typed. */
+/**
+ * A literal from what was typed. A number stays the text typed, so "-" and
+ * an empty input keep their place while the person types; numberValue reads
+ * it when the automation is built.
+ */
 export function literalFor(type: CollectionFieldType | null, text: string): AutomationValue {
-  if (type === "number") {
-    const number = Number(text);
-    return { kind: "literal", value: text.trim() === "" || !Number.isFinite(number) ? null : number };
-  }
   if (type === "checkbox") return { kind: "literal", value: text === "true" };
   if (type === "multi-select") {
     return { kind: "literal", value: text.split(",").map((item) => item.trim()).filter((item) => item.length > 0) };
   }
   return { kind: "literal", value: text };
+}
+
+/**
+ * A number field's typed text as the number it stores, or undefined when it
+ * is not a number yet. Any other value is itself.
+ */
+export function numberValue<Value>(type: CollectionFieldType | null, value: Value): Value | number | undefined {
+  if (type !== "number" || typeof value !== "string") return value;
+  const number = Number(value);
+  return value.trim() === "" || !Number.isFinite(number) ? undefined : number;
 }
 
 /** What a literal shows in its input. */
@@ -159,4 +169,28 @@ export function newAutomation(fields: readonly FieldDefinition[]): Automation {
     if: null,
     do: [{ kind: "set", values: [{ field: set?.name ?? "", value: defaultValueFor(set) }], records: null, operation: null }],
   };
+}
+
+/**
+ * For each top-level step, the places of its reach verdicts among all of an
+ * automation's verdicts. The reach check has one verdict per step that
+ * changes or finds records, in the order the executor walks the steps: a
+ * step, then the steps an If runs, then its otherwise steps.
+ */
+export function reachPlaces(steps: readonly AutomationStep[]): number[][] {
+  let next = 0;
+  const walk = (list: readonly AutomationStep[], into: number[]) => {
+    for (const step of list) {
+      if (step.kind === "set" || step.kind === "add-record" || step.kind === "find") into.push(next++);
+      if (step.kind === "if") {
+        walk(step.do, into);
+        walk(step.otherwise, into);
+      }
+    }
+  };
+  return steps.map((step) => {
+    const places: number[] = [];
+    walk([step], places);
+    return places;
+  });
 }

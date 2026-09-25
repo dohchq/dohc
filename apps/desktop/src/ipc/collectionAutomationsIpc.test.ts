@@ -33,7 +33,6 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     writeText,
     showItemInFolder: () => undefined,
     deletePath: async () => undefined,
-    checkFormulas: async (sources) => sources.map(() => null),
   });
   const write = (payload: Record<string, unknown>) =>
     handlers.get(CHANNELS.writeCollectionAutomations)!({ sender: "window" }, {
@@ -41,7 +40,8 @@ function fixture(options: { file?: string; sharedView?: boolean } = {}) {
     });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { write, call, createFile, writeText, reindexed };
+  const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
+  return { write, call, check, createFile, writeText, reindexed };
 }
 
 describe("writing automations.yaml from the panel", () => {
@@ -90,6 +90,18 @@ describe("writing automations.yaml from the panel", () => {
   it("answers unavailable in a shared view, whose automations run on the owner's computer", async () => {
     await expect(fixture({ sharedView: true }).write({ expectedContentHash: null, automations: [stamp] }))
       .resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("checks a draft the way a save would, and each formula's syntax without running it", async () => {
+    const f = fixture();
+    await expect(f.check({ automation: stamp, formulas: ["today()", "record.Status =="] })).resolves.toEqual({
+      diagnostics: [],
+      formulaProblems: [null, "Unexpected token."],
+    });
+    const removed = { ...stamp, when: { kind: "record-removed", table: null } };
+    await expect(f.check({ automation: removed, formulas: [] }))
+      .resolves.toMatchObject({ diagnostics: [{ code: "step-needs-record" }] });
+    expect(f.createFile).not.toHaveBeenCalled();
   });
 });
 

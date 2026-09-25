@@ -13,7 +13,7 @@ import type {
   WriteCollectionAutomationsResult,
 } from "../../ipc/bridgeContract";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
-import { AutomationsPanel, useCollectionAutomations } from "./AutomationsPanel";
+import { AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
 
@@ -63,6 +63,7 @@ const run = (overrides: Partial<Run>): Run => ({
 function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean } = {}) {
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
+  const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
   const written: WriteCollectionAutomationsPayload[] = [];
   const writeResults: WriteCollectionAutomationsResult[] = [];
   const bridge = {
@@ -93,15 +94,26 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       path: collectionPath, status: "valid", reasons: [], recordCount: 0,
       schema: { name: null, description: null, views: [], fields: collectionPath === "Log" ? [{ name: "Entry", type: "text" }] : [] },
     })),
-    // The evaluator names a syntax error only for a formula that ends in "==".
-    checkAutomationFormulas: vi.fn(async ({ formulas }: { formulas: string[] }) => ({
-      problems: formulas.map((formula) => (formula.trim().endsWith("==") ? "Unexpected end of input." : null)),
+    // Main names a syntax error only for a formula that ends in "==", and
+    // refuses an automation named "Too long" as the file contract would.
+    checkCollectionAutomation: vi.fn(async ({ automation, formulas }: { automation: Automation; formulas: string[] }) => ({
+      diagnostics: automation.name === "Too long" ? [{ code: "too-long" as const, path: "/automations/0/name" }] : [],
+      formulaProblems: formulas.map((formula) => (formula.trim().endsWith("==") ? "Unexpected end of input." : null)),
     })),
-    onAutomationFailuresChanged: vi.fn(() => () => undefined),
+    onAutomationFailuresChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      failureListeners.push(listener);
+      return () => undefined;
+    }),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
   };
   vi.stubGlobal("dohcDesktop", bridge);
-  return { bridge, written, writeResults };
+  // Another writer changes the file; the panel reads it again, as it does
+  // when a run settles.
+  const replaceFile = (next: ListCollectionAutomationsResult) => {
+    current = next;
+    for (const listener of failureListeners) listener({ workspaceId: "ws-1" });
+  };
+  return { bridge, written, writeResults, replaceFile };
 }
 
 function Panel(props: {
@@ -133,6 +145,8 @@ function Panel(props: {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // A test that ends with a changed draft leaves it kept, as a panel does.
+  resetKeptAutomationDraftsForTests();
 });
 
 describe("the ⚡ panel", () => {
@@ -358,12 +372,15 @@ describe("an automation's runs", () => {
 });
 
 describe("the builder", () => {
-  it("makes \"when Status becomes Done, set Finished on to today\" in a few choices", async () => {
+  const openBuilder = async (user: ReturnType<typeof userEvent.setup>, name = "Stamp the finish date") =>
+    await user.click(await screen.findByRole("button", { name }));
+
+  it("makes \"when Status becomes Done, set Finished on to today\" in three actions", async () => {
     const { written } = makeBridge({ status: "missing" });
     const user = userEvent.setup();
     render(<Panel />);
     await user.click(await screen.findByRole("button", { name: "New automation" }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "Changes to, kind of value" }), "value");
+    // The value reads as "Status to Done": one choice lists the field's options.
     await user.selectOptions(screen.getByRole("combobox", { name: "Changes to" }), "Done");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -375,39 +392,45 @@ describe("the builder", () => {
         id: "when-status-becomes-done-set-finished-on-to-today",
         name: "When Status becomes Done, set Finished on to today",
         enabled: true,
-        when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" } },
+        when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
         if: null,
-        do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null }],
+        do: [{ kind: "set", values: [{ field: "Finished on", value: { kind: "formula", expression: "today()" } }], records: null, operation: null }],
       }],
     });
-    // Back in the list, with the new automation in it.
     expect(await screen.findByTestId("automation-when-status-becomes-done-set-finished-on-to-today")).toBeTruthy();
   });
 
-  it("edits an automation's conditions as rows and keeps steps it cannot edit", async () => {
+  it("edits conditions as rows, keeps a number while it is typed, and keeps steps it cannot edit", async () => {
     const find = { kind: "find" as const, condition: 'record.Status == "Doing"', collection: null, as: "open", operation: null };
-    const edited: Automation = { ...stamp, if: 'record.Points == 3', do: [...stamp.do, find] };
+    const edited: Automation = { ...stamp, if: "record.Points == 3", do: [...stamp.do, find] };
     const { written } = makeBridge(read([summary(edited)]));
     const user = userEvent.setup();
     render(<Panel />);
-    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    await openBuilder(user);
 
     expect((screen.getByRole("combobox", { name: "Condition" }) as HTMLSelectElement).value).toBe("rows");
-    expect((screen.getByRole("spinbutton", { name: "Condition 1, value" }) as HTMLInputElement).value).toBe("3");
+    const value = screen.getByRole("textbox", { name: "Condition 1, value" }) as HTMLInputElement;
+    expect(value.value).toBe("3");
     expect(screen.getByTestId("builder-step-1").textContent).toContain('find records where record.Status == "Doing"');
-    await user.clear(screen.getByRole("spinbutton", { name: "Condition 1, value" }));
-    await user.type(screen.getByRole("spinbutton", { name: "Condition 1, value" }), "5");
+    await user.clear(value);
+    await user.type(value, "-");
+    // A minus sign alone stays put, and is not a number yet.
+    expect((screen.getByRole("textbox", { name: "Condition 1, value" }) as HTMLInputElement).value).toBe("-");
     await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Enter a number.")).toBeTruthy();
+    expect(written).toEqual([]);
 
+    await user.type(screen.getByRole("textbox", { name: "Condition 1, value" }), "5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
-    expect(written[0]!.automations).toEqual([{ ...edited, if: "record.Points == 5" }]);
+    expect(written[0]!.automations).toEqual([{ ...edited, if: "record.Points == -5" }]);
   });
 
   it("shows a formula's syntax error beside it and does not save until it is fixed", async () => {
     const { written, bridge } = makeBridge(read([summary(stamp)]));
     const user = userEvent.setup();
     render(<Panel />);
-    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    await openBuilder(user);
     await user.selectOptions(screen.getByRole("combobox", { name: "Condition" }), "formula");
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), "record.Points ==");
     expect(await screen.findByText("This formula has a syntax error. Unexpected end of input.", undefined, SLOW)).toBeTruthy();
@@ -416,24 +439,55 @@ describe("the builder", () => {
 
     await user.type(screen.getByRole("textbox", { name: "Condition formula" }), " 3");
     // Every formula in the draft is checked together, the step's today() too.
-    await waitFor(() => expect(bridge.checkAutomationFormulas).toHaveBeenLastCalledWith({
+    await waitFor(() => expect(bridge.checkCollectionAutomation).toHaveBeenLastCalledWith(expect.objectContaining({
       workspaceId: "ws-1", formulas: ["record.Points == 3", "today()"],
-    }), SLOW);
+    })), SLOW);
     await waitFor(() => expect(screen.queryByText(/syntax error/)).toBeNull(), SLOW);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1));
     expect(written[0]!.automations[0]!.if).toBe("record.Points == 3");
   }, 30_000);
 
-  it("says when a field is not in the Collection, and offers only Collections a step can reach", async () => {
-    const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null, operation: null }] };
-    const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null, operation: null };
-    makeBridge(read([summary({ ...missing, do: [...missing.do, budget] }, { cannotRun: "Done on is not a field in Tasks." })]));
+  it("never saves what the file contract refuses: a removed record's fields, or what main's check turns down", async () => {
+    const { written } = makeBridge(read([summary(stamp)]));
     const user = userEvent.setup();
     render(<Panel />);
-    await user.click(await screen.findByRole("button", { name: "Stamp the finish date" }));
+    await openBuilder(user);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "record-removed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("A removed record has no fields to set. Choose another trigger, or remove this step.")).toBeTruthy();
+    expect(written).toEqual([]);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "record-added");
+    // A new Add a record step starts with a field to fill in.
+    await user.click(screen.getByRole("button", { name: "Add a record" }));
+    expect(screen.getByRole("combobox", { name: "Step 2, field 1" })).toBeTruthy();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, field 1" }), "Title");
+    await user.clear(screen.getByRole("textbox", { name: "Name" }));
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "Too long");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This is too long to save.")).toBeTruthy();
+    expect(written).toEqual([]);
+  });
+
+  it("names a missing field, shows each step's reach, and offers only Collections a step can reach", async () => {
+    const missing: Automation = { ...stamp, do: [{ kind: "set", values: [{ field: "Done on", value: { kind: "literal", value: "x" } }], records: null, operation: null }] };
+    const budget = { kind: "add-record" as const, values: [], collection: "Budget", as: null, operation: null };
+    const find = { kind: "find" as const, condition: 'record.Status == "Open"', collection: "Budget", as: "bills", operation: null };
+    makeBridge(read([summary({ ...missing, do: [...missing.do, budget, find] }, {
+      cannotRun: "Done on is not a field in Tasks.",
+      reach: { kind: "checked", steps: [
+        { verdict: "allowed" },
+        { verdict: "stopped", reason: "ana@dohc.test cannot edit Budget." },
+        { verdict: "stopped", reason: "ana@dohc.test cannot view Budget." },
+      ] },
+    })]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
 
     expect(screen.getAllByText("Done on is not a field in Tasks.").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("builder-step-2").textContent).toContain("ana@dohc.test cannot view Budget.");
     const collection = screen.getByRole("combobox", { name: "Step 2, Collection" }) as HTMLSelectElement;
     expect(await screen.findByText("ana@dohc.test cannot edit Budget.")).toBeTruthy();
     expect([...collection.options].map((option) => option.textContent)).toEqual(["Tasks", "Budget", "Log"]);
@@ -441,5 +495,137 @@ describe("the builder", () => {
     await user.click(within(screen.getByTestId("builder-step-1")).getByRole("button", { name: "Add field" }));
     expect(await screen.findByRole("option", { name: "Entry" })).toBeTruthy();
     expect(screen.queryByText("ana@dohc.test cannot edit Budget.")).toBeNull();
+  });
+
+  it("does not save over a change someone else made while editing, and replaces it on the next Save", async () => {
+    const { written, replaceFile } = makeBridge(read([summary(stamp), summary(nudge)]));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+
+    replaceFile(read([summary({ ...stamp, enabled: false }), summary(nudge)]));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      '"Stamp the finish date!" changed in automations.yaml while you were editing, so dohc did not save. Save again to replace it with yours.',
+      null,
+    ));
+    expect(written).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations.map((automation) => automation.name)).toEqual(["Stamp the finish date!", "Nudge the owner"]);
+  });
+
+  it("does not drop an edit to an automation someone deleted, and adds it back on the next Save", async () => {
+    const { written, replaceFile } = makeBridge(read([summary(stamp), summary(nudge)]));
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    replaceFile(read([summary(nudge)]));
+    await waitFor(() => expect(screen.queryByTestId("automation-nudge")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      '"Stamp the finish date" was deleted from automations.yaml while you were editing, so dohc did not save. Save again to add it back.',
+      null,
+    ));
+    expect(written).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations.map((automation) => automation.id)).toEqual(["nudge", "stamp"]);
+  });
+
+  it("asks before Back, Cancel, or a notice drops changes, and saves or discards as the person chooses", async () => {
+    const { written } = makeBridge(read([summary(stamp)]), [run({})]);
+    const user = userEvent.setup();
+    const { rerender } = render(<Panel />);
+    await openBuilder(user);
+    // Nothing changed, so Back needs no question.
+    await user.click(screen.getByRole("button", { name: "Back to automations" }));
+    await openBuilder(user);
+
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Back to automations" }));
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Keep editing" }));
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Stamp the finish date!");
+
+    // A notice asks to open runs: the builder asks too, and stays open.
+    rerender(<Panel focus={{ automationId: "collection:Tasks#stamp", seq: 1 }} />);
+    expect(await screen.findByTestId("automation-unsaved")).toBeTruthy();
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1));
+    expect(written[0]!.automations[0]!.name).toBe("Stamp the finish date!");
+    expect(await screen.findByTestId("automation-stamp")).toBeTruthy();
+
+    await openBuilder(user, "Stamp the finish date!");
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "?");
+    await user.click(screen.getByRole("button", { name: "Back to automations" }));
+    await user.click(within(screen.getByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    expect(await screen.findByTestId("automation-stamp")).toBeTruthy();
+    expect(written).toHaveLength(1);
+  });
+
+  it("keeps a draft with changes when the panel goes away, and opens it again", async () => {
+    makeBridge(read([summary(stamp)]));
+    const user = userEvent.setup();
+    const first = render(<Panel />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), " v2");
+    first.unmount();
+
+    render(<Panel />);
+    expect((await screen.findByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Stamp the finish date v2");
+  });
+
+  it("holds the draft still while it saves, and while the file cannot be read", async () => {
+    const { bridge, replaceFile } = makeBridge(read([summary(stamp)]));
+    let answer: (result: WriteCollectionAutomationsResult) => void = () => undefined;
+    bridge.writeCollectionAutomations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const onOpenFile = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onOpenFile={onOpenFile} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    // A disabled fieldset disables what it holds.
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(true));
+    answer({ status: "conflict" });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" }).matches(":disabled")).toBe(false));
+
+    replaceFile({
+      status: "read", contentHash: HASH,
+      automations: [summary(stamp), { valid: false, id: "Broken", name: "Broken", diagnostics: [{ code: "invalid-id", path: "/automations/1/id" }] }],
+    });
+    expect(await screen.findByText("dohc cannot read every automation in automations.yaml, so you cannot save this now.")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Stamp the finish date!");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Open file" }));
+    expect(onOpenFile).toHaveBeenCalledWith("Tasks/automations.yaml");
+  });
+
+  it("keeps focus with a step it moves, and moves it to a neighbor or a new row", async () => {
+    const two: Automation = { ...stamp, do: [
+      ...stamp.do,
+      { kind: "set", values: [{ field: "Title", value: { kind: "literal", value: "Done" } }], records: null, operation: null },
+    ] };
+    makeBridge(read([summary(two)]));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+
+    await user.click(screen.getByRole("button", { name: "Move step 1 down" }));
+    // The step moved to the end, so focus is on its other arrow.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Move step 2 up" })));
+    expect(screen.getByTestId("builder-step-1").textContent).toContain("Finished on");
+    await user.click(screen.getByRole("button", { name: "Remove step 1" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove step 1" })));
+    await user.click(screen.getByRole("button", { name: "Set fields" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Step 2, field 1" })));
   });
 });

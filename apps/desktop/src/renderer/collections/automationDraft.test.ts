@@ -5,6 +5,8 @@ import {
   idFor,
   literalFor,
   newAutomation,
+  numberValue,
+  reachPlaces,
   valueKindOf,
   valueKindsFor,
 } from "./automationDraft";
@@ -43,9 +45,12 @@ describe("values in the builder", () => {
     expect(valueKindOf(null)).toBe("any");
   });
 
-  it("stores what was typed as the field's type stores it", () => {
-    expect(literalFor("number", "12.5")).toEqual({ kind: "literal", value: 12.5 });
-    expect(literalFor("number", "")).toEqual({ kind: "literal", value: null });
+  it("keeps a number as typed until the automation is built, and stores the rest as the field's type does", () => {
+    expect(literalFor("number", "-")).toEqual({ kind: "literal", value: "-" });
+    expect(numberValue("number", "-")).toBeUndefined();
+    expect(numberValue("number", "")).toBeUndefined();
+    expect(numberValue("number", "-12.5")).toBe(-12.5);
+    expect(numberValue("text", "12")).toBe("12");
     expect(literalFor("checkbox", "true")).toEqual({ kind: "literal", value: true });
     expect(literalFor("multi-select", "a, b ,")).toEqual({ kind: "literal", value: ["a", "b"] });
     expect(literalFor("text", "Done")).toEqual({ kind: "literal", value: "Done" });
@@ -67,5 +72,18 @@ describe("a new automation", () => {
     expect(idFor("Stamp the finish date", new Set(["stamp-the-finish-date"]))).toBe("stamp-the-finish-date-2");
     expect(idFor("✨", new Set())).toBe("automation");
     expect(idFor("x".repeat(80), new Set()).length).toBe(64);
+  });
+});
+
+describe("each step's reach verdicts", () => {
+  it("counts the steps that change or find records, an If's steps inside it", () => {
+    const set = { kind: "set" as const, values: [], records: null, operation: null };
+    const find = { kind: "find" as const, condition: "true", collection: null, as: "all", operation: null };
+    expect(reachPlaces([
+      set,
+      { kind: "if", if: "true", do: [find, set], otherwise: [set] },
+      { kind: "notify", text: "Hi", to: [] },
+      find,
+    ])).toEqual([[0], [1, 2, 3], [], [4]]);
   });
 });

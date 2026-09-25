@@ -31,28 +31,6 @@ export interface SharedAutomationEvaluator {
   close(): Promise<void>;
 }
 
-/**
- * Why each formula cannot be read, or null when it can: the builder checks
- * what a person types against the same evaluator the runs use. A formula
- * compiles before it runs, and only a syntax error counts here, so one that
- * reads a field the empty scope lacks is not a problem. A busy evaluator
- * reports nothing.
- */
-export async function formulaSyntaxProblems(
-  evaluator: AutomationFormulaEvaluator,
-  sources: readonly string[],
-  now: string,
-): Promise<Array<string | null>> {
-  if (sources.length === 0) return [];
-  const results = await evaluator.evaluate(
-    "builder:syntax",
-    { trigger: { kind: "check" }, person: null, record: {}, previous: {}, bindings: {}, now },
-    sources.map((source) => ({ kind: "expression" as const, source })),
-  );
-  if (results === "busy") return sources.map(() => null);
-  return results.map((result) => (!result.ok && result.error.code === "syntax" ? result.error.message : null));
-}
-
 export function createAutomationFormulaEvaluator(
   create: () => AutomationEvaluator = () => createAutomationEvaluator(),
 ): SharedAutomationEvaluator {

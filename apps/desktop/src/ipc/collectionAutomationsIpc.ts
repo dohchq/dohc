@@ -3,7 +3,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
-  CheckAutomationFormulasPayload,
+  CheckCollectionAutomationPayload,
   ConfirmCollectionAutomationStepPayload,
   ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
@@ -14,7 +14,7 @@ import {
   RetryCollectionAutomationPayload,
   UndoCollectionAutomationRunPayload,
   WriteCollectionAutomationsPayload,
-  type CheckAutomationFormulasResult,
+  type CheckCollectionAutomationResult,
   type ConfirmCollectionAutomationStepResult,
   type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
@@ -29,6 +29,7 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { expressionProblem } from "../automations/automationPlan";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "../automations/collectionAutomations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
@@ -60,8 +61,6 @@ export function registerCollectionAutomationsIpc<
   showItemInFolder(path: string): void;
   /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
-  /** Each formula's syntax error, or null, from the evaluator the runs use. */
-  checkFormulas(sources: readonly string[]): Promise<Array<string | null>>;
 }): void {
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
@@ -121,13 +120,23 @@ export function registerCollectionAutomationsIpc<
         : { collections: await operation.state.collectionAutomations.targetsFor(input.collectionPath) });
   });
 
-  // Checking a formula reads nothing in the workspace, but it answers only
-  // the window that has the workspace open, like every other automations call.
-  registerHandler(CHANNELS.checkAutomationFormulas, async (event, payload) => {
+  // The builder's check, the same one a save makes: the writer reads the
+  // automation back through the file contract. It reads nothing in the
+  // workspace, but answers only the window that has the workspace open,
+  // like every other automations call.
+  registerHandler(CHANNELS.checkCollectionAutomation, async (event, payload) => {
     assertTrustedSender(event);
-    const input = CheckAutomationFormulasPayload.parse(payload);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckAutomationFormulasResult> =>
-      ({ problems: await dependencies.checkFormulas(input.formulas) }));
+    const input = CheckCollectionAutomationPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckCollectionAutomationResult> => {
+      let diagnostics: CheckCollectionAutomationResult["diagnostics"];
+      try {
+        const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
+        diagnostics = written.status === "refused" ? written.diagnostics : [];
+      } catch {
+        diagnostics = [{ code: "changed-on-reread", path: "/automations/0" }];
+      }
+      return { diagnostics, formulaProblems: input.formulas.map(expressionProblem) };
+    });
   });
 
   registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {

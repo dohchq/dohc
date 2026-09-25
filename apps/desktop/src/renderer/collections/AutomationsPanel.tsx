@@ -37,6 +37,31 @@ export const AUTOMATIONS_FILE = "automations.yaml";
 
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 
+/** What the builder edits, and what it started from. */
+interface Editing {
+  /** Keeps one builder mounted while its baseline changes after a conflict. */
+  session: number;
+  /** The draft the builder opens with. */
+  start: Automation;
+  /** What counts as unchanged. */
+  baseline: Automation;
+  /** The file's copy when editing began, or null for a new automation. */
+  original: Automation | null;
+  cannotRun: string | null;
+  reach: ValidAutomationSummary["reach"] | null;
+}
+
+let sessions = 0;
+const nextSession = () => (sessions += 1);
+// Drafts with changes a panel held when it went away without asking, by
+// workspace and Collection. The panel opens the draft again.
+const keptDrafts = new Map<string, Editing>();
+
+/** Tests start without drafts an earlier test's panel kept. */
+export function resetKeptAutomationDraftsForTests(): void {
+  keptDrafts.clear();
+}
+
 /** What the panel can save over: the file's hash and its automations, or null when editing is off. */
 function editableOf(file: AutomationsFile | null): { contentHash: string | null; automations: Automation[] } | null {
   if (file?.status === "missing") return { contentHash: null, automations: [] };
@@ -325,8 +350,27 @@ export function AutomationsPanel(props: {
     returnFocusTo.current = automationId;
     setRunsOf({ automationId, name });
   };
-  // The automation the builder edits, or a new one with an empty id.
-  const [editing, setEditing] = useState<{ automation: Automation; cannotRun: string | null } | null>(null);
+  // What the builder edits. A draft kept when the panel went away without
+  // asking, such as on a workspace switch, opens again here.
+  const draftKey = `${workspaceId}\n${collectionPath}`;
+  const [editing, setEditing] = useState<Editing | null>(() => keptDrafts.get(draftKey) ?? null);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const latestDraft = useRef<{ automation: Automation; dirty: boolean } | null>(null);
+  useEffect(() => {
+    keptDrafts.delete(draftKey);
+    return () => {
+      const open = editingRef.current;
+      if (open && latestDraft.current?.dirty) keptDrafts.set(draftKey, { ...open, start: latestDraft.current.automation });
+    };
+  }, [draftKey]);
+  // Back, Close, Cancel, and a notice leave the builder through here, so a
+  // draft with changes asks first.
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const leave = (then: () => void) => {
+    if (editingRef.current) setLeaving(() => then);
+    else then();
+  };
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
   // Rises when the workspace or Collection changes, or the panel closes: a
@@ -353,8 +397,11 @@ export function AutomationsPanel(props: {
       ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
       : undefined;
     const name = summary?.valid ? summary.automation.name : (props.focus.automationId.split("#").at(-1) ?? "");
-    setEditing(null);
-    setRunsOf({ automationId: props.focus.automationId, name });
+    const automationId = props.focus.automationId;
+    leave(() => {
+      setEditing(null);
+      setRunsOf({ automationId, name });
+    });
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
 
@@ -366,11 +413,16 @@ export function AutomationsPanel(props: {
    * agrees to lose its comments and hand formatting.
    */
   const save = useCallback(
-    (change: (automations: Automation[]) => Automation[], onSaved: () => void = () => undefined, agreed = false) => {
+    (
+      change: (automations: Automation[]) => Automation[],
+      onSaved: () => void = () => undefined,
+      agreed = false,
+      onNotSaved: () => void = () => undefined,
+    ) => {
       const current = fileRef.current;
       const editable = current === null || current.status === "unavailable" ? null : editableOf(current);
       if (editable === null) return;
-      const again = () => save(change, onSaved, agreed);
+      const again = () => save(change, onSaved, agreed, onNotSaved);
       const epoch = scope.current();
       setSaving(true);
       void bridge()
@@ -383,16 +435,20 @@ export function AutomationsPanel(props: {
         })
         .then(async (result) => {
           if (!scope.isCurrent(epoch)) return;
-          if (result.status === "reformats") setReformat(() => () => save(change, onSaved, true));
+          if (result.status === "reformats") setReformat(() => () => save(change, onSaved, true, onNotSaved));
           await load();
           if (!scope.isCurrent(epoch)) return;
-          if (result.status === "written") onSaved();
-          else if (result.status !== "reformats") {
-            onError(writeProblem(result), null, result.status === "conflict" ? again : null);
+          if (result.status === "written") {
+            onSaved();
+            return;
           }
+          onNotSaved();
+          if (result.status !== "reformats") onError(writeProblem(result), null, result.status === "conflict" ? again : null);
         })
         .catch((error: unknown) => {
-          if (scope.isCurrent(epoch)) onError(`dohc could not save ${AUTOMATIONS_FILE}.`, error, again);
+          if (!scope.isCurrent(epoch)) return;
+          onNotSaved();
+          onError(`dohc could not save ${AUTOMATIONS_FILE}.`, error, again);
         })
         .finally(() => {
           if (scope.isCurrent(epoch)) setSaving(false);
@@ -496,30 +552,74 @@ export function AutomationsPanel(props: {
     );
   };
 
-  // The builder saves the automation it edits in place, or adds a new one
-  // at the end, and goes back to the list once the file has it.
+  /**
+   * The builder saves the automation it edits in place, or adds a new one
+   * at the end, and goes back to the list once the file has it. When the
+   * file's copy is no longer the one editing started from, someone else
+   * changed or deleted it: nothing is saved, and the next Save replaces
+   * theirs on purpose.
+   */
   const saveEdited = (automation: Automation) => {
-    const replacing = editing?.automation.id ?? "";
+    const open = editingRef.current;
+    const listed = editable?.automations;
+    if (!open || !listed) return;
+    const { original } = open;
+    const now = original === null ? undefined : listed.find((entry) => entry.id === original.id);
+    const stopLeaving = () => setLeaving(null);
+    if (original !== null && now === undefined) {
+      stopLeaving();
+      setEditing({ ...open, original: null });
+      onError(`"${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`, null);
+      return;
+    }
+    if ((original !== null && JSON.stringify(now) !== JSON.stringify(original)) ||
+      (original === null && listed.some((entry) => entry.id === automation.id))) {
+      stopLeaving();
+      const theirs = now ?? listed.find((entry) => entry.id === automation.id) ?? null;
+      setEditing({ ...open, original: theirs, baseline: theirs ?? open.baseline });
+      onError(`"${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`, null);
+      return;
+    }
     save(
-      (automations) => replacing === ""
+      (automations) => original === null
         ? [...automations, automation]
-        : automations.map((entry) => (entry.id === replacing ? automation : entry)),
-      () => setEditing(null),
+        : automations.map((entry) => (entry.id === original.id ? automation : entry)),
+      () => {
+        setEditing(null);
+        const then = leavingRef.current;
+        setLeaving(null);
+        then?.();
+      },
+      false,
+      stopLeaving,
     );
   };
-  const startNew = () => setEditing({ automation: newAutomation(props.fields), cannotRun: null });
+  const leavingRef = useRef(leaving);
+  leavingRef.current = leaving;
+  const startNew = () => {
+    const start = newAutomation(props.fields);
+    setEditing({ session: nextSession(), start, baseline: start, original: null, cannotRun: null, reach: null });
+  };
+  const edit = (entry: ValidAutomationSummary) => setEditing({
+    session: nextSession(),
+    start: entry.automation,
+    baseline: entry.automation,
+    original: entry.automation,
+    cannotRun: entry.cannotRun,
+    reach: entry.reach,
+  });
 
-  const title = editing ? (editing.automation.id === "" ? "New automation" : editing.automation.name) : runsOf?.name ?? null;
+  const title = editing ? (editing.start.id === "" ? "New automation" : editing.start.name) : runsOf?.name ?? null;
   const header = title !== null ? (
     <>
       <IconButton
         ref={backButton}
         aria-label="Back to automations"
         title="Back to automations"
-        onClick={() => {
+        onClick={() => leave(() => {
           setEditing(null);
           setRunsOf(null);
-        }}
+        })}
       >
         <ArrowLeft size={14} aria-hidden />
       </IconButton>
@@ -550,23 +650,37 @@ export function AutomationsPanel(props: {
             <FileCode2 size={14} aria-hidden />
           </IconButton>
         ) : null}
-        <IconButton ref={closeButton} aria-label="Close automations" title="Close automations" onClick={props.onClose}>
+        <IconButton ref={closeButton} aria-label="Close automations" title="Close automations" onClick={() => leave(props.onClose)}>
           <X size={14} aria-hidden />
         </IconButton>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {editing ? (
           <AutomationBuilder
-            key={editing.automation.id}
+            key={editing.session}
             workspaceId={workspaceId}
             collectionPath={collectionPath}
             fields={props.fields}
-            automation={editing.automation}
+            automation={editing.start}
+            baseline={editing.baseline}
             cannotRun={editing.cannotRun}
+            reach={editing.reach}
             takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
             saving={saving}
+            readOnly={editable === null}
+            leaveRequested={leaving !== null}
+            onLeave={() => {
+              const then = leaving;
+              setLeaving(null);
+              then?.();
+            }}
+            onStay={() => setLeaving(null)}
+            onDraftChange={(draft) => {
+              latestDraft.current = draft;
+            }}
             onSave={saveEdited}
-            onCancel={() => setEditing(null)}
+            onCancel={() => leave(() => setEditing(null))}
+            onOpenFile={() => props.onOpenFile(filePath)}
             onError={onError}
           />
         ) : runsOf ? (
@@ -639,7 +753,7 @@ export function AutomationsPanel(props: {
                       <button
                         type="button"
                         disabled={editable === null}
-                        onClick={() => setEditing({ automation: entry.automation, cannotRun: entry.cannotRun })}
+                        onClick={() => edit(entry)}
                         className="block max-w-full truncate rounded text-left text-[13px] font-medium text-ink hover:underline disabled:no-underline"
                       >
                         {entry.automation.name}
@@ -660,7 +774,7 @@ export function AutomationsPanel(props: {
                     <RowMenu
                       label={`${entry.automation.name} actions`}
                       items={[
-                        { label: "Edit", onSelect: () => setEditing({ automation: entry.automation, cannotRun: entry.cannotRun }), disabled: editable === null },
+                        { label: "Edit", onSelect: () => edit(entry), disabled: editable === null },
                         { label: "Runs", onSelect: () => openRuns(entry.automationId, entry.automation.name) },
                         { label: "Duplicate", onSelect: () => duplicate(entry.automation), disabled: editable === null || saving || count >= MAX_AUTOMATIONS },
                         { label: "Delete", onSelect: () => remove(entry.automation), disabled: editable === null || saving },

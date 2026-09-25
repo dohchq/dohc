@@ -5212,14 +5212,19 @@ export const ListAutomationTargetsPayload = z.object({
 export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
 export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
 
-// The builder checks what a person types: each formula's syntax error, or
-// null. Formulas are one expression each, as the file stores them.
-export const CheckAutomationFormulasPayload = z.object({
+// The builder checks a draft the way saving would: what the file contract
+// refuses, and each formula's syntax error or null. Formulas are one
+// expression each, as the file stores them; only their syntax is checked.
+export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  formulas: z.array(z.string().max(2_000)).max(25),
+  automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
+  formulas: z.array(z.string().max(2_000)).max(500),
 });
-export type CheckAutomationFormulasPayload = z.infer<typeof CheckAutomationFormulasPayload>;
-export type CheckAutomationFormulasResult = { problems: Array<string | null> };
+export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
+export type CheckCollectionAutomationResult = {
+  diagnostics: AutomationDiagnostic[];
+  formulaProblems: Array<string | null>;
+};
 
 // Undo for a finished run, as the person who clicked it.
 export const UndoCollectionAutomationRunPayload = z.object({
@@ -6547,7 +6552,7 @@ export interface DohcDesktopBridge
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
   listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
-  checkAutomationFormulas(payload: CheckAutomationFormulasPayload): Promise<CheckAutomationFormulasResult>;
+  checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
