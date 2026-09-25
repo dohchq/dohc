@@ -31,7 +31,7 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build daemon=PASS test --workspace=PASS doctests=PASS " +
+  "test --workspace=PASS doctests=PASS build daemon=PASS " +
   "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
@@ -216,7 +216,7 @@ test("the gate name is required in its own field, not anywhere in the line", () 
   const impostor =
     "- 2026-07-27T00:00:00.000Z | not-the-gate | run-rust-checks | PASS | " +
     "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-    "build daemon=PASS test --workspace=PASS doctests=PASS " +
+    "test --workspace=PASS doctests=PASS build daemon=PASS " +
     "cargo-deny=PASS cargo-audit=PASS";
   assert.throws(
     () => check(impostor),

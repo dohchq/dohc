@@ -7,9 +7,9 @@
 // PowerShell and Git Bash (spawns through the platform shell).
 //
 // Steps: native target (see below), fixture drift, cargo fmt --check, cargo
-// clippy -D warnings, the shipping-default daemon build, the workspace test
-// run including crash recovery (cargo nextest), the doctest run (nextest runs
-// no doctests by design), then cargo-deny / cargo-audit IF
+// clippy -D warnings, the workspace test run including crash recovery (cargo
+// nextest), the doctest run (nextest runs no doctests by design), the
+// shipping-default daemon build, then cargo-deny / cargo-audit IF
 // installed (skip-with-warning when absent, never fail on a missing tool).
 //
 // A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
@@ -180,18 +180,18 @@ const required = [
     name: "clippy -D warnings",
     cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   },
-  // Workspace builds include testkit, which enables fault hooks through
-  // feature unification. Build the shipping daemon without those dev features.
-  {
-    name: "build daemon",
-    cmd: "cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
-  },
   // nextest schedules the workspace's ~73 test binaries in parallel where
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
   { name: "test --workspace", cmd: "cargo nextest run --locked --workspace" },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
+  // Test builds enable fault hooks through testkit. Finish with the shipping
+  // daemon so desktop preparation sees the default production features.
+  {
+    name: "build daemon",
+    cmd: "cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
+  },
 ];
 
 // Cost of the native-target probe: a check-build of dohc-engine-protocol and

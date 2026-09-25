@@ -18,12 +18,12 @@ const requiredSteps = [
   "fixture drift",
   "fmt --check",
   "clippy -D warnings",
-  "build daemon",
   "test --workspace",
   // The workspace test run is nextest, which runs no doctests by design.
   // Without this row a runner swap silently drops every doctest the
   // workspace has, and the verdict still reads green.
   "doctests",
+  "build daemon",
   "cargo-deny",
   // cargo-audit was deliberately absent from this list because CI did not
   // install the tool, so the gate probed for it and reported SKIP -- which

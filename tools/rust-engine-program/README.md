@@ -6,10 +6,11 @@ Scripts that run and guard the Rust workspace engine gate. `run-rust-checks.mjs`
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | The gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build daemon`, `test --workspace` (`cargo nextest run`, including collab and sync crash recovery), `doctests` (`cargo test --doc`; nextest runs no doctests by design), plus `cargo deny check` and `cargo audit` when installed (skip with a warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget: a 40 GB free-disk floor, one of 4 build slots, and capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
+| `run-rust-checks.mjs` | The gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `test --workspace` (`cargo nextest run`, including collab and sync crash recovery), `doctests` (`cargo test --doc`; nextest runs no doctests by design), `build daemon`, plus `cargo deny check` and `cargo audit` when installed (skip with a warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget: a 40 GB free-disk floor, one of 4 build slots, and capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 
-The daemon build selects only `dohc-workspace-engine`, with its default production features.
+The daemon build runs after the tests and selects only `dohc-workspace-engine`, with its default production features.
+This leaves the production daemon ready for desktop preparation. Different compiler settings can still require a rebuild.
 The workspace tests use testkit to enable storage fault injection.
 Normal delivery and crash recovery run in the same workspace pass, with independent fixtures.
 The verdict verifier also requires the scratch cleanup row to pass.
@@ -40,7 +41,7 @@ node tools/rust-engine-program/run-rust-checks.mjs
 It prints an `EVIDENCE (paste into the pull request)` line, e.g.:
 
 ```
-- <timestamp> | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head <sha> clean, 10 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build daemon=PASS test --workspace=PASS doctests=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
+- <timestamp> | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head <sha> clean, 10 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS test --workspace=PASS doctests=PASS build daemon=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
 ```
 
 `win32/x64` is Node's view of the host. The `rust cfg` field is what rustc
