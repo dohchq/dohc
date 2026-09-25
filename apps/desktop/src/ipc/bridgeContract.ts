@@ -71,6 +71,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  APP_VIEW_ID_PREFIX,
+  parseAppViewId,
   parsePluginViewId,
   PLUGIN_VIEW_ID_PREFIX,
   VIEW_IDS,
@@ -788,7 +790,8 @@ export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
 
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  context: z.enum(["tab", "editor", "status"]),
+  // A pinned app's menu names the app's folder as its path.
+  context: z.enum(["tab", "editor", "status", "pinned-app"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
   canCloseEditorGroup: z.boolean().optional(),
@@ -2893,10 +2896,17 @@ export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 export const SitePackageResult = SitePackageInfo.nullable();
 export type SitePackageResult = z.infer<typeof SitePackageResult>;
 
+// One surface showing an app's preview: a tab or a pinned panel.
+const SITE_PREVIEW_HOLDER_ID = z.string().min(1).max(100);
+
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  // True when the person asked for this start, which starts the preview
+  // again even when it is running. Otherwise the surface shares it.
+  restart: z.boolean(),
 });
 export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
@@ -2937,6 +2947,9 @@ export const StartSitePreviewResult = z.object({
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
   exited: z.boolean(),
+  // Which start of the app's preview this is. Every surface showing the app
+  // shows the newest one it has heard of.
+  generation: z.number().int().nonnegative(),
   build: z
     .object({
       ok: z.boolean(),
@@ -2948,6 +2961,26 @@ export const StartSitePreviewResult = z.object({
     .optional(),
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+// What a start answers: the preview, or that another surface replaced this
+// start with a newer one before it finished. The newer start's preview then
+// arrives as a SitePreviewReplacedEvent.
+export const StartSitePreviewAnswer = z.union([
+  StartSitePreviewResult,
+  z.object({ replaced: z.literal(true) }).strict(),
+]);
+export type StartSitePreviewAnswer = z.infer<typeof StartSitePreviewAnswer>;
+
+// Another surface started the app's preview again. The surface named here
+// shows `preview` from now on, or nothing when no preview runs.
+export const SitePreviewReplacedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  generation: z.number().int().nonnegative(),
+  preview: StartSitePreviewResult.nullable(),
+});
+export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2965,9 +2998,12 @@ export type GetSitePreviewLogsResult = z.infer<
   typeof GetSitePreviewLogsResult
 >;
 
+// The surface stops showing the preview. The preview stops when no surface
+// shows it.
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 const StopSitePreviewResult = z.void();
@@ -5565,6 +5601,14 @@ export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
 // `base` is the settings the caller changed. Main writes only the difference,
 // so a caller that has not yet seen an edit made in the file cannot undo it.
+// Pins or unpins one app in one workspace's sidebar.
+export const SetAppPinnedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: SITE_ROOT_STRING,
+  pinned: z.boolean(),
+}).strict();
+export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
   base: DesktopUserSettingsSchema,
@@ -5736,11 +5780,17 @@ const PLUGIN_VIEW_ID = z
     );
   });
 
+// A pinned app's view: its folder, where each character can encode to nine.
+const APP_VIEW_ID = z
+  .string()
+  .max(APP_VIEW_ID_PREFIX.length + 4096 * 9)
+  .refine((value) => parseAppViewId(value) !== null);
+
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  // dohc's own views, or a view a plugin contributes. The catch keeps a
-  // stored id that names neither from failing the whole file.
-  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID]).catch("explorer"),
+  // dohc's own views, a view a plugin contributes, or a pinned app. The
+  // catch keeps a stored id that names none of them from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID, APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
@@ -6385,11 +6435,14 @@ export interface DohcDesktopBridge
   ): Promise<ImportToDatabaseResult>;
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
-  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewAnswer>;
   getSitePreviewLogs(
     payload: GetSitePreviewLogsPayload,
   ): Promise<GetSitePreviewLogsResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
+  onSitePreviewReplaced(
+    listener: (event: SitePreviewReplacedEvent) => void,
+  ): () => void;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(
     listener: (event: PluginPanelOpenedEvent) => void,
@@ -6671,6 +6724,7 @@ export interface DohcDesktopBridge
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
   // Reads the settings file again, applies it, and answers what is in effect.
   reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
   getUserSettingsFilePath(): Promise<string>;
   // Opens the settings file in the system's editor, creating it first when
   // there is none.

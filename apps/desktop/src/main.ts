@@ -94,6 +94,7 @@ import { dirname, join } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
+  SitePreviewReplacedEvent,
   McpConfigResult,
   DesktopUserSettingsResult,
   SyncStatusResult,
@@ -335,6 +336,7 @@ import {
   WILL_QUIT_BUDGET_MS,
 } from "./workspaces/siteRunner";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
+import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 import { createPluginPanelPreviewStarter } from "./plugins/pluginPanelLifecycle";
 import { createDesktopPluginRuntime, type DesktopPluginRuntimeDependencies } from "./plugins/desktopPluginRuntime";
 import {
@@ -1170,7 +1172,7 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
-  sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
+  sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
@@ -1229,8 +1231,14 @@ function createDesktopWorkspaceAuthorityState(
     workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
-    sitePreviews: createSitePreviewLifecycle({
+    sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
+      notifyReplaced: (senderId, replacement) => {
+        const parsed = SitePreviewReplacedEvent.safeParse(replacement);
+        const target = webContents.fromId(senderId);
+        if (!parsed.success || !target || target.isDestroyed()) return;
+        target.send(CHANNELS.sitePreviewReplaced, parsed.data);
+      },
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
@@ -1526,7 +1534,7 @@ const pluginSurfaces: WorkspacePluginSurfaces = {
 };
 
 type SitePreviewLifecycle = Omit<
-  ReturnType<typeof createSitePreviewLifecycle>,
+  ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
   "stopWorkspace"
 > & {
   stopWorkspace(
@@ -1539,6 +1547,15 @@ const sitePreviews: SitePreviewLifecycle = {
     workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
       lease.state.sitePreviews.start(input),
     ),
+  acquire: (input) =>
+    workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.acquire(input),
+    ),
+  release(input) {
+    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.release(input),
+    );
+  },
   status(workspaceId, siteRoot) {
     const lease = requireWorkspaceAuthority(workspaceId);
     try {
@@ -4158,6 +4175,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings,
   openPath: (path) => shell.openPath(path),
+  knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
 
 function registerIpcHandlers(): void {
