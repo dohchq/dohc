@@ -2570,7 +2570,11 @@ body {
 }
 
 .dohc-page-identity__title {
+  display: block;
   width: 100%;
+  field-sizing: content;
+  resize: none;
+  overflow: hidden;
   border: 0;
   background: transparent;
   padding: 0;

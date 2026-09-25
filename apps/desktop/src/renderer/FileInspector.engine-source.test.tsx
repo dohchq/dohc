@@ -273,7 +273,7 @@ describe("engine markdown source view", () => {
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(screen.queryByTestId("orphaned-draft-copy")).toBeNull();
-    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(true);
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
     await waitFor(() =>
       expect(
         screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
@@ -389,7 +389,7 @@ describe("engine markdown source view", () => {
     expect(notice.textContent).toContain(`${message} Wait for it to finish.`);
     expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(
       true,
     );
     removalInProgress = false;
@@ -397,7 +397,7 @@ describe("engine markdown source view", () => {
     await screen.findByTestId("markdown-source-toggle");
     expect(screen.queryByTestId("engine-removal-in-progress-notice")).toBeNull();
     expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
-    expect((screen.getByTestId("page-title") as HTMLInputElement).readOnly).toBe(
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(
       false,
     );
   });
@@ -2232,7 +2232,7 @@ describe("engine markdown source view", () => {
     // A new edit now, on the verified version, must reach disk — the
     // refusal must have lifted, not stayed on because a `!error` guard
     // regressed to refusing on every answer.
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     await userEvent.setup().type(title, "!");
     await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled());
   });

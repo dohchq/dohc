@@ -1320,7 +1320,7 @@ describe("markdown editor unmount flush", () => {
       ),
     );
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Retitled" } });
     fireEvent.blur(title);
@@ -1362,7 +1362,7 @@ describe("markdown editor unmount flush", () => {
     // No pending save yet, so the save-state chip is hidden in read mode.
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     await user.click(title);
     await user.type(title, "!");
 
