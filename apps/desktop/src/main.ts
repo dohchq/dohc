@@ -134,7 +134,9 @@ import {
   type PublicUpdateState,
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
-import { createUpdateAfterFailure, type UpdateFailure } from "./updates/updateAfterFailure";
+import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
+import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
+import { abandonLaunch, finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
   createQuitGuard,
@@ -3873,6 +3875,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
+  launch: { finished: finishLaunch, handedOff: abandonLaunch },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,
@@ -4074,42 +4077,10 @@ const installUpdate = createUpdateInstall<BrowserWindow>({
 
 // A failing build checks the feed before it gives up, so a person on a bad
 // release can still reach the release that fixes it.
-const WINDOW_FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
-  "window-crash": "This dohc window keeps crashing.",
-  "window-load": "This dohc window could not load.",
-};
 const updateAfterFailure = createUpdateAfterFailure({
   controller: startUpdates,
-  // Downloads can take minutes with nothing else on screen, so a native box
-  // says one is running. Closing it stops the wait.
-  showDownloading: async (failure: UpdateFailure, version, signal) => {
-    await dialog.showMessageBox({
-      type: "info",
-      message: failure === "startup" ? `Downloading update ${version}.` : WINDOW_FAILURE_MESSAGES[failure],
-      detail: failure === "startup"
-        ? "When it finishes, you can restart dohc on the new version."
-        : `dohc is downloading update ${version}. When it finishes, you can restart dohc on the new version.`,
-      buttons: [failure === "startup" ? "Quit" : "Not now"],
-      noLink: true,
-      signal,
-    });
-  },
-  confirmRestart: async (failure: UpdateFailure, version) => {
-    const startup = failure === "startup";
-    const { response } = await dialog.showMessageBox({
-      type: "info",
-      message: startup ? `Update ${version} is downloaded.` : WINDOW_FAILURE_MESSAGES[failure],
-      // A downloaded update also installs on quit (autoInstallOnAppQuit).
-      detail: startup
-        ? "Restart now to open dohc on the new version. If you quit, the update installs as dohc closes."
-        : `Update ${version} is downloaded. dohc closes and opens again on the new version.`,
-      buttons: ["Restart now", startup ? "Quit" : "Not now"],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    });
-    return response === 0;
-  },
+  showDownloading: (failure, version, signal) => showDownloadingDialog(dialog, failure, version, signal),
+  confirmRestart: (failure, version) => confirmRestartDialog(dialog, failure, version),
   install: installUpdate,
 });
 

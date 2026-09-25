@@ -92,6 +92,10 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       updateAfterStartupFailure: vi.fn(async () => { log.push("update-check"); return false; }),
       updateAfterWindowLoadFailure: vi.fn(async () => { log.push("window-update-check"); return false; }),
     },
+    launch: {
+      finished: vi.fn(() => { log.push("launch-finished"); }),
+      handedOff: vi.fn(() => { log.push("launch-handed-off"); }),
+    },
     beforeQuit: vi.fn(),
     shutdown: {
       budgetMs: 3000,
@@ -340,11 +344,43 @@ describe("desktop bootstrap", () => {
     guard.hold();
   });
 
+  it("finishes the launch only once bootstrap completes and the first window has loaded", async () => {
+    const f = fixture();
+    await boot(f);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    await vi.waitFor(() => expect(f.dependencies.launch.finished).toHaveBeenCalledOnce());
+    expect(f.dependencies.launch.handedOff).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("leaves the launch unfinished when the engine fails (window loaded: %s)", async (windowLoads) => {
+    const f = fixture();
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1 });
+    f.engine.resolve(false);
+    f.loaded.resolve(windowLoads);
+    await ready;
+    await vi.waitFor(() => expect(f.dependencies.services.startUpdates).toHaveBeenCalled());
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+  });
+
+  it("leaves the launch unfinished when the first window fails to load", async () => {
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(false);
+    await vi.waitFor(() => expect(f.dependencies.services.updateAfterWindowLoadFailure).toHaveBeenCalledOnce());
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+  });
+
   it("does not bootstrap or capture handoff intents in a losing process", async () => {
     const f = fixture((d) => { d.runtime.argv.push(handoffUrl); });
     f.app.lock = false;
     await f.lifecycle.start();
     expect(f.app.quit).toHaveBeenCalledOnce();
+    // The running instance owns the launch count; this process never counted.
+    expect(f.log.slice(-2)).toEqual(["launch-handed-off", "quit"]);
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     expect(f.app.whenReady).not.toHaveBeenCalled();
     expect(f.slot.pending()).toBeNull();
     expect(f.app.listenerCount("open-url")).toBe(0);

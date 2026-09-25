@@ -77,6 +77,12 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     updateAfterStartupFailure(): Promise<boolean>;
     updateAfterWindowLoadFailure(): Promise<boolean>;
   };
+  // The launch marker: finished once bootstrap completes and the first
+  // window has loaded; handed off when another instance already runs.
+  launch: {
+    finished(): void;
+    handedOff(): void;
+  };
   beforeQuit(event: QuitEvent): void;
   shutdown: {
     budgetMs: number;
@@ -92,7 +98,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     stopEngine(): Promise<void>;
   };
 }) {
-  const { app, runtime, handoff, windows, workspaces, bootstrap, services, shutdown } = dependencies;
+  const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
   let quitting = false;
   let bootstrapComplete = false;
   const pendingOpenPaths: string[] = [];
@@ -243,6 +249,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     workspaces.refreshNativeSurfaces();
     void windowLoaded.then((loaded) => {
       if (!loaded) return;
+      launch.finished();
       if (activatedWorkspace) windows.activate(window, activatedWorkspace);
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.
@@ -271,6 +278,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     isQuitting: () => quitting,
     start(): Promise<void> {
       if (!app.requestSingleInstanceLock()) {
+        launch.handedOff();
         app.quit();
         return Promise.resolve();
       }

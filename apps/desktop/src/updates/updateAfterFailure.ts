@@ -10,7 +10,9 @@ export const FAILURE_UPDATE_BOUNDS: UpdateWaitBounds = {
 // "startup": dohc could not start and quits unless it restarts into an update.
 // "window-crash": a window stopped reloading after repeated crashes.
 // "window-load": the first window failed to load.
-export type UpdateFailure = "startup" | "window-crash" | "window-load";
+// "unfinished-launch": launches in a row closed before they finished starting,
+// so the entry module checks before it loads main.
+export type UpdateFailure = "startup" | "window-crash" | "window-load" | "unfinished-launch";
 
 /**
  * Returns one check shared by every failure that arrives while it runs. It
