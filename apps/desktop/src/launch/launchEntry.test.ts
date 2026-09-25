@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { LAUNCH_CHECKED_FLAG, runLaunchEntry, type LaunchFailure } from "./launchEntry";
+import {
+  checkedPassFrom,
+  checkedRelaunchArguments,
+  LAUNCH_CHECKED_FLAG,
+  runLaunchEntry,
+  type LaunchFailure,
+} from "./launchEntry";
 
 function fixture(options: {
   unfinished?: number;
+  // The pass in the marker; a launch carrying it skips the check.
+  pass?: string;
   markerPath?: string | null;
   argv?: string[];
   loadMain?: () => Promise<unknown>;
@@ -12,7 +20,10 @@ function fixture(options: {
   const dependencies = {
     argv: options.argv ?? ["dohc.exe"],
     markerPath: options.markerPath === undefined ? "/profile/dohc-launch.json" : options.markerPath,
-    beginLaunch: vi.fn((_path: string) => { log.push("count"); return options.unfinished ?? 0; }),
+    beginLaunch: vi.fn((_path: string, checkedPass: string | null) => {
+      log.push("count");
+      return { unfinished: options.unfinished ?? 0, checked: checkedPass !== null && checkedPass === options.pass };
+    }),
     loadMain: vi.fn(options.loadMain ?? (async () => { log.push("main"); })),
     reportFailure: vi.fn((_error: unknown) => { log.push("report"); }),
     checkForUpdate: vi.fn(async (failure: LaunchFailure) => {
@@ -32,7 +43,7 @@ describe("launch entry", () => {
     const { recovery } = await f.run();
     expect(recovery).toBeNull();
     expect(f.log).toEqual(["count", "main"]);
-    expect(f.dependencies.beginLaunch).toHaveBeenCalledWith("/profile/dohc-launch.json");
+    expect(f.dependencies.beginLaunch).toHaveBeenCalledWith("/profile/dohc-launch.json", null);
   });
 
   it("checks for a newer build instead of loading main after two unfinished launches", async () => {
@@ -60,10 +71,30 @@ describe("launch entry", () => {
   });
 
   it("loads main on the relaunch after a check, still counting the launch", async () => {
-    const f = fixture({ unfinished: 2, argv: ["dohc.exe", LAUNCH_CHECKED_FLAG] });
+    const f = fixture({ unfinished: 2, pass: "pass-1", argv: ["dohc.exe", `${LAUNCH_CHECKED_FLAG}=pass-1`] });
     const { recovery } = await f.run();
     expect(recovery).toBeNull();
     expect(f.log).toEqual(["count", "main"]);
+    expect(f.dependencies.beginLaunch).toHaveBeenCalledWith("/profile/dohc-launch.json", "pass-1");
+  });
+
+  it.each([
+    ["the bare flag", [LAUNCH_CHECKED_FLAG]],
+    ["a pass the marker does not hold", [`${LAUNCH_CHECKED_FLAG}=old-pass`]],
+  ])("still checks when a launcher carries %s", async (_name, flags) => {
+    const f = fixture({ unfinished: 2, pass: "pass-1", argv: ["dohc.exe", ...flags] });
+    await (await f.run()).recovery;
+    expect(f.dependencies.loadMain).not.toHaveBeenCalled();
+    expect(f.log).toEqual(["count", "check:unfinished-launch", "relaunch"]);
+  });
+
+  it("relaunches with this launch's arguments and only the new pass", () => {
+    expect(checkedPassFrom(["dohc.exe", "--open-workspace=/w", `${LAUNCH_CHECKED_FLAG}=abc`])).toBe("abc");
+    expect(checkedPassFrom(["dohc.exe", LAUNCH_CHECKED_FLAG, `${LAUNCH_CHECKED_FLAG}=`])).toBeNull();
+    expect(checkedRelaunchArguments(
+      ["dohc.exe", "--open-workspace=/w", LAUNCH_CHECKED_FLAG, `${LAUNCH_CHECKED_FLAG}=old`],
+      "new",
+    )).toEqual(["--open-workspace=/w", `${LAUNCH_CHECKED_FLAG}=new`]);
   });
 
   it("reports a main module that fails to load, checks for a newer build, then quits", async () => {

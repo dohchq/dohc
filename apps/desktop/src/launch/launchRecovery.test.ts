@@ -59,9 +59,9 @@ describe("update check before main loads", () => {
     expect(electron.app.quit).not.toHaveBeenCalled();
   });
 
-  it("hands the launch to the instance that is already checking", async () => {
+  it.each(["unfinished-launch", "startup"] as const)("hands a %s check to the process that already checks, so only one installs", async (failure) => {
     electron.app.requestSingleInstanceLock.mockReturnValue(false);
-    await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(true);
+    await expect(checkForUpdateBeforeMain(failure)).resolves.toBe(true);
     expect(marker.abandonLaunch).toHaveBeenCalledOnce();
     expect(electron.app.quit).toHaveBeenCalledOnce();
     expect(updater.startAutoUpdates).not.toHaveBeenCalled();

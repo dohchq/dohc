@@ -13,7 +13,7 @@ const electron = vi.hoisted(() => ({
   dialog: { showErrorBox: vi.fn() },
 }));
 const recovery = vi.hoisted(() => ({ checkForUpdateBeforeMain: vi.fn(async () => false) }));
-const marker = vi.hoisted(() => ({ beginLaunch: vi.fn(() => 0) }));
+const marker = vi.hoisted(() => ({ beginLaunch: vi.fn(() => ({ unfinished: 0, checked: false })) }));
 
 vi.mock("electron", () => electron);
 vi.mock("./main", () => {
@@ -29,7 +29,7 @@ describe("electron main entry", () => {
   it("reports a main module that fails to load, checks for a newer build, then quits", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     await import("./entry");
-    expect(marker.beginLaunch).toHaveBeenCalledWith(expect.stringContaining("dohc-launch.json"), "1.0.0");
+    expect(marker.beginLaunch).toHaveBeenCalledWith(expect.stringContaining("dohc-launch.json"), "1.0.0", null);
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
       "dohc failed to start",
       // vitest wraps the factory's throw in its own mocking error.

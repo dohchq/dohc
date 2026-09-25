@@ -16,8 +16,9 @@ const BEFORE_LAUNCH_BOUNDS: UpdateWaitBounds = { ...FAILURE_UPDATE_BOUNDS, verdi
 export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<boolean> {
   await app.whenReady();
   // Main is not loaded, so nothing answers a second launch. The first
-  // process checks; a second one leaves the count as it was and quits.
-  if (failure === "unfinished-launch" && !app.requestSingleInstanceLock()) {
+  // process checks; a second one takes back its count and quits, so two
+  // processes never download and install at once.
+  if (!app.requestSingleInstanceLock()) {
     abandonLaunch();
     app.quit();
     return true;

@@ -3,8 +3,8 @@
 // launch/launchEntry.ts for the policy.
 import { app, dialog } from "electron";
 import { join } from "node:path";
-import { LAUNCH_CHECKED_FLAG, runLaunchEntry } from "./launch/launchEntry";
-import { beginLaunch, LAUNCH_MARKER_FILE } from "./launch/launchMarker";
+import { checkedRelaunchArguments, runLaunchEntry } from "./launch/launchEntry";
+import { beginLaunch, grantCheckedRelaunch, LAUNCH_MARKER_FILE } from "./launch/launchMarker";
 import { updatesEnabled } from "./updates/electronUpdater";
 
 await runLaunchEntry({
@@ -12,7 +12,7 @@ await runLaunchEntry({
   markerPath: updatesEnabled(process.env, app.isPackaged)
     ? join(app.getPath("userData"), LAUNCH_MARKER_FILE)
     : null,
-  beginLaunch: (path) => beginLaunch(path, app.getVersion()),
+  beginLaunch: (path, checkedPass) => beginLaunch(path, app.getVersion(), checkedPass),
   // Awaited, so main's pre-ready work runs before Electron is ready.
   loadMain: () => import("./main"),
   reportFailure: (error) => {
@@ -29,7 +29,8 @@ await runLaunchEntry({
   },
   quit: () => app.quit(),
   relaunchChecked: () => {
-    app.relaunch({ args: [...process.argv.slice(1), LAUNCH_CHECKED_FLAG] });
+    const pass = grantCheckedRelaunch();
+    if (pass) app.relaunch({ args: checkedRelaunchArguments(process.argv, pass) });
     app.exit(0);
   },
 });

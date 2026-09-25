@@ -378,7 +378,7 @@ describe("desktop bootstrap", () => {
       rmSync: (path) => { files.delete(path); },
     };
     const f = fixture((d) => { d.launch.finished = finishLaunch; });
-    beginLaunch("/profile/dohc-launch.json", "1.0.0", disk);
+    beginLaunch("/profile/dohc-launch.json", "1.0.0", null, disk);
     try {
       await boot(f);
       f.loaded.resolve(true);

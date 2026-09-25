@@ -1,8 +1,23 @@
 import { UNFINISHED_LAUNCHES_BEFORE_CHECK } from "./launchMarker";
 
-// The relaunch after a check that found nothing carries this, so it loads
-// main instead of checking again.
+// The relaunch after a check that found nothing carries this with a
+// single-use pass from the marker, so it loads main instead of checking
+// again. Without a matching pass in the marker, the flag does nothing.
 export const LAUNCH_CHECKED_FLAG = "--dohc-launch-checked";
+
+export function checkedPassFrom(argv: readonly string[]): string | null {
+  const prefix = `${LAUNCH_CHECKED_FLAG}=`;
+  const argument = argv.find((value) => value.startsWith(prefix));
+  return argument ? argument.slice(prefix.length) || null : null;
+}
+
+/** The arguments for the relaunch: this launch's, with a fresh pass. */
+export function checkedRelaunchArguments(argv: readonly string[], pass: string): string[] {
+  return [
+    ...argv.slice(1).filter((value) => value !== LAUNCH_CHECKED_FLAG && !value.startsWith(`${LAUNCH_CHECKED_FLAG}=`)),
+    `${LAUNCH_CHECKED_FLAG}=${pass}`,
+  ];
+}
 
 export type LaunchFailure = "startup" | "unfinished-launch";
 
@@ -20,8 +35,9 @@ export async function runLaunchEntry(dependencies: {
   argv: readonly string[];
   // Null when this build has no updater, so there is nothing to check for.
   markerPath: string | null;
-  // Counts this launch and returns the unfinished launches before it.
-  beginLaunch(path: string): number;
+  // Counts this launch. Returns the unfinished launches before it, and
+  // whether the pass the launch carries matched the marker's.
+  beginLaunch(path: string, checkedPass: string | null): { unfinished: number; checked: boolean };
   loadMain(): Promise<unknown>;
   reportFailure(error: unknown): void;
   // Resolves true when the check owns the exit: a restart into an update,
@@ -42,8 +58,8 @@ export async function runLaunchEntry(dependencies: {
   };
 
   if (markerPath) {
-    const unfinished = dependencies.beginLaunch(markerPath);
-    if (unfinished >= UNFINISHED_LAUNCHES_BEFORE_CHECK && !argv.includes(LAUNCH_CHECKED_FLAG)) {
+    const { unfinished, checked } = dependencies.beginLaunch(markerPath, checkedPassFrom(argv));
+    if (unfinished >= UNFINISHED_LAUNCHES_BEFORE_CHECK && !checked) {
       return { recovery: recover("unfinished-launch") };
     }
   }

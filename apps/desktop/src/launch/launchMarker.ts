@@ -24,54 +24,119 @@ export interface MarkerFileSystem {
   rmSync(path: string, options: { force: true }): void;
 }
 
+interface MarkerState {
+  unfinished: number;
+  // A single-use pass for the relaunch after a check that found nothing.
+  checked?: string;
+}
+
+export interface LaunchRecord {
+  // Unfinished launches of this version before this one.
+  readonly unfinished: number;
+  // This launch is the relaunch its checking process allowed.
+  readonly checked: boolean;
+  finish(): void;
+  handOff(): void;
+  // Allows one relaunch to skip the check. Returns the pass it must carry.
+  grantCheckedRelaunch(): string;
+}
+
 const nodeFileSystem: MarkerFileSystem = { readFileSync, writeFileSync, rmSync };
 
-// The launch this process began, if any. Main reads it through the functions
-// below; the entry module and main share this module instance.
-let current: { path: string; version: string; previous: number; fs: MarkerFileSystem } | null = null;
-
-function readUnfinished(fs: MarkerFileSystem, path: string, version: string): number {
+function read(fs: MarkerFileSystem, path: string, version: string): MarkerState {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(path, "utf8"));
-    if (typeof parsed !== "object" || parsed === null) return 0;
-    if (!("version" in parsed) || parsed.version !== version || !("unfinished" in parsed)) return 0;
+    if (typeof parsed !== "object" || parsed === null) return { unfinished: 0 };
+    if (!("version" in parsed) || parsed.version !== version || !("unfinished" in parsed)) return { unfinished: 0 };
     const count = parsed.unfinished;
-    return typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
+    const unfinished = typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
+    const checked = "checked" in parsed && typeof parsed.checked === "string" ? parsed.checked : undefined;
+    return checked ? { unfinished, checked } : { unfinished };
   } catch {
-    return 0;
+    return { unfinished: 0 };
   }
 }
 
-function write(fs: MarkerFileSystem, path: string, version: string, unfinished: number): void {
+function write(fs: MarkerFileSystem, path: string, version: string, state: MarkerState): void {
   try {
-    if (unfinished > 0) fs.writeFileSync(path, JSON.stringify({ version, unfinished }));
+    if (state.unfinished > 0 || state.checked) fs.writeFileSync(path, JSON.stringify({ version, ...state }));
     else fs.rmSync(path, { force: true });
   } catch (error) {
     console.error("[desktop] launch marker:", error);
   }
 }
 
-/** Counts this launch as unfinished and returns the count before it. */
-export function beginLaunch(path: string, version: string, fs: MarkerFileSystem = nodeFileSystem): number {
-  const previous = readUnfinished(fs, path, version);
-  write(fs, path, version, previous + 1);
-  current = { path, version, previous, fs };
-  return previous;
+/**
+ * Counts this launch as unfinished. A pass from the marker matching
+ * `checkedPass` marks this launch as the allowed relaunch and is used up.
+ */
+export function openLaunchMarker(
+  path: string,
+  version: string,
+  checkedPass: string | null,
+  fs: MarkerFileSystem = nodeFileSystem,
+): LaunchRecord {
+  const before = read(fs, path, version);
+  const checked = checkedPass !== null && before.checked === checkedPass;
+  write(fs, path, version, { unfinished: before.unfinished + 1 });
+  let open = true;
+  return {
+    unfinished: before.unfinished,
+    checked,
+    finish() {
+      if (!open) return;
+      open = false;
+      write(fs, path, version, { unfinished: 0 });
+    },
+    // This process gave its launch to the running instance, so it takes back
+    // its own count from the marker as it is now. The running instance may
+    // have finished and removed it meanwhile; restoring an older snapshot
+    // would bring a stale count back.
+    handOff() {
+      if (!open) return;
+      open = false;
+      const now = read(fs, path, version);
+      write(fs, path, version, { ...now, unfinished: Math.max(0, now.unfinished - 1) });
+    },
+    // The checking process never loaded main, so it does not count.
+    grantCheckedRelaunch() {
+      open = false;
+      const pass = globalThis.crypto.randomUUID();
+      write(fs, path, version, { unfinished: before.unfinished, checked: pass });
+      return pass;
+    },
+  };
+}
+
+// The launch this process began, if any. The entry module and main share
+// this module instance.
+let current: LaunchRecord | null = null;
+
+export function beginLaunch(
+  path: string,
+  version: string,
+  checkedPass: string | null,
+  fs: MarkerFileSystem = nodeFileSystem,
+): LaunchRecord {
+  current = openLaunchMarker(path, version, checkedPass, fs);
+  return current;
 }
 
 /** This launch finished starting: the next one starts from zero. */
 export function finishLaunch(): void {
-  if (!current) return;
-  write(current.fs, current.path, current.version, 0);
+  current?.finish();
   current = null;
 }
 
-/**
- * This process handed its launch to the running instance, so it never
- * counted as a launch of its own. The count goes back to what it was.
- */
+/** This process handed its launch to the instance that already runs. */
 export function abandonLaunch(): void {
-  if (!current) return;
-  write(current.fs, current.path, current.version, current.previous);
+  current?.handOff();
   current = null;
+}
+
+/** Allows one relaunch of this launch to skip the check; null without a launch. */
+export function grantCheckedRelaunch(): string | null {
+  const pass = current?.grantCheckedRelaunch() ?? null;
+  current = null;
+  return pass;
 }
