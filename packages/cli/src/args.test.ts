@@ -255,7 +255,21 @@ describe("parseCliArguments", () => {
     expect(parseCliArguments(["chat"], {})).toEqual({ help: ["chat"] });
     expect(parseCliArguments(["--help", "dataset"], {})).toEqual({ help: ["dataset"] });
     expect(parseCliArguments(["chat", "reply", "--help"], {})).toEqual({ help: ["chat", "reply"] });
-    expect(parseCliArguments(["app", "prepare", "-h", "{}"], {})).toEqual({ help: ["app", "prepare"] });
+    expect(parseCliArguments(["chat", "--help", "post"], {})).toEqual({ help: ["chat", "post"] });
+  });
+
+  it("reads --help as verb input once operands start", () => {
+    expect(parseCliArguments(["chat", "post", "general", "Use", "-h", "for", "help"], {})).toMatchObject({
+      verb: "post",
+      body: "Use -h for help",
+    });
+    expect(() => parseCliArguments(["chat", "post", "general", "--help", "me"], {})).toThrow(
+      "unknown post option '--help'; put -- before text that starts with a dash",
+    );
+    expect(() => parseCliArguments(["chat", "reply", "th_a", "---", "Report"], {})).toThrow(
+      "unknown reply option '---'; put -- before text that starts with a dash",
+    );
+    expect(() => parseCliArguments(["app", "prepare", "-h", "{}"], {})).toThrow("app prepare does not accept '{}'");
   });
 
   it("reads --help as text after the terminator or as a flag value", () => {
@@ -277,6 +291,19 @@ describe("parseCliArguments", () => {
     expect(() =>
       parseCliArguments(["dataset", "list", JSON.stringify({ workspaceId: "w", action: "delete" })], {}),
     ).toThrow("dataset list arguments must not name another action");
+  });
+
+  it("accepts a renamed app verb's own name or its request action", () => {
+    const selection = { workspaceId: "w", grantId: "g" };
+    for (const action of ["responses", "list"]) {
+      expect(parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action })], {})).toMatchObject({
+        verb: "ownerAppResponses",
+        request: { action: "list" },
+      });
+    }
+    expect(() =>
+      parseCliArguments(["app", "responses", JSON.stringify({ ...selection, action: "undo" })], {}),
+    ).toThrow("app responses arguments must not name another action");
   });
 
   it("returns distinct input errors", () => {

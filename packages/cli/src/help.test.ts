@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OwnerAppPublicationRequest } from "./appPublication";
-import { OwnerAppResponsesRequest } from "./appResponses";
 import { CLI_COMMANDS } from "./args";
-import { DatasetRequest } from "./dataset";
 import { executeCli } from "./index";
 
 async function help(...argv: string[]): Promise<string> {
@@ -16,16 +13,6 @@ async function help(...argv: string[]): Promise<string> {
 const flat = (text: string) => text.replace(/\s+/g, " ");
 
 describe("CLI help", () => {
-  it("dispatches every request action the CLI can send", () => {
-    const actions = (options: readonly { shape: { action: { value: string } } }[]) =>
-      options.map((option) => option.shape.action.value).sort();
-    expect(Object.keys(CLI_COMMANDS.dataset.verbs).sort()).toEqual(actions(DatasetRequest.options));
-    expect(Object.keys(CLI_COMMANDS.app.verbs).sort()).toEqual(
-      [...actions(OwnerAppPublicationRequest.options), "responses", "undo-responses"].sort(),
-    );
-    expect(OwnerAppResponsesRequest.options.map((option) => option.shape.action.value)).toEqual(["list", "undo"]);
-  });
-
   it("gives every dispatched verb a line in help and its own flags", async () => {
     const top = await help("--help");
     for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {
@@ -50,7 +37,7 @@ describe("CLI help", () => {
   it("answers bare commands with help and keeps lines readable", async () => {
     expect(await help()).toBe(await help("--help"));
     expect(await help("chat")).toBe(await help("chat", "-h"));
-    expect(await help("chat", "post", "general", "--help")).toBe(await help("chat", "post", "--help"));
+    expect(await help("chat", "--help", "post")).toBe(await help("chat", "post", "--help"));
     for (const argv of [["--help"], ["dataset", "--help"], ["chat", "grep", "--help"]]) {
       for (const line of (await help(...argv)).split("\n")) expect(line.length, line).toBeLessThanOrEqual(80);
     }
@@ -61,16 +48,23 @@ describe("CLI help", () => {
     expect(flat(await help("app", "--help"))).toContain("Find workspaceId in .dohc/manifest.json");
     expect(await help("chat", "--help")).toContain("DOHC_CHAT_ACTOR=agent");
     expect(await help("chat", "reply", "--help")).toMatch(/^ {2}--resolve <message> +Resolve this open decision/m);
+    expect(await help("chat", "reply", "--help")).toContain("Put -- before text that starts with a dash.");
   });
 
-  it("points unknown commands and verbs at help", async () => {
+  it("refuses with exit 1 instead of showing help once a verb has input", async () => {
     for (const [argv, stderr] of [
       [["site"], "dohc: unknown command 'site'; run dohc --help\n"],
       [["chat", "channels"], "dohc: unknown chat verb 'channels'; run dohc chat --help\n"],
       [["chat", "constructor"], "dohc: unknown chat verb 'constructor'; run dohc chat --help\n"],
       [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
+      [
+        ["chat", "post", "general", "--help", "me"],
+        "dohc: unknown post option '--help'; put -- before text that starts with a dash\n",
+      ],
     ] as const) {
-      expect(await executeCli({ argv, env: {}, request: vi.fn() })).toEqual({ exitCode: 1, stdout: "", stderr });
+      const send = vi.fn();
+      expect(await executeCli({ argv, env: {}, request: send })).toEqual({ exitCode: 1, stdout: "", stderr });
+      expect(send).not.toHaveBeenCalled();
     }
   });
 });

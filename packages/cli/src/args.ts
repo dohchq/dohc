@@ -132,7 +132,8 @@ function allValues(input: VerbInput, flag: string): string[] {
 }
 
 /** Splits a verb's tokens into operands and the flags the verb declares. */
-function readVerbInput(verb: string, flags: readonly CliFlag[], tokens: readonly string[]): VerbInput {
+function readVerbInput(name: string, verb: CliVerb, tokens: readonly string[]): VerbInput {
+  const flags = verb.flags ?? [];
   const operands: string[] = [];
   const values = new Map<string, string[]>();
   let optionsEnded = false;
@@ -146,7 +147,7 @@ function readVerbInput(verb: string, flags: readonly CliFlag[], tokens: readonly
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(`unknown ${verb} option '${token}'`);
+      fail(`unknown ${name} option '${token}'${verb.operands ? `; put -- before text that starts with a dash` : ""}`);
     } else {
       operands.push(token);
     }
@@ -167,7 +168,7 @@ const decisionFlags: readonly CliFlag[] = [
     text: "Offer a choice. Repeat for more choices. Implies --needs-decision.",
   },
 ];
-const stdinNote = "Use - as the body to read it from stdin.";
+const bodyNotes = ["Use - as the body to read it from stdin.", "Put -- before text that starts with a dash."];
 
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
   const options = allValues(input, "--option");
@@ -220,7 +221,7 @@ const CHAT_VERBS = {
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
     flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
-    notes: [stdinNote, "In a direct message, use reply instead."],
+    notes: [...bodyNotes, "In a direct message, use reply instead."],
     parse: (input) => {
       const [group, ...bodyParts] = input.operands;
       if (!group) fail("post requires a group");
@@ -247,7 +248,7 @@ const CHAT_VERBS = {
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
     ],
-    notes: [stdinNote],
+    notes: bodyNotes,
     parse: (input) => {
       const [thread, ...bodyParts] = input.operands;
       if (!thread) fail("reply requires a thread id");
@@ -287,7 +288,7 @@ const CHAT_VERBS = {
       { name: "--thread", value: "thread", text: "Search only this thread." },
       { name: "--from", value: "author", text: "Match authors: human, agent, or part of a name." },
       { name: "--since", value: "when", text: "Match messages newer than a date or an age such as 7d." },
-      { name: "-i", text: "Ignore case. Otherwise capitals in the pattern match case." },
+      { name: "-i", text: "Ignore case. Without it, a regex or a pattern with capitals matches case." },
       { name: "-l", text: "Print only the IDs of threads that match." },
       { name: "-C", value: "count", text: "Show this many messages before and after each match." },
       { name: "--limit", value: "count", text: "Print at most this many results. The default is 100." },
@@ -375,7 +376,9 @@ function jsonVerb(
         fail(invalid);
       }
       if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} requires one JSON object`);
-      if ("action" in value && value.action !== action) fail(`${label} arguments must not name another action`);
+      if ("action" in value && value.action !== action && value.action !== name) {
+        fail(`${label} arguments must not name another action`);
+      }
       const missing = help.required?.find((field) => !(field in value));
       if (missing) fail(`${label} requires ${missing}`);
       try {
@@ -620,12 +623,10 @@ const VALUE_FLAGS = new Set(
 function stripGlobalFlags(argv: readonly string[]): {
   actorFlag: boolean;
   json: boolean;
-  help: boolean;
   tokens: string[];
 } {
   let actorFlag = false;
   let json = false;
-  let help = false;
   let optionsEnded = false;
   let expectsOptionValue = false;
   const tokens: string[] = [];
@@ -648,16 +649,12 @@ function stripGlobalFlags(argv: readonly string[]): {
       json = true;
       continue;
     }
-    if (!optionsEnded && (token === "--help" || token === "-h")) {
-      help = true;
-      continue;
-    }
     tokens.push(token);
     if (!optionsEnded && VALUE_FLAGS.has(token)) {
       expectsOptionValue = true;
     }
   }
-  return { actorFlag, json, help, tokens };
+  return { actorFlag, json, tokens };
 }
 
 export function parseCliArguments(
@@ -665,15 +662,18 @@ export function parseCliArguments(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ParsedCliCommand | CliHelpRequest {
   const global = stripGlobalFlags(argv);
-  const [commandName, verbName, ...tokens] = global.tokens;
+  // --help asks for help only beside a command and verb. Once operands start, it is verb input.
+  const names = global.tokens.filter((token) => token !== "--help" && token !== "-h");
+  const help = names.length < global.tokens.length && names.length <= 2 && !names.includes("--");
+  const [commandName, verbName, ...tokens] = help ? names : global.tokens;
   if (!commandName) return { help: [] };
   const command = lookup(CLI_COMMANDS, commandName);
   if (!command) fail(`unknown command '${commandName}'; run dohc --help`);
   if (!verbName) return { help: [commandName] };
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
-  if (global.help) return { help: [commandName, verbName] };
+  if (help) return { help: [commandName, verbName] };
   const agent = global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
-  const body = verb.parse(readVerbInput(verbName, verb.flags ?? [], tokens));
+  const body = verb.parse(readVerbInput(verbName, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }
