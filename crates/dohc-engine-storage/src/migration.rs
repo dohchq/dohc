@@ -2435,7 +2435,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 8,
+        ordinal: 9,
         id: "v2-automation-trigger-keys",
         sql: V2_AUTOMATION_TRIGGER_KEYS_DDL,
         sets_user_version: None,
