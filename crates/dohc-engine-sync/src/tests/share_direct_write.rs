@@ -495,6 +495,32 @@ fn a_later_write_that_fails_keeps_an_earlier_one_delivered_and_holds_send_change
 }
 
 #[test]
+fn a_relay_that_does_not_take_direct_writes_leaves_the_change_to_send_changes() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
+    let schema = "shared/docs/packing/collection.yaml";
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-1", "object-schema", schema, "v1", "v2"),
+        1_001,
+    );
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::ShareUnavailable));
+    let client = RelaySyncClient::new(relay);
+
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::ShareUnavailable),
+    );
+    // No write is left open, so Send changes offers the change.
+    assert_eq!(propose(&client, &mut engine, "submit-1").submitted, 1);
+    assert_eq!(proposed_paths(&client), vec![schema.to_owned()]);
+}
+
+#[test]
 fn a_refused_edit_after_a_delivered_create_keeps_the_create_delivered() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["rules", "rules two"]);
     hold_schema(&mut engine, "shared/docs/packing");

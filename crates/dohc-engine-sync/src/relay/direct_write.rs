@@ -170,9 +170,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for write in plan.writes.iter().filter(|write| write.result.is_none()) {
             let mut changes = write.request.changes.clone();
             self.upload_proposed_blobs(store, share_id, &mut changes, &mut uploaded)?;
-            let response = self
-                .transport
-                .share_collection_write(write.request.clone())?;
+            let response = match self.transport.share_collection_write(write.request.clone()) {
+                Ok(response) => response,
+                Err(error) => {
+                    // A relay that does not take these writes, or no longer
+                    // takes them from this grant, will not answer later
+                    // either. Dropping the plan lets Send changes offer the
+                    // files it still carries.
+                    if relay_refuses_the_lane(&error) {
+                        abandon_direct_write_plan(store, workspace_id, share_id, faults)?;
+                    }
+                    return Err(error);
+                }
+            };
             let result = direct_write_result(response, &write.request)?;
             record_direct_write_result(store, workspace_id, share_id, write, &result, faults)?;
         }
@@ -193,6 +203,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             more_pending: finished.more_pending,
         })
     }
+}
+
+/// The relay's lasting no to the route itself: it does not take direct
+/// writes, the share or the grant's level is gone, or the request can never
+/// be taken as sent. Every other error may pass, so the plan waits for it.
+fn relay_refuses_the_lane(error: &RelayError) -> bool {
+    matches!(
+        error,
+        RelayError::ShareUnavailable
+            | RelayError::ShareReadOnly
+            | RelayError::ShareOperationRejected
+            | RelayError::Forbidden
+            | RelayError::MethodNotAllowed
+            | RelayError::BadRequest
+            | RelayError::PayloadTooLarge
+            | RelayError::QuotaExceeded
+            | RelayError::UnknownServerCode(_)
+    )
 }
 
 fn request_paths(request: &ShareCollectionWriteRequest) -> Vec<String> {
@@ -813,6 +841,34 @@ fn record_direct_write_result(
                     },
                 )?;
             }
+            Ok::<(), SyncError>(())
+        })
+        .map_err(local)?;
+    crashed(outcome)
+}
+
+/// The relay will not answer the rest of the plan: drop it without moving the
+/// position. Writes it answered keep their marks; the rest go back to being
+/// changes, and the next push plans them again.
+fn abandon_direct_write_plan(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    let outcome = store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "DELETE FROM share_direct_write_plan WHERE workspace_id=?1 AND share_id=?2",
+                params![workspace_id, share_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE share_direct_write_state SET plan_seq=NULL,plan_more_pending=0 \
+                 WHERE workspace_id=?1 AND share_id=?2",
+                params![workspace_id, share_id],
+            )
+            .map_err(SyncError::persist)?;
             Ok::<(), SyncError>(())
         })
         .map_err(local)?;
