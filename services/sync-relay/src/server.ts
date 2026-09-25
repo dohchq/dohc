@@ -28,6 +28,11 @@ import {
   NOTICE_POST_REFILL_PER_SECOND,
   type NoticeRoute,
 } from "./noticeRoutes";
+import {
+  createAutomationHostRoutes,
+  parseAutomationHostAction,
+  type AutomationHostRoute,
+} from "./automationHostRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -164,6 +169,7 @@ type SyncRelayRoute =
   | { route: "link-discussion-activity" }
   | { route: "workspaces" }
   | NoticeRoute
+  | AutomationHostRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
@@ -373,6 +379,7 @@ export function createSyncRelayHandler({
     claimPendingShares,
     noticePostRateLimiter,
   );
+  const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs);
 
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
@@ -723,6 +730,16 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
+      if (route.route === "automation-host") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToAutomationHost(request, route, actor.userId);
+      }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -990,6 +1007,11 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();
+  }
+  if (parts[2] === "automation-host" && parts.length <= 4) {
+    const action = parseAutomationHostAction(parts[3]);
+    if (!action) throw notFound();
+    return { route: "automation-host", workspaceId, action };
   }
   if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {
