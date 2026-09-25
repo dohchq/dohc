@@ -4758,3 +4758,128 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
         "an over-cap binary must not persist"
     );
 }
+
+#[test]
+fn held_conflict_allows_later_pages_and_replays_after_restart() {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let result_text = "resolved after retry";
+    let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![result_sha, result_text.len() as i64, result_text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed result blob");
+    let result = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "retry-object".to_owned(),
+        latest_moment_id: "retry-result-moment".to_owned(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: result_sha,
+        byte_length: result_text.len() as i64,
+        updated_at_ms: 21,
+    });
+    let built = build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "retryable-parent-conflict".to_owned(),
+        chosen_from: ResolveChoiceV1::Incoming,
+        resolution: ResolutionV1::AppliedIncoming,
+        target_version_id: "main".to_owned(),
+        source_version_id: "peer".to_owned(),
+        paths: vec!["retry.md".to_owned()],
+        current: HeadV1::Absent { path_ref: 0 },
+        incoming: result.clone(),
+        result,
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 21,
+            metadata: MetadataV1 {
+                origin: "sync".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: None,
+            result_object_created_at_ms: Some(20),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "retry-result-moment".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+    })
+    .expect("retryable parent carrier");
+    let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "bundle-peer",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 22;
+    let mut same_origin_later =
+        version_create_with_shipped_snapshots("bundle-peer", "same-origin-version", Vec::new());
+    same_origin_later.origin_seq = 2;
+    same_origin_later.recorded_at_ms = 23;
+    let mut later =
+        version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
+    later.recorded_at_ms = 24;
+    let mut page = vec![parent, child, same_origin_later];
+    for sequence in 0..497 {
+        let mut op = version_create_with_shipped_snapshots("unrelated", &format!("independent-{sequence}"), Vec::new());
+        op.origin_seq = sequence;
+        page.push(op);
+    }
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (0, PullResponse { ops: page, next_cursor: 500, has_more: true }),
+        (500, PullResponse { ops: vec![later], next_cursor: 501, has_more: false }),
+        (501, PullResponse { ops: Vec::new(), next_cursor: 501, has_more: false }),
+    ]));
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "retry-object").unwrap();
+    let held = leases.acquire(&key).unwrap();
+    for expected_cursor in [500, 501] {
+        let outcome = client.pull_chat_workspace(&mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_000)
+            .expect("a held conflict must not block unrelated pages");
+        let SyncPassOutcome::Complete { pending_cursor: Some(cursor), .. } = outcome else { panic!("durable cursor"); };
+        assert_eq!(cursor.cursor, expected_cursor);
+        client.commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000).unwrap();
+        assert_eq!(read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(), -1,
+            "retention is not application acknowledgement");
+    }
+    assert_eq!(read_replication_acked_seq(&engine, "ws", "later-peer").unwrap(), 0);
+    assert!(VersionedTextStore::new(&mut engine).read_text("ws", "main", "retry.md").unwrap().is_none());
+    drop(held);
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_001).unwrap();
+    // Interrupt after application but before the disk report's cursor commits.
+    let outcome = client.pull_chat_workspace(&mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_001).unwrap();
+    let SyncPassOutcome::Complete { changed_paths, .. } = outcome else { panic!("replay"); };
+    assert!(changed_paths.iter().any(|change| change.path == "retry.md"));
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_002).unwrap();
+    let outcome = client.pull_chat_workspace(&mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(), "ws", &NoFaults, &leases, 1_002).unwrap();
+    let SyncPassOutcome::Complete { pending_cursor: Some(cursor), changed_paths, .. } = outcome else { panic!("report replay"); };
+    assert!(changed_paths.iter().any(|change| change.path == "retry.md"), "uncommitted disk report survives restart");
+    client.commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_002).unwrap();
+    assert_eq!(read_replication_acked_seq(&engine, "ws", "bundle-peer").unwrap(), 2);
+    assert_eq!(VersionedTextStore::new(&mut engine).read_text("ws", "main", "retry.md").unwrap().unwrap().text, result_text);
+    let count: i64 = engine.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='retry-result-moment'", [], |row| row.get(0))).unwrap();
+    assert_eq!(count, 1, "conflict effect applies exactly once");
+}
