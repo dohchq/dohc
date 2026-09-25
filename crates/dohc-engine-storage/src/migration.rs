@@ -2130,6 +2130,26 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
+/// A share recipient's direct writes to a Collection's own files: where the
+/// direct lane last read this replica's journal for a share, and its decision
+/// about each file, so the proposal lane never offers a file it wrote.
+const V2_SHARE_DIRECT_WRITES_DDL: &str = "\
+CREATE TABLE share_direct_write_state (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    scanned_seq  INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+CREATE TABLE share_direct_write_marks (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    object_id    TEXT    NOT NULL,
+    through_seq  INTEGER NOT NULL CHECK (through_seq >= 0),
+    delivered    INTEGER NOT NULL CHECK (delivered IN (0, 1)),
+    PRIMARY KEY (workspace_id, share_id, object_id)
+) STRICT;
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2172,6 +2192,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 6,
         id: "v2-relay-bootstrap-complete",
         sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 13,
+        id: "v2-share-direct-writes",
+        sql: V2_SHARE_DIRECT_WRITES_DDL,
         sets_user_version: None,
     },
 ];
@@ -2417,6 +2443,10 @@ mod tests {
             (
                 "v2-relay-bootstrap-complete",
                 "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
+            (
+                "v2-share-direct-writes",
+                "1fd7b6405790c3025639c8474e74e96bcc10bff88e3df6e697ec7d1a023e9365",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2703,7 +2733,7 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_MIGRATIONS.len() as u32,
+            ordinal: BASELINE_MIGRATIONS.last().map_or(0, |last| last.ordinal + 1),
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,

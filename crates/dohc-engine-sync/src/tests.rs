@@ -325,6 +325,13 @@ impl RelayTransport for FakeRelay {
     ) -> Result<ShareProposalSubmitResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
+
+    fn share_collection_write(
+        &self,
+        _req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
 }
 
 #[derive(Default)]
@@ -408,6 +415,13 @@ impl RelayTransport for KeyConflictRelay {
         &self,
         _req: ShareProposalSubmitRequest,
     ) -> Result<ShareProposalSubmitResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
+    fn share_collection_write(
+        &self,
+        _req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
 }
@@ -596,6 +610,13 @@ impl RelayTransport for PagedRelay {
     ) -> Result<ShareProposalSubmitResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
+
+    fn share_collection_write(
+        &self,
+        _req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
 }
 
 struct PagedShareRelay {
@@ -617,6 +638,11 @@ struct PagedShareRelay {
     proposal_calls: Mutex<Vec<String>>,
     blob_uploads: Mutex<Vec<ShareBlobUploadRequest>>,
     proposal_submits: Mutex<Vec<ShareProposalSubmitRequest>>,
+    collection_writes: Mutex<Vec<ShareCollectionWriteRequest>>,
+    /// What the relay answers each direct write, in order. A write past the
+    /// end is written.
+    collection_write_answers:
+        Mutex<std::collections::VecDeque<Result<ShareCollectionWriteResponse, RelayError>>>,
 }
 
 impl PagedShareRelay {
@@ -636,6 +662,8 @@ impl PagedShareRelay {
             proposal_calls: Mutex::new(Vec::new()),
             blob_uploads: Mutex::new(Vec::new()),
             proposal_submits: Mutex::new(Vec::new()),
+            collection_writes: Mutex::new(Vec::new()),
+            collection_write_answers: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -792,6 +820,30 @@ impl RelayTransport for PagedShareRelay {
             ops,
         })
     }
+
+    fn share_collection_write(
+        &self,
+        req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError> {
+        self.proposal_calls
+            .lock()
+            .expect("proposal calls")
+            .push("write".to_owned());
+        let paths = req
+            .changes
+            .iter()
+            .filter_map(|change| change.after_path.clone())
+            .collect();
+        self.collection_writes
+            .lock()
+            .expect("collection writes")
+            .push(req);
+        self.collection_write_answers
+            .lock()
+            .expect("collection write answers")
+            .pop_front()
+            .unwrap_or(Ok(ShareCollectionWriteResponse::Written { paths }))
+    }
 }
 
 fn seed_identity(engine: &mut EngineStore) {
@@ -881,6 +933,7 @@ mod recover;
 mod relay_pull;
 mod relay_pull_bench;
 mod secret;
+mod share_direct_write;
 mod share_proposal;
 mod share_view;
 mod shared_channel;

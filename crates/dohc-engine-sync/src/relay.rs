@@ -16,9 +16,16 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
+
+mod direct_write;
 use crate::{
     ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
     ShareDisposition, SyncError, blob_ceiling,
+};
+use direct_write::read_direct_write_marks;
+pub use direct_write::{
+    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,6 +574,13 @@ pub trait RelayTransport {
         &self,
         req: ShareProposalSubmitRequest,
     ) -> Result<ShareProposalSubmitResponse, RelayError>;
+    /// POST one direct write to a Collection's own files. The relay answers
+    /// a stale base and a refusal as outcomes, not errors, because the
+    /// recipient shows each one and keeps going.
+    fn share_collection_write(
+        &self,
+        req: ShareCollectionWriteRequest,
+    ) -> Result<ShareCollectionWriteResponse, RelayError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1699,6 +1713,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     [workspace_id],
                 )
                 .map_err(SyncError::persist)?;
+                // Direct-write marks name this origin's journal positions, which
+                // a recovered origin starts over.
+                tx.execute(
+                    "DELETE FROM share_direct_write_state WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM share_direct_write_marks WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
                 usize::try_from(preserved_ops).map_err(|_| SyncError::CoordinateDiverged)
             })
             .map_err(local)?;
@@ -1999,7 +2025,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scanned = read_share_proposal_scan_position(store, workspace_id, share_id)?;
         let submit_through =
             local_max_origin_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
-        let mut scan = collect_share_proposal_changes(
+        // A change the direct lane already wrote to the granter's files is
+        // not offered again. Its later edits are, based on what it wrote.
+        let delivered: BTreeMap<String, i64> =
+            read_direct_write_marks(store, workspace_id, share_id)?
+                .into_iter()
+                .filter(|(_, mark)| mark.delivered)
+                .map(|(object_id, mark)| (object_id, mark.through_seq))
+                .collect();
+        let scan = collect_share_proposal_changes(
             store,
             workspace_id,
             granted,
@@ -2007,8 +2041,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             scanned,
             submit_through,
             max_read_bytes,
+            &delivered,
         )?;
-        if scan.changes.is_empty() {
+        let mut changes: Vec<ShareProposalChange> =
+            scan.changes.into_iter().map(|net| net.change).collect();
+        if changes.is_empty() {
             // Nothing to offer, but this window is read. Recording it keeps
             // the next submit from re-reading ops it already decided about.
             write_share_proposal_scan_position(
@@ -2024,15 +2061,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 ..ShareProposalSubmitOutcome::default()
             });
         }
-        self.upload_proposed_blobs(store, share_id, &mut scan.changes)?;
+        self.upload_proposed_blobs(store, share_id, &mut changes, &mut BTreeMap::new())?;
         let response = self
             .transport
             .share_proposal_submit(ShareProposalSubmitRequest {
                 share_id: share_id.to_owned(),
                 submit_id: submit_id.to_owned(),
-                ops: scan.changes.clone(),
+                ops: changes.clone(),
             })?;
-        if response.proposal_id.is_empty() || response.ops != scan.changes.len() {
+        if response.proposal_id.is_empty() || response.ops != changes.len() {
             return Err(RelayError::InvalidResponse);
         }
         write_share_proposal_scan_position(
@@ -2043,7 +2080,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
         )?;
         Ok(ShareProposalSubmitOutcome {
-            submitted: scan.changes.len(),
+            submitted: changes.len(),
             proposal_id: Some(response.proposal_id),
             skipped_outside_share: scan.skipped_outside_share,
             more_pending: scan.more_pending,
@@ -2059,13 +2096,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// stored `payloadAfterByteLength` is null would otherwise be offered with
     /// a length nobody measured, and the relay writes that number into the
     /// granter's own moment at accept.
+    ///
+    /// `uploaded` holds the blobs already sent in this operation, with their
+    /// byte lengths, so a blob several changes name travels once.
     fn upload_proposed_blobs(
         &self,
         store: &EngineStore,
         share_id: &str,
         changes: &mut [ShareProposalChange],
+        uploaded: &mut BTreeMap<String, i64>,
     ) -> Result<(), RelayError> {
-        let mut uploaded: BTreeMap<String, i64> = BTreeMap::new();
         for change in changes {
             let Some(sha256) = change.after_blob_sha256.clone() else {
                 continue;
@@ -3538,9 +3578,17 @@ fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::Sha
     named
 }
 
+/// One file's net change in a scan, with the object it belongs to and the
+/// last journal position it consolidates.
+struct NetChange {
+    object_id: String,
+    last_seq: i64,
+    change: ShareProposalChange,
+}
+
 /// What one scan of this replica's journal found.
 struct ShareProposalScan {
-    changes: Vec<ShareProposalChange>,
+    changes: Vec<NetChange>,
     /// The journal position this scan read through, and the position the
     /// submit records once the relay accepts it. Below `submit_through`
     /// exactly when the change bound stopped the scan early.
@@ -3605,6 +3653,11 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// reports the position it stopped at, so the next submit resumes from exactly
 /// there. Folding more ops into files it already holds is not what the bound
 /// counts, so no file is ever offered half consolidated.
+///
+/// `settled` names, per object, the journal position through which another
+/// lane already decided its ops. Those ops are read past; a later op for the
+/// same object starts a change based on what that lane decided.
+#[allow(clippy::too_many_arguments)]
 fn collect_share_proposal_changes(
     store: &EngineStore,
     workspace_id: &str,
@@ -3613,9 +3666,10 @@ fn collect_share_proposal_changes(
     scanned_seq: i64,
     submit_through: i64,
     max_read_bytes: usize,
+    settled: &BTreeMap<String, i64>,
 ) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
-    let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
+    let mut by_object: BTreeMap<String, (ShareProposalChange, i64)> = BTreeMap::new();
     let mut outside_share: BTreeSet<String> = BTreeSet::new();
     let mut scanned_through = scanned_seq;
     let mut more_pending = false;
@@ -3635,6 +3689,9 @@ fn collect_share_proposal_changes(
             if op.op_kind == "moment.append"
                 && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
                 && !outside_share.contains(&object_id)
+                && !settled
+                    .get(&object_id)
+                    .is_some_and(|through| op.origin_seq <= *through)
             {
                 if !proposal_paths_within_grant(&op.payload, granted) {
                     // One op outside the grant takes the whole file out of
@@ -3668,7 +3725,7 @@ fn collect_share_proposal_changes(
                         // The base stays the first moment's before side: what
                         // the recipient started from, which is what the
                         // granter has to resolve against its own log.
-                        Some(held) => {
+                        Some((held, _)) => {
                             change.based_on_path.clone_from(&held.based_on_path);
                             change
                                 .based_on_blob_sha256
@@ -3676,7 +3733,7 @@ fn collect_share_proposal_changes(
                         }
                         None => order.push(object_id.clone()),
                     }
-                    by_object.insert(object_id, change);
+                    by_object.insert(object_id, (change, op.origin_seq));
                 }
             }
             scanned_through = op.origin_seq;
@@ -3687,7 +3744,7 @@ fn collect_share_proposal_changes(
     for object_id in order {
         // A file collected and then taken out of the grant by a later op is
         // gone from `by_object` but still named here.
-        let Some(mut change) = by_object.remove(&object_id) else {
+        let Some((mut change, last_seq)) = by_object.remove(&object_id) else {
             continue;
         };
         // A half-stated base names a file without saying what the recipient
@@ -3713,7 +3770,11 @@ fn collect_share_proposal_changes(
             // apply.
             continue;
         }
-        changes.push(change);
+        changes.push(NetChange {
+            object_id,
+            last_seq,
+            change,
+        });
     }
     Ok(ShareProposalScan {
         changes,
