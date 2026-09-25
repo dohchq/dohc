@@ -1252,7 +1252,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#seen", task);
     await w.executor.open();
     await w.until(() => w.events.includes(`released ${claim.claimId}`));
-    expect(w.executor.holdState()).toEqual({ holds: [], unreadable: true });
+    expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true });
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
     // Nothing overwrote the file dohc could not read.
     expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
