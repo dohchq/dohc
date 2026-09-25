@@ -296,7 +296,7 @@ export async function invokePluginSdkHost(
               onBehalfOf: run.onBehalfOf,
               depth: run.depth,
             },
-            collectionWriteIdempotencyKey: `${run.claimId}/${run.run}/${run.writes++}`,
+            collectionWriteIdempotencyKeyPrefix: `${run.claimId}/${run.run}/${run.writes++}`,
           }
         : hostContext;
       return waitForOperation(

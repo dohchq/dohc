@@ -1689,6 +1689,7 @@ fn write_normalized_text_in_tx(
         },
         moment,
         deduped: false,
+        automation_claims: Vec::new(),
     })
 }
 

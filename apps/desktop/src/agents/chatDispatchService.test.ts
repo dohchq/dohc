@@ -22,6 +22,8 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunnerSettings } from "../settings/userSettings";
+import type { PostNoticeInput } from "../notices/noticeStore";
+import { createOwedRunNotices, type OwedRunNotices } from "./owedRunNotices";
 import {
   EngineClientError,
   EngineWorkspaceSessions,
@@ -130,6 +132,10 @@ interface FixtureOptions {
   ambiguousClaimOnce?: boolean;
   deferClaim?: boolean;
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
+  // Each post of a run notice takes the next error, if any, and fails.
+  noticeFailures?: Error[];
+  // Each record of an owed notice takes the next error, if any, and fails.
+  owedAddFailures?: Error[];
 }
 
 interface Fixture {
@@ -153,6 +159,11 @@ interface Fixture {
     run: { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   }>;
   errors: unknown[];
+  notices: PostNoticeInput[];
+  // Where the service keeps the runs whose notice is owed, and its own
+  // view of them, which changes only once the file does.
+  owedRunNoticesPath: string;
+  owedRunNotices: OwedRunNotices;
   requeues: Array<{
     workspaceId: string;
     attachmentId?: symbol;
@@ -511,6 +522,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const presence: ChatDispatchPresenceInput[] = [];
   const attributions: Fixture["attributions"] = [];
   const errors: unknown[] = [];
+  const notices: PostNoticeInput[] = [];
+  const owedRunNoticesPath = join(stateRoot, "owed-run-notices.json");
+  const owedRunNotices = createOwedRunNotices(() => owedRunNoticesPath);
   const requeues: Fixture["requeues"] = [];
   const runActivity = { acquires: 0, releases: 0 };
   const storeResolves = { chat: 0, dispatch: 0 };
@@ -615,6 +629,22 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
+    runNotices: {
+      // One notice per id, as the notice store keeps them.
+      post: async (input) => {
+        const failure = options.noticeFailures?.shift();
+        if (failure) throw failure;
+        if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
+      },
+      owed: {
+        ...owedRunNotices,
+        add: async (workspaceId, runId) => {
+          const failure = options.owedAddFailures?.shift();
+          if (failure) throw failure;
+          await owedRunNotices.add(workspaceId, runId);
+        },
+      },
+    },
   });
 
   const fixture: Fixture = {
@@ -635,6 +665,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     presence,
     attributions,
     errors,
+    notices,
+    owedRunNoticesPath,
+    owedRunNotices,
     requeues,
     runActivity,
     storeResolves,
@@ -663,6 +696,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   };
   fixtures.push(fixture);
   return fixture;
+}
+
+// The runs whose notice the service still owes.
+async function owedRuns(fixture: Fixture): Promise<string[]> {
+  return await fixture.owedRunNotices.list(WORKSPACE_ID);
 }
 
 async function activate(fixture: Fixture): Promise<void> {
@@ -1130,6 +1168,10 @@ describe("chatDispatchService", () => {
     expect(fixture.runActivity).toEqual({ acquires: 1, releases: 0 });
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(fixture.syncRequests).toEqual([]);
+    // The notice is owed before the run's end is saved and posted only
+    // after, so it names how the run ended.
+    expect(fixture.notices).toEqual([]);
+    expect(await owedRuns(fixture)).toEqual([claim.run.runId]);
 
     if (fixture.completeFailureAtMs === null) {
       throw new Error("Expected a recorded completion failure.");
@@ -1154,6 +1196,10 @@ describe("chatDispatchService", () => {
       exitCode: 0,
     });
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
+    expect(fixture.notices.map((notice) => notice.noticeId)).toEqual([
+      `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
+    ]);
+    expect(await owedRuns(fixture)).toEqual([]);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(
       second.threadId,
@@ -1213,6 +1259,9 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       failureReason: expect.stringContaining("runner failed to start"),
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Fail during runner setup while the daemon is unavailable.\" failed to start",
+    ]);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(
@@ -1264,6 +1313,10 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.getRunRecord(firstClaim.run.runId)).toMatchObject({
       failureNotePosted: true,
     });
+    // A failed reply lookup never reads as a finished run.
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Finish while the daemon read is unavailable.\" produced no reply",
+    ]);
   });
 
   it("coalesces pending triggers in one thread and dispatches a later message as a follow-up", async () => {
@@ -1800,6 +1853,72 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
+  it("tells the person once when a run finishes, naming its thread", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      title: "Plan day 2",
+      body: "Plan the second day.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toEqual([{
+      workspaceId: WORKSPACE_ID,
+      noticeId: `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
+      kind: "agent-run",
+      title: "Your agent finished in \"Plan day 2\"",
+      body: "",
+      target: { thread: trigger.threadId, run: claim.run.runId },
+    }]);
+  });
+
+  it("reads the thread's title from its own channel, and names no thread when that read fails", async () => {
+    const fixture = await createFixture();
+    await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
+    await createAgentThread(fixture, { title: "Plan day 3", body: "Plan it.", authorUserId: "user_local" });
+    await activate(fixture);
+    const listThreads = vi.spyOn(fixture.chat, "listThreads");
+    vi.spyOn(fixture.chat, "listChannelThreads").mockRejectedValueOnce(new Error("engine busy"));
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    fixture.spawnCalls[1]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run produced no reply",
+      "Your agent's run in \"Plan day 3\" produced no reply",
+    ]);
+    expect(fixture.errors).toContainEqual(expect.objectContaining({ message: "engine busy" }));
+    // The runner's own context reads threads when it starts; the notice does not.
+    expect(listThreads.mock.calls.length).toBe(1);
+  });
+
+  it("tells the person when a run fails, shortening a long thread name", async () => {
+    const fixture = await createFixture();
+    await createAgentThread(fixture, {
+      title: `Audit ${"every file in the workspace ".repeat(5)}`,
+      body: "Run a failing audit.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const [notice] = fixture.notices;
+    expect(fixture.notices).toHaveLength(1);
+    expect(notice!.title).toMatch(/^Your agent's run in "Audit every file in the workspace .*…" failed$/u);
+    expect([...notice!.title]).toHaveLength(120);
+  });
+
   it("posts a nonzero-exit failure note exactly once", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
@@ -2039,6 +2158,9 @@ describe("chatDispatchService", () => {
       exitCode: 0,
       failureNotePosted: true,
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Run silently.\" produced no reply",
+    ]);
   });
 
   it("does not report no reply while CLI provenance recovery is pending", async () => {
@@ -2064,6 +2186,7 @@ describe("chatDispatchService", () => {
     expect(
       messages.some((message) => message.body.includes("produced no reply")),
     ).toBe(false);
+    expect(fixture.notices).toEqual([]);
 
     linkPending = false;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
@@ -2075,6 +2198,129 @@ describe("chatDispatchService", () => {
       expect(
         messages.filter((message) => message.body.includes("produced no reply")),
       ).toHaveLength(1);
+      expect(fixture.notices.map((notice) => notice.title)).toEqual([
+        "Your agent's run in \"Wait for my CLI reply provenance.\" produced no reply",
+      ]);
+      expect(await owedRuns(fixture)).toEqual([]);
+    }, { interval: 0 });
+  });
+
+  it("posts the notice owed for a run that dohc stopped before saving its end", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      body: "Crash before this run's end is saved.",
+      authorUserId: "user_local",
+    });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+      logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+    // The last process owed the notice and stopped before saving the end.
+    await createOwedRunNotices(() => fixture.owedRunNoticesPath).add(WORKSPACE_ID, interrupted.run.runId);
+
+    await activate(fixture);
+
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
+      title: "Your agent's run in \"Crash before this run's end is saved.\" stopped when dohc restarted",
+    })]);
+    expect(await owedRuns(fixture)).toEqual([]);
+  });
+
+  it("posts the notice owed for a run whose end was saved before dohc stopped", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, {
+      title: "Plan day 2",
+      body: "Crash after this run's end is saved.",
+      authorUserId: "user_local",
+    });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const ended = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+      logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
+    });
+    if (!ended) throw new Error("Expected a run.");
+    await linkAgentReply(fixture, trigger.threadId, ended.run.runId);
+    await createOwedRunNotices(() => fixture.owedRunNoticesPath).add(WORKSPACE_ID, ended.run.runId);
+    await fixture.dispatch.completeRun({ runId: ended.run.runId, exitCode: 0 });
+
+    await activate(fixture);
+
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent finished in \"Plan day 2\"",
+    ]);
+    expect(await owedRuns(fixture)).toEqual([]);
+  });
+
+  it("saves a run's end only once its notice is owed", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({ owedAddFailures: [new Error("owed file unavailable")] });
+    const trigger = await createAgentThread(fixture, {
+      title: "Plan day 2",
+      body: "Finish while the owed file fails once.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => {
+      expect(fixture.errors).toContainEqual(expect.objectContaining({ message: "owed file unavailable" }));
+    }, { interval: 0 });
+    expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty("endedAtMs");
+    expect(fixture.notices).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await vi.waitFor(async () => {
+      expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({ exitCode: 0 });
+      expect(fixture.notices.map((notice) => notice.title)).toEqual([
+        "Your agent finished in \"Plan day 2\"",
+      ]);
+      expect(await owedRuns(fixture)).toEqual([]);
+    }, { interval: 0 });
+  });
+
+  it("tries a notice again when its post fails", async () => {
+    vi.useFakeTimers();
+    // The run's end tries once, and the scan right after tries again.
+    const fixture = await createFixture({
+      noticeFailures: [new Error("notice store unavailable"), new Error("notice store unavailable")],
+    });
+    const trigger = await createAgentThread(fixture, {
+      title: "Plan day 2",
+      body: "Finish while notices fail once.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await vi.waitFor(() => {
+      expect(fixture.errors.filter((error) => (error as Error).message === "notice store unavailable")).toHaveLength(2);
+    }, { interval: 0 });
+    expect(fixture.notices).toEqual([]);
+    expect(await owedRuns(fixture)).toEqual([claim.run.runId]);
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await vi.waitFor(async () => {
+      expect(fixture.notices.map((notice) => notice.title)).toEqual([
+        "Your agent finished in \"Plan day 2\"",
+      ]);
+      expect(await owedRuns(fixture)).toEqual([]);
     }, { interval: 0 });
   });
 
@@ -2115,6 +2361,10 @@ describe("chatDispatchService", () => {
       attemptCount: 2,
     });
     expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
+      title: "Your agent's run in \"Resume this after restart.\" stopped when dohc restarted",
+    })]);
   });
 
   it("recovers a restart-failed row left behind before its requeue", async () => {
@@ -2461,6 +2711,9 @@ describe("chatDispatchService", () => {
       triggerMessageId: trigger.messageId,
       attemptCount: 2,
     });
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Recover this clean-shutdown interruption.\" stopped when dohc quit",
+    ]);
   });
 
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
@@ -2498,6 +2751,7 @@ describe("chatDispatchService", () => {
       threadId: trigger.threadId,
     });
     expect(messages.some((message) => message.body.includes("app quit during run"))).toBe(false);
+    expect(fixture.notices).toEqual([]);
   });
 
   it("terminates an app-quit runner when persisting its failure rejects", async () => {
@@ -2566,6 +2820,10 @@ describe("chatDispatchService", () => {
       message.body.includes("timed out after 1m"),
     );
     expect(timeoutMessage?.authorUserId).toBe("user_local");
+    // Worded like the thread's note.
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"This harness will hang.\" timed out",
+    ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
     expect(fixture.killCalls.at(-1)).toEqual({
@@ -2671,6 +2929,9 @@ describe("chatDispatchService", () => {
     expect(stoppedMessages.some((message) => message.body.includes("failed (exit 143)"))).toBe(
       false,
     );
+    expect(fixture.notices.map((notice) => notice.title)).toEqual([
+      "Your agent's run in \"Stop this run.\" stopped",
+    ]);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRunId: null,
     });

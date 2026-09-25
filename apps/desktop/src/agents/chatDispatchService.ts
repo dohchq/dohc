@@ -1,4 +1,7 @@
 import { configuredRunnerCommand } from "./agentToolCatalog";
+import { NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import type { PostNoticeInput } from "../notices/noticeStore";
+import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -21,6 +24,57 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+
+// How a run ended, as its notice says it. Each matches the note the run
+// leaves in its thread.
+type RunOutcome =
+  | "finished" | "no-reply" | "timed-out" | "failed" | "not-started" | "restarted" | "quit" | "stopped";
+
+const RUNNER_START_FAILURE = "runner failed to start";
+const RUN_TIMEOUT = "timed out after";
+
+// How a run ended, read from its saved record. A clean exit is "finished"
+// only once the run's reply is known, so it stays "exited" here.
+function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | "no-reply"> | "exited" {
+  switch (run.failureReason) {
+    case undefined:
+      return run.exitCode === 0 ? "exited" : "failed";
+    case "app restart during run":
+      return "restarted";
+    case "app-quit":
+      return "quit";
+    case "user-stop":
+      return "stopped";
+    default:
+      if (run.failureReason.startsWith(RUNNER_START_FAILURE)) return "not-started";
+      return run.failureReason.startsWith(RUN_TIMEOUT) ? "timed-out" : "failed";
+  }
+}
+
+const RUN_OUTCOME_ENDINGS: Record<Exclude<RunOutcome, "finished">, string> = {
+  "no-reply": "produced no reply",
+  "timed-out": "timed out",
+  failed: "failed",
+  "not-started": "failed to start",
+  restarted: "stopped when dohc restarted",
+  quit: "stopped when dohc quit",
+  stopped: "stopped",
+};
+
+// "Your agent finished in "Plan day 2"" or "Your agent's run in "Plan day
+// 2" failed", shortening the thread's name to fit. Without a name, the
+// sentence names no thread.
+function runNoticeTitle(outcome: RunOutcome, thread: string): string {
+  const sentence = (name: string | null) => {
+    const where = name === null ? "" : ` in "${name}"`;
+    return outcome === "finished"
+      ? `Your agent finished${where}`
+      : `Your agent's run${where} ${RUN_OUTCOME_ENDINGS[outcome]}`;
+  };
+  if (!thread) return sentence(null);
+  const room = NOTICE_TITLE_MAX_CHARS - [...sentence("")].length;
+  return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
+}
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
 const CHAT_DISPATCH_BUDGET_WINDOW_MS = 10 * 60_000;
@@ -115,6 +169,12 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   nowMs?: () => number;
   createId?: () => string;
   onError?: (error: unknown) => void;
+  // Tells this computer's person how each run ended. A run's notice is owed
+  // from before its end is saved until the notice is posted.
+  runNotices?: {
+    post(input: PostNoticeInput): Promise<void>;
+    owed: OwedRunNotices;
+  };
 }
 
 interface ChatDispatchThreadState {
@@ -584,6 +644,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
       }
       try {
+        await oweRunNotice(live.workspace, live.claim.run.runId);
         if (intent.kind === "complete") {
           await dispatch.completeRun({
             runId: live.claim.run.runId,
@@ -600,6 +661,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         live.terminalDurable = true;
         notifyRunUpdated(live.workspace);
+        await settleRunNotice(live.workspace, live.claim.run.runId);
       } catch (error) {
         reportError(error);
         scheduleRecoveryScan(live.workspace);
@@ -619,7 +681,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     live.terminalIntent = {
       kind: "fail",
       exitCode: 124,
-      reason: `timed out after ${live.timeoutMinutes}m`,
+      reason: `${RUN_TIMEOUT} ${live.timeoutMinutes}m`,
     };
     live.killEscalation = terminateWithEscalation(
       live.child,
@@ -632,18 +694,120 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       `⚠ Agent run produced no reply (timed out after ${live.timeoutMinutes}m). Open the run chip for details.`,
     ).catch(reportError);
     try {
+      await oweRunNotice(live.workspace, live.claim.run.runId);
       await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: 124,
-        reason: `timed out after ${live.timeoutMinutes}m`,
+        reason: `${RUN_TIMEOUT} ${live.timeoutMinutes}m`,
       });
       live.terminalDurable = true;
       notifyRunUpdated(live.workspace);
+      await settleRunNotice(live.workspace, live.claim.run.runId);
     } catch (error) {
       reportError(error);
       scheduleRecoveryScan(live.workspace);
     }
   }
+
+  // Records that a run's notice is owed. Every run's end is saved only
+  // after this succeeds, so a failure here holds the end back like a failed
+  // save, and the recovery scan tries both again.
+  async function oweRunNotice(workspace: ChatDispatchWorkspace, runId: string): Promise<void> {
+    await options.runNotices?.owed.add(workspace.workspaceId, runId);
+  }
+
+  // Posts the notice for how an owed run ended, as its saved record says,
+  // then drops it from the owed list. A run still open is left for the code
+  // that ends it. A clean exit whose reply is not known yet, or a failed
+  // read or post, stays owed for a later scan. The notice store ignores a
+  // second post of the same id.
+  async function settleRunNotice(workspace: ChatDispatchWorkspace, runId: string): Promise<void> {
+    const notices = options.runNotices;
+    if (!notices) return;
+    const { workspaceId } = workspace;
+    try {
+      const dispatch = options.dispatchStoreFor(workspace);
+      const run = await dispatch.getRunRecord(runId, durableDispatchRequest);
+      if (run?.workspaceId === workspaceId) {
+        if (run.endedAtMs === undefined) return;
+        const saved = savedRunOutcome(run);
+        let outcome: RunOutcome;
+        if (saved !== "exited") {
+          outcome = saved;
+        } else if (run.failureNotePosted) {
+          // The no-reply check found no reply and left its note, which is
+          // itself linked to the run.
+          outcome = "no-reply";
+        } else if (runMessageLinkPending(workspace, runId)) {
+          scheduleRecoveryScan(workspace);
+          return;
+        } else {
+          const linked = await dispatch.listRunMessages(workspaceId, runId, durableDispatchRequest);
+          outcome = linked.length === 0 ? "no-reply" : "finished";
+        }
+        await noticeRun(workspace, run, outcome);
+      }
+      await notices.owed.remove(workspaceId, runId);
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(workspace);
+    }
+  }
+
+  // Posts every notice this workspace still owes, after a crash or a failed
+  // post. A live run's notice waits for its end to be saved.
+  async function recoverRunNotices(workspace: ChatDispatchWorkspace): Promise<void> {
+    const notices = options.runNotices;
+    if (!notices) return;
+    let owed: string[];
+    try {
+      owed = await notices.owed.list(workspace.workspaceId);
+    } catch (error) {
+      reportError(error);
+      scheduleRecoveryScan(workspace);
+      return;
+    }
+    const live = liveRuns.get(workspace.workspaceId);
+    for (const runId of owed) {
+      if (live?.claim.run.runId === runId && !live.terminalDurable) continue;
+      await settleRunNotice(workspace, runId);
+    }
+  }
+
+  // Tells this computer's person how a run ended.
+  async function noticeRun(
+    workspace: ChatDispatchWorkspace,
+    run: AgentRunRecord,
+    outcome: RunOutcome,
+  ): Promise<void> {
+    if (!options.runNotices) return;
+    const { workspaceId } = workspace;
+    await options.runNotices.post({
+      workspaceId,
+      noticeId: `agent-run:${workspaceId}:${run.runId}`,
+      kind: "agent-run",
+      title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
+      body: "",
+      target: { thread: run.threadId, run: run.runId },
+    });
+  }
+
+  // The thread's title, read from its own channel's threads. An empty title
+  // when that read fails or the thread has no channel: the notice still goes.
+  async function threadTitle(workspace: ChatDispatchWorkspace, threadId: string): Promise<string> {
+    try {
+      const store = options.chatStoreFor(workspace);
+      const { workspaceId } = workspace;
+      const channelId = await store.findThreadChannelId({ workspaceId, threadId });
+      if (!channelId) return "";
+      const threads = await store.listChannelThreads({ workspaceId, channelId });
+      return threads.find((summary) => summary.thread.id === threadId)?.thread.title.replace(/\s+/gu, " ").trim() ?? "";
+    } catch (error) {
+      reportError(error);
+      return "";
+    }
+  }
+
 
   async function failClaimBeforeRun(
     workspace: ChatDispatchWorkspace,
@@ -668,17 +832,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       claim.run,
       "⚠ Agent run failed to start. Open the run chip for details.",
     ).catch(reportError);
+    await oweRunNotice(workspace, claim.run.runId);
     await options.dispatchStoreFor(workspace).failRun({
       runId: claim.run.runId,
       reason,
     });
     notifyRunUpdated(workspace);
+    await settleRunNotice(workspace, claim.run.runId);
   }
 
   async function recoverPreRunFailure(
     recovery: PendingPreRunFailure,
   ): Promise<boolean> {
     try {
+      await oweRunNotice(recovery.workspace, recovery.claim.run.runId);
       await options.dispatchStoreFor(recovery.workspace).failRun({
         runId: recovery.claim.run.runId,
         reason: recovery.reason,
@@ -689,6 +856,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         pendingPreRunFailures.delete(recovery.workspace.workspaceId);
       }
       notifyRunUpdated(recovery.workspace);
+      await settleRunNotice(recovery.workspace, recovery.claim.run.runId);
       await releaseWorkspaceLease(recovery.releaseWorkspace);
       recovery.releaseWorkspace = null;
       return true;
@@ -784,7 +952,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       reportError(error);
       const detail =
         error instanceof Error && error.message ? error.message : "unknown error";
-      const reason = `runner failed to start: ${detail}`;
+      const reason = `${RUNNER_START_FAILURE}: ${detail}`;
       try {
         await failClaimBeforeRun(workspace, claim, reason);
         await releaseWorkspaceLease(releaseWorkspace);
@@ -1064,11 +1232,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           "⚠ Agent run failed (app restarted during run). Open the run chip for details.",
         ).catch(reportError);
       }
+      await oweRunNotice(workspace, claim.run.runId);
       await dispatch.failRun({
         runId: claim.run.runId,
         reason: "app restart during run",
       });
       notifyRunUpdated(workspace);
+      await settleRunNotice(workspace, claim.run.runId);
       if (claim.dispatch.attemptCount < 2) {
         if (
           !(await requeueInterruptedRun(workspace, {
@@ -1087,6 +1257,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const recoveries =
       (await options.listAppQuitRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
+      await oweRunNotice(workspace, recovery.run.runId);
+      await settleRunNotice(workspace, recovery.run.runId);
       const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
         recovery.run.runId,
@@ -1180,6 +1352,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     if (!(await recoverInterruptedRequeues(workspace))) return;
     await recoverNoReplyChecks(workspace);
+    await recoverRunNotices(workspace);
     if (!(await startupSweep(workspace))) return;
     await scanTriggers(workspace);
     await drain(workspace);
@@ -1295,12 +1468,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         live.killEscalation,
       );
       const dispatch = options.dispatchStoreFor(live.workspace);
+      await oweRunNotice(live.workspace, live.claim.run.runId);
       await dispatch.failRun({
         runId: live.claim.run.runId,
         exitCode: APP_QUIT_EXIT_CODE,
         reason: "user-stop",
       });
       live.terminalDurable = true;
+      await settleRunNotice(live.workspace, live.claim.run.runId);
       try {
         await postFailureNote(
           live.workspace,

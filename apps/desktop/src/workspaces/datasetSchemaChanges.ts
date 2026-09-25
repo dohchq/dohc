@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { parseDatasetDefinition, type DatasetRevision, type DatasetField } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, parseDatasetDefinition, type DatasetColumnField, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { datasetNumberText, losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
@@ -8,7 +8,7 @@ import { generateFieldMigration } from "./datasetFieldMigration";
 
 const quote = (value: string) => `"${value}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
-function column(field: DatasetField): string {
+function column(field: DatasetColumnField): string {
   const name = quote(field.sqlColumn), type = field.type === "number" ? "REAL" : field.type === "checkbox" ? "INTEGER" : "TEXT";
   let output = `${name} ${type}${field.required ? " NOT NULL" : ""}`;
   if (Object.hasOwn(field, "default")) {
@@ -60,9 +60,16 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       const field = table.fields.find(candidate => candidate.fieldId === change.fieldId);
       if (!field) throw new Error("This field changed. Refresh the Collection.");
       summary = `Rename ${field.name} to ${change.name}`; field.name = change.name;
+    } else if (change.kind === "addButton") {
+      // A button stores nothing and no operation lists it, so this revision
+      // changes no SQL and no operation.
+      table.fields.push({ fieldId: randomUUID(), name: change.name, type: "button" });
+      definition = parseDatasetDefinition(definition);
+      summary = `Add ${change.name}`;
     } else if (change.kind === "changeField") {
       const field = table.fields.find(candidate => candidate.fieldId === change.fieldId);
       if (!field) throw new Error("This field changed. Refresh the Collection.");
+      if (field.type === "button") throw new Error(`${field.name} is a button. It has no type or value to change.`);
       if (!generated) {
         const actions = original.operations.filter(operation => operation.fieldIds.includes(field.fieldId)).map(operation => operation.label).join(", ");
         throw new Error(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`);
@@ -72,7 +79,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       if (field.type !== change.type && !(["text", "number"].includes(field.type) && ["text", "number"].includes(change.type))) {
         throw new Error("This type change needs a conversion rule. Edit the Collection source, then choose Review source change.");
       }
-      if (field.type !== change.type && definition.tables.some(candidate => candidate.fields.some(related => related.relation?.fieldId === field.fieldId))) {
+      if (field.type !== change.type && definition.tables.some(candidate => datasetColumnFields(candidate).some(related => related.relation?.fieldId === field.fieldId))) {
         throw new Error(`${field.name} is used by related records. Review a source change that converts both fields together.`);
       }
       field.type = change.type; field.required = change.required;
@@ -89,7 +96,7 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       schemaSql = migration.schemaSql; migrationSql = migration.migrationSql;
       summary = `Change ${field.name}`;
     } else {
-      const fieldId = randomUUID(), field: DatasetField = { ...change.field, fieldId, sqlColumn: `field_${fieldId.replaceAll("-", "")}` };
+      const fieldId = randomUUID(), field: DatasetColumnField = { ...change.field, fieldId, sqlColumn: `field_${fieldId.replaceAll("-", "")}` };
       if (field.required && (!Object.hasOwn(field, "default") || field.default === null)) throw new Error("A new required field needs a default for existing records.");
       if (field.unique && Object.hasOwn(field, "default") && field.default !== null) throw new Error("A new unique field cannot give every record the same default.");
       table.fields.push(field);

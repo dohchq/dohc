@@ -254,6 +254,39 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   await session.close({ settle: false });
 });
 
+it("decides a local update at its turn, against the canonical doc as it stands then", async () => {
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+  });
+  const seen: unknown[] = [];
+  const skipped = session.applyDecidedLocalUpdate((doc) => {
+    seen.push(doc.getMap("frontmatter").get("Note"));
+    return null;
+  });
+  // A remote update lands on the canonical doc before that update's turn.
+  const remote = new Y.Doc();
+  Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.doc));
+  remote.getMap("frontmatter").set("Note", "theirs");
+  Y.applyUpdate(session.doc, Y.encodeStateAsUpdate(remote, Y.encodeStateVector(session.doc)));
+  await expect(skipped).resolves.toBe(false);
+  expect(seen).toEqual(["theirs"]);
+
+  const journaledBefore = ydoc.recordedUpdates.length;
+  const written = session.applyDecidedLocalUpdate((doc) => {
+    const scratch = new Y.Doc();
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+    const before = Y.encodeStateVector(scratch);
+    scratch.getMap("frontmatter").set("Note", "mine");
+    return Y.encodeStateAsUpdate(scratch, before);
+  });
+  await expect(written).resolves.toBe(true);
+  await session.settleNow();
+  expect(ydoc.recordedUpdates.length).toBe(journaledBefore + 1);
+  expect(session.doc.getMap("frontmatter").get("Note")).toBe("mine");
+  await session.close({ settle: false });
+});
+
 it("refuses a new live session before it can recreate a path inside a removal window", async () => {
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath(PATH);
   await rm(join(root, PATH));

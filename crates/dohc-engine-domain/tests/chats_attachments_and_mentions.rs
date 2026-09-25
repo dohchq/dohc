@@ -59,6 +59,7 @@ fn start_with(
     LinkedChatStore::new(store)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -97,6 +98,7 @@ fn start_message(
     LinkedChatStore::new(store)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: channel_id.to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -134,6 +136,7 @@ fn send_text(
     LinkedChatStore::new(store)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),
@@ -225,6 +228,7 @@ fn attachment_insert_and_replication_op_commit_together() {
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     let result = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "thread".to_owned(),
@@ -531,6 +535,7 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     let base = StartChannelThread {
+        automation: None,
         workspace_id: WS.to_owned(),
         channel_id: "channel".to_owned(),
         thread_id: "thread".to_owned(),
@@ -554,6 +559,7 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
         .expect("first");
     let result = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             attachments: vec![attachment("object-b")],
             ..base
         },
@@ -576,6 +582,7 @@ fn send_message_returns_authoritative_attachments() {
     let message = LinkedChatStore::new(&mut store)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: "thread".to_owned(),
                 message_id: "reply".to_owned(),
@@ -710,6 +717,7 @@ fn local_start_and_send_index_mentions_atomically() {
 
     let failed = LinkedChatStore::new(&mut store).send_message(
         &SendMessage {
+            automation: None,
             workspace_id: WS.to_owned(),
             thread_id: "thread".to_owned(),
             message_id: "rolled-back".to_owned(),

@@ -4,11 +4,15 @@ import {
   datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
   effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision,
   parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
-  type AppDatasetBinding, type DatasetDefinition, type DatasetField, type DatasetRevision,
+  datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision,
 } from "./dataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+function column(field: DatasetField | undefined): DatasetColumnField {
+  if (!field || field.type === "button") throw new Error("Expected a column field.");
+  return field;
+}
 function definition(): DatasetDefinition {
   return {
     formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "data/schema.sql", operationsPath: "data/operations.js",
@@ -47,7 +51,7 @@ describe("dataset publication binding", () => {
     const approved = revision();
     const archived = { datasetId: approved.datasetId, name: approved.definition.name, revision: 1, revisionSha256: approved.revisionSha256,
       archived: true, operations: [], tables: approved.definition.tables.map(table => ({ tableId: table.tableId, name: table.name,
-        fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })) };
+        fields: datasetColumnFields(table).map(({ sqlColumn: _column, ...field }) => field) })) };
     expect(parseDatasetDescription(archived)).toEqual(archived);
     expect(() => parseDatasetDescription({ ...archived, archived: false })).toThrow();
     const invalid = structuredClone(archived); invalid.tables[0]!.fields[0]!.fieldId = "invalid";
@@ -142,7 +146,7 @@ describe("dataset definition", () => {
     expect(renamed.datasetId).toBe(parsed.datasetId);
     expect(renamed.tables[0]!.tableId).toBe(parsed.tables[0]!.tableId);
     expect(renamed.tables[0]!.fields[1]!.fieldId).toBe(parsed.tables[0]!.fields[1]!.fieldId);
-    expect(renamed.tables[0]!.fields[1]!.sqlColumn).toBe("name");
+    expect(column(renamed.tables[0]!.fields[1]).sqlColumn).toBe("name");
     expect(parsed.tables[0]!.fields[1]!.name).toBe("Name");
     expect(parsed).not.toHaveProperty("appRoot");
   });
@@ -193,9 +197,9 @@ describe("dataset definition", () => {
       value => { value.datasetId += "\n"; },
       value => { value.tables[0]!.tableId = value.datasetId; },
       value => { value.tables[0]!.fields[1]!.fieldId = id(3); },
-      value => { value.tables[0]!.fields[1]!.sqlColumn = "ID"; },
+      value => { column(value.tables[0]!.fields[1]).sqlColumn = "ID"; },
       value => { value.tables[0]!.sqlName = "dohc_history"; },
-      value => { value.tables[0]!.fields[0]!.required = false; },
+      value => { column(value.tables[0]!.fields[0]).required = false; },
       value => { value.tables[0]!.primaryKey = "missing"; },
       value => { value.operations[0]!.fieldIds = [id(100)]; },
       value => { value.operations[0]!.kind = "edit"; value.operations[0]!.fieldIds = [id(3)]; },
@@ -234,11 +238,94 @@ describe("dataset definition", () => {
     const value = definition();
     value.tables[0]!.fields.push({ fieldId: id(8), name: "Parent", sqlColumn: "parent_id", type: "relation", required: false, unique: false,
       relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } });
-    expect(parseDatasetDefinition(value).tables[0]!.fields[2]!.relation!.fieldId).toBe(id(3));
+    expect(column(parseDatasetDefinition(value).tables[0]!.fields[2]).relation!.fieldId).toBe(id(3));
     for (const patch of [{ datasetId: id(100) }, { tableId: id(100) }, { fieldId: id(100) }, { fieldId: id(4) }]) {
-      const changed = structuredClone(value); Object.assign(changed.tables[0]!.fields[2]!.relation!, patch);
+      const changed = structuredClone(value); Object.assign(column(changed.tables[0]!.fields[2]).relation!, patch);
       expect(() => parseDatasetDefinition(changed)).toThrow();
     }
+  });
+});
+
+describe("dataset buttons", () => {
+  const button = { fieldId: id(20), name: "Send receipt", type: "button" as const };
+  function withButton(): DatasetDefinition {
+    const value = definition(); value.tables[0]!.fields.push({ ...button });
+    value.tables.push({ tableId: id(30), name: "Notes", sqlName: "notes", primaryKey: "id", fields: [
+      { fieldId: id(31), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      { fieldId: id(32), name: "Archive", type: "button" },
+    ] });
+    return value;
+  }
+  function approvedWithButton(): DatasetRevision {
+    const result = revision(); result.definition = withButton();
+    result.definitionSha256 = hash(datasetDefinitionDigestContent(result.definition));
+    result.revisionSha256 = hash(datasetRevisionDigestContent(result));
+    return result;
+  }
+
+  it("parses a button as an id, a name and its type, with no column", () => {
+    expect(parseDatasetDefinition(withButton()).tables[0]!.fields[2]).toEqual(button);
+    for (const extra of [{ sqlColumn: "send_receipt" }, { required: false }, { unique: false }, { default: null }, { options: ["Now"] }, { relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } }]) {
+      const value = withButton(); Object.assign(value.tables[0]!.fields[2]!, extra);
+      expect(() => parseDatasetDefinition(value)).toThrow();
+    }
+    for (const patch of [{ name: "Name" }, { fieldId: id(4) }, { fieldId: id(2) }, { fieldId: "button" }, { name: "" }]) {
+      const value = withButton(); Object.assign(value.tables[0]!.fields[2]!, patch);
+      expect(() => parseDatasetDefinition(value)).toThrow();
+    }
+  });
+
+  it("refuses an operation that lists a button, in a definition, an approval, a binding, and a description", () => {
+    const approved = approvedWithButton();
+    expect(parseDatasetRevision(approved)).toEqual(approved);
+    for (const kind of ["create", "read", "edit", "action"] as const) {
+      const allowed = withButton();
+      allowed.operations[0] = { ...allowed.operations[0]!, kind, readOnly: kind === "read", fieldIds: [id(4)] };
+      expect(parseDatasetDefinition(allowed).operations[0]!.fieldIds).toEqual([id(4)]);
+      const listed = structuredClone(allowed); listed.operations[0]!.fieldIds.push(id(20));
+      expect(() => parseDatasetDefinition(listed)).toThrow();
+      expect(() => parseDatasetRevision({ ...approved, definition: listed })).toThrow();
+    }
+    expect(() => parseDatasetBinding({ ...binding(approved), createFields: [{ operationId: id(5), fieldIds: [id(20)] }] }, approved)).toThrow();
+    const description = describeApprovedDataset(approved, approved.definition.operations);
+    expect(() => parseDatasetDescription({ ...description, operations: [{ ...description.operations[1]!, fieldIds: [id(3), id(20)] }] })).toThrow();
+  });
+
+  it("refuses a relation to a button", () => {
+    const value = withButton();
+    value.tables[0]!.fields.push({ fieldId: id(8), name: "Parent", sqlColumn: "parent_id", type: "relation", required: false, unique: false,
+      relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } });
+    expect(parseDatasetDefinition(value)).toBeTruthy();
+    column(value.tables[0]!.fields[3]).relation!.fieldId = id(20);
+    expect(() => parseDatasetDefinition(value)).toThrow();
+  });
+
+  it("describes a visible table's buttons, though no operation lists them", () => {
+    const approved = approvedWithButton(), [submit, list] = approved.definition.operations;
+    const helper = describeApprovedDataset(approved, [list!]);
+    expect(helper.tables).toEqual([{ tableId: id(2), name: "People", fields: [
+      { fieldId: id(3), name: "Record ID", type: "text", required: true, unique: true },
+      { fieldId: id(4), name: "Name", type: "text", required: true, unique: false },
+      button,
+    ] }]);
+    expect(parseDatasetDescription(helper)).toEqual(helper);
+    const link = describeApprovedDataset(approved, [submit!]);
+    expect(link.tables[0]!.fields.map(field => field.fieldId)).toEqual([id(4), id(20)]);
+    expect(parseDatasetDescription(link)).toEqual(link);
+    expect(JSON.stringify(link)).not.toContain("Archive");
+    expect(describeApprovedDataset(approved, []).tables).toEqual([]);
+    expect(() => parseDatasetDescription({ ...link, tables: [{ ...link.tables[0]!, fields: [link.tables[0]!.fields[0]!, { ...button, sqlColumn: "send_receipt" }] }] })).toThrow();
+  });
+
+  it("keeps access when a revision adds, renames or removes a button", () => {
+    const before = revision(), after = approvedWithButton();
+    after.revision = 2; after.definition.tables.pop();
+    expect(datasetRevisionsPreserveAccess(before, after)).toBe(true);
+    const renamed = structuredClone(after); renamed.definition.tables[0]!.fields[2]!.name = "Email receipt";
+    expect(datasetRevisionsPreserveAccess(after, renamed)).toBe(true);
+    expect(datasetRevisionsPreserveAccess(after, before)).toBe(true);
+    const changedSource = structuredClone(after); changedSource.operationsSha256 = "e".repeat(64);
+    expect(datasetRevisionsPreserveAccess(before, changedSource)).toBe(false);
   });
 });
 
@@ -285,11 +372,11 @@ it("permits only display names and source locations in access-preserving revisio
   const changes: Array<(value: DatasetRevision) => void> = [
     value => { value.schemaSha256 = "e".repeat(64); },
     value => { value.operationsSha256 = "e".repeat(64); },
-    value => { value.definition.tables[0].fields[1].required = false; },
-    value => { value.definition.tables[0].fields[1].unique = true; },
-    value => { value.definition.tables[0].fields[1].default = "changed"; },
+    value => { column(value.definition.tables[0].fields[1]).required = false; },
+    value => { column(value.definition.tables[0].fields[1]).unique = true; },
+    value => { column(value.definition.tables[0].fields[1]).default = "changed"; },
     value => { value.definition.tables[0].fields[1].type = "number"; },
-    value => { value.definition.tables[0].fields[1].sqlColumn = "other"; },
+    value => { column(value.definition.tables[0].fields[1]).sqlColumn = "other"; },
     value => { value.definition.operations[0].fieldIds.push(id(3)); },
     value => { value.definition.operations[0].access = "owner"; },
     value => { value.definition.operations[0].name = "other"; },

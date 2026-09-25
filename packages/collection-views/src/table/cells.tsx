@@ -61,6 +61,9 @@ export function fieldDisplayText(
   const value = indexed?.value ?? null;
   if (value === null) return "";
   switch (field.type) {
+    // A button stores no value, so a value under its name is never shown.
+    case "button":
+      return "";
     case "person": {
       const id = asText(value);
       return personLabel?.(id) ?? id;
@@ -108,6 +111,8 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "invalid-record-id":
     "This value is not a record id. Edit the value to pick a record.",
   "invalid-url": "This value is not a URL. Edit the value to replace it.",
+  "expected-empty":
+    "A button field stores no value. Remove this value from the record's file.",
 };
 
 function wrapFlagged(
@@ -424,6 +429,14 @@ export function FieldCell({
       ? indexed.validation.reason.code
       : null;
   const value = indexed?.value ?? null;
+
+  // A button field stores no value, so its cell shows the field's name.
+  if (field.type === "button") {
+    return wrapFlagged(
+      reason,
+      <span className="truncate text-[13px] text-muted">{field.name}</span>,
+    );
+  }
 
   if (field.type === "checkbox") {
     const checked = value === true;

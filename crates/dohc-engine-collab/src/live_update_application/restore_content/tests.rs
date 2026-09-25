@@ -431,7 +431,7 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
             |_, _, _, _| Ok(())
         )
         .unwrap(),
-        ApplicationResult::Applied(_)
+        ApplicationResult::Applied(..)
     ));
     let after = snapshot(&f.store);
     assert_eq!(after.0, 4095);
@@ -669,7 +669,7 @@ impl Fixture {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
-        let ApplicationResult::Applied(ack) = result else {
+        let ApplicationResult::Applied(ack, _) = result else {
             panic!("apply refused")
         };
         self.sequence = ack.local_ydoc_sequence;
@@ -1151,7 +1151,18 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
     f.edit("# Later\n", 11);
     let prep = f.freeze(selected);
     let input = admitted_restore(&mut f, prep.clone());
+    let remote_changes = |store: &EngineStore| {
+        store
+            .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+            .unwrap()
+    };
+    let before = remote_changes(&f.store);
     let receipt = apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    assert_eq!(
+        remote_changes(&f.store),
+        before + 1,
+        "a restore arrives from the computer that asked for it"
+    );
     assert_eq!(receipt.local_head_sequence, 3);
     assert_eq!(receipt.admitted, input.admitted);
     let projected = f.canonical().project(ContentKind::Richdoc).unwrap().content;
@@ -1193,6 +1204,11 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
     f.host.host_epoch = 2;
     assert_eq!(receipt, apply_restore(&mut f, input, &NoFaults).unwrap());
     assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(
+        remote_changes(&f.store),
+        before + 1,
+        "a replayed restore counts nothing"
+    );
 }
 
 #[test]
