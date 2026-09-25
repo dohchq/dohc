@@ -15,7 +15,7 @@ import { definitionHash, localIsoTime, stepKey } from "./automationPlan";
 import type { ReachRoster, RosterGrant } from "./automationReach";
 import { createAutomationRunStore, type AutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, UNREADABLE_REACH, type CollectionAutomationEngine } from "./collectionAutomations";
-import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
+import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNDONE_RUN_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -183,8 +183,14 @@ async function world(options: {
       }
       const record = [...records.values()].find((candidate) => candidate.path === path);
       if (!record) throw new Error(`No record at ${path}.`);
-      return {
+      const session = {
         get initialUpdate() { return Y.encodeStateAsUpdate(record.doc); },
+        async applyDecidedLocalUpdate(decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void, applyOptions?: { idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }) {
+          const update = decide(record.doc);
+          if (update === null) return false;
+          session.applyLocalUpdate(update, armed, applyOptions);
+          return true;
+        },
         applyLocalUpdate(update: Uint8Array, armed?: () => void, applyOptions?: { idempotencyKey?: string; actorOriginId?: string; attribution?: ChangeAttributionWire }) {
           const key = applyOptions?.idempotencyKey;
           const bytes = Buffer.from(update).toString("base64");
@@ -201,7 +207,8 @@ async function world(options: {
         },
         async settleNow() { return { materialized: true }; },
         async close() {},
-      } as unknown as WorkspaceEngineYDocProviderSession;
+      };
+      return session as unknown as WorkspaceEngineYDocProviderSession;
     },
     async writeAuthoredTextFile(absolutePath, text, author, writeOptions) {
       if (failures.authoredWrite > 0) {
@@ -872,6 +879,193 @@ describe("Collection automations", () => {
     w.executor.notifyClaimed();
     await w.until(() => claim.state === "failed" && claim.error === UNREADABLE_RUN_ERROR);
     expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+  const STAMP = [
+    "  - id: stamp",
+    "    name: Stamp",
+    "    when: {field-changed: Status}",
+    "    do:",
+    "      - set: {Count: '=record.Count + 1', Note: done}",
+    "      - add-record: {Title: Stamped}",
+    "        collection: Log",
+  ].join("\n");
+
+  it("undoes a run as the person, keeps what someone changed since, and moves the records it added to the trash", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
+    const [added] = [...w.records.values()].filter((record) => record.collection === "Log");
+    task.doc.getMap("frontmatter").set("Note", "theirs");
+
+    const trashed: string[] = [];
+    const trash = async (path: string) => {
+      trashed.push(path);
+      for (const [id, record] of w.records) if (record.path === path) w.records.delete(id);
+    };
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
+      .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
+    expect(trashed).toEqual([added!.path]);
+    expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
+    expect(w.journaled.at(-1)!.actorOriginId).toBeUndefined();
+
+    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    expect(run).toMatchObject({ state: "done", undone: true, chainStopped: false });
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, trash))
+      .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
+  });
+
+  it("will not run a failed run again after someone undid what it changed", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    expect(w.fieldsOf(task).Count).toBe(3);
+
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+    expect(w.fieldsOf(task).Count).toBe(2);
+    await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    expect(claim.state).toBe("failed");
+    // A retry that reaches the engine another way does not run it either.
+    claim.state = "pending";
+    w.requeue(claim);
+    w.executor.notifyClaimed();
+    await w.until(() => claim.state === "failed" && claim.error === UNDONE_RUN_ERROR);
+    expect(w.fieldsOf(task).Count).toBe(2);
+  });
+
+  it("marks an Undo started before it reverses anything, so nothing resumes over it, and resumes it next time", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The run sets its fields, then cannot add its record, so its plan could resume.
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    // Undo stops before it puts anything back: the record cannot be opened.
+    w.failures.openSession = 1;
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
+      .rejects.toThrow("The record is open in a live session elsewhere.");
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
+    const [stopped] = await w.executor.runs("collection:Tasks#stamp");
+    expect(stopped).toMatchObject({ undone: false });
+    await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    // A requeue from the engine's recovery does not resume the plan either.
+    claim.state = "pending";
+    w.requeue(claim);
+    w.executor.notifyClaimed();
+    await w.until(() => claim.state === "failed" && claim.error === UNDONE_RUN_ERROR);
+    expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
+
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+    const [finished] = await w.executor.runs("collection:Tasks#stamp");
+    expect(finished).toMatchObject({ undone: true });
+  });
+
+  it("lists a record a run created before it stopped, once, so its Undo shows", async () => {
+    const addOnly = [
+      "  - id: log",
+      "    name: Log",
+      "    when: {field-changed: Status}",
+      "    do:",
+      "      - add-record: {Title: Logged}",
+      "        collection: Log",
+    ].join("\n");
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: addOnly } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    // The record is created, then its fields cannot be set.
+    w.failOpenAt(1);
+    const claim = w.claim("collection:Tasks#log", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    const added = [...w.records.values()].find((record) => record.collection === "Log")!;
+    const [run] = await w.executor.runs("collection:Tasks#log");
+    expect(run!.writes).toEqual([{ kind: "created", recordId: added.id, path: added.path }]);
+  });
+
+  it("moves a record to the trash that a run created before it stopped setting its fields", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The task's fields land, the record is created, then its fields cannot be set.
+    w.failOpenAt(2);
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+    const added = [...w.records.values()].find((record) => record.collection === "Log")!;
+
+    const trashed: string[] = [];
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async (path) => {
+      trashed.push(path);
+    })).resolves.toEqual({ status: "undone", reverted: 2, removed: 1, changedSince: 0, missing: 0 });
+    expect(trashed).toEqual([added.path]);
+  });
+
+  it("undoes what a run did under the definition a person started it over from", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The first version sets its fields, then cannot add its record.
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
+
+    await w.writeAutomations("Tasks", STAMP.replace("record.Count + 1", "record.Count + 10"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Count).toBe(13);
+    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    expect(run!.writes.filter((write) => write.kind === "field" && write.field === "Count")
+      .map((write) => write.kind === "field" && [write.before, write.after])).toEqual([[2, 3], [3, 13]]);
+
+    await w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
+    // Back to before the first version ran, not only before the second.
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+  });
+
+  it("lets only one of an Undo and a Try again started together change a run", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    const undoing = w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
+    const retrying = w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false });
+    await expect(retrying).resolves.toEqual({ status: "refused", reason: "dohc is already changing this run. Try again in a moment." });
+    await expect(undoing).resolves.toMatchObject({ status: "undone", reverted: 2 });
+    expect(claim.state).toBe("failed");
+    expect(w.fieldsOf(task).Count).toBe(2);
+  });
+
+  it("marks a run the chain depth cap stopped, so the panel offers no Try again", async () => {
+    const w = await world({ automations: { Tasks: STAMP.replace("        collection: Log", "") } });
+    const claim = w.claim("collection:Tasks#stamp", w.addRecord("Tasks", "one", { Status: "Done" }));
+    // The engine inserts a chain stop failed, and never serves it.
+    w.claims.get(claim.claimId)!.state = "failed";
+    w.claims.get(claim.claimId)!.error = "chain-stopped";
+    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    expect(run).toMatchObject({ state: "failed", chainStopped: true, undone: false, writes: [] });
   });
 
   it("keeps counting timeouts across a restart", async () => {

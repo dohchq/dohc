@@ -224,11 +224,36 @@ export function derivedRecordId(seed: string): string {
 }
 
 /**
+ * The update that sets one frontmatter field over `doc`'s state. It is
+ * computed on a scratch replica, exactly like the renderer editor: the
+ * session journals a local edit from its doc's update event, so transacting
+ * on the session's own doc would change state without journaling.
+ */
+function frontmatterUpdate(doc: Y.Doc, field: string, value: unknown): Uint8Array {
+  const scratch = new Y.Doc();
+  try {
+    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+    const captured: { update?: Uint8Array } = {};
+    scratch.on("update", (encoded: Uint8Array) => {
+      captured.update = encoded;
+    });
+    // Setting a map key always emits an update.
+    scratch.transact(() => scratch.getMap(FRONTMATTER_FIELD).set(field, value));
+    if (captured.update === undefined) throw new Error(`Setting "${field}" produced no update.`);
+    return captured.update;
+  } finally {
+    scratch.destroy();
+  }
+}
+
+/**
  * Sets frontmatter fields on one record through the record's live engine
- * Y.Doc session: open, skip every field that already holds the requested
- * value, journal each remaining field as one update with the author-derived
- * actorOriginId, settle so the writes are durable and the .md is on disk,
- * release. When no field changes, nothing is journaled or settled. Throws on
+ * Y.Doc session: open, then for each field at its turn on the session's
+ * chain, skip it when it already holds the requested value (or, with
+ * `expectedBefore`, anything but the expected one), else journal it as one
+ * update with the author-derived actorOriginId; settle so the writes are
+ * durable and the .md is on disk, release. When no field changes, nothing
+ * is journaled or settled. Throws on
  * refusal (invalid path, engine off, the record's doc session held live
  * elsewhere).
  *
@@ -262,87 +287,60 @@ export async function setCollectionRecordFields(
     // The caller can end while the session opens (an automation run's
     // deadline); a write must not land after that.
     throwIfAborted(context.signal);
-    // The update is computed on a scratch replica, exactly like the renderer
-    // editor: the session journals a local edit from its doc's update event,
-    // so transacting on the session's own doc would change state without
-    // journaling, and re-applying the same update afterwards would journal
-    // nothing (Yjs re-apply is a no-op).
-    const scratch = new Y.Doc();
-    try {
-      Y.applyUpdate(scratch, session.initialUpdate);
-      const frontmatter = scratch.getMap(FRONTMATTER_FIELD);
-      // Field names are the caller's, so "__proto__" must stay a plain key.
-      const replaced: Record<string, unknown> = Object.create(null);
-      const kept: Record<string, unknown> = Object.create(null);
-      const expected = input.expectedBefore;
-      const changed = entries.filter(([field, value]) => {
-        const current = frontmatter.get(field);
-        const currentValue =
-          (current instanceof Y.AbstractType ? current.toJSON() : current) ??
-          null;
-        if (isDeepStrictEqual(currentValue, value)) return false;
-        if (
-          expected !== undefined &&
-          Object.hasOwn(expected, field) &&
-          !isDeepStrictEqual(currentValue, expected[field] ?? null)
-        ) {
-          kept[field] = currentValue;
-          return false;
-        }
-        replaced[field] = currentValue;
-        return true;
-      });
-      if (changed.length === 0) {
-        // Every field already holds its value; nothing to journal or settle.
-        return { path: input.recordPath, replaced, kept };
-      }
-      // Setting a map key always emits an update, so each transaction
-      // assigns one.
-      const updates = changed.map(([field, value]) => {
-        let update!: Uint8Array;
-        const captureUpdate = (encoded: Uint8Array): void => {
-          update = encoded;
-        };
-        scratch.on("update", captureUpdate);
-        try {
-          scratch.transact(() => frontmatter.set(field, value));
-        } finally {
-          scratch.off("update", captureUpdate);
-        }
-        return { field, update };
-      });
-      let armed = 0;
-      const actorOriginId = actorOriginIdFor(input.author);
-      for (const { field, update } of updates) {
-        session.applyLocalUpdate(
-          update,
-          () => {
-            armed += 1;
-          },
-          {
-            ...(actorOriginId === undefined ? {} : { actorOriginId }),
-            attribution: attributionFor(input.author),
-            ...(input.idempotencyKeyPrefix === undefined
-              ? {}
-              : { idempotencyKey: `${input.idempotencyKeyPrefix}/${field}` }),
-          },
-        );
-      }
-      // settleNow queues on the same session chain as the updates above, so
-      // it observes the journaled edits; it throws when the settle cannot
-      // commit.
-      await session.settleNow({
-        summary: `Updated ${recordBasename(input.recordPath)}`,
-      });
-      if (armed !== updates.length) {
-        throw new Error(
-          `The engine session did not accept the field change for ${input.recordPath}.`,
-        );
-      }
-      return { path: input.recordPath, replaced, kept };
-    } finally {
-      scratch.destroy();
+    // Field names are the caller's, so "__proto__" must stay a plain key.
+    const replaced: Record<string, unknown> = Object.create(null);
+    const kept: Record<string, unknown> = Object.create(null);
+    const expected = input.expectedBefore;
+    const actorOriginId = actorOriginIdFor(input.author);
+    let armed = 0;
+    // Each field is compared and written at its own turn on the session's
+    // chain, against the canonical doc as it stands then, so a change that
+    // arrived after the session opened is compared, not overwritten.
+    const journaled = await Promise.all(entries.map(([field, value]) =>
+      session.applyDecidedLocalUpdate(
+        (doc) => {
+          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+          const currentValue =
+            (current instanceof Y.AbstractType ? current.toJSON() : current) ??
+            null;
+          if (isDeepStrictEqual(currentValue, value)) return null;
+          if (
+            expected !== undefined &&
+            Object.hasOwn(expected, field) &&
+            !isDeepStrictEqual(currentValue, expected[field] ?? null)
+          ) {
+            kept[field] = currentValue;
+            return null;
+          }
+          replaced[field] = currentValue;
+          return frontmatterUpdate(doc, field, value);
+        },
+        () => {
+          armed += 1;
+        },
+        {
+          ...(actorOriginId === undefined ? {} : { actorOriginId }),
+          attribution: attributionFor(input.author),
+          ...(input.idempotencyKeyPrefix === undefined
+            ? {}
+            : { idempotencyKey: `${input.idempotencyKeyPrefix}/${field}` }),
+        },
+      )));
+    const updates = journaled.filter(Boolean).length;
+    // Every field already held its value, or someone else's: nothing to settle.
+    if (updates === 0) return { path: input.recordPath, replaced, kept };
+    // settleNow queues on the same session chain as the updates above, so
+    // it observes the journaled edits; it throws when the settle cannot
+    // commit.
+    await session.settleNow({
+      summary: `Updated ${recordBasename(input.recordPath)}`,
+    });
+    if (armed !== updates) {
+      throw new Error(
+        `The engine session did not accept the field change for ${input.recordPath}.`,
+      );
     }
+    return { path: input.recordPath, replaced, kept };
   } finally {
     await session.close();
   }

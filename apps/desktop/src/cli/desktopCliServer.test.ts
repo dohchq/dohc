@@ -231,7 +231,11 @@ describe("desktop CLI workspace context", () => {
     const events: string[] = [];
     const session = {
       doc, initialUpdate: Y.encodeStateAsUpdate(doc),
-      applyLocalUpdate: (update: Uint8Array, armed?: () => void) => { Y.applyUpdate(doc, update); events.push("apply"); armed?.(); },
+      applyDecidedLocalUpdate: async (decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void) => {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); events.push("apply"); armed?.(); return true;
+      },
       settleNow: async () => { events.push("settle"); return { materialized: true }; },
       close: async () => { events.push("close"); },
     } as unknown as WorkspaceEngineYDocProviderSession;
