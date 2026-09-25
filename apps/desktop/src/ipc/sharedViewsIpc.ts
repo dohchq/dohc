@@ -173,7 +173,7 @@ export function registerSharedViewsIpcHandlers<
       }
       throw error;
     }
-    // A chat-channel code has no file selector, so there is no scope to
+    // A chat code has no file selector, so there is no scope to
     // enforce and nothing to project. Refuse it here rather than record a
     // grant of "everything" (the mount path says the same through
     // assertMountableSelector).

@@ -29,13 +29,36 @@ export interface PostData {
   viewerAuthorId: string;
 }
 
-// A derived title repeats the body's first line. The card shows the title
-// once, so the text starts after it.
-export function postExcerpt(title: string, body: string): string {
+// The engine's chat_thread_display_title (chats.rs): an untitled post's title
+// is its first line with whitespace runs collapsed, and a line over 80
+// characters becomes its first 79, trimmed, plus "…". Characters are Unicode
+// scalar values, and whitespace is Rust's char::is_whitespace.
+const DERIVED_TITLE_MAX_CHARS = 80;
+const RUST_WHITESPACE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
+
+function derivedTitle(firstLine: string): string {
+  const line = firstLine.split(RUST_WHITESPACE).filter(Boolean).join(" ");
+  const chars = [...line];
+  if (chars.length <= DERIVED_TITLE_MAX_CHARS) return line;
+  // The collapsed line's only whitespace is single spaces.
+  return `${chars.slice(0, DERIVED_TITLE_MAX_CHARS - 1).join("").replace(/ $/, "")}…`;
+}
+
+// Whether a post's title is the one the engine derives from its first line,
+// so it repeats the text. An explicit title that ends in "…" is still a
+// title; only one identical to the derived title repeats the text.
+export function titleRepeatsFirstLine(title: string, firstLine: string): boolean {
+  const derived = derivedTitle(firstLine);
+  return derived !== "" && title === derived;
+}
+
+// The card shows a post's words once: a derived title gives way to the whole
+// first line it came from, and the text continues after that line.
+export function postText(title: string, body: string): { heading: string; excerpt: string } {
   const newline = body.indexOf("\n");
   const firstLine = (newline === -1 ? body : body.slice(0, newline)).trim();
-  if (firstLine !== title.trim()) return body;
-  return newline === -1 ? "" : body.slice(newline + 1).trim();
+  if (!titleRepeatsFirstLine(title, firstLine)) return { heading: title, excerpt: body };
+  return { heading: firstLine, excerpt: newline === -1 ? "" : body.slice(newline + 1).trim() };
 }
 
 
@@ -127,7 +150,9 @@ export function PostCard(props: {
   const isAgent = message?.authorKind === "agent";
   const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const excerpt = message ? postExcerpt(props.thread.title, message.bodySnippet) : "";
+  const { heading, excerpt } = message
+    ? postText(props.thread.title, message.bodySnippet)
+    : { heading: props.thread.title, excerpt: "" };
   const plain = message !== null && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
 
@@ -215,13 +240,13 @@ export function PostCard(props: {
         </div>
         <span
           data-testid="chats-post-title"
-          className={`mt-2.5 block whitespace-pre-wrap break-words text-ink ${
+          className={`mt-2.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
             plain
               ? "text-[15px] leading-relaxed"
               : "text-[16px] font-semibold leading-snug tracking-[-0.01em]"
           }`}
         >
-          {props.thread.title}
+          {heading}
         </span>
         {excerpt ? (
           <span

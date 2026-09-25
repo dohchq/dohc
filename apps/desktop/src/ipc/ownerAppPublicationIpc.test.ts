@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
@@ -12,32 +13,18 @@ const hash = (value: Uint8Array | string) => createHash("sha256").update(value).
 const prepareInput = { action: "prepare", workspaceId: "w", appRoot: "app", shareId: "s", grantId: "g" };
 function harness() {
   const source = new Map<string, Uint8Array>([
-    ["app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {} }))],
+    ["app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {} }))],
     ["app/index.js", Buffer.from("document.body.textContent='trip';")],
   ]);
-  const blobs = new Map<string, Uint8Array>();
   const controller = new AbortController();
   const workspace = { workspaceId: "w", shareView: undefined as unknown };
   let rendererGeneration = 1, credentialGeneration = 1, current = true, captures = 0;
   let beforeCapture: (count: number) => void = () => {};
   const requests: string[] = [];
-  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
-    requests.push(request.method);
-    const params = request.params as Record<string, unknown>;
-    if (request.method === "versionedText.captureSources") {
-      beforeCapture(++captures);
-      const paths = params.paths as string[];
-      const files = [...paths].sort().map(path => {
-        const bytes = source.get(path)!;
-        const sha256 = hash(bytes); blobs.set(sha256, Uint8Array.from(bytes));
-        return { path, objectId: path, contentKind: "text", sha256, byteLength: bytes.byteLength, latestMomentId: "m" };
-      });
-      return { id: request.id, result: { workspaceId: "w", versionId: "main", files, totalBytes: files.reduce((n, f) => n + f.byteLength, 0),
-        sourceDigest: hash(JSON.stringify(["dohc-source-capture-v1", "w", "main", files])) } };
-    }
-    const bytes = blobs.get(String(params.sha256))!;
-    return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
-  } }, "owner", { workspaceId: "w" });
+  const adapter = sourceCaptureAdapter(source, { onRequest(method) {
+    requests.push(method);
+    if (method === "versionedText.captureSources") beforeCapture(++captures);
+  } });
   const credentials = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" };
   const grant = { shareId: "s", grantId: "g", generation: 7, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null },
     createdAtMs: 1, lastUsedAtMs: null, urlIssuedAtMs: null, dependents: [], access: "view" };
@@ -77,7 +64,7 @@ function withDataset(h: ReturnType<typeof harness>) {
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE" });
   const approved = { revision, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE", active: true,
     cursor: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
-  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {},
+  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
     dataset: { kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
   const original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => {
@@ -88,7 +75,8 @@ function withDataset(h: ReturnType<typeof harness>) {
   return { ...h, approved };
 }
 function withCollection(h: ReturnType<typeof harness>, declaration = collection) {
-  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {}, collection: declaration })));
+  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
+    collection: { ...declaration, collectionPath: posix.relative("app", declaration.collectionPath) } })));
   h.source.set(`${declaration.collectionPath}/collection.yaml`, Buffer.from(collectionSchema));
   return h;
 }
@@ -288,7 +276,7 @@ describe("owner app publication", () => {
   });
   it("preflights all declared paths before reading their bytes", async () => {
     const h = harness();
-    h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "private/index.js", inputs: ["private/index.js"], packageMap: {} })));
+    h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "../private/index.js", inputs: ["../private/index.js"], packageMap: {} })));
     await expect(h.prepare()).rejects.toThrow("outside this link");
     expect(h.requests.filter(method => method === "versionedText.captureSources")).toHaveLength(1);
   });

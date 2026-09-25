@@ -1381,6 +1381,39 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
+  it("closes Preview options after a pick, on Escape, and on a press outside it", async () => {
+    const user = userEvent.setup();
+    render(
+      <div>
+        <button type="button">Elsewhere</button>
+        <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />
+      </div>,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    const trigger = screen.getByTestId("site-preview-options");
+    const menu = trigger.closest("details");
+    if (!menu) throw new Error("Preview options is not a disclosure");
+
+    await user.click(trigger);
+    expect(menu.open).toBe(true);
+    await user.click(screen.getByTestId("site-preview-static"));
+    expect(menu.open).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2));
+
+    await user.click(trigger);
+    expect(menu.open).toBe(true);
+    await user.keyboard("{Escape}");
+    expect(menu.open).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+
+    await user.click(trigger);
+    expect(menu.open).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Elsewhere" }));
+    expect(menu.open).toBe(false);
+  });
+
   it("clears a stopped preview when its replacement fails", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({
       ...site,

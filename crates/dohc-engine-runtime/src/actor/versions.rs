@@ -696,6 +696,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         MaterializationReplayScope {
             workspace_id,
             self_writes: Some(self_writes),
+            progress: None,
         },
         now_ms,
         faults,
@@ -791,6 +792,7 @@ fn switch_active_version_on_store(
         MaterializationReplayScope {
             workspace_id,
             self_writes: Some(self_writes),
+            progress: None,
         },
         now_ms,
         faults,
@@ -824,6 +826,7 @@ fn switch_active_version_on_store(
             MaterializationReplayScope {
                 workspace_id,
                 self_writes: Some(self_writes),
+                progress: None,
             },
             now_ms,
             faults,
@@ -931,7 +934,7 @@ impl ActorHandle {
                 if matches!(outcome, TxnOutcome::Crashed {..}) { return Err(RuntimeError::OperationCrashed); }
                 let selected = HashSet::from([projection.spec.job_id]);
                 let replay = replay_pending_materializations(store, &root_dir,
-                    MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref())},
+                    MaterializationReplayScope {workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None},
                     now_ms, &dohc_engine_storage::NoFaults, Some(&selected), false)?;
                 let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
                 if failed_jobs > 0 { return Err(RuntimeError::ActiveVersionMaterializationIncomplete {failed_jobs}); }

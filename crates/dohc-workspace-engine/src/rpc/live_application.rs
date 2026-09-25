@@ -1103,6 +1103,7 @@ mod tests {
             workspace: Some(workspace.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
         }
     }
@@ -1187,6 +1188,7 @@ mod tests {
             workspace: Some(workspace.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}),
         };
         assert!(
@@ -1254,7 +1256,7 @@ mod tests {
         ctx.connection = Some(owner.handle());
         let cancel = ctx.cancel.clone();
         let mut operation = Box::pin(service.call(ctx, Request { id: 93, method: "liveApplication.ack".into(), workspace: Some(workspace.clone()),
-            deadline_ms: None, idempotency_key: None, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }));
+            deadline_ms: None, idempotency_key: None, progress: false, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(operation.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -1282,7 +1284,7 @@ mod tests {
         ctx.connection = Some(owner.handle());
         ctx.deadline = Some(Instant::now() - std::time::Duration::from_secs(1));
         let result = service.call(ctx, Request { id: 94, method: "liveApplication.ack".into(), workspace: Some(WorkspaceHandle(workspace)),
-            deadline_ms: None, idempotency_key: None, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }).await;
+            deadline_ms: None, idempotency_key: None, progress: false, params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}) }).await;
         assert_eq!(result.unwrap_err().code, ErrorCode::DeadlineExceeded);
     }
 
@@ -1300,6 +1302,7 @@ mod tests {
             workspace: Some(workspace.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({"registrationId":registration,"deliveryId":"missing","updateDigest":"00".repeat(32)}),
         };
         let result = tokio::time::timeout(
@@ -1460,6 +1463,7 @@ mod tests {
             workspace: Some(workspace.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({"registrationId": registration, "terminalReceipt": null}),
         };
         let mut waiting = Box::pin(service.live_application_settle(ctx, request));
@@ -1523,6 +1527,7 @@ mod tests {
             workspace: Some(workspace.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({"registrationId": registration, "terminalReceipt": null}),
         };
         assert_eq!(
@@ -1632,6 +1637,7 @@ mod tests {
                 workspace: Some(workspace.clone()),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: json!({"registrationId":registration,"terminalReceipt":null}),
             }
         };
@@ -1773,6 +1779,7 @@ mod tests {
                 workspace: Some(workspace.clone()),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: json!({"registrationId":registration,"baselineStreamId":1,"baseline":{
                     "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
                     "baselineDigest":hex_sha256(&baseline),"baselineByteLength":baseline.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
@@ -1809,6 +1816,7 @@ mod tests {
                 workspace: Some(workspace.clone()),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: json!({"registrationId":registration,"terminalReceipt":null}),
             }
         };

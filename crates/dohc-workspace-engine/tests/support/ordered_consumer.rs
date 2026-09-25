@@ -33,7 +33,7 @@ pub async fn run() {
             .unwrap();
     }
     let service = Arc::new(EngineService::new());
-    let response=service.call(RequestContext::unbounded(),Request {id:1,method:"workspace.open".into(),workspace:None,deadline_ms:None,idempotency_key:None,
+    let response=service.call(RequestContext::unbounded(),Request {id:1,method:"workspace.open".into(),workspace:None,deadline_ms:None,idempotency_key:None,progress:false,
         params:serde_json::json!({"rootDir":config.root_dir,"workspaceId":config.workspace_id,"captureMode":"none"})}).await.unwrap();
     let workspace = response.response.result["workspace"]
         .as_str()
@@ -86,6 +86,7 @@ pub async fn run() {
                 workspace: Some(WorkspaceHandle(workspace)),
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: serde_json::Value::Null,
             },
         )
