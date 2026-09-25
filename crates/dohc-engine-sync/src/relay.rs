@@ -3705,9 +3705,15 @@ fn collect_share_proposal_changes(
             if op.origin_seq > submit_through {
                 break 'pages;
             }
+            // An open write stops the scan at its file's first op past what
+            // is already settled; a settled op is read past as usual.
             if op.op_kind == "moment.append"
                 && let Some(object_id) = string_field(&op.payload, "objectId")
                 && skips.stop_at.contains(object_id)
+                && !skips
+                    .settled
+                    .get(object_id)
+                    .is_some_and(|through| op.origin_seq <= *through)
             {
                 more_pending = true;
                 break 'pages;

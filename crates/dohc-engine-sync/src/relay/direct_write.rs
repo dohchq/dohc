@@ -208,19 +208,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 /// The relay's lasting no to the route itself: it does not take direct
 /// writes, the share or the grant's level is gone, or the request can never
 /// be taken as sent. Every other error may pass, so the plan waits for it.
+///
+/// Only a failure that may pass keeps the plan: the transport, the relay's
+/// own 5xx or 429, a blob the relay does not hold yet, an answer this
+/// replica could not read (the relay may have taken the write), a sign-in to
+/// refresh, and this replica's own store. Everything else is a no.
 fn relay_refuses_the_lane(error: &RelayError) -> bool {
-    matches!(
+    !matches!(
         error,
-        RelayError::ShareUnavailable
-            | RelayError::ShareReadOnly
-            | RelayError::ShareOperationRejected
-            | RelayError::Forbidden
-            | RelayError::MethodNotAllowed
-            | RelayError::BadRequest
-            | RelayError::PayloadTooLarge
-            | RelayError::QuotaExceeded
-            | RelayError::UnknownServerCode(_)
-    )
+        RelayError::Partitioned
+            | RelayError::ServerInternal
+            | RelayError::BlobMissing
+            | RelayError::BlobReferenceMissing
+            | RelayError::InvalidResponse
+            | RelayError::Unauthorized
+            | RelayError::StoreBusy
+            | RelayError::Local(_)
+    ) && !matches!(error, RelayError::HttpStatus(status) if *status == 429 || *status >= 500)
 }
 
 fn request_paths(request: &ShareCollectionWriteRequest) -> Vec<String> {
@@ -289,11 +293,27 @@ fn build_direct_write_plan(
         &skips,
     )?;
 
+    let groups = plan_direct_writes(store, workspace_id, granted, &scan.changes)?;
+    // A new Collection the scan bound may have cut waits for the next push,
+    // which reads it again whole. That only helps when this push still moves
+    // on: it writes something, or it leaves files to proposals. A scan that is
+    // nothing but new Collections would read the same window for ever, so
+    // those go now, as the scan saw them.
+    let grouped: BTreeSet<&str> = groups
+        .iter()
+        .flat_map(|group| group.changes.iter().map(|net| net.object_id.as_str()))
+        .collect();
+    let defer = scan.more_pending
+        && (groups.iter().any(|group| !group.new_collection)
+            || scan
+                .changes
+                .iter()
+                .any(|net| !grouped.contains(net.object_id.as_str())));
     let mut position = scan.scanned_through;
     let mut carried = BTreeSet::new();
     let mut writes = Vec::new();
-    for group in plan_direct_writes(store, workspace_id, granted, &scan.changes)? {
-        if scan.more_pending && group.new_collection {
+    for group in groups {
+        if defer && group.new_collection {
             // The scan stopped at its bound, so more of this Collection's
             // records may follow. The next push reads it again whole.
             if let Some(first) = group.changes.iter().map(|net| net.first_seq).min() {

@@ -2207,7 +2207,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 13,
+        ordinal: 12,
         id: "v2-share-direct-writes",
         sql: V2_SHARE_DIRECT_WRITES_DDL,
         sets_user_version: None,

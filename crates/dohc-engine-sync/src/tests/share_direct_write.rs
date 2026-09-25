@@ -632,6 +632,115 @@ fn a_new_collection_batch_stops_at_its_byte_bound_and_at_a_second_spelling() {
 }
 
 #[test]
+fn a_scan_of_nothing_but_new_collections_still_moves_on() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["schema"]);
+    let count = crate::MAX_SHARE_PROPOSAL_OPS + 1;
+    for index in 0..count {
+        journal_local_moment(
+            &mut engine,
+            &create_moment(
+                &format!("m-{index}"),
+                &format!("object-{index}"),
+                &format!("shared/docs/c{index}/collection.yaml"),
+                "schema",
+            ),
+            1_001,
+        );
+    }
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+
+    let first = push(&client, &mut engine);
+    assert_eq!(first.writes.len(), crate::MAX_SHARE_PROPOSAL_OPS);
+    assert!(first.more_pending);
+    let second = push(&client, &mut engine);
+    assert_eq!(second.writes.len(), 1);
+    assert!(!second.more_pending);
+    assert_eq!(written_paths(&client).len(), count);
+}
+
+#[test]
+fn an_open_write_does_not_stop_send_changes_below_what_was_delivered() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2", "v3", "note"]);
+    let schema = "shared/docs/packing/collection.yaml";
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-1", "object-schema", schema, "v1", "v2"),
+        1_001,
+    );
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    assert_eq!(push(&client, &mut engine).writes.len(), 1);
+
+    // A plain file, then another schema edit whose write stays open.
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-2", "object-note", "shared/docs/packing/a.md", "note"),
+        1_002,
+    );
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("m-3", "object-schema", schema, "v2", "v3"),
+        1_003,
+    );
+    client
+        .transport()
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::ServerInternal));
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::ServerInternal),
+    );
+    // Send changes reads past the delivered edit and offers the plain file,
+    // then stops at the open edit.
+    let outcome = propose(&client, &mut engine, "submit-1");
+    assert_eq!(outcome.submitted, 1);
+    assert!(outcome.more_pending);
+    assert_eq!(
+        proposed_paths(&client),
+        vec!["shared/docs/packing/a.md".to_owned()]
+    );
+}
+
+#[test]
+fn only_a_failure_that_may_pass_keeps_the_plan() {
+    for (error, kept) in [
+        (RelayError::ShareUnavailable, false),
+        (RelayError::ShareReadOnly, false),
+        (RelayError::Forbidden, false),
+        (RelayError::BadRequest, false),
+        (RelayError::PayloadTooLarge, false),
+        (RelayError::Conflict, false),
+        (RelayError::Partitioned, true),
+        (RelayError::ServerInternal, true),
+        (RelayError::HttpStatus(429), true),
+        (RelayError::HttpStatus(503), true),
+        (RelayError::BlobReferenceMissing, true),
+    ] {
+        let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
+        let schema = "shared/docs/packing/collection.yaml";
+        journal_local_moment(
+            &mut engine,
+            &edit_moment("m-1", "object-schema", schema, "v1", "v2"),
+            1_001,
+        );
+        let relay = PagedShareRelay::new([], []);
+        relay
+            .collection_write_answers
+            .lock()
+            .expect("answers")
+            .push_back(Err(error.clone()));
+        let client = RelaySyncClient::new(relay);
+        assert_eq!(
+            client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+            Err(error.clone()),
+        );
+        let outcome = propose(&client, &mut engine, "submit-1");
+        assert_eq!(outcome.submitted, usize::from(!kept), "{error:?}");
+    }
+}
+
+#[test]
 fn a_new_collection_the_scan_bound_cuts_is_sent_whole_by_the_next_push() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["schema", "record"]);
     let folder = "shared/docs/ideas";
