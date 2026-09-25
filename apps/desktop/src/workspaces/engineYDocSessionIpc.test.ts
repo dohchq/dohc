@@ -14,6 +14,7 @@ import {
 } from "./workspaceEngineCapture";
 import {
   createEngineYDocSessionIpc,
+  DOCUMENT_EDIT_SHARED_WARNING,
   LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
@@ -1306,7 +1307,7 @@ describe("engine Y.Doc IPC adapter", () => {
       Y.applyUpdate(editor, opened.initialUpdate!);
       keepBlocksSeen.length = 0;
 
-      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true });
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
       expect(keepBlocksSeen).toEqual([true]);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
@@ -1363,7 +1364,7 @@ describe("engine Y.Doc IPC adapter", () => {
         return { materialized: true } as SettleResult;
       });
       await expect(h.ipc.editDocument(edit({ find: "## Before.", replacement: "## Before noon." })))
-        .resolves.toEqual({ path: "notes/a.md", changed: true });
+        .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.");
       await h.ipc.shutdown();
     });
@@ -1386,7 +1387,7 @@ describe("engine Y.Doc IPC adapter", () => {
       });
 
       await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
-        .resolves.toEqual({ path: "notes/a.md", changed: true });
+        .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore and afte.");
       await h.ipc.shutdown();
     });
@@ -1458,7 +1459,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.open(new FakeSender(7), openPayload);
       const first = h.ipc.editDocument(edit({ find: "400", replacement: "450" }));
       const second = h.ipc.editDocument(edit({ find: "400", replacement: "500" }));
-      await expect(first).resolves.toEqual({ path: "notes/a.md", changed: true });
+      await expect(first).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
       await expect(second).rejects.toThrow("not in the document");
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("Budget: 450 dollars");
       await h.ipc.shutdown();

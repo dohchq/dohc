@@ -1434,6 +1434,46 @@ describe("CLI socket server", () => {
     expect(applied).toBe(3);
   });
 
+  it("keeps a running request's id, and refuses a resend whose result it no longer holds", async () => {
+    serverOptions.requestIdLimits = { results: 1, ids: 1 };
+    let applied = 0;
+    const slow = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        applied += 1;
+        if (input.edit.replacement === "Slow.") {
+          await new Promise<void>((resolve) => { slow.release = resolve; });
+        }
+        return { path: input.path, changed: true };
+      },
+    };
+    const request = (replacement: string, requestId: string) => ({
+      cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement, requestId,
+    });
+
+    // Other requests finish while the first is still saving, past the limit.
+    const running = invoke("documentEdit", request("Slow.", "slow"));
+    await vi.waitFor(() => expect(applied).toBe(1));
+    for (const id of ["a", "b", "c"]) await invoke("documentEdit", request(`Edit ${id}.`, id));
+    const resent = invoke("documentEdit", request("Slow.", "slow"));
+    slow.release();
+    await expect(running).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(4);
+
+    // "slow" finished, and a later result pushes it out: its id is still
+    // known, so a resend is refused rather than run again.
+    await invoke("documentEdit", request("Edit d.", "d"));
+    await expect(invoke("documentEdit", request("Slow.", "slow"))).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("no longer holds the result of request id slow, so it did not run it again"),
+    });
+    expect(applied).toBe(5);
+  });
+
   it("refuses document edits it cannot attribute or place", async () => {
     let touched = 0;
     context.documents = {

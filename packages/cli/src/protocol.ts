@@ -766,7 +766,7 @@ const documentReadResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 const documentEditResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean() }).strict(),
+  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
   rawFailureSchema,
 ]);
 

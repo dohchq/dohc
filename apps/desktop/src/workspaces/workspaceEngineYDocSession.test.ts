@@ -35,7 +35,7 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
-import { createEngineYDocSessionIpc } from "./engineYDocSessionIpc";
+import { createEngineYDocSessionIpc, DOCUMENT_EDIT_SHARED_WARNING } from "./engineYDocSessionIpc";
 import { CHANNELS } from "../ipc/channels";
 import { documentEditUpdate, documentMarkdown } from "@dohc/ydoc-projection";
 import {
@@ -969,7 +969,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     origin,
     change: async (state, options) =>
       documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
-  })).resolves.toEqual({ path: PATH, changed: true });
+  })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
   // Now the editor sends its typing and takes the agent's edit.
   expect(ipc.applyUpdate(sender, { sessionId: "editor", update: typed!, seq: 1, lineageGeneration: 1 }))

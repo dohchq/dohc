@@ -160,11 +160,28 @@ export interface LiveDocumentEdit {
   origin: LiveDocumentEditOrigin;
 }
 
+/**
+ * What an edit did. `warning` says the text is saved but someone may be
+ * changing the same blocks: an editor holds the document, or it syncs to other
+ * devices or share recipients. Their change can reach the document after the
+ * edit and still remove its text, as between two people typing.
+ */
+export interface LiveDocumentEditOutcome {
+  path: string;
+  changed: boolean;
+  warning?: string;
+}
+
+export const DOCUMENT_EDIT_SHARED_WARNING =
+  'The edit is saved. Someone may be changing this document at the same moment, and a change ' +
+  'they make to the same blocks before your edit reaches them can still remove its text. Read ' +
+  'the document to check it is there.';
+
 /** Main-side reads and edits of live documents, for doors other than the editor. */
 export interface LiveDocumentSessions {
   /** `state` is the encoded Y.Doc an open editor holds, or null when none holds it. */
   readDocument(input: { workspaceId: string; path: string }): Promise<{ path: string; state: Uint8Array | null }>;
-  editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }>;
+  editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome>;
 }
 
 type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
@@ -740,7 +757,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
    * edit alone applies and settles it, and an editor that opens meanwhile
    * waits for that session to close.
    */
-  async editDocument(input: LiveDocumentEdit): Promise<{ path: string; changed: boolean }> {
+  async editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome> {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
@@ -758,7 +775,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         });
       this.#documentEdits.set(key, turn);
       try {
-        return { path, changed: await turn };
+        return { path, ...(await turn) };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
@@ -771,7 +788,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     workspace: EngineYDocWorkspace,
     path: string,
     input: LiveDocumentEdit,
-  ): Promise<boolean> {
+  ): Promise<AppliedEdit> {
     const attachment = workspace.attachmentId;
     const held = this.#owner.documentSession(attachment, path);
     if (held) return await this.#editHeld(held, path, input);
@@ -804,7 +821,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     held: NonNullable<ReturnType<EngineYDocIpcSessionOwner["documentSession"]>>,
     path: string,
     input: LiveDocumentEdit,
-  ): Promise<boolean> {
+  ): Promise<AppliedEdit> {
     const owned = held.session;
     // Checked again once the edit is computed: an update computed against one
     // lineage must not land on its replacement.
@@ -829,7 +846,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     workspace: EngineYDocWorkspace,
     path: string,
     input: LiveDocumentEdit,
-  ): Promise<boolean> {
+  ): Promise<AppliedEdit> {
     let capture = this.#captureFor(workspace);
     if (!capture) {
       await this.#ensureCaptureFor(workspace);
@@ -842,12 +859,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       // Nothing else reads this session's doc before it closes.
       onRemoteUpdate: () => undefined,
     });
-    let changed: boolean;
+    let applied: AppliedEdit;
     try {
       if (provider.contentKind !== "richdoc") {
         throw new Error(`${path} is not a Markdown document.`);
       }
-      changed = await applyDocumentEdit(provider, path, input, {
+      applied = await applyDocumentEdit(provider, path, input, {
         // No editor here holds it, but a replicated lineage is shared with
         // other devices or share recipients, who may be typing in it.
         keepBlocks: provider.lineageClaimId != null,
@@ -866,7 +883,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     await provider.close().catch((closeError: unknown) => {
       this.#onError(`[desktop] engine Y.Doc close after an edit failed for ${path}:`, closeError);
     });
-    return changed;
+    return applied;
   }
 
   existingOwner(binding: LiveObjectBinding) {
@@ -1102,13 +1119,13 @@ async function applyDocumentEdit(
   path: string,
   input: LiveDocumentEdit,
   session: { keepBlocks: boolean; assertSame(): void; show(update: Uint8Array): void },
-): Promise<boolean> {
+): Promise<AppliedEdit> {
   const settleNow = provider.settleNow;
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,
   });
-  if (update === null) return false;
+  if (update === null) return { changed: false };
   session.assertSame();
   let armed = false;
   provider.applyLocalUpdate(update, () => {
@@ -1136,8 +1153,14 @@ async function applyDocumentEdit(
       `Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in ${path}. Read the document again and redo what is missing.`,
     );
   }
-  return true;
+  // This checks the document as main holds it. A change the person made just
+  // before the edit can still be on its way from their editor, and waiting
+  // for it would only move the moment: they can change the block again right
+  // after. So the answer says so instead of promising the text stays.
+  return session.keepBlocks ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING } : { changed: true };
 }
+
+type AppliedEdit = Omit<LiveDocumentEditOutcome, "path">;
 
 // Whether everything `update` inserted is still inside the document: no
 // block it went into was removed. Text someone deleted from the edit
