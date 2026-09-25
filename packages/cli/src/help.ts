@@ -90,7 +90,12 @@ function commandHelp(name: string, command: CliCommandSpec): string[] {
 
 function verbHelp(commandName: string, command: CliCommandSpec, name: string, verb: CliVerbSpec): string[] {
   const usage = ["dohc", commandName, name, verb.operands, "[options]"].filter(Boolean).join(" ");
-  const details = [...fieldLines(verb), ...(verb.notes ?? []), ...(verb.freeText ? [`Put ${DASH_RULE}.`] : [])];
+  const details = [
+    ...fieldLines(verb),
+    ...(verb.take ?? []).map((source) => `Set ${source.field} to ${source.path} from ${source.from}.`),
+    ...(verb.notes ?? []),
+    ...(verb.freeText ? [`Put ${DASH_RULE}.`] : []),
+  ];
   return [
     `Usage: ${usage}`,
     "",
