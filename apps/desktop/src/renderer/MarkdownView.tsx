@@ -40,13 +40,10 @@ import { bridge } from "./bridge";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
   frontmatterBlockFor,
+  leadingFrontmatter,
   writtenFrontmatterKeys,
 } from "@dohc/ydoc-projection/frontmatter";
-import {
-  applyFrontmatter,
-  orderFrontmatter,
-  parseFrontmatter,
-} from "./markdown/frontmatter";
+import { orderFrontmatter } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
@@ -144,9 +141,11 @@ function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
   body: string;
 } {
-  const { body } = parseFrontmatter(markdown);
-  if (body === markdown) return { frontmatter: null, body };
-  return { frontmatter: markdown.slice(0, markdown.length - body.length), body };
+  // A block that does not read stays out of the body too, as the engine keeps
+  // it, so the editor never renders it as Markdown.
+  const block = leadingFrontmatter(markdown);
+  if (!block) return { frontmatter: null, body: markdown };
+  return { frontmatter: block.text, body: markdown.slice(block.text.length) };
 }
 
 export function markdownEditorBody(markdown: string): string {
@@ -734,7 +733,7 @@ export function MarkdownView(props: {
     if (editorBody === undefined && engine.doc !== null) return null;
     const body = editorBody ?? markdownEditorBody(props.body);
     if (!engine.doc) {
-      return applyFrontmatter(body, orderFrontmatter(parseFrontmatter(latestDraft.current).meta));
+      return mergeMarkdownEditorBody(latestDraft.current, body);
     }
     const liveMeta = Object.fromEntries(
       engine.doc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),

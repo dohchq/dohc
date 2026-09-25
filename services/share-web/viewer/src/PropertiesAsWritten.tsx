@@ -1,12 +1,15 @@
-import { frontmatterAsWritten, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterAsWritten, leadingFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { useEffect, useState } from "react";
 import type * as Y from "yjs";
 
-/** A Markdown file's frontmatter block as written, and the body after it. No block when the body keeps it. */
+/**
+ * A Markdown file's frontmatter block as written, and the body after it. A
+ * block that does not read but looks like properties is still the block, so
+ * it never renders as Markdown.
+ */
 export function splitFrontmatter(markdown: string): { block: string; body: string } {
-  const loaded = loadMarkdownFrontmatter(markdown);
-  if (!loaded) return { block: "", body: markdown };
-  return { block: markdown.slice(0, markdown.length - loaded.rest.length), body: loaded.rest };
+  const block = leadingFrontmatter(markdown)?.text ?? "";
+  return { block, body: markdown.slice(block.length) };
 }
 
 /** A live document's frontmatter block as its file holds it, following shared edits. */

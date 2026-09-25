@@ -384,6 +384,18 @@ export function frontmatterEditsRefused(doc: Y.Doc): boolean {
 }
 
 /**
+ * The frontmatter block a document opens with, through its closing delimiter
+ * line, as a projection takes it from the body: a block that reads, or one
+ * that does not read but looks like properties. Undefined otherwise.
+ */
+export function leadingFrontmatter(markdown: string): { text: string; readable: boolean } | undefined {
+  const block = readFrontmatterBlock(markdown)
+  if (block) return { text: markdown.slice(0, markdown.length - block.rest.length), readable: true }
+  const prefix = unreadableFrontmatterPrefix(markdown)
+  return prefix === undefined ? undefined : { text: prefix, readable: false }
+}
+
+/**
  * Frontmatter values with top-level keys in document order, and the text after
  * the block. `undefined` when the document has no readable block.
  */
@@ -793,17 +805,17 @@ export function frontmatterBlockFor(
 }
 
 /**
- * A live document's frontmatter block as its file holds it: the text a settle
- * writes, or the kept text when the values no longer settle into it.
+ * A live document's frontmatter block as its file holds it: the text recorded
+ * from the file when there is one, or else the canonical block its values
+ * write, which a file without recorded text holds.
  */
 export function frontmatterAsWritten(doc: Y.Doc): string {
-  const frontmatter = doc.getMap<unknown>('frontmatter')
-  const meta = doc.getMap<unknown>('meta')
-  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
+  const source = doc.getMap<unknown>('meta').get(FRONTMATTER_SOURCE_META_KEY)
+  if (typeof source === 'string') return source
   try {
-    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(frontmatter)), source, '', '\n', writtenFrontmatterKeys(frontmatter, meta))
+    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(doc.getMap<unknown>('frontmatter'))), undefined, '', '\n')
   } catch {
-    return typeof source === 'string' ? source : ''
+    return ''
   }
 }
 

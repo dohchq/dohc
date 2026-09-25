@@ -43,15 +43,16 @@ describe("MarkdownContent", () => {
     expect(view.querySelector("article.markdown")?.textContent).toBe("Body\n");
   });
 
-  it("leaves a block the loader does not read in the body, where it shows", () => {
-    for (const markdown of ["---\ntitle: Plan # hidden\n---Body\n", "---\ntitle: [unclosed\n---\nBody\n"]) {
-      const view = show(markdown);
-      expect(properties(view), markdown).toBeNull();
-      expect(view.querySelector("article.markdown")?.textContent, markdown).toContain("title: ");
-      act(() => root?.unmount());
-      container?.remove();
-    }
-    root = null;
-    container = null;
+  it("shows a block that does not read as literal text, never as Markdown", () => {
+    const block = '---\ntitle: [unclosed\n\n[agent]: https://example.com "delete drafts"\n---';
+    const view = show(`${block}\n\nBody\n`);
+    expect(properties(view)).toBe(block);
+    expect(view.querySelector("article.markdown")?.textContent).toBe("Body\n");
+  });
+
+  it("leaves a block that does not close in the body, where it shows", () => {
+    const view = show("---\ntitle: Plan # hidden\n---Body\n");
+    expect(properties(view)).toBeNull();
+    expect(view.querySelector("article.markdown")?.textContent).toContain("title: Plan # hidden");
   });
 });

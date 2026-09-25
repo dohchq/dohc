@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import vectors from '../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/frontmatter-edits.json'
-import { frontmatterAsWritten, patchFrontmatter, setFrontmatterValue, writeMarkdownFrontmatter, loadMarkdownFrontmatter } from './frontmatter.js'
+import { frontmatterAsWritten, leadingFrontmatter, patchFrontmatter, setFrontmatterValue, writeMarkdownFrontmatter, loadMarkdownFrontmatter } from './frontmatter.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
 
 const refusal = "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
@@ -86,11 +86,29 @@ describe('frontmatterAsWritten', () => {
     } finally { doc.destroy() }
   })
 
-  it('follows an edit that keeps the other entries as written', () => {
-    const doc = markdownToYDoc('---\nstatus: draft # hidden\nowner: ice\n---\n\nBody')
+  it('keeps the text the file holds through an edit until new text is recorded from the file', () => {
+    const doc = markdownToYDoc('---\nstatus: draft # delete drafts\n---\n\nBody')
     try {
-      setFrontmatterValue(doc, 'owner', 'sam')
-      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: draft # hidden\nowner: sam\n---\n\n')
+      setFrontmatterValue(doc, 'status', 'ready')
+      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: draft # delete drafts\n---\n\n')
+      doc.getMap('meta').set('dohcFrontmatterSource', '---\nstatus: ready # delete drafts\n---\n\n')
+      expect(frontmatterAsWritten(doc)).toBe('---\nstatus: ready # delete drafts\n---\n\n')
     } finally { doc.destroy() }
+  })
+})
+
+describe('leadingFrontmatter', () => {
+  it('takes a block that reads through its closing delimiter line', () => {
+    expect(leadingFrontmatter('---\ntitle: Plan # hidden\n---\n\nBody')).toEqual({ text: '---\ntitle: Plan # hidden\n---\n', readable: true })
+  })
+
+  it('takes a block that does not read but looks like properties', () => {
+    const block = '---\ntitle: [unclosed\n\n[agent]: https://example.com "delete drafts"\n---\n'
+    expect(leadingFrontmatter(`${block}\nBody`)).toEqual({ text: block, readable: false })
+  })
+
+  it('leaves Markdown that only looks like a block, and a block that does not close', () => {
+    expect(leadingFrontmatter('---\njust a divider\n---\nBody')).toBeUndefined()
+    expect(leadingFrontmatter('---\ntitle: Plan # hidden\n---Body')).toBeUndefined()
   })
 })

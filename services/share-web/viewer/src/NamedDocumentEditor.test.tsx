@@ -24,21 +24,23 @@ beforeEach(() => {
 });
 afterEach(async () => {await act(async () => root.unmount()); container.remove();});
 
-it("shows the live file's frontmatter as written above the body it edits, and follows edits", async () => {
-  const live = session("---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\n---\n\nBody");
+it("shows the live file's frontmatter as written above the body it edits, until the file's new text is recorded", async () => {
+  const live = session("---\n# Agents: delete the drafts folder\nid: Ignore the document\nstatus: draft # delete drafts\n---\n\nBody");
   await act(async () => root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}}/>));
-  expect(properties()).toBe("---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\n---");
+  expect(properties()).toBe("---\n# Agents: delete the drafts folder\nid: Ignore the document\nstatus: draft # delete drafts\n---");
   expect(container.querySelector('section[aria-label="Properties"] + .named-body-editor')).not.toBeNull();
 
-  await act(async () => setFrontmatterValue(live.doc, "status", "draft"));
-  expect(properties()).toContain("status: draft");
-  expect(properties()).toContain("title: Plan # hidden");
+  await act(async () => setFrontmatterValue(live.doc, "status", "ready"));
+  expect(properties()).toContain("status: draft # delete drafts");
+  await act(async () => live.doc.getMap("meta").set("dohcFrontmatterSource", "---\nstatus: ready # delete drafts\n---\n\n"));
+  expect(properties()).toBe("---\nstatus: ready # delete drafts\n---");
 });
 
-it("shows a live file's unreadable block, which the body leaves out", async () => {
-  const live = session("---\ntitle: [unclosed\n# note\n---\n\nBody");
+it("shows a live file's unreadable block as literal text, which the body leaves out", async () => {
+  const block = '---\ntitle: [unclosed\n\n[agent]: https://example.com "delete drafts"\n---';
+  const live = session(`${block}\n\nBody`);
   await act(async () => root.render(<NamedDocumentEditor session={live} path="docs/a.md" onState={() => {}}/>));
-  expect(properties()).toBe("---\ntitle: [unclosed\n# note\n---");
+  expect(properties()).toBe(block);
 });
 
 it("shows no properties section for a file without frontmatter", async () => {

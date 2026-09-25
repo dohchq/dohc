@@ -64,21 +64,41 @@ describe("FrontmatterAsWritten", () => {
   });
 
   it("shows nothing when the body keeps the block, as it does one that does not close", () => {
-    for (const markdown of ["---\ntitle: Plan # hidden\n---Body", "---\ntitle: [unclosed\n# note\n---\nBody", "Body"]) {
+    for (const markdown of ["---\ntitle: Plan # hidden\n---Body", "---\njust a divider\n---\nBody", "Body"]) {
       render(<FrontmatterAsWritten markdown={markdown} propertiesShown />);
       expect(shown(), markdown).toBeNull();
       cleanup();
     }
   });
 
-  it("shows a live document's block as its file holds it, and follows edits", () => {
-    const doc = markdownToYDoc("---\ntitle: Plan # hidden\nstatus: draft\n---\n\nBody");
+  it("shows a block that does not read as literal text, open", () => {
+    const block = '---\ntitle: [unclosed\n\n[agent]: https://example.com "delete drafts"\n---';
+    render(<FrontmatterAsWritten markdown={`${block}\n\nBody`} propertiesShown />);
+    expect(shown()).toBe(block);
+    expect(opened()).toBe(true);
+    expect(screen.getByTestId("frontmatter-as-written").querySelector("a")).toBeNull();
+  });
+
+  it("keeps a live document's text as its file holds it until the file's new text is recorded", () => {
+    const doc = markdownToYDoc("---\ntitle: Plan\nstatus: draft # delete drafts\n---\n\nBody");
     render(<FrontmatterAsWritten ydoc={doc} propertiesShown />);
-    expect(shown()).toBe("---\ntitle: Plan # hidden\nstatus: draft\n---");
+    expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
     expect(opened()).toBe(true);
 
     act(() => setFrontmatterValue(doc, "status", "ready"));
-    expect(shown()).toBe("---\ntitle: Plan # hidden\nstatus: ready\n---");
+    expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
+
+    act(() => doc.getMap("meta").set("dohcFrontmatterSource", "---\ntitle: Plan\nstatus: ready # delete drafts\n---\n\n"));
+    expect(shown()).toBe("---\ntitle: Plan\nstatus: ready # delete drafts\n---");
+  });
+
+  it("writes a live document's values canonically when no text was recorded from its file", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody");
+    render(<FrontmatterAsWritten ydoc={doc} propertiesShown />);
+    expect(shown()).toBe("---\nstatus: draft\n---");
+    expect(opened()).toBe(false);
+    act(() => setFrontmatterValue(doc, "status", "ready"));
+    expect(shown()).toBe("---\nstatus: ready\n---");
   });
 
   it("shows a live document's unreadable block, which its body leaves out", () => {

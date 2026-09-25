@@ -1,19 +1,20 @@
-import { frontmatterAsWritten } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterAsWritten, leadingFrontmatter, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
-import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
+import { displayFrontmatterValue } from "./markdown/frontmatter";
 
 // A leading block's text, found cheaply so the block parses again only when
-// it changes. The loader still decides whether it is frontmatter.
+// it changes. The projection still decides whether it is frontmatter.
 const LEADING_BLOCK = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/;
 // Keys the properties hide; PageIdentity shows `title` and `icon`.
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 
-// The document's frontmatter exactly as the file holds it. The body leaves the
-// block out, and an agent reading the file receives all of it, so a person
-// sees all of it here. It opens when the properties do not show every line as
-// written: a comment, an anchor, a hidden key, or anything else.
+// The document's frontmatter exactly as the file holds it, never rendered as
+// Markdown. The body leaves the block out, and an agent reading the file
+// receives all of it, so a person sees all of it here. It opens when the
+// properties do not show every line as written: a comment, an anchor, a hidden
+// key, a block that does not read, or anything else.
 export function FrontmatterAsWritten(
   props: ({ markdown: string; ydoc?: never } | { ydoc: Y.Doc; markdown?: never }) & {
     propertiesShown: boolean;
@@ -36,7 +37,7 @@ export function FrontmatterAsWritten(
   const block = useMemo(() => {
     if (ydoc) return frontmatterAsWritten(ydoc);
     if (!leading) return "";
-    return parseFrontmatter(leading).body === leading ? "" : leading;
+    return leadingFrontmatter(leading)?.text ?? "";
     // revision re-reads the observed maps after a shared write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leading, ydoc, revision]);
@@ -63,7 +64,8 @@ export function FrontmatterAsWritten(
 
 /** Whether the properties and page title show every line of the block as written. */
 function everyLineShown(text: string): boolean {
-  const { meta } = parseFrontmatter(`${text}\n`);
+  const meta = loadMarkdownFrontmatter(`${text}\n`)?.meta;
+  if (!meta) return false;
   return text.split("\n").every((line) => {
     if (line === "" || line === "---") return true;
     const match = /^([^\s:#][^:]*?):(?: (.*))?$/.exec(line);

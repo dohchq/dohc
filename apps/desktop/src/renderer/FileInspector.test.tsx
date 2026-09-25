@@ -431,11 +431,20 @@ describe("markdown WYSIWYG frontmatter seam", () => {
     );
   });
 
-  it("leaves malformed and non-map frontmatter-looking blocks editable", () => {
+  it("keeps a block that does not read but looks like properties out of the body, as the engine does", () => {
+    for (const block of [
+      "---\nid: note-1\nbad: [unclosed\n---\n",
+      "---\nkey: a: b\n---\n",
+      "---\nkey: *missing\n---\n",
+      '---\ntitle: [unclosed\n\n[agent]: https://example.com "delete drafts"\n---\n',
+    ]) {
+      expect(markdownEditorBody(`${block}# Body\n`)).toBe("# Body\n");
+      expect(mergeMarkdownEditorBody(`${block}# Body\n`, "# Edited\n")).toBe(`${block}# Edited\n`);
+    }
+  });
+
+  it("leaves Markdown that only looks like frontmatter editable", () => {
     for (const markdown of [
-      "---\nid: note-1\nbad: [unclosed\n---\n# Body\n",
-      "---\nkey: a: b\n---\n# Body\n",
-      "---\nkey: *missing\n---\n# Body\n",
       "---\njust a divider\n---\n# Body\n",
       "---\nnull\n---\n# Body\n",
       "---\n- one\n---\n# Body\n",
