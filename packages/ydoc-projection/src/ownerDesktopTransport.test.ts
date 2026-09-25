@@ -62,7 +62,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     maxRegistrations: 8,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 100,maxApplicationsPerSettlement: 100,
     sync: {policy: {maxClientVectorBytes: 100_000,maxHostVectorBytes: 100_000,maxOutputBytes: 2_000_000,maxReadBytes: 8_000_000},workingReserveBytes: 4_000_000},
     restore: {maxBytes: restoreMaxBytes, maxEvents: 100}, ownerOutbox: {maxPendingBytes: 1_000_000,maxPendingAgeMs: 600_000}}));
-  const conflicting = spawnSync(binary,[],{windowsHide: true,timeout: 10_000,encoding: "utf8",env: {...process.env,DOHC_ENGINE_AUTH_TOKEN: "test-auth",
+  const conflicting = spawnSync(binary,[],{windowsHide: true,timeout: 20_000,encoding: "utf8",env: {...process.env,DOHC_ENGINE_AUTH_TOKEN: "test-auth",
     DOHC_ENGINE_OWNER_HOST_CONFIG: nativeConfig,DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig}});
   expect(conflicting.status).not.toBe(0);
   expect(conflicting.stderr).toContain("mutually exclusive");
@@ -185,7 +185,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
         maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 30_000}));
       const mainPath = fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
       for (const devicePath of ["",relayConfig]) {
-        const refused = spawnSync(process.execPath,[mainPath],{windowsHide: true,timeout: 10_000,encoding: "utf8",
+        const refused = spawnSync(process.execPath,[mainPath],{windowsHide: true,timeout: 20_000,encoding: "utf8",
           env: {...process.env,NODE_ENV: "test",SYNC_RELAY_TEST_AUTH: "1",SYNC_RELAY_PORT: "0",DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
             DOHC_RELAY_DEVICE_DELIVERY_CONFIG: devicePath,DOHC_RELAY_OWNER_ADMISSION_CONFIG: join(root,"missing-owner.json"),
             DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),DOHC_RELAY_DEVICE_CONTROL_HOSTS: `127.0.0.1:${relayPort}`,DOHC_RELAY_EXCHANGE_KEY: exchangeKey}});

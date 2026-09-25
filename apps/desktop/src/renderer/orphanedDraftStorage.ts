@@ -1,4 +1,5 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { bridge } from "./bridge";
 
 // The durable half of the set-aside recovery store. `orphanedDrafts.ts`
 // holds the copy this app run reads; this holds the copy that survives a quit,
@@ -60,7 +61,7 @@ type StoredOrphanedDraft = {
 // made on a path that was not the path when the text was captured, about bytes
 // nothing has re-read since.
 function isPersistableDraftPath(path: string): boolean {
-  return classifyEngineFilePathForRead(path).kind === "tracked";
+  return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
 }
 
 // An id this store can still count from. Storage is foreign input, and

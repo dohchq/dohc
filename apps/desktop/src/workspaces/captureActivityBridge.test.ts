@@ -3,6 +3,7 @@ import type { Event } from "@dohc/workspace-engine-client";
 import {
   CAPTURE_MOMENT_RECORDED_EVENT,
   bridgeCaptureEventsToRenderer,
+  onWorkspaceCaptureSettled,
 } from "./captureActivityBridge";
 
 function captureEvent(name: string, payload: Event["payload"] = null): Event {
@@ -156,5 +157,33 @@ describe("bridgeCaptureEventsToRenderer", () => {
     expect(handlerCount()).toBe(0);
     vi.advanceTimersByTime(1_000);
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("onWorkspaceCaptureSettled", () => {
+  it("passes one workspace's announced paths, and null when an announcement may concern it without listing them", () => {
+    const { daemon, emit, handlerCount } = fakeDaemon();
+    const seen: Array<readonly string[] | null> = [];
+    const unsubscribe = onWorkspaceCaptureSettled(daemon, "ws-a", (paths) => {
+      seen.push(paths);
+    });
+
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["tasks/two.md"])));
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["tasks/two.md"])));
+    emit(captureEvent("record.created", momentPayload("ws-a", ["tasks/two.md"])));
+    // More paths than the payload lists, and a payload that names no workspace.
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, {
+        workspaceId: "ws-a",
+        appliedCount: 40,
+        notOwnedCount: 0,
+        paths: ["tasks/one.md"],
+      }),
+    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, { paths: ["tasks/two.md"] }));
+
+    expect(seen).toEqual([["tasks/two.md"], null, null]);
+    unsubscribe();
+    expect(handlerCount()).toBe(0);
   });
 });

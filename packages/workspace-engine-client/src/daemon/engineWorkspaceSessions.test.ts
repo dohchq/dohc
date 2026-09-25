@@ -2788,9 +2788,10 @@ describe("EngineWorkspaceSessions", () => {
             { retryTransportErrors: true },
           ),
       );
+      // The failed open first prepares the real workspace folder on disk.
       await vi.waitFor(() => {
         expect(sleeping).not.toBeNull();
-      });
+      }, { timeout: 10_000 });
       sessions.beginShutdown();
       await expect(run).rejects.toMatchObject({ code: "transport-error" });
     });

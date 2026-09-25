@@ -3,7 +3,9 @@ import { promisify } from "node:util";
 import { describe, it } from "vitest";
 
 // A separate Node process can count the native calls without replacing the
-// filesystem backend for other tests in this worker.
+// filesystem backend for other tests in this worker. Each wait sits inside the
+// next (20 s in the child, 40 s for the child, 60 s for the test) so a loaded
+// gate host reports the condition that stalled rather than an outer timeout.
 describe.skipIf(process.platform !== "win32")("Windows native watch handles", () => {
   it("coalesces uncertain bursts and reruns when a later deletion arrives during the first sweep", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -33,11 +35,20 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
       fsp.stat = async (path, ...args) => controlled && snapshots.has(resolve(path))
         ? new Promise((resolveStat, reject) => pending.push({ path: resolve(path), resolve: resolveStat, reject }))
         : realStat(path, ...args);
+      // The same notifications make chokidar reread the directory. On a loaded
+      // host that reread can lstat the target after rm and drop its watch before
+      // the trailing sweep runs. Holding rereads leaves the sweep as the only
+      // path that can observe the deletion.
+      const realReaddir = fsp.readdir;
+      const heldReads = [];
+      fsp.readdir = (path, ...args) => controlled && resolve(path) === root
+        ? new Promise(release => heldReads.push(() => release(realReaddir(path, ...args))))
+        : realReaddir(path, ...args);
       syncBuiltinESMExports();
       const { watch } = await import(process.argv[1]);
       const watcher = watch(root, { ignoreInitial: true });
       const waitFor = async predicate => {
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + 20_000;
         while (!predicate()) {
           assert.ok(Date.now() < deadline, 'sweep did not settle');
           await new Promise(resolve => setImmediate(resolve));
@@ -65,12 +76,13 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         assert.equal(await deleted, target);
       } finally {
         controlled = false;
+        for (const release of heldReads) release();
         for (const request of pending) request.resolve(snapshots.get(request.path));
         await watcher.close();
         await fsp.rm(root, { recursive: true, force: true });
       }
-    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  }, 20_000);
+    `, import.meta.resolve("chokidar")], { timeout: 40_000 });
+  }, 60_000);
 
   it("resolves short-name content changes without relying on changed file metadata", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -119,8 +131,8 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         await watcher.close();
         await fsp.rm(root, { recursive: true, force: true });
       }
-    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  }, 20_000);
+    `, import.meta.resolve("chokidar")], { timeout: 40_000 });
+  }, 60_000);
 
   it("creates a fresh shared handle after a native error and preserves it when stale owners close", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -169,8 +181,8 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         assert.ok(native.every(entry => entry.closed));
         await rm(root, { recursive: true, force: true });
       }
-    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  }, 20_000);
+    `, import.meta.resolve("chokidar")], { timeout: 40_000 });
+  }, 60_000);
 
   it("does not let an unrelated short-name hint suppress a real edit", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -223,8 +235,8 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         await watcher.close();
         await fsp.rm(root, { recursive: true, force: true });
       }
-    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  }, 20_000);
+    `, import.meta.resolve("chokidar")], { timeout: 40_000 });
+  }, 60_000);
 
   it("shares directory handles, routes ambiguous names, and closes each owner", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -253,7 +265,7 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
       syncBuiltinESMExports();
       const { watch } = await import(process.argv[1]);
       const waitFor = async (predicate) => {
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + 20_000;
         while (!predicate()) {
           assert.ok(Date.now() < deadline, 'watch event timed out');
           await new Promise(resolve => setImmediate(resolve));
@@ -328,6 +340,6 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         await third?.close();
         await rm(root, { recursive: true, force: true });
       }
-    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  }, 20_000);
+    `, import.meta.resolve("chokidar")], { timeout: 40_000 });
+  }, 60_000);
 });

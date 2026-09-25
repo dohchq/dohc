@@ -60,7 +60,7 @@ describe("fundraiser app operations", () => {
       {paymentMethod: "gcash", verified: 0, pending: 4300, rejected: 0, dueAtVenue: 0, total: 4300},
     ]);
     expect(rows((await f.call("listPublicSessions", {}, {readOnly: true})).result).map(value => value.available)).toEqual([34, 34]);
-  }, 30000);
+  });
 
   it("rolls back both-session reservations when the second session is full", async () => {
     const f = await fixture();
@@ -70,7 +70,7 @@ describe("fundraiser app operations", () => {
     expect(Buffer.from(f.database)).toEqual(before);
     expect(rows((await f.call("listPublicSessions", {}, {readOnly: true})).result).map(value => value.available)).toEqual([36, 0]);
     expect(row((await f.call("listRegistrations", {}, {caller: helper, readOnly: true})).result).records).toHaveLength(1);
-  }, 30000);
+  });
 
   it("enforces capacity on restoration and rejects stale table updates", async () => {
     const f = await fixture();
@@ -86,7 +86,7 @@ describe("fundraiser app operations", () => {
     const attendees = row((await f.call("attendees", {}, {caller: helper, readOnly: true})).result).records;
     expect(attendees).toHaveLength(36);
     expect(attendees.every((person: {registrationId: string}) => person.registrationId === first.id)).toBe(true);
-  }, 30000);
+  });
 
   it("supports manual spectators and pay-at-venue without an uploaded receipt", async () => {
     const f = await fixture();
@@ -97,7 +97,7 @@ describe("fundraiser app operations", () => {
     await f.call("setStatus", {id: entry.id, status: "verified", expectedVersion: 1, paymentMethod: "gcash"}, {caller: helper});
     expect((await f.call("totals", {}, {caller: helper, readOnly: true})).result).toMatchObject([{paymentMethod: "gcash", verified: 300, dueAtVenue: 0}]);
     await expect(f.call("receiptAccess", {id: entry.id}, {caller: helper, readOnly: true})).rejects.toMatchObject({refusal: {code: "not_found"}});
-  }, 30000);
+  });
 
   it("refuses hidden organizer operations for public callers and named nonhelpers", async () => {
     const f = await fixture();
@@ -106,7 +106,7 @@ describe("fundraiser app operations", () => {
         await expect(f.call(operation, {}, {caller})).rejects.toMatchObject({refusal: {code: "forbidden"}});
       }
     }
-  }, 30000);
+  });
 
   it("keeps ReClub checklist changes on individual players and sessions without changing registration or capacity", async () => {
     const f = await fixture();
@@ -147,7 +147,7 @@ describe("fundraiser app operations", () => {
     const restored = row((await f.call("attendees", {}, {caller: helper, readOnly: true})).result).records;
     expect(restored.find((person: {id: string}) => person.id === second.id).reclubSynced).toBe(true);
     expect(restored.find((person: {id: string}) => person.id === first.id).reclubSynced).toBe(false);
-  }, 30000);
+  });
 
   it("validates duplicate names, mobile formats and receipt metadata before accepting", async () => {
     const f = await fixture();
@@ -157,7 +157,7 @@ describe("fundraiser app operations", () => {
     await expect(f.call("register", registration(), {files: []})).rejects.toThrow();
     await expect(f.call("register", registration(), {files: [{...file, contentType: "text/html"}]})).rejects.toMatchObject({refusal: {code: "invalid_receipt"}});
     expect(Buffer.from(f.database)).toEqual(before);
-  }, 30000);
+  });
 
   it("accepts the maximum original roster within operation and SQL limits", async () => {
     const f = await fixture();
@@ -171,7 +171,7 @@ describe("fundraiser app operations", () => {
     const second = row((await f.call("attendees", {limit: 200, offset: 200}, {caller: helper, readOnly: true})).result);
     expect(second.records).toHaveLength(72);
     expect(second.nextOffset).toBeNull();
-  }, 30000);
+  });
 
   it("accepts the original form's local and international mobile formats", async () => {
     const f = await fixture();
@@ -181,7 +181,7 @@ describe("fundraiser app operations", () => {
     for (const mobile of ["", "0917123456", "091712345678", "+63281234567", "09001234567", "+12025550123", "08001234567", "0917abc4567", "call 09171234567", "09171234567 ext 2"]) {
       await expect(f.call("register", {...registration(), mobile})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
     }
-  }, 30000);
+  });
 });
 
 describe("stock order app operations", () => {
@@ -200,7 +200,7 @@ describe("stock order app operations", () => {
     await expect(f.call("setStatus", {id: first.id, status: "cancelled", expectedVersion: 2}, {caller: helper})).rejects.toMatchObject({refusal: {code: "conflict"}});
     await expect(f.call("listOrders", {}, {readOnly: true})).rejects.toMatchObject({refusal: {code: "forbidden"}});
     expect(rows((await f.call("listItems", {}, {readOnly: true})).result).find(item => item.id === "shirt-s")?.remaining).toBe(0);
-  }, 30000);
+  });
 
   it("serves every declared stock table through the Collection contract", async () => {
     const f = await fixture("stock-orders");
@@ -233,5 +233,5 @@ describe("stock order app operations", () => {
     for (const operation of ["listOrders", "listOrderItems"]) {
       expect((await f.call(operation, {}, {caller: helper, readOnly: true})).result).toMatchObject({records: [expect.any(Object)], nextOffset: null});
     }
-  }, 30000);
+  });
 });

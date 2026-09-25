@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
+import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
@@ -112,6 +113,19 @@ afterEach(async () => {
 async function retainBound() {
   retainDocument();
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+}
+
+// Deleting the global makes any read of it throw the ReferenceError the
+// sandboxed renderer throws.
+async function withoutProcess(run: () => Promise<void>): Promise<void> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "process");
+  if (!descriptor) throw new Error("expected a process global to remove");
+  Reflect.deleteProperty(globalThis, "process");
+  try {
+    await run();
+  } finally {
+    Object.defineProperty(globalThis, "process", descriptor);
+  }
 }
 
 async function flushLocalBatch(): Promise<void> {
@@ -295,6 +309,45 @@ it("keeps recovery from consecutive independent lineage replacements", async () 
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("seed!");
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("winner!");
 });
+
+// Turning sync on claims the open document's lineage, so main hands the
+// renderer a replacement while the person is still typing. The sandboxed
+// renderer has no `process`, and a handoff that reached it stayed frozen.
+it.each([
+  { path: "trip/plan.md", platform: "win32", stored: true },
+  { path: "trip/plan.md:notes", platform: "win32", stored: false },
+  { path: "trip/plan.md:notes", platform: "darwin", stored: true },
+  { path: "trip/.env", platform: "linux", stored: false },
+] as const)(
+  "hands off $path on $platform with no process global, and typing resumes",
+  async ({ path, platform, stored }) => {
+    vi.stubGlobal("dohcDesktop", { ...harness.api, platform });
+    retainDocument(path);
+    await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+    act(() => {
+      editDocument();
+    });
+
+    await withoutProcess(async () => {
+      harness.emitLineageReplacement("winner");
+      await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+      act(() => {
+        editDocument();
+      });
+      await flushLocalBatch();
+    });
+
+    expect(retained.boundDoc().getText("plainText").toString()).toBe("winner!");
+    expect(harness.applied).toHaveLength(1);
+    expect(retained.snapshot.saveState).toBe("saving");
+    // The typing the replacement retired stays recoverable in this window
+    // either way. Only a tracked path may reach plaintext storage.
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+    expect(
+      localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)?.includes("seed!") ?? false,
+    ).toBe(stored);
+  },
+);
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {
   await retainBound();

@@ -260,7 +260,6 @@ it("persists a crude-text draft synchronously, before the held projection import
       expect(drafts.result.current.length).toBe(1);
       expect(drafts.result.current.at(-1)?.text).toBe("# My Heading");
     },
-    { timeout: 10_000 },
   );
   // Upgraded in place, not appended: still exactly one row for this path.
   expect(drafts.result.current.length).toBe(1);

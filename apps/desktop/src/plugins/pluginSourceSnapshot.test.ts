@@ -645,7 +645,7 @@ describe("snapshotPluginSource dependency validation", () => {
 
     requireSuccess(result);
     expect(elapsedMs).toBeLessThan(5_000);
-  }, 15_000);
+  });
 });
 
 describe("snapshotPluginSource canonical hash and replacement", () => {
