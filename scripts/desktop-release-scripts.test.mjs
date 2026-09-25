@@ -446,7 +446,7 @@ test("workflow section helpers support CRLF line endings", () => {
   );
 });
 
-test("desktop releases use explicit release events and preserve unsigned package smoke", async () => {
+test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", async () => {
   const workflow = await readFile(
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
@@ -458,12 +458,69 @@ test("desktop releases use explicit release events and preserve unsigned package
     step.includes("electron-builder")
   );
 
-  assert.doesNotMatch(onSection, /pull_request/);
-  assert.doesNotMatch(onSection, /tags:/);
-  assert.match(onSection, /  push:/);
-  assert.match(onSection, /  workflow_dispatch:/);
+  // A key can carry its value on the same line, as in `  push: {branches: [main]}`.
+  assert.deepEqual(
+    [...onSection.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]),
+    ["workflow_dispatch"],
+    "a desktop release starts only when someone dispatches it",
+  );
+  assert.match(
+    topLevelSection(workflow, "concurrency"),
+    /^ {2}cancel-in-progress: false\r?$/m,
+    "a second dispatch waits instead of cancelling a publish in progress",
+  );
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   const jobs = topLevelSection(workflow, "jobs");
+
+  // The release action reuses a release that has the same tag and turns it
+  // back into a draft. Nothing is packaged for a version that already has a
+  // tag or a release, published or draft.
+  const unusedVersion = indentedSection(jobs, 2, "unused-version");
+  assert.match(unusedVersion, /^ {4}needs: preflight$/m);
+  assert.match(unusedVersion, /^ {6}contents: write$/m, "only push access lists draft releases");
+  const refuseUsedVersion = stepBlock(unusedVersion, "Refuse a version that has a tag or release");
+  assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
+  assert.match(refuseUsedVersion, /select\(\.tag_name == env\.TAG\)/);
+  assert.match(refuseUsedVersion, /git\/matching-refs\/tags\/\$\{TAG\}/);
+  for (const found of [/== \*published\*/, /== \*draft\*/, /-n "\$tag"/]) {
+    assert.match(refuseUsedVersion, found);
+  }
+  assert.match(
+    indentedSection(jobs, 2, "build"),
+    /^ {6}- unused-version$/m,
+    "packaging waits for the version check",
+  );
+
+  // A cancelled or failed publish must leave only a draft, which updaters
+  // never read. The release becomes visible in the job's last step.
+  const publishSteps = stepBlocks(indentedSection(jobs, 2, "publish"));
+  const createRelease = publishSteps.find((step) => step.includes("softprops/action-gh-release"));
+  assert.ok(createRelease, "the publish job creates the release");
+  assert.match(createRelease, /^ {8}id: draft$/m);
+  assert.match(createRelease, /^ {10}draft: true$/m);
+  assert.match(createRelease, /^ {10}target_commitish: \$\{\{ github\.sha \}\}$/m);
+  const lastPublishStep = publishSteps.at(-1);
+  assert.match(lastPublishStep, /^ {6}- name: Publish draft release$/m);
+  assert.match(lastPublishStep, /RELEASE_ID: \$\{\{ steps\.draft\.outputs\.id \}\}/);
+  assert.match(lastPublishStep, /-F draft=false/);
+
+  // Cloud runners stay off (AGENTS.md). The package matrix names each
+  // platform's runner labels.
+  const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]);
+  const runsOn = [...jobs.matchAll(/^ {4}runs-on: (.+)$/gm)].map((match) => match[1].trim());
+  assert.equal(runsOn.length, jobNames.length, "every job names its runner");
+  const matrixRunners = [...jobs.matchAll(/^ {12}runner: (.+)$/gm)].map((match) => match[1].trim());
+  assert.ok(matrixRunners.length > 0, "the package matrix names its runners");
+  for (const runner of [
+    ...runsOn.filter((value) => value !== "${{ matrix.runner }}"),
+    ...matrixRunners,
+  ]) {
+    assert.match(
+      runner,
+      /^\[self-hosted, (linux|windows|macos), (x64|arm64)\]$/,
+      `release jobs run only on self-hosted runners: ${runner}`,
+    );
+  }
   assert.match(indentedSection(jobs, 2, "preflight"), /if: github\.ref == 'refs\/heads\/main'/);
   for (const job of ["build", "publish"]) {
     assert.match(indentedSection(jobs, 2, job), /^ {4}environment: desktop-release$/m);
