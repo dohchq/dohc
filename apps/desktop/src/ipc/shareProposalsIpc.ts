@@ -6,6 +6,7 @@ import {
   ReadShareProposalFileContentPayload, ReadShareProposalFileContentResult,
   SettleShareProposalPayload, SettleShareProposalResult,
   SubmitShareChangesPayload, resolveSubmitShareChangesResult,
+  PushShareDirectWritesPayload, PushShareDirectWritesResult, MAX_DIRECT_WRITE_ROWS, type DirectWriteRow,
   ListMyShareChangesPayload, ListMyShareChangesResult,
   WithdrawShareChangesPayload, WithdrawShareChangesResult,
 } from "./bridgeContract";
@@ -19,30 +20,57 @@ import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
-import type { ShareProposal, ShareProposalOp, SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposal, type ShareProposalOp, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewSelector } from "../workspaces/shareViewInfo";
 import type { WorkspaceTextReadResult, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
+import { createShareDirectWriteQueue } from "../workspaces/shareDirectWriteQueue";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type {
   listMyShareProposals, listShareProposals, readShareProposal, readShareProposalOp,
   settleShareProposal, withdrawShareProposal,
 } from "../workspaces/shareProposalRelay";
 
+const DIRECT_PUSH_PASSES = 4;
+
+// Engine refusals that trying again will not change: the grant, the request,
+// or the relay's decision.
+const LASTING_DIRECT_PUSH_CODES = new Set([
+  "FORBIDDEN", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED", "PAYLOAD_TOO_LARGE",
+  "QUOTA_EXCEEDED", "INVALID_PARAMS", "RELAY_METHOD_NOT_ALLOWED",
+]);
+
+function lastingDirectPushError(error: unknown): boolean {
+  // The relay client turns these codes into classes that carry no code.
+  if (error instanceof SharedFileReadOnlyError || error instanceof RelayConflictError) return true;
+  const code = typeof error === "object" && error !== null && "wireCode" in error ? error.wireCode : undefined;
+  return typeof code === "string" && LASTING_DIRECT_PUSH_CODES.has(code);
+}
+
+// What a share view's work needs, from a window's operation or main's own.
+interface WorkspaceOperation {
+  readonly workspace: RegistryEntry & { readonly attachmentId: symbol };
+  assertCurrent(): void;
+}
+
 export function registerShareProposalsIpcHandlers<
   Sender,
   Event extends { sender: Sender },
-  Operation extends {
-    readonly workspace: RegistryEntry & { readonly attachmentId: symbol };
-    assertCurrent(): void;
-  },
+  Operation extends WorkspaceOperation,
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, inactiveMessage: string,
     work: (operation: Operation) => Promise<Result>): Promise<Result>;
+  /** Main's own operation on a workspace, whichever workspace its windows show. */
+  withWorkspaceAuthority<Result>(workspaceId: string, work: (operation: WorkspaceOperation) => Promise<Result>): Promise<Result>;
+  /**
+   * A direct push no window asked for finished: windows on the share view
+   * show it. False when no window shows the view.
+   */
+  reportDirectWrites(workspaceId: string, result: PushShareDirectWritesResult): boolean;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   currentCredentialGeneration(): number;
@@ -59,7 +87,7 @@ export function registerShareProposalsIpcHandlers<
   withStaleSensitiveWorkspaceOperation: typeof withStaleSensitiveWorkspaceOperation;
   shareViewFiles: Pick<ShareViewFiles, "reconcile">;
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "relayFor">;
-}): void {
+}): { shareViewEdited(workspaceId: string): void } {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     warmCredentialCache, currentCredentials, currentCredentialGeneration, normalizeServerUrl,
@@ -200,6 +228,26 @@ export function registerShareProposalsIpcHandlers<
       assert(scope: ShareProposalRecipientScope): void;
     }) => Promise<Result>,
   ): Promise<Result> {
+    return withRecipientScope(
+      (inner) => withRendererWorkspaceOperation(
+        sender,
+        workspaceId,
+        "Share changes stopped because this window changed workspaces.",
+        inner,
+      ),
+      resolveScope,
+      work,
+    );
+  }
+
+  function withRecipientScope<Result>(
+    run: (work: (operation: WorkspaceOperation) => Promise<Result>) => Promise<Result>,
+    resolveScope: (shareView: unknown) => ShareViewProposalScope,
+    work: (scope: {
+      resolve(): ShareProposalRecipientScope;
+      assert(scope: ShareProposalRecipientScope): void;
+    }) => Promise<Result>,
+  ): Promise<Result> {
     const sameScope = (
       left: ShareProposalRecipientScope,
       right: ShareProposalRecipientScope,
@@ -212,10 +260,7 @@ export function registerShareProposalsIpcHandlers<
       left.relay.baseUrl === right.relay.baseUrl &&
       left.relay.token === right.relay.token &&
       left.credentialGeneration === right.credentialGeneration;
-    return withRendererWorkspaceOperation(
-      sender,
-      workspaceId,
-      "Share changes stopped because this window changed workspaces.",
+    return run(
       async (operation) => {
         await warmCredentialCache();
         operation.assertCurrent();
@@ -487,6 +532,95 @@ export function registerShareProposalsIpcHandlers<
     );
   });
 
+  // Writes the share view's changes to a Collection's own files straight into
+  // the owner's workspace (ADR 0013), as main's own operation, so a push goes
+  // after the window leaves the view. Saves are already in the share view's
+  // journal, so nothing is captured first. A relay that does not take direct
+  // writes answers as the share being unavailable; the changes then wait for
+  // Send changes.
+  function pushDirectWrites(workspaceId: string): Promise<PushShareDirectWritesResult> {
+    return withRecipientScope(
+      (inner) => dependencies.withWorkspaceAuthority(workspaceId, inner),
+      requireShareViewProposalScope,
+      async (operation) => {
+        const scope = operation.resolve();
+        const relay = receivedShareEngine.relayFor({
+          engineWorkspaceId: scope.workspaceId,
+          rootPath: scope.rootPath,
+          attachmentId: scope.attachmentId,
+          relay: scope.relay,
+        });
+        const writes: DirectWriteRow[] = [];
+        try {
+          // A push reads a bounded window; a few passes drain a backlog. An
+          // answer carries a bounded number of rows, so rows past it go to
+          // the windows as answers of their own.
+          for (let pass = 0; pass < DIRECT_PUSH_PASSES; pass += 1) {
+            const result = await relay.pushDirectWrites({
+              shareId: scope.shareId,
+              grantedSelector: scope.grant,
+            });
+            operation.assert(scope);
+            for (const write of result.writes) {
+              if (writes.length === MAX_DIRECT_WRITE_ROWS) {
+                directWrites.report(workspaceId, PushShareDirectWritesResult.parse({ status: "pushed", writes }));
+                writes.length = 0;
+              }
+              writes.push(
+                write.result === "stale"
+                  ? { result: "stale", paths: write.paths, stalePath: write.stalePath }
+                  : write,
+              );
+            }
+            if (!result.morePending) break;
+          }
+        } catch (error) {
+          if (error instanceof ShareUnavailableError && writes.length === 0) {
+            return PushShareDirectWritesResult.parse({ status: "unavailable" });
+          }
+          return PushShareDirectWritesResult.parse({
+            status: "failed",
+            writes,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
+          });
+        }
+        return PushShareDirectWritesResult.parse({ status: "pushed", writes });
+      },
+    );
+  }
+
+  const directWrites = createShareDirectWriteQueue({
+    push: pushDirectWrites,
+    report: dependencies.reportDirectWrites,
+  });
+
+  // A view pushes when it opens, so changes a closed view left go then. The
+  // push runs in main's queue for the view.
+  registerHandler(CHANNELS.pushShareDirectWrites, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PushShareDirectWritesPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Share changes stopped because this window changed workspaces.",
+      async (operation) => {
+        requireShareViewProposalScope(operation.workspace.shareView);
+        const workspaceId = operation.workspace.workspaceId;
+        const result = await directWrites.pushNow(workspaceId);
+        try {
+          operation.assertCurrent();
+        } catch (error) {
+          // The window left the view while the push ran, so its answer goes
+          // where a background push's goes: to a window on the view, or held.
+          directWrites.report(workspaceId, result);
+          throw error;
+        }
+        return result;
+      },
+    );
+  });
+
   registerHandler(CHANNELS.listMyShareChanges, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListMyShareChangesPayload.parse(payload);
@@ -543,4 +677,5 @@ export function registerShareProposalsIpcHandlers<
     );
   });
 
+  return { shareViewEdited: directWrites.edited };
 }

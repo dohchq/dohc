@@ -9,14 +9,15 @@ import type {
   createSitePreviewLifecycle,
 } from "../workspaces/sitePreviewLifecycle";
 import {
+  StartSitePreviewAnswer,
   StartSitePreviewPayload,
-  StartSitePreviewResult,
+  type StartSitePreviewResult,
   type SitePreviewMode,
 } from "./bridgeContract";
 
-type SitePreviewResultBody = Omit<
+export type SitePreviewResultBody = Omit<
   StartSitePreviewResult,
-  "url" | "exited"
+  "url" | "exited" | "generation"
 >;
 
 export type SitePreviewExecutionInput = {
@@ -52,7 +53,10 @@ export interface StartSitePreviewDependencies<
     ): Promise<Result>;
   };
   catalog: OwnedSiteCatalog<Workspace>;
-  lifecycle: Pick<ReturnType<typeof createSitePreviewLifecycle>, "start">;
+  lifecycle: Pick<
+    ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
+    "acquire"
+  >;
   isSharedView(workspaceId: string): boolean;
   execute(
     input: SitePreviewExecutionInput,
@@ -82,7 +86,7 @@ export function createStartSitePreviewHandler<
   Workspace extends { workspaceId: string; rootPath: string },
 >(
   dependencies: StartSitePreviewDependencies<Event, Sender, Workspace>,
-): (event: Event, payload: unknown) => Promise<StartSitePreviewResult> {
+): (event: Event, payload: unknown) => Promise<StartSitePreviewAnswer> {
   return async (event, rawPayload) => {
     const sender = dependencies.authority.requireTrustedSender(event);
     const payload = StartSitePreviewPayload.parse(rawPayload);
@@ -93,13 +97,18 @@ export function createStartSitePreviewHandler<
       "start the preview again",
       async ({ workspace, session }) => {
         const isCurrent = () => session.isCurrent();
-        return StartSitePreviewResult.parse(
-          await dependencies.lifecycle.start<SitePreviewResultBody>({
+        return StartSitePreviewAnswer.parse(
+          await dependencies.lifecycle.acquire({
+            holderId: payload.holderId,
             senderId: sender.id,
             workspaceId: payload.workspaceId,
             siteRoot: payload.siteRoot,
+            mode: payload.mode,
+            restart: payload.restart,
             isCurrent,
-            prepare: async () => {
+            // The start's own check, not this window's: a start another
+            // window also holds outlives this one.
+            prepare: async (startIsCurrent) => {
               const sharedView = dependencies.isSharedView(workspace.workspaceId);
               assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
               const site = requireExactSiteRoot(
@@ -116,7 +125,7 @@ export function createStartSitePreviewHandler<
                   workspaceRoot: workspace.rootPath,
                   site,
                   mode: payload.mode,
-                  isCurrent,
+                  isCurrent: startIsCurrent,
                   signal,
                   sharedView,
                 });

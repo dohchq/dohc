@@ -718,6 +718,13 @@ test("artifact identity includes nested file bytes and names", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("gate selection covers root self-host deployment inputs", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of ["docker-compose.self-host.yml", ".env.self-host.example", ".dockerignore"]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
+  }
+});
+
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });

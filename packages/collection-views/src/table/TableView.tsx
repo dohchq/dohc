@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -11,6 +11,7 @@ import type {
 import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
+import { Tooltip, useTooltip } from "../tooltip";
 import { CellEditor, FieldCell } from "./cells";
 
 /**
@@ -41,6 +42,17 @@ export interface CollectionOptionCreate {
   previousValues?: readonly CollectionValue[];
 }
 
+/**
+ * A mark after a field's name in the header, such as the ⚡ of a field that
+ * automations set. The host supplies the icon and its words; hovering the
+ * header or giving its sort control keyboard focus shows the words, and
+ * screen readers hear them as the control's description.
+ */
+export interface TableFieldMark {
+  icon: ReactNode;
+  label: string;
+}
+
 export interface TableViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -66,6 +78,8 @@ export interface TableViewProps {
   relationExecutor?: CollectionQueryExecutor;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
+  /** Marks by field name. Built once by the host, so rows never pay for them. */
+  fieldMarks?: ReadonlyMap<string, TableFieldMark>;
   /**
    * Called when the virtualizer renders within NEAR_END_ROWS of the last
    * loaded record. Hosts respond by loading the next page; extra calls are
@@ -94,6 +108,49 @@ interface EditingCell {
   field: string;
 }
 
+/**
+ * One field's header: its name sorts the table. The tooltip state for a
+ * mark's words lives here, so showing them renders this header alone.
+ */
+function FieldHeader(props: {
+  name: string;
+  sorted: "asc" | "desc" | null;
+  mark: TableFieldMark | undefined;
+  onSort: () => void;
+}) {
+  const { mark, sorted } = props;
+  const tooltip = useTooltip();
+  return (
+    <div
+      role="columnheader"
+      aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
+      className="relative"
+      style={{ width: COLUMN_WIDTH }}
+      {...(mark ? tooltip.hoverProps : {})}
+    >
+      <button
+        type="button"
+        className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
+        onClick={props.onSort}
+        {...(mark ? tooltip.focusProps : {})}
+      >
+        <span className="truncate">{props.name}</span>
+        {mark ? (
+          <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
+            {mark.icon}
+          </span>
+        ) : null}
+        {sorted ? (
+          <span aria-hidden="true" className="text-subtle">
+            {sorted === "asc" ? "↑" : "↓"}
+          </span>
+        ) : null}
+      </button>
+      {mark ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
+    </div>
+  );
+}
+
 export function TableView({
   schema,
   records,
@@ -108,6 +165,7 @@ export function TableView({
   onOpenRecord,
   relationExecutor,
   personLabel,
+  fieldMarks,
   onNearEnd,
 }: TableViewProps) {
   const fields = useMemo(
@@ -123,11 +181,12 @@ export function TableView({
         fields.map((field) => {
           // Relation editing needs query access to the related collection;
           // without an executor the cell stays read-only. Checkboxes commit
-          // through onChange and never open an editor.
+          // through onChange and never open an editor. Buttons store no value.
           const editable =
             !editingDisabled &&
             onCellChange !== undefined &&
             field.type !== "checkbox" &&
+            field.type !== "button" &&
             (field.type !== "relation" || relationExecutor !== undefined);
           return helper.accessor(
             (record) => record.values.find((entry) => entry.field === field.name),
@@ -231,27 +290,27 @@ export function TableView({
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
         ) : null}
         {fields.map((field) => {
-          const sorted = primarySort?.field === field.name ? primarySort.direction : null;
-          return (
-            <div
-              key={field.name}
-              role="columnheader"
-              aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
-              style={{ width: COLUMN_WIDTH }}
-            >
-              <button
-                type="button"
-                className="flex h-7 w-full items-center gap-1 px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:text-ink"
-                onClick={() => toggleSort(field.name)}
+          // A button stores no value to sort by, so its header is a label.
+          if (field.type === "button") {
+            return (
+              <div
+                key={field.name}
+                role="columnheader"
+                className="flex h-7 items-center px-2 text-[12px] font-medium text-muted"
+                style={{ width: COLUMN_WIDTH }}
               >
                 <span className="truncate">{field.name}</span>
-                {sorted ? (
-                  <span aria-hidden="true" className="text-subtle">
-                    {sorted === "asc" ? "↑" : "↓"}
-                  </span>
-                ) : null}
-              </button>
-            </div>
+              </div>
+            );
+          }
+          return (
+            <FieldHeader
+              key={field.name}
+              name={field.name}
+              sorted={primarySort?.field === field.name ? primarySort.direction : null}
+              mark={fieldMarks?.get(field.name)}
+              onSort={() => toggleSort(field.name)}
+            />
           );
         })}
       </div>

@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
   createRustEngineDaemon,
@@ -25,7 +25,10 @@ const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
 
-type State = { pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace> };
+type State = {
+  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
+  collectionAutomations: { notifyClaimed: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };
+};
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
 
 function workspaceIdOf(request: Request): unknown {
@@ -94,7 +97,7 @@ function fixture() {
           return result as unknown as PluginWorkspaceRuntimeParts;
         },
         onPipelineStatus: () => undefined, onCleanupError: cleanupErrors,
-      }) };
+      }), collectionAutomations: { notifyClaimed: vi.fn(), pauseForEngineRestart: vi.fn(), resumeAfterEngineRestart: vi.fn() } };
       states.set(binding.workspaceId, state);
       return state;
     },
@@ -133,6 +136,7 @@ function fixture() {
         try { return lease.state.pluginRuntimes.current(id); } finally { lease.release(); }
       },
     },
+    collectionAutomations: { current: (id) => states.get(id)?.collectionAutomations },
     notifyRenderer: vi.fn(), notifyAutomationFailuresChanged: vi.fn(),
     launchMarks: { daemonReady: vi.fn() }, desktopMarks: { markOnce: vi.fn() },
     logLaunchMarksOnce: vi.fn(),
@@ -507,10 +511,16 @@ describe("desktop engine restart coordination", () => {
       expect(daemon!.currentClient()).toBe(replacement);
       expect(f.created).toHaveLength(3);
       expect(f.dependencies.launchMarks.daemonReady).toHaveBeenCalledOnce();
+      // The Collection executor paused before each daemon was published and
+      // resumed once it answered: at the first start and at the restart.
+      const collection = f.states.get("workspace")!.collectionAutomations;
+      expect(collection.pauseForEngineRestart).toHaveBeenCalledTimes(2);
+      expect(collection.resumeAfterEngineRestart).toHaveBeenCalledTimes(2);
       // The recreated plugin runtime drained once at its start; the claim wakes it again.
       const woken = f.created[2]!.parts.automations.notifyClaimed.mock.calls.length;
       replacement.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(f.created[2]!.parts.automations.notifyClaimed).toHaveBeenCalledTimes(woken + 1);
+      expect(collection.notifyClaimed).toHaveBeenCalledOnce();
     } finally { held.resolve(); await restarting; await f.close(); }
   });
 
@@ -690,6 +700,7 @@ describe("desktop engine composed sessions and events", () => {
         data: { collectionPath: "tasks", recordId: "record", author: null, timestamp: 10, actorKind: "human",
           onBehalfOf: null, depth: 0, source: { originId: "origin", originSeq: 1 } } });
       expect(current.automations.notifyClaimed).toHaveBeenCalledTimes(drainedAtStart + 1);
+      expect(f.states.get("workspace")!.collectionAutomations.notifyClaimed).toHaveBeenCalledOnce();
       expect(f.dependencies.notifyAutomationFailuresChanged).toHaveBeenCalledWith("workspace");
       f.rows.delete("workspace");
       f.client.emit("record.updated", payload);

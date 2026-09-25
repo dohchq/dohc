@@ -83,6 +83,17 @@ describe("CollectionMigrationReviewDialog", () => {
     expect(screen.getAllByText("Community tournament").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("Collection definition")).toBeNull();
   });
+  it("shows an added button by its name and type, and a renamed button by its name", () => {
+    const added=prep();added.revision.definition.tables[0]!.fields.push({fieldId:id(5),name:"Send receipt",type:"button"});
+    setup({initialPreparation:added,generatedChange:true});
+    expect(screen.getByText("Send receipt · button")).toBeTruthy();
+    cleanup();
+    const renamed=prep();renamed.previousRevision.definition.tables[0]!.fields.push({fieldId:id(5),name:"Send receipt",type:"button"});
+    renamed.revision.definition.tables[0]!.fields.push({fieldId:id(5),name:"Email receipt",type:"button"});
+    setup({initialPreparation:renamed,generatedChange:true});
+    expect(screen.getByText("Name: Send receipt")).toBeTruthy();
+    expect(screen.getByText("Name: Email receipt")).toBeTruthy();
+  });
   it("shows actual record changes and pages the exact preparation", async () => {
     const onLoadPreview = vi.fn<CollectionMigrationReviewDialogProps["onLoadPreview"]>(async () => ({changes: [{table: "registrations", kind: "delete", key: {id: "two"}, before: {name: "Last record"}, after: null}], nextCursor: null}));
     setup({initialPreparation: prep(), onLoadPreview});

@@ -34,6 +34,7 @@ import type {
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
   OwnerLiveRefusalsResult,
@@ -41,6 +42,7 @@ import {
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
+  ShareDirectWritesPushedEvent,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -67,6 +69,7 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
   WorkbenchMenuCommand,
+  WorkspaceIdPayload,
   WorkspaceSummary,
   crashReportOperations,
   noticeOperations,
@@ -250,6 +253,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getSitePreviewLogs, payload),
   stopSitePreview: (payload: StopSitePreviewPayload) =>
     ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
+  onSitePreviewReplaced: (listener) =>
+    onEvent(CHANNELS.sitePreviewReplaced, SitePreviewReplacedEvent, listener),
   openPluginPanel: async (payload: OpenPluginPanelPayload) => {
     const result = OpenPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
@@ -459,6 +464,36 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
   dismissAutomationFailure: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
+  listCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
+  listCollectionAutomationRuns: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
+  retryCollectionAutomation: (payload) =>
+    ipcRenderer.invoke(CHANNELS.retryCollectionAutomation, payload),
+  undoCollectionAutomationRun: (payload) =>
+    ipcRenderer.invoke(CHANNELS.undoCollectionAutomationRun, payload),
+  listAutomationTargets: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationTargets, payload),
+  checkCollectionAutomation: (payload) =>
+    ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
+  confirmCollectionAutomationStep: (payload) =>
+    ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
+  writeCollectionAutomations: (payload) =>
+    ipcRenderer.invoke(CHANNELS.writeCollectionAutomations, payload),
+  listAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationHolds, payload),
+  resetAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resetAutomationHolds, payload),
+  revealAutomationHolds: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revealAutomationHolds, payload),
+  dismissAutomationStops: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissAutomationStops, payload),
+  automationShareImpact: (payload) =>
+    ipcRenderer.invoke(CHANNELS.automationShareImpact, payload),
+  listCollectionFieldMarks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionFieldMarks, payload),
+  onCollectionAutomationsChanged: (listener) =>
+    onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationFailuresChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
@@ -483,6 +518,27 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(crashReportOperations, invoke),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
+  onAutomationHoldsChanged: (
+    listener: (event: { workspaceId: string }) => void,
+  ) => {
+    // Validate at the boundary like every main-sent event: the listener
+    // only ever sees a workspace id string; anything else is dropped.
+    const handler = (_event: unknown, payload: unknown) => {
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "workspaceId" in payload &&
+        typeof (payload as { workspaceId: unknown }).workspaceId === "string"
+      ) {
+        listener({
+          workspaceId: (payload as { workspaceId: string }).workspaceId,
+        });
+      }
+    };
+    ipcRenderer.on(CHANNELS.automationHoldsChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.automationHoldsChanged, handler);
+  },
   listShareProposals: (payload) =>
     ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
   readShareProposalChanges: (payload) =>
@@ -493,6 +549,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
   submitShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
+  pushShareDirectWrites: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
+  onShareDirectWritesPushed: (listener) =>
+    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
   listMyShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>
@@ -593,6 +653,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
   reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
+  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
   getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
   openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
   openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>

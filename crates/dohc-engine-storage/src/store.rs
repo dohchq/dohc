@@ -86,6 +86,24 @@ impl EngineStore {
         })
     }
 
+    /// Open a store, recording a fresh root binding in its initial schema transaction.
+    /// The caller must persist the matching root marker before calling this.
+    /// An existing store is never rebound; verify its binding before use.
+    pub fn open_with_root_token(
+        path: &Path,
+        now_ms: i64,
+        token: &str,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened =
+            crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
+        Ok(EngineStore {
+            conn: opened.conn,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+        })
+    }
+
     /// Open an existing, current store for queries only. Unlike [`Self::open`],
     /// this never creates the database, changes persistent pragmas, or runs the
     /// migration ledger.

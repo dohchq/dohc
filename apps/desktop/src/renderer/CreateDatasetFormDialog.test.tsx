@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
 import { CreateDatasetFormDialog, type CreateDatasetFormDialogProps } from "./CreateDatasetFormDialog";
 
@@ -20,7 +20,7 @@ afterEach(cleanup);
 describe("CreateDatasetFormDialog", () => {
   it("previews the selected field order, types, and defaults without accepting responses", () => {
     const description = dataset();
-    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "select", options: ["New", "Reviewed"], default: "New" };
+    description.tables[0]!.fields[2] = { ...datasetColumnFields(description.tables[0]!)[2]!, type: "select", options: ["New", "Reviewed"], default: "New" };
     setup({ dataset: description });
     const preview = within(screen.getByRole("region", { name: "Form preview" }));
     fireEvent.change(screen.getByLabelText("Form title"), { target: { value: "Pickleball registration" } });
@@ -63,7 +63,7 @@ describe("CreateDatasetFormDialog", () => {
     expect(screen.getByRole("alert").textContent).toContain("workspace folder"); expect(onCreate).not.toHaveBeenCalled();
   });
   it("refuses an empty field selection", () => {
-    const description = dataset(); description.tables[0]!.fields[1]!.required = false;
+    const description = dataset(); datasetColumnFields(description.tables[0]!)[1]!.required = false;
     const { onCreate } = setup({ dataset: description });
     for (const label of ["Name", "Note", "Receipt"]) fireEvent.click(screen.getByLabelText(label)); submit();
     expect(screen.getByRole("alert").textContent).toContain("1 to 128"); expect(onCreate).not.toHaveBeenCalled();
@@ -92,7 +92,7 @@ describe("CreateDatasetFormDialog", () => {
   });
   it("requires explicit public choice selection, discloses the complete action, and exposes source review", async () => {
     const description = dataset();
-    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    description.tables[0]!.fields[2] = { ...datasetColumnFields(description.tables[0]!)[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
     description.operations.push({ operationId: id(8), name: "choices", label: "Read choices", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3), id(4)] });
     description.operations.push({ operationId: id(9), name: "private", label: "Private read", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4)] });
     const onLoadSource = vi.fn(async () => ({ path: "approved/actions.js", source: "globalThis.operations = {};", sha256: "b".repeat(64) }));
@@ -109,7 +109,7 @@ describe("CreateDatasetFormDialog", () => {
   });
   it("offers reviewed public-choice creation and preserves the selected label in retries", async () => {
     const description = dataset();
-    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    description.tables[0]!.fields[2] = { ...datasetColumnFields(description.tables[0]!)[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
     const onPrepareChoices = vi.fn<NonNullable<CreateDatasetFormDialogProps["onPrepareChoices"]>>().mockRejectedValue(new Error("Host unavailable"));
     const { onError } = setup({ dataset: description, onPrepareChoices });
     fireEvent.click(screen.getByLabelText("Note"));

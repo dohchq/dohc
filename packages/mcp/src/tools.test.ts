@@ -2828,6 +2828,15 @@ describe("raw file writes preserve live documents", () => {
     },
   );
 
+  it("names the tool that edits a Markdown document, and dohc for a scene", async () => {
+    await withWorkspace(async (ctx) => {
+      expect(await writeWorkspaceFile(ctx, { path: "note.md", content: "new" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("dohc_edit_document") });
+      expect(await writeWorkspaceFile(ctx, { path: "scene.excalidraw", content: "{}" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("Edit it in dohc") });
+    });
+  });
+
   it("refuses creating a live document before making parent directories", async () => {
     await withWorkspace(async (ctx) => {
       expect(await writeWorkspaceFile(ctx, { path: "draft/note.md", content: "new" }))

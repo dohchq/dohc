@@ -41,6 +41,7 @@ fn start(
     LinkedChatStore::new(store)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -92,6 +93,7 @@ fn send_with(
     LinkedChatStore::new(store)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),
@@ -636,6 +638,7 @@ fn decision_open_is_atomic_with_start_and_send() {
 
     let failed = LinkedChatStore::new(&mut store).send_message(
         &SendMessage {
+            automation: None,
             workspace_id: WS.to_owned(),
             thread_id: "thread".to_owned(),
             message_id: "rolled-back".to_owned(),
@@ -738,6 +741,7 @@ fn decision_resolution_omits_a_local_only_resolver_from_relay_payload() {
     LinkedChatStore::new(&mut store)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: "thread".to_owned(),
                 message_id: "local-resolver".to_owned(),
@@ -1216,6 +1220,7 @@ fn js_trimmed_author_user_id_matches_person_follow() {
     LinkedChatStore::new(&mut store)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: "trimmed-author".to_owned(),
@@ -1269,6 +1274,7 @@ fn lone_bom_display_name_is_invalid_sender() {
     seed_channel(&mut store);
     let result = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "invalid-display".to_owned(),
@@ -1317,6 +1323,7 @@ fn channel_name_and_optional_thread_title_use_js_trim() {
     LinkedChatStore::new(&mut store)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: "untitled".to_owned(),
@@ -1361,6 +1368,7 @@ fn optional_thread_title_caps_utf16_units_before_journaling() {
     seed_channel(&mut store);
     let accepted = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "title-boundary".to_owned(),
@@ -1383,6 +1391,7 @@ fn optional_thread_title_caps_utf16_units_before_journaling() {
     );
     let rejected = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "title-over-cap".to_owned(),
@@ -1443,6 +1452,7 @@ fn channel_sender_and_author_caps_use_utf16_units() {
     );
     let accepted_sender = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "boundary-channel".to_owned(),
             thread_id: "sender-boundary".to_owned(),
@@ -1465,6 +1475,7 @@ fn channel_sender_and_author_caps_use_utf16_units() {
     );
     let rejected_display = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "boundary-channel".to_owned(),
             thread_id: "display-over-cap".to_owned(),
@@ -1487,6 +1498,7 @@ fn channel_sender_and_author_caps_use_utf16_units() {
     );
     let rejected_author = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "boundary-channel".to_owned(),
             thread_id: "author-over-cap".to_owned(),
@@ -1523,6 +1535,7 @@ fn thread_mutations_reject_negative_timestamps_before_journaling() {
     seed_channel(&mut store);
     let start_result = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "negative-channel-thread".to_owned(),
@@ -1580,6 +1593,7 @@ fn thread_mutations_reject_timestamps_above_the_wire_integer_max() {
     let above_max = 9_007_199_254_740_992;
     let start_result = LinkedChatStore::new(&mut store).start_channel_thread(
         &StartChannelThread {
+            automation: None,
             workspace_id: WS.to_owned(),
             channel_id: "channel".to_owned(),
             thread_id: "unsafe-channel-thread".to_owned(),
@@ -1658,6 +1672,7 @@ fn channel_thread_start_refuses_unreplicable_stored_channel_identity() {
             .expect("corrupt imported channel identity");
         let result = LinkedChatStore::new(&mut store).start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: "channel".to_owned(),
                 thread_id: "thread".to_owned(),

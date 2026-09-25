@@ -1,5 +1,5 @@
 import { createDatasetReplica, type DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
-import { parseDatasetRevision, parseDatasetDescription, type DatasetDescription } from "@dohc/security-contract/dataset";
+import { describeApprovedDataset, parseDatasetRevision, parseDatasetDescription, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,17 +61,8 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       });
       const describe = (definitionJson: string): DatasetDescription => {
         const approved = parseDatasetRevision(JSON.parse(definitionJson));
-        // Match the authority's description projection: schema-only fields are not Collection controls.
-        const operations = approved.definition.operations;
-        const fields = new Set(operations.flatMap(operation => operation.fieldIds));
-        const tables = new Set(operations.map(operation => operation.tableId));
-        return parseDatasetDescription({ datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
-          revisionSha256: approved.revisionSha256,
-          tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-            fields: table.fields.filter(field => fields.has(field.fieldId)).map(({ sqlColumn: _column, ...field }) => {
-              if (field.relation && !fields.has(field.relation.fieldId)) delete field.relation;
-              return field;
-            }) })), operations });
+        // The authority's own description projection: schema-only fields are not Collection controls.
+        return parseDatasetDescription(describeApprovedDataset(approved, approved.definition.operations));
       };
       const capture = async () => {
         authorize(); let offline = false; const priorArchived = archived;

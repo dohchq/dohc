@@ -45,7 +45,15 @@ type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "r
 
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
+  collectionAutomations: CollectionAutomationsLifecycle;
 };
+
+/** The Collection automation executor's part in an engine restart. */
+interface CollectionAutomationsLifecycle {
+  notifyClaimed(): void;
+  pauseForEngineRestart(): void;
+  resumeAfterEngineRestart(): void;
+}
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   serverOwnerDelivery?: ServerOwnerDelivery;
@@ -69,6 +77,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
     ): Promise<Result>;
   };
   pluginWorkspaceRuntimes: Pick<PluginWorkspaceRuntimes<CreatedWorkspace>, "current">;
+  collectionAutomations: { current(workspaceId: string): Pick<CollectionAutomationsLifecycle, "notifyClaimed"> | undefined };
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   notifyAutomationFailuresChanged(workspaceId: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
@@ -350,6 +359,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
 
   async function startRustEngineDaemon(): Promise<boolean> {
     const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
+    const restartingCollectionAutomations = new Set<CollectionAutomationsLifecycle>();
     // Everything, including resolving the binary path, runs inside the try: a
     // throw while building the options would otherwise reject this whenReady
     // callback and leave the user with no dialog, on the one path whose job is
@@ -428,6 +438,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           await stopOwnerDelivery();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
             workspaceAuthorities.withAuthority(workspaceId, (lease) => {
+              const automations = lease.state.collectionAutomations;
+              automations.pauseForEngineRestart();
+              restartingCollectionAutomations.add(automations);
               const runtimes = lease.state.pluginRuntimes;
               restartingPluginRuntimes.add(runtimes);
               return runtimes.prepareForEngineRestart();
@@ -447,6 +460,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             runtimes.resumeAfterEngineRestart();
           }
           restartingPluginRuntimes.clear();
+          for (const automations of restartingCollectionAutomations) {
+            automations.resumeAfterEngineRestart();
+          }
+          restartingCollectionAutomations.clear();
           notifyRenderer();
         },
       });
@@ -463,12 +480,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       );
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
-      // workspace's executor to drain the durable claim table, and a claim
+      // workspace's executors to drain the durable claim table, and a claim
       // inserted already failed (the depth cap's chain-stopped stop report)
-      // pokes the owner's failure notice instead.
+      // pokes the owner's failure notice instead. Each executor drains only
+      // its own namespace, so both wake.
       bridgeAutomationClaimsToExecutors(
         rustEngineDaemon,
-        (workspaceId) => pluginWorkspaceRuntimes.current(workspaceId)?.automations,
+        (workspaceId) => ({
+          notifyClaimed() {
+            pluginWorkspaceRuntimes.current(workspaceId)?.automations.notifyClaimed();
+            dependencies.collectionAutomations.current(workspaceId)?.notifyClaimed();
+          },
+        }),
         notifyAutomationFailuresChanged,
       );
       const relaySource = new RelayConfiguredDaemonClientSource(

@@ -169,12 +169,20 @@ function unresolvedPathRefusal(
   }
 }
 
-const LIVE_DOCUMENT_WRITE_REFUSAL =
-  "This file is a live document. Edit it in dohc; raw MCP file writes cannot update its document state.";
-
-function isLiveDocumentPath(resolved: { normalized: string; realRelative: string }): boolean {
-  return liveDocumentKindForPath(resolved.normalized) !== null ||
-    liveDocumentKindForPath(resolved.realRelative) !== null;
+// A raw write cannot update a live document's state, so each kind names the
+// way that can.
+function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: string }): string | null {
+  const kinds = [
+    liveDocumentKindForPath(resolved.normalized),
+    liveDocumentKindForPath(resolved.realRelative),
+  ];
+  if (kinds.includes("scene")) {
+    return "This file is a live document. Edit it in dohc; a raw file write cannot update its document state.";
+  }
+  if (kinds.includes("richdoc")) {
+    return "This file is a live document. Read it with dohc_read_document and change it with dohc_edit_document; a raw file write cannot update its document state.";
+  }
+  return null;
 }
 
 async function safeResolveForMutation(
@@ -185,7 +193,8 @@ async function safeResolveForMutation(
   if (!resolved.ok) {
     throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
   }
-  if (isLiveDocumentPath(resolved)) throw new Error(LIVE_DOCUMENT_WRITE_REFUSAL);
+  const refusal = liveDocumentWriteRefusal(resolved);
+  if (refusal) throw new Error(refusal);
   return resolved;
 }
 
@@ -916,12 +925,8 @@ export async function writeWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isLiveDocumentPath(resolved)) {
-    return {
-      ok: false as const,
-      reason: LIVE_DOCUMENT_WRITE_REFUSAL,
-    };
-  }
+  const refusal = liveDocumentWriteRefusal(resolved);
+  if (refusal) return { ok: false as const, reason: refusal };
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -2601,6 +2606,30 @@ export async function createRecord(
     collectionPath: resolved.normalized,
     name: args.name,
     fields: fields.value,
+  });
+}
+
+// Live documents change through the desktop, which applies an edit to the
+// session an open editor holds. The path is checked here and again there.
+export async function readDocument(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentRead", { path: resolved.normalized });
+}
+
+export async function editDocument(
+  ctx: ToolContext,
+  args: { path: string; find?: string; replacement: string; requestId?: string },
+  agent: string | undefined,
+) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "documentEdit", {
+    path: resolved.normalized,
+    ...(args.find === undefined ? {} : { find: args.find }),
+    replacement: args.replacement,
+    ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+    ...(agent === undefined ? {} : { agent }),
   });
 }
 
