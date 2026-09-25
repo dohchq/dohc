@@ -110,6 +110,7 @@ export function createRealShareMountHarness(input: {
     shareViewFiles: files,
     trashItem: unexpected,
     notifyRenderer: () => undefined,
+    shareViewEdited: () => undefined,
     logError,
   });
   type Event = { sender: { id: number } };

@@ -57,6 +57,18 @@ describe("dataset source imports", () => {
     expect(previewDatasetCsv(table, fields, operation, ["name", null, null]).rows[0]?.values).toEqual({ name: "Ada" });
   });
 
+  it("leaves button fields and their stray values out of a document import", () => {
+    const table = collectionRecordsToCsv({ ...schema, fields: [...schema.fields, { name: "Mark paid", type: "button" }] }, [
+      { id: "1", path: "1.md", conflicted: false, values: [
+        { field: "Name", value: "Ada", validation: { status: "valid" }, resolvedRelations: [] },
+        { field: "Mark paid", value: true, validation: { status: "flagged", reason: { code: "expected-empty", path: "" } }, resolvedRelations: [] },
+      ] },
+    ]);
+    expect(table.headers).toEqual(["Name", "Amount"]);
+    expect(table.rows).toEqual([["Ada", ""]]);
+    expect(table.cellErrors?.[0]).toEqual(["", ""]);
+  });
+
   it("rejects wide, large, and truncated sources before producing an import plan", () => {
     const base = { name: "people", columns: [{ name: "Name" }], rows: [{ Name: "x".repeat(4097) }], nextOffset: null };
     expect(databasePageToCsv(base).cellErrors?.[0]?.[0]).toContain("lossless export");

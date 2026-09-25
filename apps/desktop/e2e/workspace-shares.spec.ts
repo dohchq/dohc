@@ -799,11 +799,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         dohcDesktop: {
           getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
           startAgentRun(payload: { workspaceId: string }): Promise<unknown>;
-          startSitePreview(payload: {
-            workspaceId: string;
-            siteRoot: string;
-            mode: "static" | "dev" | "build";
-          }): Promise<unknown>;
+          startSitePreview: DohcDesktopBridge["startSitePreview"];
           getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
           openEngineYDocSession(payload: {
             workspaceId: string;
@@ -827,7 +823,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       };
       const agent = await capture(() => api.startAgentRun({ workspaceId }));
       const sitePreview = await capture(() =>
-        api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev" }),
+        api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev", holderId: "e2e", restart: false }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
       // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is writable, so opening

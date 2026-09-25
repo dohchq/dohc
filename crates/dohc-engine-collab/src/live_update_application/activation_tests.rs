@@ -389,7 +389,7 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
         |_, _, _, _| Ok(()),
     )
     .unwrap();
-    assert!(matches!(applied, ApplicationResult::Applied(_)));
+    assert!(matches!(applied, ApplicationResult::Applied(..)));
     owner_outbox::acknowledge(
         &mut f.store,
         "workspace",

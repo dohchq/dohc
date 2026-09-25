@@ -168,6 +168,7 @@ async function harness(options: {
     return workspace;
   });
   const notifyRenderer = vi.fn();
+  const shareViewEdited = vi.fn();
   const logError = vi.fn();
   const trashItem = vi.fn(
     options.trashItem ??
@@ -203,6 +204,7 @@ async function harness(options: {
     shareViewFiles: { change },
     trashItem,
     notifyRenderer,
+    shareViewEdited,
     logError,
   });
   return {
@@ -214,6 +216,7 @@ async function harness(options: {
     rendererOperationCalls,
     requireWorkspace,
     notifyRenderer,
+    shareViewEdited,
     logError,
     trashItem,
     ownsDocument,
@@ -620,6 +623,12 @@ describe("WorkspaceFileMutationOwner", () => {
       "move",
       "delete",
       "save",
+    ]);
+    // A create and a save are journaled edits the shell pushes; a move and a
+    // delete stay for Send changes.
+    expect(test.shareViewEdited.mock.calls).toEqual([
+      [test.workspace.workspaceId],
+      [test.workspace.workspaceId],
     ]);
     for (const [, target] of test.change.mock.calls) {
       expect(target).toEqual({
@@ -1521,6 +1530,8 @@ describe("WorkspaceFileMutationOwner", () => {
         "[desktop] shared file change did not finish cleanly",
         testCase.outcome,
       );
+      // An edit that did not finish is not pushed.
+      expect(test.shareViewEdited).not.toHaveBeenCalled();
     }
   });
 

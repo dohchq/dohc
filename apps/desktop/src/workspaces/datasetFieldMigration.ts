@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants, DatabaseSync } from "node:sqlite";
-import type { DatasetDefinition, DatasetField } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetSchema } from "./datasetGenerator";
 
 const quote = (name: string) => `"${name}"`;
@@ -52,10 +52,10 @@ function generatedSchema(actual: string, definition: DatasetDefinition): boolean
   try { return inspect(actual) === inspect(generateDatasetSchema(definition)); } catch { return false; }
 }
 
-export function generateFieldMigration(input: { previous: DatasetDefinition; next: DatasetDefinition; schemaSql: string; tableId: string; field: DatasetField }) {
+export function generateFieldMigration(input: { previous: DatasetDefinition; next: DatasetDefinition; schemaSql: string; tableId: string; field: DatasetColumnField }) {
   if (!generatedSchema(input.schemaSql, input.previous)) throw new Error("This field uses custom SQL constraints. Edit the schema source, then choose Review source change.");
   const table = input.next.tables.find(table => table.tableId === input.tableId)!;
-  const next = table.fields.find(field => field.fieldId === input.field.fieldId)!;
+  const next = datasetColumnFields(table).find(field => field.fieldId === input.field.fieldId)!;
   const field = input.field, sql: string[] = [], name = quote(field.sqlColumn), tableName = quote(table.sqlName);
   const invalid: string[] = [];
   if (next.required) invalid.push(`${name} IS NULL`);
@@ -74,7 +74,7 @@ export function generateFieldMigration(input: { previous: DatasetDefinition; nex
   const triggerStart = schemaSql.indexOf("CREATE TRIGGER ");
   sql.push(triggerStart < 0 ? schemaSql : schemaSql.slice(0, triggerStart));
   for (const {table: old,copy} of copies) {
-    const columns = [...old.fields.map(field => field.sqlColumn), "_record_version"];
+    const columns = [...datasetColumnFields(old).map(field => field.sqlColumn), "_record_version"];
     const expressions = columns.map(column => old.tableId === table.tableId && column === field.sqlColumn && field.type !== next.type
       ? `${next.type === "number" ? "dohc_migration_number" : "dohc_migration_number_text"}(${quote(column)})` : quote(column));
     sql.push(`INSERT INTO ${quote(old.sqlName)} (${columns.map(quote).join(",")}) SELECT ${expressions.join(",")} FROM ${quote(copy)};`, `DROP TABLE ${quote(copy)};`);

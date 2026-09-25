@@ -34,6 +34,9 @@ function typedField(draft: DataDraft): TransactionalFieldDraft {
 export interface NewCollectionDialogProps {
   workspaceId: string;
   initialFolder?: string;
+  // A share view makes document Collections only: a data Collection lives in
+  // the owner's workspace engine, which a share view cannot create in.
+  documentsOnly?: boolean;
   onClose(): void;
   onCreated(collection: CollectionRef): void;
   onError(fallback: string, error: unknown, retry: (() => void) | null): void;
@@ -44,7 +47,7 @@ export function NewCollectionDialog(props: NewCollectionDialogProps) {
 }
 function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
   const [name, setName] = useState(props.initialFolder ? `${props.initialFolder}/` : "");
-  const [kind, setKind] = useState<"transactional" | "document">("transactional");
+  const [kind, setKind] = useState<"transactional" | "document">(props.documentsOnly ? "document" : "transactional");
   const [drafts, setDrafts] = useState<DataDraft[]>([newDataDraft("Name")]);
   const [documentDrafts, setDocumentDrafts] = useState<FieldDraft[]>([emptyFieldDraft("Name")]);
   const [relationTargets, setRelationTargets] = useState<string[]>([]);
@@ -115,12 +118,12 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
       <h2 className="m-0 shrink-0 border-b border-line px-5 py-4 text-sm font-semibold text-ink">New collection</h2>
       <div className="min-h-0 overflow-y-auto min-[900px]:grid min-[900px]:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] min-[900px]:overflow-hidden">
       <div className="flex min-w-0 flex-col gap-4 p-5 min-[900px]:overflow-y-auto">
-      <fieldset disabled={pending} className="m-0 grid grid-cols-2 gap-3 border-0 p-0"><legend className="sr-only">Record type</legend>
+      {props.documentsOnly ? null : <fieldset disabled={pending} className="m-0 grid grid-cols-2 gap-3 border-0 p-0"><legend className="sr-only">Record type</legend>
         {(["transactional", "document"] as const).map(option => <label key={option} className={`flex cursor-pointer flex-col gap-2 rounded-lg border p-2.5 ${kind === option ? "border-accent bg-bg" : "border-line"}`}>
           <CollectionKindShape documents={option === "document"} />
           <span className="flex items-center gap-2 text-[13px] text-ink"><input type="radio" name="collection-kind" checked={kind === option} onChange={() => { setKind(option); setError(null); }} />{option === "document" ? "Documents" : "Data"}</span>
         </label>)}
-      </fieldset>
+      </fieldset>}
       <input ref={inputRef} spellCheck={false} aria-label="Collection name" placeholder="Collection name" value={name} disabled={pending} className={`${inputClass} font-mono`} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void create(); }} />
       <SectionLabel>Fields</SectionLabel>
       {(kind === "document" ? documentDrafts : drafts).map((draft, index) => <div key={index} className="flex items-start gap-2 border-b border-line pb-4">

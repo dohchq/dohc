@@ -47,3 +47,26 @@ it("refuses a wrong server, another dataset receipt, and credentials changed in 
   f.relay.mockImplementationOnce(async () => { f.switchCredentials(); return receipt; });
   await expect(f.target.importRecovery(f.transfer)).rejects.toThrow(/session changed/);
 });
+
+it("resumes an installed receipt by posting the same transfer before confirming its claim", async () => {
+  const f = fixture();
+  const { targetCursor: _target, ...installed } = receipt;
+  f.relay.mockResolvedValueOnce(installed);
+  expect(await f.target.importRecovery(f.transfer)).toEqual(receipt);
+  expect(f.relay.mock.calls.map(call => call[2].method)).toEqual(["GET", "POST"]);
+});
+
+it("does not resume an installed receipt for different archive bytes", async () => {
+  const f = fixture();
+  const { targetCursor: _target, ...installed } = receipt;
+  f.relay.mockResolvedValueOnce({ ...installed, manifestSha256: "e".repeat(64) });
+  await expect(f.target.importRecovery(f.transfer)).rejects.toThrow(/another transfer/);
+  expect(f.relay.mock.calls.map(call => call[2].method)).toEqual(["GET"]);
+});
+
+it("does not report an installed receipt as a completed transfer after a lost response", async () => {
+  const f = fixture();
+  const { targetCursor: _target, ...installed } = receipt;
+  f.relay.mockResolvedValueOnce(null).mockRejectedValueOnce(Error("response lost")).mockResolvedValueOnce(installed);
+  await expect(f.target.importRecovery(f.transfer)).rejects.toThrow("response lost");
+});
