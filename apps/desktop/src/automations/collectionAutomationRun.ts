@@ -251,11 +251,13 @@ async function plan(
   const stop = (outcome: CollectionAutomationRunOutcome) => ({ kind: "stop" as const, outcome });
   const read = await dependencies.withReads(async (reads) => {
     let record: RunRecord | null = null;
-    if (claim.change.kind !== "removed") {
+    // A claim with no record (a message or a schedule) reads none.
+    const recordId = claim.recordId;
+    if (claim.change.kind !== "removed" && recordId !== null) {
       try {
         const result = await reads.getCollectionRecord({
           collectionPath: claim.collectionPath,
-          recordId: claim.recordId,
+          recordId,
           historyLimit: 1,
         });
         record = runRecordOf(result.record);
@@ -430,7 +432,7 @@ async function applyEffect(
     // The record's id comes from the claim and step, so an earlier attempt's
     // record is found again instead of added twice. When the engine gave the
     // file another id, the one this run recorded is the one to find.
-    const known = run.created.findLast((entry) => entry.ordinal === ordinal);
+    const known = [...run.created].reverse().find((entry) => entry.ordinal === ordinal);
     const created = await dependencies.withRecordWrites(signal, (edit) =>
       createCollectionRecord(edit, {
         collectionPath: effect.collectionPath,
