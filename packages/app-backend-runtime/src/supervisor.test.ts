@@ -189,7 +189,27 @@ it("rejects corrupted checkpoint ranges before starting a worker",async()=>{
   const f=await fixture({launch:launcher((_command,controls)=>{launches++;controls.deliver();}),
     transform:journal=>({...journal,exportBlob(input){const bytes=journal.exportBlob(input);bytes[bytes.length-1]^=1;return bytes;}}),
   });
-  await expect(f.invoke({}, {readOnly:true})).rejects.toThrow('checkpoint is invalid');expect(launches).toBe(0);
+  await expect(f.invoke({}, {readOnly:true})).rejects.toMatchObject({code:"reopen_failed",retryAfterMs:5_000,cause:{message:"Dataset checkpoint is invalid."}});
+  expect(launches).toBe(0);
+  // A checkpoint that fails its check earns a wait like a worker that fails.
+  await expect(f.invoke({}, {readOnly:true})).rejects.toMatchObject({code:"dataset_reopen_wait"});
+});
+
+it("starts no wait when a replay fails because the caller lost access",async()=>{
+  const f=await fixture();
+  await f.invoke({id:"one",value:"saved"});
+  await f.supervisor.close();
+  let revoke=true;
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="applyBatch"&&revoke){revoke=false;f.db.prepare("UPDATE grants SET allowed=0").run();}
+    controls.deliver();
+  });
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toThrow("denied");
+  f.db.prepare("UPDATE grants SET allowed=1").run();
+  expect((await supervisor.invoke(read)).result).toEqual([{id:"one",value:"saved"}]);
 });
 
 it("preserves a revoked migration stage for authorized owner cleanup",async()=>{
@@ -412,7 +432,8 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,replayCacheMs:0});
     try {
       expect((await supervisor.invoke(read)).result).toEqual(swapped);
-      if(round===1) await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(3),{timeout:30_000});
+      // The request returns only once the replay's cache is installed.
+      if(round===1) expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(3);
     } finally {await supervisor.close();}
   }
   expect(steps).toContain("rebuilding the dataset from the replay copy");
@@ -483,6 +504,25 @@ it("waits to reopen when the worker stops during a replay without saying why",as
   await expect(read()).rejects.toMatchObject({code:"worker_stopped",retryAfterMs:5_000});
   await expect(read()).rejects.toMatchObject({code:"dataset_reopen_wait"});
   expect(state.replayed).toEqual([1]);
+});
+
+it.each(["quota","seal"] as const)("waits to reopen when a costly replay's cache fails at its %s",async(stage)=>{
+  const replayed:number[]=[];
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+    controls.deliver();
+  });
+  const f=await fixture();
+  await f.invoke({id:"one",value:"saved"});
+  await f.supervisor.close();
+  const journal=stage==="seal" ? {...f.journal,async sealMaterializationCheckpoint():Promise<never>{throw new Error("disk full");}} : f.journal;
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,"workers"),runtime:{launch},replayCacheMs:0,onMaintenanceError(){},
+    maintenanceStorage:{authorize(){},account(){if(stage==="quota")throw new Error("quota full");}}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"replay_not_saved",retryAfterMs:5_000});
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:"dataset_reopen_wait"});
+  expect(replayed).toEqual([1]);
 });
 
 it("waits to reopen when a costly replay cannot be saved",async()=>{

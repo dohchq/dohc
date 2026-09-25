@@ -113,8 +113,8 @@ export class DatasetReopenWaitError extends Error {
     this.name = "DatasetReopenWaitError";
   }
 }
-// A worker that ran out of CPU or time, stopped, or could not save its replay.
-const WORKER_FAILURES = new Set(["worker_budget", "worker_stalled", "worker_deadline", "worker_stopped", "replay_not_saved"]);
+// A worker that ran out of CPU or time, stopped, could not save its replay, or could not be reopened.
+const WORKER_FAILURES = new Set(["worker_budget", "worker_stalled", "worker_deadline", "worker_stopped", "replay_not_saved", "reopen_failed"]);
 /**
  * A dataset worker failure the caller can retry. `retryAfterMs` is set when the failure made the dataset wait before it
  * reopens. Public package entrypoints can contain separate bundled copies of the error class.
@@ -157,16 +157,20 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const maintenance = new Map<string,{cancel:AbortController;done:Promise<void>}>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
-  // A reopen that ran out of time or CPU would repeat the same work, so each
-  // such failure in a row doubles the wait before the next reopen. The count
-  // starts over once the longest wait has passed since the last wait ended.
+  // A failed reopen or replay would repeat the same work, so each such failure
+  // in a row doubles the wait before the next reopen. The count starts over
+  // once the longest wait has passed since the last wait ended.
   const reopenWaits = new Map<string, { failures: number; untilMs: number }>();
-  function noteReopenFailure(scope: DatasetScope, error: unknown): void {
-    if (!reopenWaitCapMs || !(error instanceof PersistentRuntimeError) || !WORKER_FAILURES.has(error.code)) return;
+  function reopenFailure(scope: DatasetScope, error: unknown): unknown {
+    if (!reopenWaitCapMs) return error;
     const key = JSON.stringify(scope), previous = reopenWaits.get(key), at = now();
     const failures = previous && at - previous.untilMs < reopenWaitCapMs ? previous.failures + 1 : 1;
-    error.retryAfterMs = Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs);
-    reopenWaits.set(key, { failures, untilMs: at + error.retryAfterMs });
+    // A storage or validation error can name host paths, so callers get a plain one.
+    const failure = error instanceof PersistentRuntimeError && WORKER_FAILURES.has(error.code) ? error
+      : Object.assign(new PersistentRuntimeError("reopen_failed", "The dataset could not be reopened. Try again."), { cause: error });
+    failure.retryAfterMs = Math.min(REOPEN_WAIT_MS * 2 ** (failures - 1), reopenWaitCapMs);
+    reopenWaits.set(key, { failures, untilMs: at + failure.retryAfterMs });
+    return failure;
   }
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
@@ -181,10 +185,13 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function maintainMaterialization(lane:Lane,afterCostlyReplay=false):Promise<void> {
     const storage=options.maintenanceStorage,worker=lane.worker;
     const key=JSON.stringify(lane.scope);
-    if(!storage||!worker||closed||maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key))return;
+    if(!storage||!worker||closed)return;
+    const notSaved=(cause?:unknown)=>Object.assign(new PersistentRuntimeError("replay_not_saved","The dataset could not save its replay. Try again."),{cause});
+    if(afterCostlyReplay)await maintenance.get(key)?.done;
+    if(maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key)){if(afterCostlyReplay)throw notSaved();return;}
     const expected={...worker.cursor},cancel=new AbortController();
     const reservations:CheckpointStage[]=[];
-    let path:string|undefined,directory:string|undefined,captured=false;
+    let path:string|undefined,directory:string|undefined,captured=false,failure:unknown;
     let releaseCapture!:()=>void;
     const captureReady=new Promise<void>(resolve=>releaseCapture=resolve);
     const authorize=()=>{
@@ -236,6 +243,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         reservations.pop();
       } finally {await file.close();}
     } catch(error) {
+      failure=error;
       if(!cancel.signal.aborted&&!closed)reportMaintenanceError(lane.scope,error);
       if(path&&!captured)try{await stopWorker(lane);}catch(stopError){reportMaintenanceError(lane.scope,stopError);}
     }
@@ -252,7 +260,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     }
     });
     maintenance.set(key,{cancel,done});
-    await captureReady;
+    // Ordinary maintenance lets foreground work continue once its snapshot is
+    // captured. A costly replay continues only once its cache is installed.
+    if(!afterCostlyReplay){await captureReady;return;}
+    await done;
+    if(failure!==undefined)throw notSaved(failure);
   }
   async function cancelMaintenance(scope:DatasetScope):Promise<void> {
     const task=maintenance.get(JSON.stringify(scope));
@@ -337,7 +349,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     if(performance.now()>=lane.admission!.deadline)throw new Error("Dataset operation expired while waiting for a worker.");
     if(!head(input).active)throw new Error("Dataset authority was transferred.");
   }
-  async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
+  async function openWorker(lane: Lane, input: DatasetAccess, reopen: { admitted: boolean }): Promise<Worker> {
     const wait=reopenWaits.get(JSON.stringify(lane.scope));
     if(wait&&now()<wait.untilMs)throw new DatasetReopenWaitError(wait.untilMs-now());
     let waiting=false;
@@ -365,7 +377,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       standing(input);lane.lifecycle.signal.throwIfAborted();
       if(!head(input).active)throw new Error("Dataset authority was transferred.");
       // Reserve before asynchronous opening so different datasets cannot exceed the pool.
-      workerCount++;
+      workerCount++;reopen.admitted=true;
     } finally {
       if(waiting){capacityWaiters--;capacityWaitBytes-=lane.admission!.bytes;}
     }
@@ -429,14 +441,27 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const current = head(input);
     if (!current.active) throw new Error("Dataset authority was transferred.");
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
+    // Waiting for a worker slot is admission, not reopening, so it earns no wait.
+    const reopen = { admitted: Boolean(lane.worker) };
     try {
-      const worker = await reopenAndReplay(lane, input, current.cursor);
+      const worker = await reopenAndReplay(lane, input, current.cursor, reopen);
       reopenWaits.delete(JSON.stringify(lane.scope));
       return worker;
-    } catch (error) { noteReopenFailure(lane.scope, error); throw error; }
+    } catch (error) {
+      if (!reopen.admitted || !reopenFailed(lane, input, current.cursor)) throw error;
+      throw reopenFailure(lane.scope, error);
+    }
   }
-  async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor): Promise<Worker> {
-    const worker = lane.worker ?? await openWorker(lane, input);
+  // Whether a reopen or replay failed on its own work, such as its worker,
+  // storage, or checkpoint, rather than because the caller lost access, the
+  // request was cancelled, or the dataset changed under it.
+  function reopenFailed(lane: Lane, input: DatasetAccess, target: DatasetCursor): boolean {
+    if (lane.lifecycle.signal.aborted) return false;
+    try { standing(input); const current = head(input); return current.active && sameCursor(current.cursor, target); }
+    catch { return false; }
+  }
+  async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor, reopen: { admitted: boolean }): Promise<Worker> {
+    const worker = lane.worker ?? await openWorker(lane, input, reopen);
     if (worker.cursor.revision > target.revision) throw new Error("Dataset materialization is ahead of its journal.");
     const replayStart = performance.now();
     let replayed = false;
@@ -456,7 +481,6 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     // later reopen repeats it.
     if (replayed && performance.now() - replayStart >= replayCacheMs) {
       await maintainMaterialization(lane, true);
-      if (lane.worker !== worker) throw new PersistentRuntimeError("replay_not_saved", "The dataset worker stopped while saving its replay. Try again.");
     }
     return worker;
   }

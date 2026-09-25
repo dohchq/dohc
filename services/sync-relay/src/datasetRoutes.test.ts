@@ -121,6 +121,12 @@ it("tells callers when to retry a dataset that waits to reopen", async () => {
   expect(failed.status).toBe(503);
   expect(failed.headers.get("retry-after")).toBe("5");
   expect(await failed.json()).toEqual({code: "worker_budget", message});
+  // A reopen that failed on storage or a checkpoint says only that, with its wait.
+  f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("reopen_failed", "The dataset could not be reopened. Try again."), {retryAfterMs: 10_000}); };
+  const reopen = await f.invoke();
+  expect(reopen.status).toBe(503);
+  expect(reopen.headers.get("retry-after")).toBe("10");
+  expect(await reopen.json()).toEqual({code: "reopen_failed", message: "The dataset could not be reopened. Try again."});
   // A failed operation starts no wait.
   f.host.invoke = async () => { throw new PersistentRuntimeError("worker_stalled", "The dataset worker made no progress for 30 s while running the app operation. Try again."); };
   const stalled = await f.invoke();

@@ -20,6 +20,11 @@ export { PersistentRuntimeError } from "./persistent-protocol.js";
 // worker (RuntimeLimits.cpuBudgetMs), so a slow disk never counts against it.
 export const WORKER_SILENCE_MS=30_000;
 export const WORKER_COMMAND_CAP_MS=600_000;
+// A dataset check such as the integrity check reports nothing until it ends,
+// so it may stay quiet longer than other steps, up to this bound. The slowest
+// measured check, the integrity check of a 128 MiB dataset with six indexes on
+// random keys, took 87 s on a loaded desktop machine; this is twice that.
+export const CHECK_SILENCE_CAP_MS=180_000;
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string; silenceMs?:number; commandCapMs?:number }
 const nodeLauncher:AppRuntimeLauncher=options=>{
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
@@ -110,10 +115,10 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
         const progress=message as PersistentProgress;
         if(active && progress && progress.id===active.id && typeof progress.progress==="string" && progress.progress.length<=128) {
           active.step=progress.progress;active.progress++;
-          // Such a step's own CPU budget bounds it. Waiting on the disk can
-          // double its wall time, and the command cap still applies.
+          // Such a step's own CPU budget bounds its work. Waiting on the disk
+          // can double its wall time, up to the bound for a quiet check.
           const budget=progress.cpuBudgetMs;
-          watchSilence(active,Number.isSafeInteger(budget) && budget!>0 ? Math.min(silenceMs+2*budget!,commandCapMs) : silenceMs);
+          watchSilence(active,Number.isSafeInteger(budget) && budget!>0 ? Math.max(silenceMs,Math.min(silenceMs+2*budget!,CHECK_SILENCE_CAP_MS,commandCapMs)) : silenceMs);
           return;
         }
         const reply=message as PersistentReply;

@@ -11,6 +11,7 @@ import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
+import { armBudget, BUDGET_STATE_SLOTS, CONDEMNED, disarmBudget, watchBudget } from "./budget-watch.js";
 import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
 import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
@@ -57,8 +58,8 @@ function writeMarker(next:DatasetCursor):void {
 
 // App code runs on this thread and can block it inside SQLite, where no timer
 // on this thread runs. A second thread watches the process's CPU time while a
-// budgeted step runs. Past the budget it leaves a marker for the host and ends
-// the worker, because node:sqlite cannot interrupt a statement. Waiting on the
+// budgeted step runs. Past the budget it ends the worker, because node:sqlite
+// cannot interrupt a statement, and leaves a marker that tells the host why. Waiting on the
 // disk uses no CPU, so a slow disk never counts against a budget.
 //
 // The app's code (its schema text and SQL, an operation, a migration, and the
@@ -67,28 +68,13 @@ function writeMarker(next:DatasetCursor):void {
 // dataset check (a host step over every row, whose cost per row the app's
 // schema sets) gets its own budget, scaled by the data it reads.
 //
-// Shared with the watch thread: generation, armed (0 or 1), the budget's kind,
-// the process CPU time at which the step's charge would be zero, and the
-// budget, in microseconds. The watch reads the generation first and again
-// before it ends the worker, so a step that ended or started while it measured
-// is never charged.
-const budgetState=new BigInt64Array(new SharedArrayBuffer(5*8));
-const [GENERATION,ARMED,KIND,ORIGIN,BUDGET]=[0,1,2,3,4];
+const budgetState=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8));
 const [APP_CODE,DATASET_CHECK]=[1n,2n];
 const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
-const {writeFileSync}=require("node:fs");
-const state=new BigInt64Array(workerData.state);
-setInterval(()=>{
-  const generation=Atomics.load(state,${GENERATION});
-  if(Atomics.load(state,${ARMED})!==1n) return;
-  const used=process.cpuUsage();
-  if(BigInt(used.user+used.system)-Atomics.load(state,${ORIGIN})<=Atomics.load(state,${BUDGET})) return;
-  const kind=Atomics.load(state,${KIND})===${APP_CODE}n ? "app" : "checks";
-  const budgetMs=Number(Atomics.load(state,${BUDGET})/1000n);
-  if(Atomics.load(state,${ARMED})!==1n || Atomics.load(state,${GENERATION})!==generation) return;
-  try {writeFileSync(workerData.marker,kind+" "+budgetMs);} finally {process.kill(process.pid,"SIGKILL");}
-},50);`;
+const {writeFile}=require("node:fs/promises");
+(${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
+  reason=>writeFile(workerData.marker,reason),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
 process.on("exit",()=>{exiting=true;});
@@ -109,14 +95,10 @@ function budgeted<T>(kind:bigint, budget:bigint, run:()=>T):T {
   // A dataset check may report nothing until it ends, so every report during it names its budget.
   if(kind===DATASET_CHECK) {checkBudgetMs=Number(budget/1000n);progress(step);}
   const start=cpuMicros();
-  Atomics.add(budgetState,GENERATION,1n);
-  Atomics.store(budgetState,KIND,kind);
-  Atomics.store(budgetState,ORIGIN,start-(kind===APP_CODE ? appCharged : 0n));
-  Atomics.store(budgetState,BUDGET,budget);
-  Atomics.store(budgetState,ARMED,1n);
+  const section=armBudget(budgetState,kind,start-(kind===APP_CODE ? appCharged : 0n),budget);
   const disarm=()=>{
-    Atomics.store(budgetState,ARMED,0n);
-    Atomics.add(budgetState,GENERATION,1n);
+    // The watch condemned this step and is ending the worker. Its result must never reach the host.
+    if(!disarmBudget(budgetState,section)) for(;;) Atomics.wait(budgetState,0,CONDEMNED);
     if(kind===APP_CODE) appCharged+=cpuMicros()-start;
     else {checkBudgetMs=undefined;progress(step);}
   };
