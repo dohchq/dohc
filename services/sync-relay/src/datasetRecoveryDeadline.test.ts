@@ -92,4 +92,3 @@ it.each(["caller", "storage"])("cancels an upload immediately when its %s discon
   expect(cancel).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });
-
