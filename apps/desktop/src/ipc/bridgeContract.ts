@@ -21,6 +21,7 @@ import type {
   CollectionAutomationsFile,
   CollectionAutomationStop,
   CollectionFieldMark,
+  CollectionAutomationTarget,
   CollectionAutomationUndo,
 } from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
@@ -5306,6 +5307,29 @@ export const RetryCollectionAutomationPayload = z.object({
 export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
 export type RetryCollectionAutomationResult = CollectionAutomationRetry;
 
+// The builder's Collection picker: every Collection, with why a step in
+// this Collection's automations cannot reach it, or null.
+export const ListAutomationTargetsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
+export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
+
+// The builder checks a draft the way saving would: what the file contract
+// refuses, and each formula's syntax error or null. Formulas are one
+// expression each, as the file stores them; only their syntax is checked.
+export const CheckCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
+  formulas: z.array(z.string().max(2_000)).max(500),
+});
+export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
+export type CheckCollectionAutomationResult = {
+  diagnostics: AutomationDiagnostic[];
+  formulaProblems: Array<string | null>;
+};
+
 // Undo for a finished run, as the person who clicked it.
 export const UndoCollectionAutomationRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6694,6 +6718,8 @@ export interface DohcDesktopBridge
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
   retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
   undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
+  listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
+  checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;

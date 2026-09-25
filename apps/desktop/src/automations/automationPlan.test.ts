@@ -7,6 +7,7 @@ import {
   definitionHash,
   evaluationRequest,
   fieldWritesOf,
+  expressionProblem,
   findQueryOf,
   localIsoTime,
   parseCollectionAutomationId,
@@ -303,5 +304,14 @@ describe("plans", () => {
     expect(request.scope.bindings).toEqual({ __dohc_before: { Status: "Doing", Count: 2, id: "rec_task" } });
     expect(planRun(inputs(definition), request, [{ ok: true, value: false }, { ok: true, value: true }], key).kind).toBe("plan");
     expect(planRun(inputs(definition), request, [{ ok: true, value: true }, { ok: true, value: true }], key)).toEqual({ kind: "skip" });
+  });
+});
+
+describe("a formula's syntax, for the builder", () => {
+  it("parses without running, so a loop costs nothing, and names what is wrong", () => {
+    expect(expressionProblem('record.Status == "Done"')).toBeNull();
+    expect(expressionProblem("(() => { while (true) {} })()")).toBeNull();
+    expect(expressionProblem("record.Status ==")).toBe("Unexpected token.");
+    expect(expressionProblem("1 2")).toBe("Unexpected text at character 3.");
   });
 });

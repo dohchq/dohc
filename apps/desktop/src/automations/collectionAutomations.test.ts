@@ -460,6 +460,16 @@ describe("Collection automations", () => {
     expect(run!.writes).toContainEqual({ kind: "created", recordId: added.id, path: added.path });
   });
 
+  it("lists every Collection a step can add records to, with why one is out of reach", async () => {
+    const w = await world({ collections: ["Tasks", "Budget"], automations: {} });
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks"])] });
+    await w.executor.open();
+    await expect(w.executor.targetsFor("Tasks")).resolves.toEqual([
+      { path: "Budget", name: "Budget", stopped: "ana@dohc.test cannot edit Budget." },
+      { path: "Tasks", name: "Tasks", stopped: null },
+    ]);
+  });
+
   it("fails a run whose step reaches past what every editor can reach, before anything is written", async () => {
     const w = await world({ collections: ["Tasks", "Budget"], automations: { Tasks: [
       "  - id: spend",
