@@ -204,7 +204,7 @@ impl DeferredRelayTransport {
         if let Some(index) = state
             .completed
             .iter()
-            .position(|(completed, _)| completed == &request)
+            .position(|(completed, _)| same_io_request(completed, &request))
         {
             let release = matches!(
                 state.completed[index].0,
@@ -215,7 +215,6 @@ impl DeferredRelayTransport {
                     | RelayIoRequest::UploadKeyEnvelope(_)
                     | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
-                    | RelayIoRequest::ShareBlobUpload(_)
                     | RelayIoRequest::ShareProposalSubmit(_)
             ) || matches!(
                 &state.completed[index].1,
@@ -269,6 +268,17 @@ impl DeferredRelayTransport {
         if let Ok(RelayIoResponse::ShareLogPush(response)) = &result {
             state.share_log_pushed = state.share_log_pushed.saturating_add(response.inserted);
         }
+        // A completed upload stays for every rerun of its operation, so it
+        // keeps only what names it: the content is gone once it is sent.
+        let request = match request {
+            RelayIoRequest::ShareBlobUpload(upload) => {
+                RelayIoRequest::ShareBlobUpload(ShareBlobUploadRequest {
+                    bytes: Vec::new(),
+                    ..upload
+                })
+            }
+            other => other,
+        };
         state.completed.push((request, result));
     }
 
@@ -286,6 +296,18 @@ impl DeferredRelayTransport {
             }
             _ => {}
         }
+    }
+}
+
+/// Whether a completed request answers `request`. A share upload is named by
+/// its share and content hash, because its completed copy no longer holds the
+/// content.
+fn same_io_request(completed: &RelayIoRequest, request: &RelayIoRequest) -> bool {
+    match (completed, request) {
+        (RelayIoRequest::ShareBlobUpload(done), RelayIoRequest::ShareBlobUpload(asked)) => {
+            done.share_id == asked.share_id && done.sha256 == asked.sha256
+        }
+        _ => completed == request,
     }
 }
 
@@ -415,6 +437,56 @@ mod relay_bench;
 #[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    /// An operation reruns from its start after each relay call. Send changes
+    /// uploads each changed file's content before it submits, so a completed
+    /// upload must answer every later rerun. When it was consumed on its first
+    /// rerun, each extra upload doubled the reruns: four uploads took 16.
+    #[test]
+    fn an_operation_with_several_uploads_reruns_once_per_relay_call() {
+        let transport = DeferredRelayTransport::default();
+        let uploads: Vec<ShareBlobUploadRequest> = ['a', 'b', 'c', 'd']
+            .into_iter()
+            .map(|sha| ShareBlobUploadRequest {
+                share_id: "share".to_owned(),
+                sha256: sha.to_string().repeat(64),
+                bytes: vec![1, 2, 3],
+            })
+            .collect();
+        let operation = || -> Result<(), RelayError> {
+            for upload in &uploads {
+                transport.share_blob_upload(upload.clone())?;
+            }
+            Ok(())
+        };
+        let mut runs = 0;
+        loop {
+            runs += 1;
+            assert!(runs <= uploads.len() + 1, "an upload was sent again");
+            match operation() {
+                Ok(()) => break,
+                Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING => {
+                    let request = transport.take_pending().expect("pending upload");
+                    transport.complete(request, Ok(RelayIoResponse::ShareBlobUpload));
+                }
+                Err(error) => panic!("unexpected relay error: {error:?}"),
+            }
+        }
+        assert_eq!(runs, uploads.len() + 1);
+        assert!(
+            transport
+                .state
+                .lock()
+                .expect("state")
+                .completed
+                .iter()
+                .all(|(request, _)| matches!(
+                    request,
+                    RelayIoRequest::ShareBlobUpload(upload) if upload.bytes.is_empty()
+                )),
+            "a kept upload holds no content",
+        );
+    }
 
     #[test]
     fn completed_blob_batch_transfers_body_allocations_without_copying() {
