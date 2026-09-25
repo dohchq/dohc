@@ -2,7 +2,7 @@ import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { RelayShareReceivedRow, ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -18,6 +18,13 @@ const BUSY_COPY =
   "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
+
+// An edit share of the main version opens for live editing, which a
+// read-only shared-with-me folder cannot give.
+export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
+  return share.access === "edit" && share.selector !== null &&
+    (share.selector.versionId === null || share.selector.versionId === "main");
+}
 
 type ReceivedShareState =
   | { kind: "idle" }
@@ -88,8 +95,7 @@ export function ShareHandoffSurface(props: {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
           result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: result.share.access === "edit" && result.share.selector !== null &&
-              (result.share.selector.versionId === null || result.share.selector.versionId === "main") }
+            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: opensForLiveEditing(result.share) }
             : { kind: "missing", shareId },
         );
       })

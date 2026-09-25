@@ -787,6 +787,8 @@ const credentialSessionCache =
     if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
       .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
+    // The notice list shows the signed-in account's notices.
+    notifyNoticesChanged();
     if (snapshot.credentials) void noticeStore().sync();
   });
 async function refreshCredentialCache(): Promise<void> {
@@ -846,16 +848,17 @@ async function noticeSession(): Promise<NoticeSession | null> {
     },
   };
 }
+function notifyNoticesChanged(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send(CHANNELS.noticesChanged);
+  }
+}
 function noticeStore(): NoticeStore {
   cachedNoticeStore ??= createNoticeStore({
     directory: join(stateDir(), "notices"),
     session: noticeSession,
     installId: localReactorFallbackId,
-    onChanged: () => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        window.webContents.send(CHANNELS.noticesChanged);
-      }
-    },
+    onChanged: notifyNoticesChanged,
   });
   return cachedNoticeStore;
 }
@@ -4893,9 +4896,8 @@ function registerIpcHandlers(): void {
   }));
 
   registerOperations(operationBoundary, noticeOperations, {
-    listNotices: async () => ({ notices: await noticeStore().list() }),
-    readNotice: (input) => noticeStore().mark(input, "read"),
-    dismissNotice: (input) => noticeStore().mark(input, "dismissed"),
+    listNotices: () => noticeStore().list(),
+    markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
   });
 
   workspaceEngineIpc.registerYDoc();

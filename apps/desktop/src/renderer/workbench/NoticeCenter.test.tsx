@@ -3,12 +3,13 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  NoticeRow,
   SyncStatusResult,
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
-import { NoticeCenter } from "./NoticeCenter";
+import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 
 // Captures the renderer-side update listener exactly as the preload would
@@ -80,6 +81,14 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
       {...(props.onResetAutomationHolds ? { onResetAutomationHolds: props.onResetAutomationHolds } : {})}
       {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
+      {...(props.sentNotices ? { sentNotices: props.sentNotices } : {})}
+      {...(props.sentNoticeToast ? { sentNoticeToast: props.sentNoticeToast } : {})}
+      {...(props.onHideSentNoticeToast ? { onHideSentNoticeToast: props.onHideSentNoticeToast } : {})}
+      {...(props.onOpenSentNotice ? { onOpenSentNotice: props.onOpenSentNotice } : {})}
+      {...(props.sentNoticesLoading ? { sentNoticesLoading: props.sentNoticesLoading } : {})}
+      {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
+      {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
+      {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
     />
   );
 }
@@ -1370,5 +1379,401 @@ describe("notice center", () => {
 
     await userEvent.click(document.body);
     expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+});
+
+function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: string | null = null): SentNotice {
+  return {
+    notice: {
+      store: "account",
+      noticeId,
+      kind: "mention",
+      workspaceId: "ws-status-test",
+      recipientShareId: null,
+      senderKind: "person",
+      senderLabel: "Ana",
+      title: `Ana mentioned you in Trip ${noticeId}`,
+      body: "Can you check day 2?",
+      target: { path: "Trip/day-2.md" },
+      createdAtMs: 1_700_000_000_000,
+      readAtMs: null,
+      ...overrides,
+    },
+    folder,
+    openable: true,
+  };
+}
+
+describe("notices sent to you", () => {
+  it("puts this computer's rows first and sent rows after, each under one heading", async () => {
+    renderNotices({
+      agentActive: true,
+      sentNotices: [sentRow("b"), sentRow("a", { readAtMs: 1 })],
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    const headings = within(screen.getByTestId("notice-center")).getAllByRole("heading");
+    expect(headings.map((heading) => heading.textContent)).toEqual(["On this computer", "Sent to you"]);
+    expect(within(screen.getByTestId("notice-group-local")).getByTestId("notice-agent-active")).toBeTruthy();
+    const sent = within(screen.getByTestId("notice-group-sent")).getAllByRole("listitem");
+    expect(sent.map((row) => row.dataset.testid)).toEqual(["sent-notice-b", "sent-notice-a"]);
+  });
+
+  it("counts unread sent rows and this computer's rows in the badge", async () => {
+    renderNotices({
+      agentActive: true,
+      sentNotices: [sentRow("unread"), sentRow("read", { readAtMs: 1 })],
+    });
+    const toggle = screen.getByTestId("notice-center-toggle");
+    expect(toggle.getAttribute("aria-label")).toBe("Notices, 2 unread");
+    expect(toggle.textContent).toBe("2");
+
+    await userEvent.click(toggle);
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("2");
+    expect(screen.getByTestId("sent-notice-unread-unread").textContent).toBe("Unread");
+    expect(screen.queryByTestId("sent-notice-read-unread")).toBeNull();
+  });
+
+  it("names the toggle without a count when nothing is unread", () => {
+    renderNotices({ sentNotices: [sentRow("read", { readAtMs: 1 })] });
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  it("shows each sender's shape and says who sent it", async () => {
+    renderNotices({
+      sentNotices: [
+        sentRow("person"),
+        sentRow("agent", { senderKind: "agent", kind: "agent-run", title: "Your agent finished" }),
+        sentRow("automation", { senderKind: "automation", kind: "automation-notify" }),
+      ],
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const shape = (id: string) =>
+      screen.getByTestId(`sent-notice-${id}`).querySelector("[data-sender-shape]");
+    expect(shape("person")?.getAttribute("class")).toContain("rounded-full");
+    expect(shape("agent")?.getAttribute("class")).toContain("rounded-md");
+    // An automation is the bare lightning mark, as in chat: no box around it.
+    expect(shape("automation")?.getAttribute("class")).toContain("lucide-zap");
+    expect(shape("automation")?.getAttribute("class")).not.toMatch(/rounded|border/);
+    expect(screen.getByTestId("sent-notice-automation").textContent).toContain("From an automation");
+    expect(screen.getByTestId("sent-notice-agent").textContent).toContain("From an agent");
+  });
+
+  it("names the Collection folder of a notice from another workspace", async () => {
+    renderNotices({ sentNotices: [sentRow("elsewhere", {}, "Japan"), sentRow("here")] });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("sent-notice-elsewhere").textContent).toContain("Japan");
+    expect(screen.getByTestId("sent-notice-here").textContent).not.toContain("Japan");
+  });
+
+  it("shows 50 at a time, newest first", async () => {
+    const rows = Array.from({ length: SENT_NOTICE_PAGE * 2 + 20 }, (_, index) =>
+      sentRow(`n${index}`, { readAtMs: 1 }));
+    renderNotices({ sentNotices: rows });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const shown = () => within(screen.getByTestId("notice-group-sent")).getAllByRole("listitem");
+    expect(shown()).toHaveLength(SENT_NOTICE_PAGE);
+    expect(shown()[0]?.dataset.testid).toBe("sent-notice-n0");
+
+    await userEvent.click(screen.getByRole("button", { name: "Show 50 more" }));
+    expect(shown()).toHaveLength(SENT_NOTICE_PAGE * 2);
+    await userEvent.click(screen.getByRole("button", { name: "Show 20 more" }));
+    expect(shown()).toHaveLength(rows.length);
+    expect(screen.queryByTestId("sent-notices-more")).toBeNull();
+
+    // Opening again starts at the newest page.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(shown()).toHaveLength(SENT_NOTICE_PAGE);
+  });
+
+  it("opens a notice and closes the panel", async () => {
+    const onOpenSentNotice = vi.fn(async () => null);
+    renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }));
+    expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("a").notice, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it("says on the row when access ended, and keeps the panel open", async () => {
+    const note = "Your access to this ended. Ask the person who shared it to share it again.";
+    const onOpenSentNotice = vi.fn(async () => note);
+    renderNotices({ sentNotices: [sentRow("ended", { target: null })], onOpenSentNotice });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("sent-notice-ended")).getByRole("button", { name: "Open" }));
+    expect(await within(screen.getByTestId("sent-notice-ended")).findByRole("status")).toHaveProperty("textContent", note);
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+  });
+
+  it("offers no Open for a notice with nowhere to go", async () => {
+    renderNotices({
+      sentNotices: [{ ...sentRow("server", { senderKind: null }), openable: false }],
+      onOpenSentNotice: vi.fn(async () => null),
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(screen.getByTestId("sent-notice-server")).queryByRole("button", { name: "Open" })).toBeNull();
+  });
+
+  it("marks all read from the header while something is unread", async () => {
+    const onReadAllSentNotices = vi.fn();
+    const { rerender } = renderNotices({ sentNotices: [sentRow("a")], onReadAllSentNotices });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+    expect(onReadAllSentNotices).toHaveBeenCalledOnce();
+
+    rerender(noticeElement({ sentNotices: [sentRow("a", { readAtMs: 1 })], onReadAllSentNotices }));
+    expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
+    // The button went, but the keyboard is still in the panel.
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+
+  it("keeps focus in the list when a row's dismiss button takes the row away", async () => {
+    const onDismissSentNotice = vi.fn();
+    const onDismissWorkspaceError = vi.fn();
+    const error = {
+      id: "e1", message: "dohc could not search this workspace.", details: "d", atMs: 1, canRetry: false, seen: true,
+    };
+    const { rerender } = renderNotices({
+      workspaceErrors: [error],
+      onDismissWorkspaceError,
+      sentNotices: [sentRow("a"), sentRow("b")],
+      onDismissSentNotice,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    await userEvent.click(screen.getByTestId("sent-notice-a-dismiss"));
+    expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+
+    rerender(noticeElement({ workspaceErrors: [error], onDismissWorkspaceError, sentNotices: [sentRow("b")], onDismissSentNotice }));
+    await userEvent.click(screen.getByTestId("notice-e1-dismiss"));
+    expect(onDismissWorkspaceError).toHaveBeenCalledWith("e1");
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+
+    rerender(noticeElement({ onDismissWorkspaceError, sentNotices: [sentRow("b")], onDismissSentNotice }));
+    // The last row gives focus back to the panel.
+    await userEvent.click(screen.getByTestId("sent-notice-b-dismiss"));
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+
+  it("shows no All clear before the first list of sent notices answers", async () => {
+    const { rerender } = renderNotices({ sentNotices: [], sentNoticesLoading: true });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+    expect(screen.queryByText("All clear")).toBeNull();
+    rerender(noticeElement({ sentNotices: [] }));
+    expect(screen.getByText("All clear")).toBeTruthy();
+  });
+
+  describe("an Open that has to wait", () => {
+    function waitingOpen() {
+      const answers: Array<ReturnType<typeof deferred<string | null>>> = [];
+      const signals: AbortSignal[] = [];
+      const onOpenSentNotice = vi.fn((_notice: NoticeRow, signal: AbortSignal) => {
+        const answer = deferred<string | null>();
+        answers.push(answer);
+        signals.push(signal);
+        return answer.promise;
+      });
+      return { answers, signals, onOpenSentNotice };
+    }
+
+    it("says it is opening and ignores a second click", async () => {
+      const { answers, onOpenSentNotice } = waitingOpen();
+      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      const open = screen.getByTestId("sent-notice-a-open");
+      expect(open.textContent).toBe("Opening…");
+      expect(open.getAttribute("aria-busy")).toBe("true");
+      await userEvent.click(open);
+      expect(onOpenSentNotice).toHaveBeenCalledOnce();
+
+      await act(async () => answers[0]?.resolve("dohc could not open this share."));
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
+      expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent)
+        .toBe("dohc could not open this share.");
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+    });
+
+    it("does nothing with a late answer after Escape", async () => {
+      const { answers, signals, onOpenSentNotice } = waitingOpen();
+      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      await userEvent.keyboard("{Escape}");
+      expect(signals[0]?.aborted).toBe(true);
+
+      await act(async () => answers[0]?.resolve("Your access to this ended."));
+      expect(screen.queryByTestId("notice-center")).toBeNull();
+    });
+
+    it("stops when another account signs in, and leaves that account's notice free to open", async () => {
+      const { answers, signals, onOpenSentNotice } = waitingOpen();
+      const { rerender } = renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, sentNoticesAccount: "ana" });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Opening…");
+
+      // Ben's list has a notice with the same id.
+      rerender(noticeElement({ sentNotices: [sentRow("a", { title: "Ben's notice" })], onOpenSentNotice, sentNoticesAccount: "ben" }));
+      expect(signals[0]?.aborted).toBe(true);
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      expect(onOpenSentNotice).toHaveBeenCalledTimes(2);
+      expect(signals[1]?.aborted).toBe(false);
+
+      // Ana's late answer puts nothing on Ben's row.
+      await act(async () => answers[0]?.resolve("Your access to this ended."));
+      expect(within(screen.getByTestId("sent-notice-a")).queryByRole("status")).toBeNull();
+    });
+
+    it("stops when its notice is dismissed or another Open starts", async () => {
+      const { signals, onOpenSentNotice } = waitingOpen();
+      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onOpenSentNotice, onDismissSentNotice: vi.fn() });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      await userEvent.click(screen.getByTestId("sent-notice-b-open"));
+      expect(signals.map((signal) => signal.aborted)).toEqual([true, false]);
+      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
+
+      await userEvent.click(screen.getByTestId("sent-notice-b-dismiss"));
+      expect(signals[1]?.aborted).toBe(true);
+    });
+  });
+
+  it("dismisses a sent row", async () => {
+    const onDismissSentNotice = vi.fn();
+    renderNotices({ sentNotices: [sentRow("a")], onDismissSentNotice });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("sent-notice-a-dismiss"));
+    expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
+  });
+
+  it("moves between rows with the arrows, opens with Enter, dismisses with Delete, and closes with Escape", async () => {
+    const onOpenSentNotice = vi.fn(async () => null);
+    const onDismissSentNotice = vi.fn();
+    const onOpenHistory = vi.fn();
+    renderNotices({
+      agentActive: true,
+      onOpenHistory,
+      sentNotices: [sentRow("a"), sentRow("b")],
+      onOpenSentNotice,
+      onDismissSentNotice,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
+
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active"));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+    await userEvent.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+
+    // Delete keeps the keyboard in the list: focus moves on first.
+    await userEvent.keyboard("{Delete}");
+    expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+
+    await userEvent.keyboard("{Enter}");
+    expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("b").notice, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+
+    // This computer's rows answer Enter with their own action.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onOpenHistory).toHaveBeenCalledOnce();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.keyboard("{ArrowDown}{Escape}");
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it("dismisses this computer's rows with Delete too", async () => {
+    const onDismissWorkspaceError = vi.fn();
+    renderNotices({
+      workspaceErrors: [{
+        id: "e1", message: "dohc could not search this workspace.", details: "d", atMs: 1, canRetry: false, seen: true,
+      }],
+      onDismissWorkspaceError,
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.keyboard("{ArrowDown}{Delete}");
+    expect(onDismissWorkspaceError).toHaveBeenCalledWith("e1");
+  });
+
+  it("uses only theme tokens, so both themes follow the palette", async () => {
+    renderNotices({
+      agentActive: true,
+      sentNotices: [sentRow("a"), sentRow("b", { senderKind: "agent", readAtMs: 1 })],
+      sentNoticeToast: sentRow("a"),
+      onHideSentNoticeToast: vi.fn(),
+    });
+    const classes = () =>
+      [...document.querySelectorAll<HTMLElement>("[class]")].map((element) => element.getAttribute("class") ?? "");
+    const rawColor = /(?:^|\s)(?:bg|text|border)-(?:white|black|(?:zinc|gray|slate|neutral|stone|red|blue|green|yellow)-\d+)|#[0-9a-f]{3,8}\b/i;
+    expect(classes().filter((value) => rawColor.test(value))).toEqual([]);
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(classes().filter((value) => rawColor.test(value))).toEqual([]);
+  });
+
+  describe("toast", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("fades after a few seconds and keeps the row", () => {
+      vi.useFakeTimers();
+      const onHideSentNoticeToast = vi.fn();
+      renderNotices({
+        sentNotices: [sentRow("a")],
+        sentNoticeToast: sentRow("a"),
+        onHideSentNoticeToast,
+      });
+      const toast = screen.getByTestId("sent-notice-toast");
+      expect(toast.getAttribute("role")).toBe("status");
+      expect(toast.textContent).toContain("Ana mentioned you in Trip a");
+      act(() => vi.advanceTimersByTime(5_999));
+      expect(onHideSentNoticeToast).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+    });
+
+    it("opens from the toast or closes it", async () => {
+      const onHideSentNoticeToast = vi.fn();
+      const onOpenSentNotice = vi.fn(async () => null);
+      renderNotices({
+        sentNotices: [sentRow("a")],
+        sentNoticeToast: sentRow("a"),
+        onHideSentNoticeToast,
+        onOpenSentNotice,
+      });
+      await userEvent.click(screen.getByTestId("sent-notice-toast-open"));
+      expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("a").notice, expect.any(AbortSignal));
+      expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
+
+      await userEvent.click(within(screen.getByTestId("sent-notice-toast")).getByRole("button", { name: "Close" }));
+      expect(onHideSentNoticeToast).toHaveBeenCalledTimes(2);
+    });
+
+    it("stays out of the way while the panel is open", async () => {
+      renderNotices({
+        sentNotices: [sentRow("a")],
+        sentNoticeToast: sentRow("a"),
+        onHideSentNoticeToast: vi.fn(),
+      });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("sent-notice-toast")).toBeNull();
+    });
   });
 });
