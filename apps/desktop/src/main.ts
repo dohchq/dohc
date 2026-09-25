@@ -971,7 +971,7 @@ function relayShareErrorCopy(
     // One relay code for every chat refusal, and the desktop refuses the
     // general group, the agent lane, and direct-message-as-group before it
     // asks the relay. What remains is a group the relay has not synced yet.
-    case "invalid_channel":
+    case "invalid_chat":
       return "This can't be shared yet. Wait for it to sync, then try again.";
     case "ambiguous_selector":
       return "A group is shared as it is now, not at a version. Share it without choosing a version.";

@@ -98,7 +98,7 @@ export function AcceptDmDialog(props: {
             data-testid="chats-accept-dm-confirm"
             disabled={!chosen || busy}
             onClick={() => void accept()}
-            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1.5 text-xs text-bg disabled:opacity-50"
           >
             {chosen ? `Add to ${chosen.label}` : "Choose a workspace"}
           </button>
@@ -190,7 +190,7 @@ export function LeaveDmDialog(props: {
             data-testid="chats-leave-dm-confirm"
             disabled={busy || props.sendInFlight}
             onClick={() => void confirm()}
-            className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded bg-accent px-3 py-1.5 text-xs text-bg disabled:opacity-50"
           >
             Leave conversation
           </button>

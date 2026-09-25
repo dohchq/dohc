@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { initializeRelayDeployment } from "./relayDeployment";
+import { RELAY_API_VERSIONS } from "./apiVersion";
+import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -427,6 +429,21 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     // Deployment opt-in alone grants neither collection authority nor public Edit.
     expect((await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}})).status).toBe(quota === "2" ? 401 : 404);
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
+  });
+
+  it("refuses a relay API version it does not serve before it reads the credential", async () => {
+    const relay = await spawnRelay(join(await tempRoot("api-version"), "relay.sqlite"));
+    const ready = await (await fetch(`${relay}/ready`)).json() as {apiVersions: unknown};
+    expect(ready.apiVersions).toEqual(RELAY_API_VERSIONS);
+    const newer = String(RELAY_API_VERSIONS.max + 1);
+    for (const headers of [new Headers({[RELAY_API_VERSION_HEADER]: newer}), authHeaders({[RELAY_API_VERSION_HEADER]: newer})]) {
+      const refused = await fetch(`${relay}/sync/${WORKSPACE_ID}/log`, {headers});
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ok: false, code: "api_version_too_new", error: "this relay is older than the dohc that sent the request"});
+    }
+    const current = authHeaders({[RELAY_API_VERSION_HEADER]: String(RELAY_API_VERSIONS.max), "content-type": "application/json"});
+    expect((await fetch(`${relay}/sync/workspaces`, {method: "POST", headers: current,
+      body: JSON.stringify({workspaceId: WORKSPACE_ID})})).status).toBe(200);
   });
 
   it("ignores inherited device-delivery config in an isolated relay child", async () => {
@@ -944,7 +961,7 @@ describe("sync relay startup guards", () => {
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
       expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
-      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true});
+      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS});
     }, {timeout: 10_000});
     expect((await fetch(`${relay.baseUrl}/sync/workspace/live-host`)).status).toBe(404);
   });

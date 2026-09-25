@@ -1,27 +1,27 @@
 // Which relay share rows this app's PATH/VERSION manager lists, per lane.
 //
-// Two managers split the relay's listing: chat-channel grants belong to the
+// Two managers split the relay's listing: chat grants belong to the
 // Chats surface (`listChatChannelShares`), path and version shares belong to
 // Settings → Cloud. The split has to be exhaustive for granted rows, because
 // ending a share is only possible from the manager that lists it.
 //
 // That is what makes a damaged row awkward. The chat manager scopes by
 // `selector.kind` and `channelWireId`, and a damaged row has no selector at
-// all — so a damaged row claiming to be a chat-channel grant can never appear
+// all — so a damaged row claiming to be a chat grant can never appear
 // there. Excluding it here too would strand it in neither manager, with no
 // way left to end it.
 //
-// So: a readable chat-channel selector is the other manager's, and leaves
+// So: a readable chat selector is the other manager's, and leaves
 // both lanes. A damaged row stays in granted whatever kind it claims, and is
 // dropped from received, where an invitation whose grant cannot be read
 // offers the recipient nothing to accept.
 
 type ShareRow = Record<string, unknown>;
 
-/** A row whose selector the relay could read, naming a chat-channel or group grant. */
+/** A row whose selector the relay could read, naming a chat or group grant. */
 export function isReadableChatChannelRow(row: ShareRow): boolean {
   const kind = (row.selector as { kind?: unknown } | undefined)?.kind;
-  return kind === "chat-channel" || kind === "group";
+  return kind === "chat" || kind === "group";
 }
 
 /** A row the relay could not read at all. */
@@ -38,7 +38,7 @@ export function pathShareLanes(listing: {
     received: (listing.received ?? []).filter(
       (row) =>
         !isReadableChatChannelRow(row) &&
-        row.selectorKind !== "chat-channel" &&
+        row.selectorKind !== "chat" &&
         row.selectorKind !== "group",
     ),
   };

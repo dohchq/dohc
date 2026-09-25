@@ -18,7 +18,7 @@ const pathRow = (shareId: string) => ({
 });
 const chatRow = (shareId: string) => ({
   shareId,
-  selector: { kind: "chat-channel", channelWireId: "wire-1" },
+  selector: { kind: "chat", channelWireId: "wire-1" },
   access: "read-write",
   grantId: `grant-${shareId}`,
   generation: 1,
@@ -39,7 +39,7 @@ const damagedChatRow = (shareId: string) => ({
   grantId: `grant-${shareId}`,
   generation: 1,
   damaged: true,
-  selectorKind: "chat-channel",
+  selectorKind: "chat",
 });
 const damagedPathRow = (shareId: string) => ({
   shareId,
@@ -51,7 +51,7 @@ const damagedPathRow = (shareId: string) => ({
 });
 
 describe("relay share lanes", () => {
-  it("sends a healthy chat-channel grant to the chat manager, not this one", () => {
+  it("sends a healthy chat grant to the chat manager, not this one", () => {
     const lanes = pathShareLanes({
       granted: [pathRow("s-path"), chatRow("s-chat")],
       received: [pathRow("r-path"), chatRow("r-chat")],
@@ -74,7 +74,7 @@ describe("relay share lanes", () => {
   // The regression this rule exists for. The chat manager scopes by
   // selector.kind and channelWireId, which a damaged row does not have, so
   // dropping it here too left it in neither manager and unendable.
-  it("keeps a damaged chat-channel grant listed, because no other manager can", () => {
+  it("keeps a damaged chat grant listed, because no other manager can", () => {
     const damaged = damagedChatRow("s-damaged-chat");
     // Traced: the chat manager cannot take this row.
     expect(isReadableChatChannelRow(damaged)).toBe(false);
@@ -83,7 +83,7 @@ describe("relay share lanes", () => {
     const lanes = pathShareLanes({ granted: [damaged], received: [damaged] });
     expect(
       lanes.granted.map((row) => row.shareId),
-      "a damaged chat-channel grant reaches neither manager and cannot be ended",
+      "a damaged chat grant reaches neither manager and cannot be ended",
     ).toEqual(["s-damaged-chat"]);
     // The receive side has nothing to accept, so it is dropped there.
     expect(lanes.received).toEqual([]);

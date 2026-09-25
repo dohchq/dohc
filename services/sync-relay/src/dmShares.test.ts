@@ -30,16 +30,16 @@ import {
 } from "./testing";
 
 // A resolver that knows no file-linked thread and no object: a DM grant is a
-// chat-channel selector, and the file half must never decide anything for it.
+// chat selector, and the file half must never decide anything for it.
 const NO_FILE_CHAT: ShareFileChatResolver = {
   threadFileBinding: () => undefined,
   objectCurrentPath: () => undefined,
   objectIdAtPath: () => undefined,
 };
 
-// WS-MU-C3 — DM / chat-channel grants over the relay, riding MU-C4's
+// WS-MU-C3 — DM / chat grants over the relay, riding MU-C4's
 // bidirectional shared-channel lane. A DM is a `kind:"dm"` channel + one
-// email-addressed chat-channel grant per participant, so a DM op is a strict
+// email-addressed chat grant per participant, so a DM op is a strict
 // subset of the already-merged shared-channel route: it serves byte-identically
 // to a regular channel op, binds by thread (never a self-claimed
 // channelWireId on the message payload), and every unauthorized probe is
@@ -160,7 +160,7 @@ async function fetchSharedOps(
   return (await json(response)).ops as Array<Record<string, unknown>>;
 }
 
-describe("chat-channel share selector (DM grants)", () => {
+describe("chat share selector (DM grants)", () => {
   it("validates grant-time chat selectors fail-closed", () => {
     expect(validateChatChannelShareSelector({ channelWireId: DM_WIRE }).ok).toBe(true);
     expect(validateChatShareAccess("read-only").ok).toBe(true);
@@ -176,7 +176,7 @@ describe("chat-channel share selector (DM grants)", () => {
 
   it("admits only thread-bound chat ops for the granted channel through the read filter", () => {
     const selector: ChatChannelShareSelector = {
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: DM_WIRE,
       access: "read-write",
     };
@@ -257,7 +257,7 @@ describe("DM grants over the relay", () => {
     resetOpSeq();
   });
 
-  it("creates an email-addressed chat-channel grant and lists it on both sides", async () => {
+  it("creates an email-addressed chat grant and lists it on both sides", async () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
@@ -267,7 +267,7 @@ describe("DM grants over the relay", () => {
       request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: "" })),
     );
     expect(invalid.status).toBe(400);
-    expect((await json(invalid)).code).toBe("invalid_channel");
+    expect((await json(invalid)).code).toBe("invalid_chat");
     const badAccess = await h(
       request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: DM_WIRE, access: "admin" })),
     );
@@ -289,14 +289,14 @@ describe("DM grants over the relay", () => {
       ),
     );
     expect(mixed.status).toBe(400);
-    expect((await json(mixed)).code).toBe("invalid_channel");
+    expect((await json(mixed)).code).toBe("invalid_chat");
 
     const granted = await json(await h(request(OWNER, "/sync/shares")));
     const grantedRow = (granted.granted as Array<Record<string, unknown>>).find(
       (row) => row.shareId === shareId,
     );
     expect(grantedRow?.selector).toEqual({
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: DM_WIRE,
     });
     expect(grantedRow).toMatchObject({
@@ -310,7 +310,7 @@ describe("DM grants over the relay", () => {
       (row) => row.shareId === shareId,
     );
     expect(receivedRow?.selector).toEqual({
-      kind: "chat-channel",
+      kind: "chat",
       channelWireId: DM_WIRE,
     });
     expect(receivedRow).toMatchObject({

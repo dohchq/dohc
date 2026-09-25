@@ -48,14 +48,16 @@ Other guest exceptions return a generic error without invoking guest error gette
 
 ## Snapshot evaluator isolation and limits
 
-Each evaluation uses a fresh QuickJS Wasm runtime inside a child process.
+Each evaluation runs in a new QuickJS Wasm instance with its own memory, inside a child process, so it cannot read memory another evaluation used.
 The guest receives no process, filesystem, network, module loader, or host environment.
 The child receives an empty environment and owns one temporary database.
 The parent kills the owned child at the deadline or when its abort signal fires.
 Temporary data is removed after the child closes.
 
-Guest memory, stack, execution, SQL calls, query results, inputs, and outputs are bounded.
-The default snapshot limit is 16 MiB. Limits can be lowered, not raised.
+Guest memory, stack, execution, SQL calls, query results, inputs, and outputs are bounded. Limits can be lowered, not raised.
+`memoryBytes` is an operation's whole Wasm memory, 24 MiB by default. QuickJS uses about 5 MiB of it.
+This QuickJS build has no `malloc_usable_size`, so QuickJS's own memory limit cannot count allocations. The memory's fixed size is the bound.
+An operation that needs more fails with an error that names the limit. The limit is in whole MiB and at least 16 MiB, which QuickJS needs to start.
 SQLite has a 64 MiB native heap cap and a database page cap.
 The parent deadline also covers native SQL, initialization, serialization, and child startup.
 There is no operating-system filesystem sandbox around the child. Guest confinement depends on Wasm and the explicit callbacks.
@@ -75,9 +77,9 @@ The isolated child compares its schema to a fresh database from the approved sch
 
 The runtime pins `quickjs-emscripten` to `0.32.0`.
 The inspected upstream source is [commit df4efb9ef2cb25c417ecb57986da462d11b244ed](https://github.com/justjake/quickjs-emscripten/tree/df4efb9ef2cb25c417ecb57986da462d11b244ed), the published package's `gitHead`.
-Its `runtime.ts` and `c/interface.c` implement explicit memory, stack, interrupt, and module-loader controls.
+Its `runtime.ts` and `c/interface.c` implement explicit stack, interrupt, and module-loader controls.
 Its `context.ts` implements host callbacks through QuickJS handles.
-The convenience module `evalCode` removes its memory limit before dumping results, so this package uses an explicit runtime and context.
+This package uses an explicit runtime and context for those controls, and instantiates the release build's Wasm with its own memory for each operation.
 
 Focused tests cover candidate isolation, changesets, SQL access, read-only calls, loops, allocation pressure, serialization getters, native SQL timeouts, refusal, attachment scope, and cancellation.
 The initial implementation passed on Windows Node 24.16.0.
@@ -141,7 +143,7 @@ The execution deadline starts on dispatch and kills blocked native SQL as well a
 Initialization keeps its separate eight-second deadline when the host lowers the subsequent operation deadline.
 `abort(reason)` immediately kills the worker and waits for process exit. Use it when authority is revoked or execution is cancelled.
 
-Each operation receives a fresh QuickJS runtime. Reused SQLite connections additionally deny `changes()`, `total_changes()`, and `last_insert_rowid()`.
+Each operation receives a new QuickJS instance and memory, as a snapshot evaluation does. Reused SQLite connections additionally deny `changes()`, `total_changes()`, and `last_insert_rowid()`.
 Use `ctx.db.execute(...).changes` for the current statement's affected row count.
 Journaled datasets reject `AUTOINCREMENT` because SQLite changesets omit its retained sequence state. Use an `INTEGER PRIMARY KEY` or an explicit ID.
 Implicit `rowid`, `oid`, and `_rowid_` reads are unavailable unless backed by a declared `INTEGER PRIMARY KEY`.

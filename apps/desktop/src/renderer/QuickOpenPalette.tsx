@@ -52,7 +52,7 @@ export function QuickOpenPalette(props: {
   return (
     <CommandPalette
       testId="quick-open"
-      placeholder="Go to file…"
+      placeholder="Go to…"
       ariaLabel="File"
       commands={commands}
       rank={rank}

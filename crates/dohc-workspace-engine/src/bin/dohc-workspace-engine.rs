@@ -10,11 +10,11 @@ use dohc_engine_protocol::{
     supervisor::{Supervisor, SupervisorConfig},
     transport::{
         BlobEgress, ConnectionHandle, ConnectionOwner, EngineService as ProtocolEngineService,
-        OutputGuard,
+        OutputGuard, ProgressMessage, ProgressSink,
     },
     wire::{
-        BlobStart, Envelope, ErrorEnvelope, Event, Hello, HelloAck, PROTOCOL_VERSION, Response,
-        decode_control, encode_control,
+        BlobStart, Envelope, ErrorEnvelope, Event, Hello, HelloAck, PROGRESS_CAPABILITY,
+        PROTOCOL_VERSION, Progress, Response, decode_control, encode_control,
     },
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
@@ -47,6 +47,9 @@ mod ordered_consumer_support;
 
 enum OutputItem {
     Envelope(Envelope),
+    /// Written as a `progress` envelope. Dropping it lets its request report
+    /// again, so each request has at most one of these queued.
+    Progress(ProgressMessage),
     Guarded {
         response: Response,
         guard: Arc<dyn OutputGuard>,
@@ -332,6 +335,7 @@ where
                                 &active_egress,
                                 &mut request_tasks,
                                 true,
+                                negotiated_capabilities.contains(PROGRESS_CAPABILITY),
                                 negotiated_max_frame_bytes,
                                 Some(connection.handle()),
                                 Some(input),
@@ -507,6 +511,7 @@ where
                     &active_egress,
                     &mut request_tasks,
                     negotiated_capabilities.contains("blobs"),
+                    negotiated_capabilities.contains(PROGRESS_CAPABILITY),
                     negotiated_max_frame_bytes,
                     Some(connection.handle()),
                     None,
@@ -652,6 +657,14 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     result = flush => result?,
                 }
                 lock(&active_egress).remove(&request_id);
+            }
+            OutputItem::Progress(message) => {
+                write_envelope(
+                    &mut output,
+                    &Envelope::Progress(Progress { id: message.id() }),
+                    limits,
+                )
+                .await?;
             }
             OutputItem::Envelope(envelope) => {
                 // A service-initiated event the wire cannot carry is dropped
@@ -880,7 +893,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
     }
     let negotiated = capabilities
         .into_iter()
-        .filter(|capability| capability == "blobs")
+        .filter(|capability| capability == "blobs" || capability == PROGRESS_CAPABILITY)
         .collect();
     // A client may lower its receive limit; the engine clamps the request
     // into the negotiable range and echoes the effective value, which sizes
@@ -916,6 +929,7 @@ async fn dispatch_authenticated<
     active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
+    progress_negotiated: bool,
     max_frame_bytes: u32,
     connection: Option<ConnectionHandle>,
     input: Option<LiveApplicationInput>,
@@ -940,6 +954,22 @@ async fn dispatch_authenticated<
             } else {
                 Arc::from([])
             };
+            // Only a request that asked, on a session that negotiated it, pays
+            // for progress. The sink holds a weak sender: a request that
+            // outlives the writer cannot keep the output queue open.
+            let progress = if request.progress && progress_negotiated {
+                let output = output.downgrade();
+                ProgressSink::new(id, move |message| {
+                    if let Some(output) = output.upgrade() {
+                        // A full queue drops the message, which lets the
+                        // request report again later.
+                        let _ = output.try_send(OutputItem::Progress(message));
+                    }
+                })
+            } else {
+                ProgressSink::default()
+            };
+            let finish_progress = progress.clone();
             let completion_egress = Arc::clone(active_egress);
             match supervisor.try_submit_input(
                 request,
@@ -947,7 +977,11 @@ async fn dispatch_authenticated<
                 max_frame_bytes,
                 connection,
                 input,
+                progress,
                 move |outcome| {
+                    // Before the terminal response is queued, so no progress
+                    // message can follow it.
+                    finish_progress.finish();
                     if let Ok(service_response) = outcome
                         && let Some(guard) = &service_response.output_guard
                     {
@@ -1099,7 +1133,7 @@ async fn dispatch_authenticated<
             }
             false
         }
-        Envelope::Response(_) | Envelope::Error(_) | Envelope::Event(_) => {
+        Envelope::Response(_) | Envelope::Error(_) | Envelope::Event(_) | Envelope::Progress(_) => {
             if !send_error(
                 output,
                 None,
@@ -1398,6 +1432,7 @@ mod tests {
                     )),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: serde_json::Value::Null,
                 },
             )
@@ -1866,6 +1901,7 @@ mod tests {
             workspace: None,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: serde_json::Value::Null,
         }))
     }
@@ -2057,6 +2093,7 @@ mod tests {
                     workspace: None,
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: serde_json::Value::Null
                 }),
                 &supervisor,
@@ -2066,6 +2103,7 @@ mod tests {
                 &egress,
                 &mut tasks,
                 true,
+                false,
                 WireLimits::default().max_frame_bytes,
                 None,
                 None
@@ -2173,6 +2211,7 @@ mod tests {
             &active_requests,
             &active_egress,
             &mut request_tasks,
+            false,
             false,
             WireLimits::default().max_frame_bytes,
             None,
@@ -2396,6 +2435,7 @@ mod tests {
                 workspace: None,
                 deadline_ms: None,
                 idempotency_key: None,
+                progress: false,
                 params: serde_json::Value::Null,
             })));
             let (client, server) = tokio::io::duplex(256 * 1024);
@@ -2496,6 +2536,138 @@ mod tests {
             assert_eq!(response.result["bytesBase64"], serde_json::Value::Null);
             assert!(decoder.next_frame().expect("frame").is_none());
         }
+    }
+
+    /// Reports progress while it works, and from a task that keeps reporting
+    /// after the request has answered.
+    struct ProgressService;
+
+    impl ProtocolEngineService for ProgressService {
+        type Input = LiveApplicationInput;
+        async fn call(
+            &self,
+            ctx: RequestContext,
+            request: WireRequest,
+        ) -> Result<ServiceResponse, WireError> {
+            ctx.progress.report();
+            let late = ctx.progress.clone();
+            tokio::spawn(async move {
+                for _ in 0..1_000 {
+                    late.report();
+                    tokio::task::yield_now().await;
+                }
+            });
+            tokio::task::yield_now().await;
+            ctx.progress.report();
+            Ok(ServiceResponse::response(WireResponse {
+                id: request.id,
+                result: serde_json::Value::Null,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_reaches_only_a_request_that_asked_on_a_session_that_negotiated_it() {
+        for (id, negotiated, asked) in [(91, true, true), (92, false, true), (93, true, false)] {
+            let mut input_bytes = encode_envelope(&Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: if negotiated {
+                    vec![PROGRESS_CAPABILITY.to_owned()]
+                } else {
+                    Vec::new()
+                },
+                last_session_generation: None,
+                max_frame_bytes: None,
+            }));
+            input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
+                id,
+                method: "test.progress".to_owned(),
+                workspace: None,
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: asked,
+                params: serde_json::Value::Null,
+            })));
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let (server_input, server_output) = tokio::io::split(server);
+            let (mut client_input, mut client_output) = tokio::io::split(client);
+            let supervisor = Arc::new(Supervisor::new(
+                SupervisorConfig::default(),
+                Arc::new(ProgressService),
+            ));
+            let run = tokio::spawn(run_transport(
+                TEST_AUTH_TOKEN.to_owned(),
+                server_input,
+                server_output,
+                supervisor,
+                no_events(),
+                || Ok(()),
+            ));
+            client_output
+                .write_all(&input_bytes)
+                .await
+                .expect("write client transcript");
+            client_output.shutdown().await.expect("close client input");
+            let mut transcript = Vec::new();
+            client_input
+                .read_to_end(&mut transcript)
+                .await
+                .expect("read daemon transcript");
+            run.await
+                .expect("transport task")
+                .expect("transport succeeds");
+
+            let limits = WireLimits::default();
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let mut envelopes = Vec::new();
+            while let Some(frame) = decoder.next_frame().expect("frame") {
+                let Frame::Control(payload) = frame else {
+                    panic!("expected only control frames");
+                };
+                envelopes.push(decode_control(&payload, &limits).expect("decode envelope"));
+            }
+            let Some(Envelope::HelloAck(ack)) = envelopes.first() else {
+                panic!("first envelope must be HelloAck");
+            };
+            assert_eq!(
+                ack.capabilities.contains(&PROGRESS_CAPABILITY.to_owned()),
+                negotiated
+            );
+            let Some(Envelope::Response(response)) = envelopes.last() else {
+                panic!("the response must be the last envelope: {envelopes:?}");
+            };
+            assert_eq!(response.id, id);
+            let between = &envelopes[1..envelopes.len() - 1];
+            assert!(
+                between
+                    .iter()
+                    .all(|envelope| matches!(envelope, Envelope::Progress(Progress { id: at }) if *at == id)),
+                "only this request's progress may come before its response: {between:?}"
+            );
+            assert_eq!(
+                !between.is_empty(),
+                negotiated && asked,
+                "progress for negotiated={negotiated} asked={asked}: {between:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_capability_is_negotiated_only_when_requested() {
+        let ack = authenticate(
+            Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: vec!["blobs".to_owned(), PROGRESS_CAPABILITY.to_owned()],
+                last_session_generation: None,
+                max_frame_bytes: None,
+            }),
+            TEST_AUTH_TOKEN,
+        )
+        .expect("authenticated hello");
+        assert_eq!(ack.capabilities, vec!["blobs", PROGRESS_CAPABILITY]);
     }
 
     #[tokio::test]

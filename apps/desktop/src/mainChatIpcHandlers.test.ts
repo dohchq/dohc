@@ -310,7 +310,7 @@ describe("readRelayChatShareLanes", () => {
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
   });
 
-  it("maps chat-channel rows and scopes grants to this workspace coordinate", async () => {
+  it("maps chat rows and scopes grants to this workspace coordinate", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -322,7 +322,7 @@ describe("readRelayChatShareLanes", () => {
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: {
-                kind: "chat-channel",
+                kind: "chat",
                 channelWireId: "wire-1",
               },
               access: "read-only",
@@ -335,17 +335,17 @@ describe("readRelayChatShareLanes", () => {
               workspaceId: "remote-2",
               recipientEmail: "bo@example.com",
               revokedAtMs: null,
-              selector: { kind: "chat-channel", channelWireId: "wire-2" },
+              selector: { kind: "chat", channelWireId: "wire-2" },
               access: "read-write",
             },
-            // Not a chat-channel share.
+            // Not a chat share.
             { shareId: "share-doc", workspaceId: "workspace-1", selector: { kind: "document" } },
           ],
           received: [
             {
               shareId: "share-in",
               granterEmail: "owner@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              selector: { kind: "chat", channelWireId: "wire-in" },
               access: "read-write",
             },
             // A group is an invitation to its channel; the folder follows.
@@ -388,7 +388,7 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  it("reports a chat-channel row with unreadable access as unreachable", async () => {
+  it("reports a chat row with unreadable access as unreachable", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -399,7 +399,7 @@ describe("readRelayChatShareLanes", () => {
               workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
-              selector: { kind: "chat-channel", channelWireId: "wire-corrupt" },
+              selector: { kind: "chat", channelWireId: "wire-corrupt" },
               access: "edit",
             },
           ],
@@ -419,13 +419,13 @@ describe("readRelayChatShareLanes", () => {
             {
               shareId: "share-dm",
               granterEmail: "dm@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-dm" },
+              selector: { kind: "chat", channelWireId: "wire-dm" },
               access: "read-write",
             },
             {
               shareId: "share-channel",
               granterEmail: "owner@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-channel" },
+              selector: { kind: "chat", channelWireId: "wire-channel" },
               access: "read-write",
             },
           ],
@@ -458,7 +458,7 @@ describe("readRelayChatShareLanes", () => {
               workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
-              selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              selector: { kind: "chat", channelWireId: "wire-1" },
               access: "read-write",
             },
           ],
@@ -481,7 +481,7 @@ describe("readRelayChatShareLanes", () => {
       recipientEmail: "ana@example.com",
       granterEmail: "owner@example.com",
       revokedAtMs: null,
-      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      selector: { kind: "chat", channelWireId: `wire-${index}` },
       access: "read-write",
     }));
     return { [lane]: rows };
@@ -570,7 +570,7 @@ describe("readRelayChatShareLanes", () => {
       workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
-      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      selector: { kind: "chat", channelWireId: `wire-${index}` },
       access: "read-write",
     }));
     const lanes = await readRelayChatShareLanes({
@@ -591,7 +591,7 @@ describe("readRelayChatShareLanes", () => {
     ).not.toThrow();
   });
 
-  // Filtering runs before the cap: an oversized body whose chat-channel rows
+  // Filtering runs before the cap: an oversized body whose chat rows
   // fit is a listing dohc can represent, and treating it as unreachable would
   // hide real shares behind rows that were never going to be listed.
   it("counts what it will list, not what the relay sent", async () => {
@@ -600,7 +600,7 @@ describe("readRelayChatShareLanes", () => {
       workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
-      selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      selector: { kind: "chat", channelWireId: `wire-${index}` },
       access: "read-write",
     }));
     const filteredOut = Array.from(
@@ -632,13 +632,13 @@ describe("readRelayChatShareLanes", () => {
             {
               shareId: "share-in-work",
               granterEmail: "owner@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-work" },
+              selector: { kind: "chat", channelWireId: "wire-work" },
               access: "read-write",
             },
             {
               shareId: "share-unclaimed",
               granterEmail: "owner@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-free" },
+              selector: { kind: "chat", channelWireId: "wire-free" },
               access: "read-write",
             },
           ],
@@ -668,7 +668,7 @@ describe("readRelayChatShareLanes", () => {
         workspaceId: "workspace-1",
         recipientEmail: "ana@example.com",
         revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
-        selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+        selector: { kind: "chat", channelWireId: `wire-${index}` },
         access: "read-write",
       }));
 
@@ -719,7 +719,7 @@ describe("readRelayChatShareLanes", () => {
           {
             shareId: "share-left-elsewhere",
             granterEmail: "owner@example.com",
-            selector: { kind: "chat-channel", channelWireId: "wire-left" },
+            selector: { kind: "chat", channelWireId: "wire-left" },
             access: "read-write",
           },
         ],
@@ -754,7 +754,7 @@ describe("readRelayChatShareLanes", () => {
       (_, index) => ({
         shareId: `share-other-${index}`,
         granterEmail: "owner@example.com",
-        selector: { kind: "chat-channel", channelWireId: `wire-other-${index}` },
+        selector: { kind: "chat", channelWireId: `wire-other-${index}` },
         access: "read-write",
       }),
     );
@@ -768,7 +768,7 @@ describe("readRelayChatShareLanes", () => {
               workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
-              selector: { kind: "chat-channel", channelWireId: "wire-mine" },
+              selector: { kind: "chat", channelWireId: "wire-mine" },
               access: "read-write",
             },
           ],
@@ -777,7 +777,7 @@ describe("readRelayChatShareLanes", () => {
             {
               shareId: "share-here",
               granterEmail: "owner@example.com",
-              selector: { kind: "chat-channel", channelWireId: "wire-here" },
+              selector: { kind: "chat", channelWireId: "wire-here" },
               access: "read-write",
             },
           ],
@@ -1039,7 +1039,7 @@ describe("readRelayChatShareLanes session classification", () => {
   // map cleanly but carry an invalid field would otherwise escape to the
   // contract parse and reject the IPC call — the same clear-by-rejection.
   it("reports invalid row fields as unreachable, not as a rejection", async () => {
-    // A chat-channel grant with no shareId at all.
+    // A chat grant with no shareId at all.
     const missingShareId = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -1049,7 +1049,7 @@ describe("readRelayChatShareLanes session classification", () => {
               workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
-              selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              selector: { kind: "chat", channelWireId: "wire-1" },
               access: "read-write",
             },
           ],
@@ -1067,7 +1067,7 @@ describe("readRelayChatShareLanes session classification", () => {
             {
               shareId: "share-in",
               granterEmail: 42,
-              selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              selector: { kind: "chat", channelWireId: "wire-in" },
               access: "read-write",
             },
           ],

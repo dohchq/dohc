@@ -1119,7 +1119,7 @@ describe("refreshShareMount", () => {
     expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam"))).toBe(true);
   });
 
-  it("refuses to mount a selector with no file content (chat-channel codes)", () => {
+  it("refuses to mount a selector with no file content (chat codes)", () => {
     expect(() => assertMountableSelector(null)).toThrow(/shared group/);
     expect(() =>
       assertMountableSelector({
