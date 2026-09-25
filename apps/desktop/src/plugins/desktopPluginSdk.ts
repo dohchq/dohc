@@ -143,14 +143,14 @@ export function createDesktopPluginSdk<Operation extends PluginSdkOperation>(dep
           // writeAuthoredText: a writable workspace and a running engine
           // capture, resolved when the write happens, never cached.
           editCollections: {
-            // The idempotency key is the automation run's claim, attempt, and
-            // write ordinal: it must reach the seam, or a retried request
+            // The idempotency key prefix is the automation run's claim, run,
+            // and write ordinal: it must reach the seam, or a retried request
             // could write twice.
             setRecordFields: async ({
               recordPath,
               fields,
               author,
-              idempotencyKey,
+              idempotencyKeyPrefix,
               signal: editSignal,
             }) =>
               setCollectionRecordFields(
@@ -159,7 +159,7 @@ export function createDesktopPluginSdk<Operation extends PluginSdkOperation>(dep
                   recordPath,
                   fields,
                   author,
-                  ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+                  ...(idempotencyKeyPrefix === undefined ? {} : { idempotencyKeyPrefix }),
                 },
               ),
             createRecord: async ({
@@ -167,7 +167,7 @@ export function createDesktopPluginSdk<Operation extends PluginSdkOperation>(dep
               name,
               fields,
               author,
-              idempotencyKey,
+              idempotencyKeyPrefix,
               signal: editSignal,
             }) =>
               createCollectionRecord(
@@ -177,7 +177,7 @@ export function createDesktopPluginSdk<Operation extends PluginSdkOperation>(dep
                   name,
                   ...(fields === undefined ? {} : { fields }),
                   author,
-                  ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+                  ...(idempotencyKeyPrefix === undefined ? {} : { idempotencyKeyPrefix }),
                 },
               ),
           },

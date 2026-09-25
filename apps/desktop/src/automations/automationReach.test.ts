@@ -43,7 +43,7 @@ const post = (channelWireId: string | null, name = "Family"): ReachStep => ({ ki
 const notify = (userId: string, name = "Someone"): ReachStep => ({ kind: "notify", person: { userId, name } });
 const personal = (userId: string, name = "Someone"): ReachStep => ({ kind: "personal", person: { userId, name } });
 const allowed = { allowed: true };
-const stopped = (reason: string) => ({ allowed: false, reason });
+const stopped = (reason: string) => expect.objectContaining({ allowed: false, reason });
 const everyStep = [change(trip), change(budget), find(budget), post("wire-family"), notify(OWNER), personal(OWNER)];
 
 describe("reach check", () => {

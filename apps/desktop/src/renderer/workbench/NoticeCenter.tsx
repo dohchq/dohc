@@ -14,6 +14,7 @@ import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import type { AutomationHoldNotice } from "../shell/useAutomationHolds";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -103,6 +104,17 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
   "login-required": "warning",
 };
 
+// A Collection automation's engine id is "collection:<collection path>#<id>".
+// Its definition lives in the Collection's automations.yaml, not in a plugin.
+function collectionAutomationOf(
+  automationId: string,
+): { collection: string; id: string } | null {
+  if (!automationId.startsWith("collection:")) return null;
+  const rest = automationId.slice("collection:".length);
+  const hash = rest.lastIndexOf("#");
+  return hash > 0 ? { collection: rest.slice(0, hash), id: rest.slice(hash + 1) } : null;
+}
+
 // The title and body for one automation's failure notice: what happened,
 // why when the engine recorded a known reason, and the way forward. The two
 // engine-recorded reason codes get their own honest sentences; every other
@@ -115,26 +127,36 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
+  const collection = collectionAutomationOf(failure.automationId);
+  const name = collection?.id ?? failure.automationId;
+  const next = collection
+    ? {
+        chain: `Open ${collection.collection}/automations.yaml to shorten the chain.`,
+        check: `Open ${collection.collection}/automations.yaml to check the automation.`,
+        fix: `Open ${collection.collection}/automations.yaml to fix the automation.`,
+      }
+    : {
+        chain: "Open the plugin's source to shorten the chain.",
+        check: "Open the plugin's source to check the handler.",
+        fix: "Open the plugin's source to fix the handler.",
+      };
   if (failure.chainStopped) {
     return {
       title: "An automation chain stopped",
       body:
         `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
-        `"${failure.automationId}" did not run. Open the plugin's source to ` +
-        "shorten the chain.",
+        `"${name}" did not run. ${next.chain}`,
     };
   }
   if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
-      title: `Automation "${failure.automationId}" did not finish`,
-      body:
-        `${count}dohc stopped retrying a run that did not finish. ` +
-        "Open the plugin's source to check the handler.",
+      title: `Automation "${name}" did not finish`,
+      body: `${count}dohc stopped retrying a run that did not finish. ${next.check}`,
     };
   }
   return {
-    title: `Automation "${failure.automationId}" failed`,
-    body: `${count}${sentence(failure.error)} Open the plugin's source to fix the handler.`,
+    title: `Automation "${name}" failed`,
+    body: `${count}${sentence(failure.error)} ${next.fix}`,
   };
 }
 
@@ -259,6 +281,14 @@ export function NoticeCenter(props: {
     automationId: string,
     generation: number,
   ) => void;
+  // Automation steps that reach more now only because an editor left. Each
+  // waits for someone who can edit the Collection to allow it.
+  automationHolds?: readonly AutomationHoldNotice[];
+  onAllowAutomationHold?: (hold: AutomationHoldNotice) => void;
+  // dohc could not read which steps were allowed, so every automation waits.
+  automationHoldsUnreadable?: boolean;
+  onResetAutomationHolds?: () => void;
+  onRevealAutomationHolds?: () => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
@@ -500,6 +530,34 @@ export function NoticeCenter(props: {
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
+    if (props.automationHoldsUnreadable) {
+      next.push({
+        id: "automation-holds-unreadable",
+        tone: "warning",
+        title: "Automations are waiting",
+        body: "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.",
+        Icon: AlertTriangle,
+        actions: [
+          ...(props.onResetAutomationHolds ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }] : []),
+          ...(props.onRevealAutomationHolds ? [{ label: "Open folder", onClick: props.onRevealAutomationHolds }] : []),
+        ],
+      });
+    }
+    for (const hold of props.automationHolds ?? []) {
+      const reach = hold.action === "find" ? `find records in ${hold.target}` : `change ${hold.target}`;
+      next.push({
+        id: `automation-hold-${hold.automationId}-${hold.step}`,
+        tone: "warning",
+        title: `Automation "${hold.automationName}" is waiting`,
+        body: hold.stoppedFor
+          ? `A step in ${hold.collection} can now ${reach}. It stopped before because ${hold.stoppedFor} could not. Allow it to run?`
+          : `A step in ${hold.collection} can ${reach}. Allow it to run?`,
+        Icon: AlertTriangle,
+        ...(props.onAllowAutomationHold
+          ? { actions: [{ label: "Allow", onClick: () => props.onAllowAutomationHold?.(hold) }] }
+          : {}),
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
@@ -733,6 +791,11 @@ export function NoticeCenter(props: {
     agentNotifications,
     props.agentActive,
     props.automationFailures,
+    props.automationHolds,
+    props.onAllowAutomationHold,
+    props.automationHoldsUnreadable,
+    props.onResetAutomationHolds,
+    props.onRevealAutomationHolds,
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
