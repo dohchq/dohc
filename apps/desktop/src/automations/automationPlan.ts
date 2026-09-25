@@ -263,6 +263,38 @@ export function unsupportedReason(automation: Automation): string | null {
   return null;
 }
 
+/**
+ * Every field an automation names by name, with the Collection that must
+ * have it: its trigger's fields, the fields its steps set or add, and the
+ * field each Find checks. Fields that formulas read are not listed.
+ */
+export function fieldsNamedBy(automation: Automation, collectionPath: string): Array<{ collection: string; field: string }> {
+  const named: Array<{ collection: string; field: string }> = [];
+  const trigger = automation.when;
+  if (trigger.kind === "field-changed") named.push({ collection: collectionPath, field: trigger.field });
+  if (trigger.kind === "record-changed") {
+    for (const field of trigger.fields ?? []) named.push({ collection: collectionPath, field });
+  }
+  const steps = orderSteps(automation.do);
+  const bindings = bindingsOf(steps);
+  for (const { step } of everyStep(steps)) {
+    if (step.kind === "set") {
+      const bound = step.records === null ? null : bindings.get(step.records);
+      const collection = bound?.collection ?? collectionPath;
+      for (const { field } of step.values) named.push({ collection, field });
+    } else if (step.kind === "add-record") {
+      for (const { field } of step.values) named.push({ collection: step.collection ?? collectionPath, field });
+    } else if (step.kind === "find") {
+      const query = findQueryOf(step.condition);
+      if ("match" in query && query.match === "field") {
+        named.push({ collection: step.collection ?? collectionPath, field: query.field });
+        if (query.value.kind === "trigger-field") named.push({ collection: collectionPath, field: query.value.field });
+      }
+    }
+  }
+  return named;
+}
+
 /** The engine subscription an automation's trigger needs. */
 export function subscriptionFor(trigger: AutomationTrigger): { kinds: AutomationChangeKind[]; fields?: string[] } {
   switch (trigger.kind) {
