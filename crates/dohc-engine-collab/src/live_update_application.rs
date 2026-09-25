@@ -805,6 +805,20 @@ pub fn apply_committed(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
+            // Every accepted frame but this computer's own draft is a change
+            // from elsewhere: a collaborator's, or its owner's on another
+            // computer. The application row above makes a replay return
+            // before this point.
+            if !crate::owner_outbox::is_own_draft_in(
+                tx,
+                &key,
+                &event.metadata.accepted.receipt.update_digest,
+                crate::owner_outbox::AcceptedAs::Delivery(
+                    &event.metadata.accepted.receipt.delivery_id,
+                ),
+            )? {
+                dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
+            }
             // The session host commits every accepted frame of a live-shared
             // document as local, the owner's and each collaborator's alike,
             // so the host is the one computer that claims its field changes
@@ -2628,6 +2642,52 @@ mod tests {
             assert_eq!(result.application_replayed, committed);
             assert_eq!(count(&store, "live_device_update_applications"), 1);
         }
+    }
+
+    /// The session host counts every accepted frame it commits as a change
+    /// from elsewhere, once, except a frame that is this computer's own
+    /// draft.
+    #[test]
+    fn the_session_host_counts_frames_from_elsewhere_once() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let remote_changes = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_storage::remote_changes_applied_in(conn, "workspace-1")
+                })
+                .unwrap()
+        };
+        let source = Ydoc::wire();
+        let own = source.plaintext_insert(0, "own");
+        let draft = crate::owner_outbox::append(
+            &mut store,
+            "workspace-1",
+            crate::owner_outbox::OwnerOutboxAppendInput {
+                binding: binding(),
+                base_update: Ydoc::wire().encode_full_state(),
+                append_key: "own-draft".into(),
+                update: own.clone(),
+                limits: crate::owner_outbox::OwnerOutboxLimits {
+                    max_pending_bytes: 10_000,
+                    max_pending_age_ms: 10_000,
+                },
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event(&draft.delivery_id, 1, own),
+        ));
+        assert_eq!(remote_changes(&store), 0, "this computer's own draft");
+
+        let other = event("other", 2, source.plaintext_insert(3, " other"));
+        ack(apply(&mut store, &mut cache, &handle, other.clone()));
+        assert_eq!(remote_changes(&store), 1, "a frame from elsewhere");
+        assert!(ack(apply(&mut store, &mut cache, &handle, other)).application_replayed);
+        assert_eq!(remote_changes(&store), 1, "a replayed frame counts once");
     }
 
     /// A live-shared record: the session host commits each accepted frame,

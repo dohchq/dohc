@@ -476,6 +476,17 @@ fn apply_deferred_base(
         .map_err(|error| {
             map_collab_payload_error(error, "parked Y.Doc base could not be claimed")
         })?;
+        // A base this drain installs is a document from elsewhere. A resumed
+        // claim was installed by an earlier attempt, and one another base
+        // already won installs nothing.
+        if matches!(
+            claim,
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+                | dohc_engine_collab::ClaimOutcome::Replaced { .. }
+        ) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)
+                .map_err(SyncError::Storage)?;
+        }
         let (winner, losing_claim_id) = match claim {
             dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
                 // A winner/fresh replica cannot recover this incoming loser:

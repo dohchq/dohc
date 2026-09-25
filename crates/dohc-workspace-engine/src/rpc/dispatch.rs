@@ -14,7 +14,7 @@ use serde_json::Value;
 use serde_json::json;
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
-    method.starts_with("sync.")
+    (method.starts_with("sync.") && method != "sync.remoteChanges")
         || method.starts_with("share.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
@@ -283,6 +283,7 @@ impl EngineService {
             "sync.probe" => {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
+            "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }
@@ -1253,6 +1254,7 @@ mod tests {
             "sync.commitCursor",
             "sync.probe",
             "sync.pull",
+            "sync.remoteChanges",
             "sync.push",
             "sync.recoverOrigin",
             "versionedBinary.read",

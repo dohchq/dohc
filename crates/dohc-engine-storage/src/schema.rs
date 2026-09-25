@@ -164,6 +164,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "merged_moments",
     "automation_presses",
     "automation_schedule_marks",
+    "remote_changes",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

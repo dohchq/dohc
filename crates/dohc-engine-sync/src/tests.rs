@@ -880,6 +880,7 @@ mod owner_publication;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;
+mod remote_changes;
 mod secret;
 mod share_proposal;
 mod share_view;
