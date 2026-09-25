@@ -3784,7 +3784,7 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
         .expect("main version");
     seed_text_head(&mut engine, "granter-object", "shared/docs/in.md", "inside");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({
@@ -3828,7 +3828,7 @@ fn a_recipient_thread_create_for_an_untracked_path_is_refused_on_the_owner_lane(
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({
@@ -3972,7 +3972,7 @@ fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
         .expect("main version");
     seed_text_head(&mut engine, "granter-object", "shared/docs/in.md", "inside");
     let operation = envelope(
-        "share:share-1:recipient",
+        "relay:share-member:recipient",
         0,
         "chat.thread.create",
         json!({

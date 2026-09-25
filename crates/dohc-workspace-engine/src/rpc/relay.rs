@@ -999,7 +999,7 @@ impl EngineService {
     /// the same reason `sync.claim` mints its own: the durable row is the
     /// record, so a refresh cannot re-mint an origin and split this replica's
     /// log in two. The origin is a REPLICA id — the relay namespaces this
-    /// recipient's ops as `share:<shareId>:<originId>` — so it must never be
+    /// recipient's ops by share, authenticated member, and replica — so it must never be
     /// a user id, which two devices would share.
     pub(super) async fn share_view_record_identity(
         &self,

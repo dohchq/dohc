@@ -1328,7 +1328,7 @@ fn apply_accepted_change(
     engine: &mut EngineStore,
     payload: serde_json::Value,
 ) -> MomentApplyResult {
-    let operation = envelope("share:share-1:recipient", 0, "moment.append", payload);
+    let operation = envelope("relay:share-member:recipient", 0, "moment.append", payload);
     match apply_moment_envelope_detailed(engine, &operation, &NoFaults, &NoLiveLeases)
         .expect("accepted change applies")
     {
