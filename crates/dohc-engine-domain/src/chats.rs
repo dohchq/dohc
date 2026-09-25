@@ -5312,6 +5312,7 @@ fn insert_attachment(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_local_attachments(
     tx: &Transaction<'_>,
     workspace_id: &str,
