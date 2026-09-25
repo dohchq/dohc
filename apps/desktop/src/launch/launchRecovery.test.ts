@@ -5,7 +5,6 @@ const electron = vi.hoisted(() => ({
     isPackaged: true,
     getVersion: vi.fn(() => "1.0.0"),
     whenReady: vi.fn(async () => undefined),
-    requestSingleInstanceLock: vi.fn(() => true),
     quit: vi.fn(),
   },
   dialog: { showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })) },
@@ -18,17 +17,14 @@ const updater = vi.hoisted(() => {
   };
   return { controller, startAutoUpdates: vi.fn(async (): Promise<typeof controller | null> => controller) };
 });
-const marker = vi.hoisted(() => ({ abandonLaunch: vi.fn() }));
 
 vi.mock("electron", () => electron);
 vi.mock("../updates/electronUpdater", () => ({ startAutoUpdates: updater.startAutoUpdates }));
-vi.mock("./launchMarker", () => marker);
 
 const { checkForUpdateBeforeMain } = await import("./launchRecovery");
 
 beforeEach(() => {
   vi.clearAllMocks();
-  electron.app.requestSingleInstanceLock.mockReturnValue(true);
   electron.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false });
   updater.controller.awaitUpdate.mockResolvedValue("1.0.1");
   updater.startAutoUpdates.mockResolvedValue(updater.controller);
@@ -59,11 +55,4 @@ describe("update check before main loads", () => {
     expect(electron.app.quit).not.toHaveBeenCalled();
   });
 
-  it.each(["unfinished-launch", "startup"] as const)("hands a %s check to the process that already checks, so only one installs", async (failure) => {
-    electron.app.requestSingleInstanceLock.mockReturnValue(false);
-    await expect(checkForUpdateBeforeMain(failure)).resolves.toBe(true);
-    expect(marker.abandonLaunch).toHaveBeenCalledOnce();
-    expect(electron.app.quit).toHaveBeenCalledOnce();
-    expect(updater.startAutoUpdates).not.toHaveBeenCalled();
-  });
 });

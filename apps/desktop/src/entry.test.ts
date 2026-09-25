@@ -7,6 +7,7 @@ const electron = vi.hoisted(() => ({
     getPath: vi.fn(() => "/profile"),
     getVersion: vi.fn(() => "1.0.0"),
     quit: vi.fn(),
+    requestSingleInstanceLock: vi.fn(() => true),
     relaunch: vi.fn(),
     exit: vi.fn(),
   },
@@ -29,6 +30,9 @@ describe("electron main entry", () => {
   it("reports a main module that fails to load, checks for a newer build, then quits", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     await import("./entry");
+    // The lock comes before any marker read or write.
+    expect(electron.app.requestSingleInstanceLock.mock.invocationCallOrder[0])
+      .toBeLessThan(marker.beginLaunch.mock.invocationCallOrder[0]!);
     expect(marker.beginLaunch).toHaveBeenCalledWith(expect.stringContaining("dohc-launch.json"), "1.0.0", null);
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
       "dohc failed to start",

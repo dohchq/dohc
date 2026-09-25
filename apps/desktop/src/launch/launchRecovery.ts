@@ -2,7 +2,6 @@ import { app, dialog } from "electron";
 import { startAutoUpdates, type UpdateWaitBounds } from "../updates/electronUpdater";
 import { createUpdateAfterFailure, FAILURE_UPDATE_BOUNDS } from "../updates/updateAfterFailure";
 import { confirmRestartDialog, showDownloadingDialog } from "../updates/failureDialogs";
-import { abandonLaunch } from "./launchMarker";
 import type { LaunchFailure } from "./launchEntry";
 
 // Before main loads, nothing is on screen until an update is found, so the
@@ -14,15 +13,9 @@ const BEFORE_LAUNCH_BOUNDS: UpdateWaitBounds = { ...FAILURE_UPDATE_BOUNDS, verdi
  * when it owns the exit: a restart into an update, or a quit it made.
  */
 export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<boolean> {
+  // The entry already holds the single-instance lock, so no other process
+  // downloads or installs at the same time.
   await app.whenReady();
-  // Main is not loaded, so nothing answers a second launch. The first
-  // process checks; a second one takes back its count and quits, so two
-  // processes never download and install at once.
-  if (!app.requestSingleInstanceLock()) {
-    abandonLaunch();
-    app.quit();
-    return true;
-  }
   const controller = await startAutoUpdates({
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),

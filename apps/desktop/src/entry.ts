@@ -9,6 +9,8 @@ import { updatesEnabled } from "./updates/electronUpdater";
 
 await runLaunchEntry({
   argv: process.argv,
+  // Main's lifecycle asks again; Electron answers true to the holder.
+  acquireLock: () => app.requestSingleInstanceLock(),
   markerPath: updatesEnabled(process.env, app.isPackaged)
     ? join(app.getPath("userData"), LAUNCH_MARKER_FILE)
     : null,

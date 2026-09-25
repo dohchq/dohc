@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  abandonLaunch,
   beginLaunch,
   finishLaunch,
   grantCheckedRelaunch,
@@ -53,28 +52,6 @@ describe("launch marker", () => {
     expect(open(disk.fs).unfinished).toBe(0);
   });
 
-  it("takes back only its own count when it hands off to the running instance", () => {
-    const disk = memoryFs(JSON.stringify({ version: "1.0.0", unfinished: 1 }));
-    const running = open(disk.fs);
-    const second = open(disk.fs);
-    expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 3 });
-    second.handOff();
-    expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 2 });
-    running.finish();
-    expect(disk.read()).toBeUndefined();
-  });
-
-  it("does not bring back a count the running instance removed before the hand-off", () => {
-    // One unfinished launch, then A starts, B starts, A finishes, B loses the lock.
-    const disk = memoryFs(JSON.stringify({ version: "1.0.0", unfinished: 1 }));
-    const a = open(disk.fs);
-    const b = open(disk.fs);
-    a.finish();
-    b.handOff();
-    expect(disk.read()).toBeUndefined();
-    expect(open(disk.fs).unfinished).toBe(0);
-  });
-
   it("lets one relaunch skip the check, once, and only with the pass it was given", () => {
     const disk = memoryFs(JSON.stringify({ version: "1.0.0", unfinished: 2 }));
     const checking = open(disk.fs);
@@ -117,13 +94,10 @@ describe("launch marker", () => {
     expect(logged).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps this process's launch for main to finish or hand off", () => {
+  it("keeps this process's launch for main to finish", () => {
     const disk = memoryFs();
     beginLaunch(PATH, "1.0.0", null, disk.fs);
     finishLaunch();
-    expect(disk.read()).toBeUndefined();
-    beginLaunch(PATH, "1.0.0", null, disk.fs);
-    abandonLaunch();
     expect(disk.read()).toBeUndefined();
     beginLaunch(PATH, "1.0.0", null, disk.fs);
     expect(grantCheckedRelaunch()).toEqual(expect.any(String));
@@ -135,7 +109,6 @@ describe("launch marker", () => {
   it("does nothing for main loaded without the entry module", () => {
     const disk = memoryFs(JSON.stringify({ version: "1.0.0", unfinished: 2 }));
     finishLaunch();
-    abandonLaunch();
     expect(grantCheckedRelaunch()).toBeNull();
     expect(disk.read()).toEqual({ version: "1.0.0", unfinished: 2 });
   });

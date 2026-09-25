@@ -136,7 +136,7 @@ import {
 import { initialUpdateState } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
 import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
-import { abandonLaunch, finishLaunch } from "./launch/launchMarker";
+import { finishLaunch } from "./launch/launchMarker";
 import {
   createExitRounds,
   createQuitGuard,
@@ -3875,7 +3875,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
-  launch: { finished: finishLaunch, handedOff: abandonLaunch },
+  launch: { finished: finishLaunch },
   beforeQuit: (event) => { quitGuard.beforeQuit(event); },
   shutdown: {
     budgetMs: WILL_QUIT_BUDGET_MS,

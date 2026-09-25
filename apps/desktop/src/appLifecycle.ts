@@ -21,6 +21,14 @@ interface LifecycleApp {
   on(event: "second-instance", listener: (event: unknown, argv: string[]) => void): unknown;
   on(event: "window-all-closed", listener: () => void): unknown;
   on(event: "activate", listener: () => void): unknown;
+  on(event: "browser-window-created", listener: (event: unknown, window: SessionWindow) => void): unknown;
+}
+
+// Windows ends a logoff, shutdown, or restart without a quit event. The
+// window's session-end is the confirmed end; query-session-end can still be
+// cancelled.
+interface SessionWindow {
+  on(event: "session-end", listener: () => void): unknown;
 }
 
 // Starts updates when the first window never finishes loading, so a renderer
@@ -83,11 +91,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     updateAfterWindowLoadFailure(): Promise<boolean>;
   };
   // The launch marker: finished once the app has run LAUNCH_SETTLED_MS
-  // after bootstrap and the first window load, or at a clean quit; handed
-  // off when another instance already runs.
+  // after bootstrap and the first window load, at a clean quit, or when the
+  // Windows session ends.
   launch: {
     finished(): void;
-    handedOff(): void;
   };
   beforeQuit(event: QuitEvent): void;
   shutdown: {
@@ -286,7 +293,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     isQuitting: () => quitting,
     start(): Promise<void> {
       if (!app.requestSingleInstanceLock()) {
-        launch.handedOff();
         app.quit();
         return Promise.resolve();
       }
@@ -295,6 +301,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
           handoff.pendingCodeChanged();
         }
       }
+
+      app.on("browser-window-created", (_event, window) => {
+        window.on("session-end", () => launch.finished());
+      });
 
       app.on("open-url", (event, rawArgument) => {
         event.preventDefault();

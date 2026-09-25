@@ -7,6 +7,9 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 // means the launch before it crashed, hung, or exited within 30 s. Another
 // version starts from zero: an update is a new build.
 //
+// Only the process that holds the single-instance lock opens the marker; a
+// second launch hands off before it reads or writes anything.
+//
 // The marker is best effort: a read or write that fails never stops a
 // launch. It is written without fsync, so a power cut can leave a stale
 // count, which costs at most one extra update check.
@@ -36,7 +39,6 @@ export interface LaunchRecord {
   // This launch is the relaunch its checking process allowed.
   readonly checked: boolean;
   finish(): void;
-  handOff(): void;
   // Allows one relaunch to skip the check. Returns the pass it must carry.
   grantCheckedRelaunch(): string;
 }
@@ -88,16 +90,6 @@ export function openLaunchMarker(
       open = false;
       write(fs, path, version, { unfinished: 0 });
     },
-    // This process gave its launch to the running instance, so it takes back
-    // its own count from the marker as it is now. The running instance may
-    // have finished and removed it meanwhile; restoring an older snapshot
-    // would bring a stale count back.
-    handOff() {
-      if (!open) return;
-      open = false;
-      const now = read(fs, path, version);
-      write(fs, path, version, { ...now, unfinished: Math.max(0, now.unfinished - 1) });
-    },
     // The checking process never loaded main, so it does not count.
     grantCheckedRelaunch() {
       open = false;
@@ -125,12 +117,6 @@ export function beginLaunch(
 /** This launch finished starting: the next one starts from zero. */
 export function finishLaunch(): void {
   current?.finish();
-  current = null;
-}
-
-/** This process handed its launch to the instance that already runs. */
-export function abandonLaunch(): void {
-  current?.handOff();
   current = null;
 }
 

@@ -95,7 +95,6 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     launch: {
       finished: vi.fn(() => { log.push("launch-finished"); }),
-      handedOff: vi.fn(() => { log.push("launch-handed-off"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -354,7 +353,6 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
-    expect(f.dependencies.launch.handedOff).not.toHaveBeenCalled();
   });
 
   it("finishes the launch at a clean quit before 30 s have passed", async () => {
@@ -367,6 +365,22 @@ describe("desktop bootstrap", () => {
     f.app.emit("will-quit", event());
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
     // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
+  });
+
+  it("finishes the launch when Windows ends the session, which emits no quit event", async () => {
+    const f = fixture();
+    await boot(f);
+    const early = new EventEmitter();
+    f.app.emit("browser-window-created", {}, early);
+    early.emit("query-session-end", { preventDefault: vi.fn() });
+    // query-session-end can still be cancelled; only session-end is final.
+    expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
+    early.emit("session-end", {});
+    expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    const later = new EventEmitter();
+    f.app.emit("browser-window-created", {}, later);
+    later.emit("session-end", {});
+    expect(f.dependencies.launch.finished).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the launch marker when the process dies within 30 s of its first window", async () => {
@@ -416,8 +430,6 @@ describe("desktop bootstrap", () => {
     f.app.lock = false;
     await f.lifecycle.start();
     expect(f.app.quit).toHaveBeenCalledOnce();
-    // The running instance owns the launch count; this process never counted.
-    expect(f.log.slice(-2)).toEqual(["launch-handed-off", "quit"]);
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     expect(f.app.whenReady).not.toHaveBeenCalled();
     expect(f.slot.pending()).toBeNull();

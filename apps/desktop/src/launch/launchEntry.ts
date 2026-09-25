@@ -33,6 +33,9 @@ export type LaunchFailure = "startup" | "unfinished-launch";
  */
 export async function runLaunchEntry(dependencies: {
   argv: readonly string[];
+  // The single-instance lock. Taken before the marker is read, so only the
+  // instance that runs ever changes it.
+  acquireLock(): boolean;
   // Null when this build has no updater, so there is nothing to check for.
   markerPath: string | null;
   // Counts this launch. Returns the unfinished launches before it, and
@@ -57,6 +60,12 @@ export async function runLaunchEntry(dependencies: {
     else dependencies.relaunchChecked();
   };
 
+  // A second launch hands its arguments to the running instance, which
+  // Electron does as part of the lock request, and leaves.
+  if (!dependencies.acquireLock()) {
+    dependencies.quit();
+    return { recovery: null };
+  }
   if (markerPath) {
     const { unfinished, checked } = dependencies.beginLaunch(markerPath, checkedPassFrom(argv));
     if (unfinished >= UNFINISHED_LAUNCHES_BEFORE_CHECK && !checked) {
