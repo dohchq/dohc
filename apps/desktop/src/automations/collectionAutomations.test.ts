@@ -1257,6 +1257,9 @@ describe("Collection automations", () => {
     // Nothing overwrote the file dohc could not read.
     expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
 
+    // Every run waits, so no field is marked.
+    await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
+
     await expect(w.executor.resetHolds()).resolves.toBe("reset");
     const { holds, unreadable } = w.executor.holdState();
     expect(unreadable).toBe(false);
@@ -1373,7 +1376,7 @@ describe("Collection automations", () => {
     // A reload says so once it has read the file again. A broken entry keeps its name.
     await w.writeAutomations("Tasks", BUMP.replace("name: Bump", "name: Bump the count").replace("{field-changed: Status}", "whenever"));
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
-    await w.until(() => w.automationsChanged() === 2);
+    await w.until(() => w.executor.automationName(TASKS) === "Bump the count");
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
     expect(w.executor.automationName(TASKS)).toBe("Bump the count");
     expect(w.executor.automationName("collection:Tasks#stamp")).toBeNull();

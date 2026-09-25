@@ -735,6 +735,8 @@ export class CollectionAutomations {
     automation: Automation,
     writable: (path: string) => Promise<boolean>,
   ): Promise<boolean> {
+    // Saved verdicts dohc cannot read hold every run until someone resets them.
+    if (this.verdictsUnreadable) return false;
     const hash = definitionHash(automation);
     const steps = reachStepsOf(automation, collectionNamed(collectionPath), collectionNamed);
     for (const [step, reach] of steps.entries()) {
