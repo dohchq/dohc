@@ -894,12 +894,6 @@ export class CollectionAutomations {
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.
     const automation = id ? this.definitionFor(id) : null;
-    const unsupported = automation === null ? null : unsupportedReason(automation);
-    // A claim this version cannot run fails with the reason the panel shows,
-    // so it reaches the failure notice and a later version's Try again runs it.
-    if (id !== null && unsupported !== null && claim.collectionPath === id.collectionPath) {
-      return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
-    }
     if (
       id === null || automation === null || !automation.enabled ||
       // A change in a Collection inside this one: the subscription's path
@@ -911,6 +905,12 @@ export class CollectionAutomations {
         void this.enqueue(() => this.dropStaleSubscription(claim.automationId, id.collectionPath));
       }
       return { kind: "settle", input: { state: "done" }, settled: async () => undefined };
+    }
+    // A claim this version cannot run fails with the reason the panel shows,
+    // so it reaches the failure notice and a later version's Try again runs it.
+    const unsupported = unsupportedReason(automation);
+    if (unsupported !== null) {
+      return { kind: "settle", input: { state: "failed", error: unsupported }, settled: () => this.pruneRuns(claim.automationId) };
     }
     // Every step needs the roster, even one inside the Collection: someone
     // with Edit on the file alone is an editor who cannot edit its records.

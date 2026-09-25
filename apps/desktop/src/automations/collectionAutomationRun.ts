@@ -194,7 +194,7 @@ export async function runCollectionAutomation(
     if (planned.kind === "stop") return planned.outcome;
     const now = dependencies.nowMs();
     run = {
-      version: 1,
+      version: 2,
       claimId: claim.claimId,
       automationId: claim.automationId,
       definitionHash: definitionHash(automation),
@@ -343,6 +343,9 @@ async function applyPlan(
     run.applied.push(applied);
     run.updatedAtMs = dependencies.nowMs();
   }
+  // A stop that came during the last write or its record leaves the run to
+  // the next drain, which finds every effect recorded and completes it.
+  if (input.stopped.aborted) return stopped;
   return { kind: "done" };
 }
 
@@ -417,7 +420,7 @@ async function applyEffect(
     // The record's id comes from the claim and step, so an earlier attempt's
     // record is found again instead of added twice. When the engine gave the
     // file another id, the one this run recorded is the one to find.
-    const known = run.created.find((entry) => entry.ordinal === ordinal);
+    const known = run.created.findLast((entry) => entry.ordinal === ordinal);
     const created = await dependencies.withRecordWrites(signal, (edit) =>
       createCollectionRecord(edit, {
         collectionPath: effect.collectionPath,

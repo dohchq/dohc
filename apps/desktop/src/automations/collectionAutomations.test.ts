@@ -228,6 +228,7 @@ async function world(options: {
   const resumable: Array<ReadonlySet<string> | null> = [];
   const baseStore = createAutomationRunStore(root);
   let failRecordAt: number | null = null;
+  let beforeRecord: (() => void) | null = null;
   // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
   const occupied = new Set<string>();
   let saves = 0;
@@ -247,6 +248,9 @@ async function world(options: {
     appendEffect: async (run, applied) => {
       records_ += 1;
       if (records_ === failRecordAt) throw new Error("The disk is full.");
+      const hook = beforeRecord;
+      beforeRecord = null;
+      hook?.();
       await baseStore.appendEffect(run, applied);
     },
   };
@@ -335,6 +339,7 @@ async function world(options: {
     setRoster: (next: ReachRoster) => { roster = next; },
     beforeNextRoster: (hook: () => Promise<void>) => { beforeRoster = hook; },
     failRecordAt: (index: number) => { failRecordAt = records_ + index; },
+    beforeNextRecord: (hook: () => void) => { beforeRecord = hook; },
     saves: () => saves,
     effectRecords: () => records_,
     occupy: (id: string) => { occupied.add(id); },
@@ -1307,5 +1312,35 @@ describe("Collection automations", () => {
       error: "dohc can run automations that start from a record change. Other triggers come later.",
     });
     expect(w.journaled).toEqual([]);
+  });
+
+  it("leaves a run to the next drain when a pause lands as its last effect is recorded", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const paused = Promise.withResolvers<void>();
+    w.beforeNextRecord(() => {
+      w.executor.pauseForEngineRestart();
+      paused.resolve();
+    });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await paused.promise;
+    // Closing waits for the stopped run and hands its claim back.
+    await w.executor.dispose();
+    const [waiting] = (await w.baseStore.runsOf("collection:Tasks#seen", claim.claimId)).runs;
+    expect(waiting).toMatchObject({ outcome: null, applied: [{ ordinal: 0 }] });
+    await w.makeExecutor().open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.journaled).toHaveLength(1);
+  });
+
+  it("settles a claim for a switched-off automation as done, even one this version cannot run", async () => {
+    const w = await world({ automations: { Tasks: "  - id: later\n    name: Later\n    enabled: false\n    when: {schedule: day, timezone: UTC}\n    do: [{find: 'true', as: all}]\n" } });
+    const claim = w.claim("collection:Tasks#later", w.addRecord("Tasks", "one", { Status: "Done" }));
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.failuresChanged).toEqual([]);
   });
 });
