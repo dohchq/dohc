@@ -2,13 +2,10 @@ import { useEffect, useRef } from "react";
 import type { DirectWriteRow, PushShareDirectWritesResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
-// How long saves settle before a push. A burst of saves makes one push.
-export const DIRECT_WRITE_PUSH_DELAY_MS = 800;
-
-// Share views whose relay answered that it takes no direct writes. The lane is
-// a deployment setting, so the view stops asking until the app restarts; its
-// changes wait for Send changes.
-const unavailableViews = new Set<string>();
+// Share views whose relay answered that it takes no direct writes, with its
+// notice shown. Main stops asking until the app restarts, and the notice
+// shows once.
+const unavailableShown = new Set<string>();
 
 export type DirectWriteNoticeKind =
   | "direct-write-stale"
@@ -24,14 +21,14 @@ export interface DirectWriteNotice {
   send: { label: string; run: () => void } | null;
 }
 
-// After a save in an Edit share view, the shell pushes the change to a
-// Collection's own files straight into the owner's workspace (ADR 0013).
-// A write that went is silent: the save already showed it. A stale or
-// refused write stays for Send changes, and its notice offers that.
+// After a save in an Edit share view, main pushes the change to a
+// Collection's own files straight into the owner's workspace (ADR 0013), and
+// this shell shows how it ended. A write that went is silent: the save
+// already showed it. A stale or refused write stays for Send changes, and its
+// notice offers that.
 //
 // The engine's journal keeps every change until a push decides it, so the
-// view also pushes when it opens: a save whose push a workspace switch cut
-// off goes then.
+// view also pushes when it opens: changes from before this session go then.
 export function useShareDirectWrites(input: {
   workspaceId: string;
   // An Edit share view that has not ended and whose grant is readable.
@@ -48,43 +45,28 @@ export function useShareDirectWrites(input: {
     if (!input.enabled) return;
     const workspaceId = input.workspaceId;
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let running = false;
-    let again = false;
 
     const push = async (): Promise<void> => {
-      if (unavailableViews.has(workspaceId)) return;
-      if (running) {
-        again = true;
-        return;
-      }
-      running = true;
+      let result: PushShareDirectWritesResult;
       try {
-        const result = await bridge().pushShareDirectWrites({ workspaceId });
-        if (!disposed) report(result);
+        result = await bridge().pushShareDirectWrites({ workspaceId });
       } catch (error) {
-        if (!disposed) {
-          report({
-            status: "failed",
-            writes: [],
-            errorMessage: error instanceof Error ? error.message : String(error),
-            lasting: false,
-          });
-        }
-      } finally {
-        running = false;
-        if (again && !disposed) {
-          again = false;
-          void push();
-        }
+        result = {
+          status: "failed",
+          writes: [],
+          errorMessage: error instanceof Error ? error.message : String(error),
+          lasting: false,
+        };
       }
+      if (!disposed) report(result);
     };
 
     const report = (result: PushShareDirectWritesResult): void => {
       const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
       const sendAsProposal = { label: "Send as proposal", run: () => void sendShareChanges() };
       if (result.status === "unavailable") {
-        unavailableViews.add(workspaceId);
+        if (unavailableShown.has(workspaceId)) return;
+        unavailableShown.add(workspaceId);
         showNotice({
           kind: "direct-write-unavailable",
           message: `${ownerName}'s server doesn't take Collection changes directly. Send your changes for ${ownerName} to review.`,
@@ -107,24 +89,22 @@ export function useShareDirectWrites(input: {
           send: sendAsProposal,
         });
       }
-      if (refused.length > 0) {
-        // The relay's reason starts with the file's path, so it stands alone.
-        const reason = refused[0]!.reason.trim().replace(/[.\s]+$/u, "");
-        const changes = refused.length === 1 ? "your change" : `${refused.length} of your changes`;
+      const lasting = result.status === "failed" && result.lasting;
+      // A lasting failure shares the refused row, so it carries the refusal too.
+      const refusal = refused.length > 0 ? refusalSentence(ownerName, refused) : "";
+      if (refused.length > 0 && !lasting) {
         showNotice({
           kind: "direct-write-refused",
-          message: reason
-            ? `${ownerName}'s server didn't take ${changes}: ${reason}. Send ${refused.length === 1 ? "it" : "them"} as a proposal.`
-            : `${ownerName}'s server didn't take your change to ${writesLabel(refused)}. Send it as a proposal.`,
+          message: `${refusal} Send ${refused.length === 1 ? "it" : "them"} as a proposal.`,
           retry: null,
           send: sendAsProposal,
         });
       }
       if (result.status !== "failed") return;
-      showNotice(result.lasting
+      showNotice(lasting
         ? {
             kind: "direct-write-refused",
-            message: `${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
+            message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
             retry: null,
             send: sendAsProposal,
           }
@@ -138,20 +118,24 @@ export function useShareDirectWrites(input: {
 
     // Anything a closed view left unsent goes now.
     void push();
-    const unsubscribe = bridge().onShareViewEdited((event) => {
-      if (event.workspaceId !== workspaceId) return;
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        void push();
-      }, DIRECT_WRITE_PUSH_DELAY_MS);
+    const unsubscribe = bridge().onShareDirectWritesPushed((event) => {
+      if (event.workspaceId === workspaceId && !disposed) report(event.result);
     });
     return () => {
       disposed = true;
-      if (timer !== null) clearTimeout(timer);
       unsubscribe();
     };
   }, [input.enabled, input.workspaceId]);
+}
+
+// Why the relay refused: its reason alone, which already starts with the
+// file's path, or the file when the relay gave no reason.
+function refusalSentence(ownerName: string, refused: ReadonlyArray<Extract<DirectWriteRow, { result: "refused" }>>): string {
+  const reason = refused[0]!.reason.trim().replace(/[.\s]+$/u, "");
+  const changes = refused.length === 1 ? "your change" : `${refused.length} of your changes`;
+  return reason
+    ? `${ownerName}'s server didn't take ${changes}: ${reason}.`
+    : `${ownerName}'s server didn't take your change to ${writesLabel(refused)}.`;
 }
 
 // The name a person knows a write by: its Collection's folder for a new

@@ -4878,7 +4878,9 @@ export const DirectWriteRow = z.discriminatedUnion("result", [
 ]);
 export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
 
-const DirectWriteRows = z.array(DirectWriteRow).max(MAX_SHARE_PROPOSAL_OPS);
+// One push's answer carries at most this many rows, over all its passes.
+export const MAX_DIRECT_WRITE_ROWS = MAX_SHARE_PROPOSAL_OPS;
+const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
 
 // What one push did. A failure is an ordinary result, for the reason a failed
 // submit is one: Electron does not carry custom Error properties across IPC.
@@ -4897,10 +4899,12 @@ export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
 ]);
 export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
 
-// A file in this share view was saved or created. The shell answers with a
-// direct push.
-export const ShareViewEditedEvent = z.object({ workspaceId: WORKSPACE_ID });
-export type ShareViewEditedEvent = z.infer<typeof ShareViewEditedEvent>;
+// A direct push main ran after a save in this share view finished.
+export const ShareDirectWritesPushedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  result: PushShareDirectWritesResult,
+});
+export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
 
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6486,7 +6490,7 @@ export interface DohcDesktopBridge
   pushShareDirectWrites(
     payload: PushShareDirectWritesPayload,
   ): Promise<PushShareDirectWritesResult>;
-  onShareViewEdited(listener: (event: ShareViewEditedEvent) => void): () => void;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;

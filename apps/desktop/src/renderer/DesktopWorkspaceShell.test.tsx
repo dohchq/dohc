@@ -68,6 +68,7 @@ import type {
   SettleShareProposalResult,
   SubmitShareChangesResult,
   PushShareDirectWritesResult,
+  ShareDirectWritesPushedEvent,
   WithdrawShareChangesResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
@@ -341,7 +342,7 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
-  const shareViewEditedCallbacks = new Set<(event: { workspaceId: string }) => void>();
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
   const automationFailuresCallbacks = new Set<
     (event: { workspaceId: string }) => void
   >();
@@ -627,13 +628,13 @@ function makeBaseBridge(
     pushShareDirectWrites: vi.fn(
       async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
     ),
-    emitShareViewEdited: (event: { workspaceId: string }) => {
-      for (const callback of [...shareViewEditedCallbacks]) callback(event);
+    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
+      for (const callback of [...directWritesPushedCallbacks]) callback(event);
     },
-    onShareViewEdited: vi.fn(
-      (listener: (event: { workspaceId: string }) => void) => {
-        shareViewEditedCallbacks.add(listener);
-        return () => shareViewEditedCallbacks.delete(listener);
+    onShareDirectWritesPushed: vi.fn(
+      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+        directWritesPushedCallbacks.add(listener);
+        return () => directWritesPushedCallbacks.delete(listener);
       },
     ),
     pickWorkspaceRoot: vi.fn(async () => null),
@@ -8881,22 +8882,21 @@ describe("shared view send changes", () => {
     );
   });
 
-  // A save in an Edit share view pushes a Collection's own files straight to
-  // the owner. A write the relay refuses stays for Send changes, and its
-  // notice sends it.
-  it("pushes after a save and offers a refused write as a proposal", async () => {
+  // After a save in an Edit share view, main pushes a Collection's own files
+  // straight to the owner. A write the relay refuses stays for Send changes,
+  // and its notice sends it.
+  it("shows a push main ran after a save and offers a refused write as a proposal", async () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
-    bridge.pushShareDirectWrites.mockResolvedValue({
-      status: "pushed",
-      writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
-    });
     renderShell(bridge, EDIT_SHARE);
     await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
 
-    act(() => bridge.emitShareViewEdited({ workspaceId: SHARE_VIEW.workspaceId }));
-    const toast = await screen.findByTestId("workspace-shell-error", {}, { timeout: 3_000 });
-    expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId });
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: SHARE_VIEW.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+    const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
       "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
     );
@@ -8908,8 +8908,9 @@ describe("shared view send changes", () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
     await screen.findByTestId("shared-view-banner");
-    // It does not listen for saves at all.
-    expect(bridge.onShareViewEdited).not.toHaveBeenCalled();
+    // It does not listen for pushes at all.
+    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 
   // What a submit did not take. Both are things the recipient would otherwise

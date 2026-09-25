@@ -283,7 +283,7 @@ export const CHANNELS = {
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
   pushShareDirectWrites: "desktop:push-share-direct-writes",
-  shareViewEdited: "desktop:share-view-edited",
+  shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   listMyShareChanges: "desktop:list-my-share-changes",
   withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",
