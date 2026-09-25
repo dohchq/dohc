@@ -130,159 +130,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
 // When nothing else applies and no caller said what failed.
 export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
-// The Collection host's plain errors that describe its own internals
-// (app-backend-runtime and localDatasetHost), as complete sentences, or as
-// the fixed words before ": " where one ends in a path. Only replies on the
-// Collection channel are read this way. Any other message keeps its words,
-// so a field, Collection or file a person named keeps its name and its
-// instruction.
-const COLLECTION_CHANNEL = "desktop:dataset";
-const COLLECTION_HOST_TEXT: ReadonlySet<string> = new Set([
-  "A fenced dataset cannot be archived.",
-  "A fenced dataset cannot be restored in place.",
-  "A newer materialization is already installed.",
-  "A protected file read requires a read-only dataset operation.",
-  "Active checkpoints cannot be discarded.",
-  "Checkpoint callbacks must be synchronous.",
-  "Checkpoint chunk integrity check failed.",
-  "Checkpoint chunks are incomplete.",
-  "Checkpoint chunks must be appended once, in order.",
-  "Checkpoint exceeds its size limit.",
-  "Checkpoint integrity check failed.",
-  "Checkpoint is already active.",
-  "Checkpoint is not available for activation.",
-  "Checkpoint is not sealed for this dataset.",
-  "Checkpoint manifest is damaged.",
-  "Checkpoint revision is not available.",
-  "Checkpoint stage changed or is unavailable.",
-  "Checkpoint stage changed.",
-  "Compiled dataset operations exceed the host limit.",
-  "Dataset access is not permitted.",
-  "Dataset access needs approval for the current revision.",
-  "Dataset already exists at the recovery target.",
-  "Dataset app binding exceeds its size limit.",
-  "Dataset approval changed after migration. Reload it.",
-  "Dataset approval changed during migration.",
-  "Dataset approval changed. Reload it before retrying.",
-  "Dataset approval or host changed.",
-  "Dataset artifacts are corrupt.",
-  "Dataset authority checks must be synchronous.",
-  "Dataset authority is already active.",
-  "Dataset authority is no longer active on this host.",
-  "Dataset authority was transferred.",
-  "Dataset catalog and journal approval differ.",
-  "Dataset catalog is missing.",
-  "Dataset changed after the migration was approved. Preview it again.",
-  "Dataset changed after this preview. Preview it again.",
-  "Dataset changed before preview. Preview it again.",
-  "Dataset changed before the protected file was read. Retry it.",
-  "Dataset changed during materialization maintenance.",
-  "Dataset changed during migration. Preview it again.",
-  "Dataset changed during preview. Preview it again.",
-  "Dataset changed during the read. Retry it.",
-  "Dataset checkpoint is invalid.",
-  "Dataset checkpoint range is invalid.",
-  "Dataset checkpoint write made no progress.",
-  "Dataset claim changed during activation.",
-  "Dataset cursor changed during checkpoint transition.",
-  "Dataset cursor changed during commit.",
-  "Dataset cursor changed.",
-  "Dataset data grant needs approval for the current revision.",
-  "Dataset export attachment count exceeds its bound.",
-  "Dataset export attachment hash differs.",
-  "Dataset export attachment inventory does not match its committed history.",
-  "Dataset export capture must be synchronous.",
-  "Dataset export checkpoint hash differs.",
-  "Dataset export chunk exceeds its bound.",
-  "Dataset export exceeds its storage reservation.",
-  "Dataset export history blob hash differs.",
-  "Dataset export history is incomplete.",
-  "Dataset export pending submissions exceed their bound.",
-  "Dataset export permission snapshot exceeds its bound.",
-  "Dataset export was disposed.",
-  "Dataset export write stopped.",
-  "Dataset head changed during recovery.",
-  "Dataset host callbacks must be synchronous.",
-  "Dataset host closed.",
-  "Dataset host is closed.",
-  "Dataset host is fenced.",
-  "Dataset host queue is full. Retry this operation.",
-  "Dataset initialization differs from its approved state.",
-  "Dataset is archived.",
-  "Dataset is not initialized.",
-  "Dataset lifecycle changed during restore.",
-  "Dataset maintenance was cancelled.",
-  "Dataset materialization is ahead of its journal.",
-  "Dataset migration requires checkpoint staging quota accounting.",
-  "Dataset operation expired before execution.",
-  "Dataset operation expired while waiting for a worker.",
-  "Dataset operation queue is full. Retry this operation.",
-  "Dataset ownership path is not a regular file",
-  "Dataset ownership record exceeds its limit",
-  "Dataset ownership record is damaged; inspect it before cleanup",
-  "Dataset recovery attachments require capture and read callbacks.",
-  "Dataset recovery history is incomplete.",
-  "Dataset recovery installation is not configured.",
-  "Dataset recovery record exceeds its metadata bound.",
-  "Dataset recovery storage is not configured.",
-  "Dataset revision transition does not match the current approval.",
-  "Dataset rules are already approved. Use a revision transition to change them.",
-  "Dataset schema changed. Recover from its current checkpoint.",
-  "Dataset was permanently deleted.",
-  "Dataset worker belongs to an expired host session.",
-  "Dataset worker directory is not a regular directory",
-  "Dataset worker directory is outside its owned root",
-  "Dataset worker manifest belongs to another session.",
-  "Dataset worker ownership is busy or unavailable",
-  "Dataset worker ownership is closed.",
-  "Dataset worker ownership is missing or damaged; inspect it before cleanup",
-  "Dataset workers are busy. Retry this operation.",
-  "Discarding this checkpoint requires quota accounting.",
-  "Implicit rowid access is unavailable for journaled datasets.",
-  "Initial dataset revision must be 1. Schema changes require a revision transition.",
-  "Invalid checkpoint chunk.",
-  "Invalid checkpoint identity.",
-  "Invalid checkpoint range.",
-  "Invalid checkpoint size or digest.",
-  "Invalid checkpoint stage page size.",
-  "Invalid dataset access path.",
-  "Invalid dataset data grant.",
-  "Invalid dataset export attachment metadata.",
-  "Invalid dataset export storage reservation.",
-  "Invalid dataset identifier.",
-  "Invalid dataset page size.",
-  "Invalid dataset recovery",
-  "Invalid dataset scope.",
-  "Invalid dataset worker limit.",
-  "Invalid dataset worker path.",
-  "Materialization checkpoint is no longer pending.",
-  "Materialization cursor changed authority or checkpoint.",
-  "Materialization cursor differs from its committed worker.",
-  "Materialization exceeds its reserved capacity.",
-  "Materialization is truncated.",
-  "Migration checkpoint differs from its source dataset.",
-  "Migration checkpoint exceeds its storage reservation.",
-  "Migration checkpoint is truncated.",
-  "Migration preview checkpoint changed.",
-  "Migration preview differs from its source dataset.",
-  "Recovery checkpoint is missing.",
-  "Recovery checkpoint staging is incomplete.",
-  "Recovery dataset differs from the requested dataset.",
-  "The Collection copy belongs to another dataset.",
-  "The dataset compiler must be an installed absolute path.",
-  "The operation expired while waiting for the dataset worker.",
-  "Too many files in dataset operation.",
-  "Transfer requires a fenced source dataset.",
-  "TypeScript dataset operations require the configured host compiler.",
-  "Unknown dataset ownership file; inspect it before cleanup",
-  "Unknown dataset worker directory; inspect it before cleanup",
-  "Unsupported dataset compiler installation.",
-  "Unsupported dataset compiler version.",
-  "journal write failed",
-]);
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
-const IPC_PREFIX = /^Error invoking remote method '([^']*)': /;
+const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
 const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
@@ -314,11 +164,9 @@ function parse(error: unknown) {
       ? error.message
       : `${error.name}${code === null ? "" : ` [${code}]`}: ${error.message}`;
   }
-  const channel = IPC_PREFIX.exec(text)?.[1];
   text = text.replace(IPC_PREFIX, "").trim();
   const match = CLASS_PREFIX.exec(text);
   return {
-    channel,
     text,
     name: match?.[1] ?? "Error",
     code: match?.[2],
@@ -339,7 +187,7 @@ export interface ReadError {
 }
 
 export function readError(error: unknown): ReadError {
-  const { channel, text, name, code, message } = parse(error);
+  const { text, name, code, message } = parse(error);
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];
@@ -351,7 +199,7 @@ export function readError(error: unknown): ReadError {
     return { words, mapped: words !== null, cause: text };
   }
   if (!message) return { words: null, mapped: false, cause: null };
-  if (RAW_CODE.test(message) || (channel === COLLECTION_CHANNEL && (COLLECTION_HOST_TEXT.has(message) || COLLECTION_HOST_TEXT.has(lead)))) {
+  if (RAW_CODE.test(message)) {
     return { words: null, mapped: false, cause: plain ? message : text };
   }
   return { words: message, mapped: false, cause: plain ? null : text };

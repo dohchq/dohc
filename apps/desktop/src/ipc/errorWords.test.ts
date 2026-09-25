@@ -115,41 +115,25 @@ describe("error words", () => {
     expect(readError({})).toEqual({ words: null, mapped: false, cause: null });
   });
 
-  it("hides the Collection worker's internal text only on the Collection channel", () => {
-    const worker = acrossIpc(new Error("Dataset operation expired while waiting for a worker."), "desktop:dataset");
-    expect(readError(worker)).toEqual({
-      words: null,
-      mapped: false,
-      cause: "Dataset operation expired while waiting for a worker.",
-    });
-    for (const internal of [
-      "Dataset workers are busy. Retry this operation.",
-      "Dataset host is closed.",
-      "Dataset access is not permitted.",
-      "Materialization is truncated.",
-      "Invalid dataset scope.",
-      "Unknown dataset worker directory; inspect it before cleanup: C:\\w\\.dohc\\workers\\a",
+  it("shows a plain Collection reply as written, names and instructions included", () => {
+    for (const message of [
+      "Dataset changed after this preview. Preview it again.",
+      "Dataset approval changed. Reload it before retrying.",
+      "Journal.md changed on disk. Open it again.",
+      "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
+      ...["Materialization", "Checkpoint", "Materialization is truncated.: Status", "Dataset operation"].map((field) =>
+        `${field} uses custom rules in Edit. Update Dataset host/operations.ts, then choose Review source change.`),
     ]) {
-      expect(readError(acrossIpc(new Error(internal), "desktop:dataset")).words, internal).toBeNull();
+      expect(readError(acrossIpc(new Error(message), "desktop:dataset")), message).toEqual({
+        words: message,
+        mapped: false,
+        cause: null,
+      });
     }
-    // A person's own names and an instruction written for them stay, even
-    // when a field, a folder or a file is named Dataset or Journal.
-    for (const [message, channel] of [
-      ["Journal.md changed on disk. Open it again.", "desktop:read-workspace-text"],
-      ["A Collection named Dataset already exists in Journal.", "desktop:create-collection"],
-      ["The server returned an invalid Collection checkpoint.", "desktop:dataset"],
-      [
-        "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
-        "desktop:dataset",
-      ],
-      ["Status uses custom rules. Update dataset/operations.ts, then choose Review source change.", "desktop:dataset"],
-      ...["Materialization", "Checkpoint", "Dataset operation", "Dataset host", "Invalid dataset"].map((field) => [
-        `${field} uses custom rules in Edit. Update Dataset host/operations.ts, then choose Review source change.`,
-        "desktop:dataset",
-      ] as const),
-    ] as const) {
-      expect(readError(acrossIpc(new Error(message), channel)).words, message).toBe(message);
-    }
+    expect(withErrorWords("dohc could not prepare this review.", acrossIpc(
+      new Error("Dataset changed after this preview. Preview it again."),
+      "desktop:dataset",
+    ))).toBe("dohc could not prepare this review. Dataset changed after this preview. Preview it again.");
   });
 
   it("tells a person what to do for each way the engine can be unavailable", () => {

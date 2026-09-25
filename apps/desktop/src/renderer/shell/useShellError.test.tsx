@@ -104,15 +104,13 @@ describe("useShellError", () => {
     ]);
   });
 
-  it("says what failed without the internal text of a Collection error", () => {
+  it("says what failed, then a Collection reply as written", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellError(
       "Could not open this Collection.",
-      new Error("Error invoking remote method 'desktop:dataset': Error: Dataset operation expired while waiting for a worker."),
+      new Error("Error invoking remote method 'desktop:dataset': Error: Dataset changed after this preview. Preview it again."),
     ));
-    expect(result.current.shellErrors[0]).toMatchObject({
-      message: "Could not open this Collection.",
-      cause: "Dataset operation expired while waiting for a worker.",
-    });
+    expect(result.current.shellErrors[0]!.message)
+      .toBe("Could not open this Collection. Dataset changed after this preview. Preview it again.");
   });
 });
