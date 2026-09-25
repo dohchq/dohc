@@ -40,7 +40,11 @@ interface FakeSessionLog {
   updates: Uint8Array[];
 }
 
-function fakeSession(options: { settleError?: Error } = {}): {
+function fakeSession(options: {
+  settleError?: Error;
+  /** Runs just before each update's turn on the session chain, as a remote update would land. */
+  beforeTurn?: (doc: Y.Doc) => void;
+} = {}): {
   session: WorkspaceEngineYDocProviderSession;
   log: FakeSessionLog;
 } {
@@ -49,10 +53,27 @@ function fakeSession(options: { settleError?: Error } = {}): {
   // The engine's rule (durable.rs): a key already journaled with other
   // update bytes refuses, so a re-run that reuses a key with a new update fails.
   const journaledKeys = new Map<string, string>();
+  // Local updates take turns on one chain, as the real session's do.
+  let chain: Promise<unknown> = Promise.resolve();
   const session = {
     doc,
     get initialUpdate() {
       return Y.encodeStateAsUpdate(doc);
+    },
+    applyDecidedLocalUpdate(
+      decide: (current: Y.Doc) => Uint8Array | null,
+      onArmed?: () => void,
+      applyOptions?: { actorOriginId?: string; attribution?: ChangeAttributionWire; idempotencyKey?: string },
+    ): Promise<boolean> {
+      const turn = chain.then(() => {
+        options.beforeTurn?.(doc);
+        const update = decide(doc);
+        if (update === null) return false;
+        session.applyLocalUpdate(update, onArmed, applyOptions);
+        return true;
+      });
+      chain = turn.catch(() => undefined);
+      return turn;
     },
     applyLocalUpdate(
       update: Uint8Array,
@@ -80,6 +101,7 @@ function fakeSession(options: { settleError?: Error } = {}): {
       onArmed?.();
     },
     async settleNow() {
+      await chain;
       log.order.push("settle");
       if (options.settleError) throw options.settleError;
       return { materialized: true };
@@ -87,8 +109,8 @@ function fakeSession(options: { settleError?: Error } = {}): {
     async close() {
       log.order.push("close");
     },
-  } as unknown as WorkspaceEngineYDocProviderSession;
-  return { session, log };
+  };
+  return { session: session as unknown as WorkspaceEngineYDocProviderSession, log };
 }
 
 function contextFor(
@@ -474,6 +496,27 @@ describe("setCollectionRecordFields", () => {
     });
     expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual(["claim-7/hash/0/rec_one/Due"]);
     expect(frontmatter.toJSON()).toEqual({ Count: 3, Owner: "ana", Due: "2026-09-30" });
+  });
+
+  it("compares each field when it is written, so a change that lands after the session opens is kept", async () => {
+    const root = await createTestScratch("dohc-collection-edits-");
+    // Undo's case: put Note back to "old" only while it still holds the run's "new".
+    const { session, log } = fakeSession({
+      // A remote edit lands after the open and before the field's turn.
+      beforeTurn: (doc) => doc.getMap("frontmatter").set("Note", "theirs"),
+    });
+    log.doc.getMap("frontmatter").set("Note", "new");
+
+    await expect(
+      setCollectionRecordFields(contextFor(root, session), {
+        recordPath: "tasks/one.md",
+        fields: { Note: "old" },
+        author: { kind: "user", userId: "local" },
+        expectedBefore: { Note: "new" },
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md", replaced: {}, kept: { Note: "theirs" } });
+    expect(log.doc.getMap("frontmatter").get("Note")).toBe("theirs");
+    expect(log.order).toEqual(["close"]);
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {

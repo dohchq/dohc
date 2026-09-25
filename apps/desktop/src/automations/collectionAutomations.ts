@@ -34,15 +34,17 @@ import {
   type ReachRoster,
   type ReachShare,
 } from "./automationReach";
-import type { AutomationRunStore, RunWrite, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, RunWrite, StoredRun, StoredSubscription } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
+  UNDONE_RUN_ERROR,
   UNREADABLE_RUN_ERROR,
   type CollectionAutomationReads,
   type CollectionAutomationRunDependencies,
   type CollectionAutomationRunOutcome,
 } from "./collectionAutomationRun";
+import { undoCollectionAutomationRuns, type CollectionAutomationUndone } from "./collectionAutomationUndo";
 import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
@@ -221,6 +223,10 @@ export interface CollectionAutomationRun {
   writes: RunWrite[];
   /** The run began under another version of the automation. */
   definitionChanged: boolean;
+  /** The chain depth cap stopped it before it ran, so Try again cannot run it. */
+  chainStopped: boolean;
+  /** A person undid what it changed. */
+  undone: boolean;
 }
 
 export type CollectionAutomationRetry =
@@ -233,6 +239,29 @@ export type CollectionAutomationRetry =
   // again starts from the beginning, and the person must choose that too.
   | { status: "progress-gone" }
   | { status: "refused"; reason: string };
+
+export type CollectionAutomationUndo =
+  | ({ status: "undone" } & CollectionAutomationUndone)
+  | { status: "refused"; reason: string };
+
+const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
+
+/**
+ * What runs did, oldest first. A record a run created before it stopped
+ * has no write yet, so it is listed from `created`, once.
+ */
+function writesOf(runs: readonly StoredRun[]): RunWrite[] {
+  const writes = runs.flatMap((run) => run.applied.flatMap((effect) => effect.writes));
+  const listed = new Set(writes.flatMap((write) => (write.kind === "created" ? [write.recordId] : [])));
+  for (const run of runs) {
+    for (const created of run.created) {
+      if (listed.has(created.recordId)) continue;
+      listed.add(created.recordId);
+      writes.push({ kind: "created", recordId: created.recordId, path: created.path });
+    }
+  }
+  return writes;
+}
 
 function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -293,8 +322,11 @@ export class CollectionAutomations {
    * before, so every run waits until someone resets the holds.
    */
   private verdictsUnreadable = false;
-  /** Claims a Try again is changing; they wait until it is done. */
-  private readonly retrying = new Set<string>();
+  /**
+   * Claims a Try again or an Undo is changing. The drain leaves them, and
+   * neither starts while the other runs.
+   */
+  private readonly changing = new Set<string>();
   /** Consecutive timed-out runs per automation, saved so a restart keeps them. */
   private timeouts = new Map<string, number>();
   /** Serializes index loads and subscription reconciles. */
@@ -689,15 +721,22 @@ export class CollectionAutomations {
     const runs: CollectionAutomationRun[] = [];
     // Only the runs shown are read.
     for (const claim of listed.claims.slice(0, limit)) {
-      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs.filter((run) => !run.superseded);
+      // Oldest first. A run a person started over under a newer definition
+      // still changed records, so its writes stay in the list.
+      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+        .sort((left, right) => left.startedAtMs - right.startedAtMs);
+      const live = stored.filter((run) => !run.superseded);
       runs.push({
         claimId: claim.claimId,
         state: claim.state,
         error: claim.error ?? null,
         createdAtMs: claim.createdAtMs,
         updatedAtMs: claim.updatedAtMs,
-        writes: stored.flatMap((run) => run.applied.flatMap((effect) => effect.writes)),
-        definitionChanged: hash !== null && stored.some((run) => run.definitionHash !== hash),
+        writes: writesOf(stored),
+        definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
+        // The engine's rule: a chain stop is inserted failed and never served.
+        chainStopped: claim.state === "failed" && claim.attempts === 0,
+        undone: stored.length > 0 && stored.every((run) => run.undo === "done"),
       });
     }
     return runs;
@@ -720,20 +759,25 @@ export class CollectionAutomations {
     }
     const unsupported = unsupportedReason(automation);
     if (unsupported !== null) return { status: "refused", reason: unsupported };
-    const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
-    if (listed === null) throw new Error("The workspace engine is not running.");
-    // Without its run history, dohc cannot tell what the run already did.
-    if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
-      return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
-    }
-    const runs = await runsForClaim(this.options.store, input, automation);
-    if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
-    const progressGone = runs.done === null && runs.current?.compacted === true;
-    const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
-    if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
-    this.retrying.add(input.claimId);
-    this.waitingFor.delete(input.claimId);
+    // The guard is taken before the first read and held to the end, so an
+    // Undo of the same run cannot start between this check and the retry.
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
+    this.changing.add(input.claimId);
     try {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      // Without its run history, dohc cannot tell what the run already did.
+      if (!listed.claims.some((claim) => claim.claimId === input.claimId)) {
+        return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+      }
+      const runs = await runsForClaim(this.options.store, input, automation);
+      if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
+      // An undone run's keys and record ids are spent, so it cannot run again.
+      if (runs.undo) return { status: "refused", reason: UNDONE_RUN_ERROR };
+      const progressGone = runs.done === null && runs.current?.compacted === true;
+      const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
+      if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
+      this.waitingFor.delete(input.claimId);
       const retried = await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
       if (retried === null) throw new Error("The workspace engine is not running.");
       if (startsOver) {
@@ -744,11 +788,65 @@ export class CollectionAutomations {
         }
       }
     } finally {
-      this.retrying.delete(input.claimId);
+      this.changing.delete(input.claimId);
     }
     this.notifyClaimed();
     this.options.onFailuresChanged();
     return { status: "queued" };
+  }
+
+  /**
+   * Undo for a finished run: its fields go back where no one changed them
+   * since, and the records it added move to the trash through `trash`.
+   */
+  async undo(
+    input: { automationId: string; claimId: string },
+    trash: (path: string) => Promise<void>,
+  ): Promise<CollectionAutomationUndo> {
+    await this.ready();
+    // Held from before the first read to the end, like Try again's.
+    if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
+    this.changing.add(input.claimId);
+    try {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId: input.automationId }));
+      if (listed === null) throw new Error("The workspace engine is not running.");
+      const claim = listed.claims.find((candidate) => candidate.claimId === input.claimId);
+      if (!claim) return { status: "refused", reason: "dohc no longer has this run on this computer." };
+      if (claim.state !== "done" && claim.state !== "failed") {
+        return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
+      }
+      const { runs, unreadable } = await this.options.store.runsOf(input.automationId, input.claimId);
+      if (unreadable) {
+        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
+      }
+      if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
+        return { status: "refused", reason: "You already undid this run." };
+      }
+      // Every run of the claim changed records, one a person started over
+      // under a newer definition too. One whose Undo stopped part way is
+      // undone again: what is already back stays as it is.
+      const pending = runs.filter((run) => run.undo !== "done");
+      // Saved before anything is reversed, so no run resumes over what this
+      // puts back, even if it stops part way.
+      for (const run of pending) {
+        if (run.undo === null) await this.options.store.save({ ...run, undo: "started", updatedAtMs: this.nowMs() });
+      }
+      const undone = await undoCollectionAutomationRuns({
+        withReads: (work) => this.withLiveEngine(work),
+        withRecordWrites: this.options.withRecordWrites,
+        trash,
+      }, pending, this.runAbort.signal);
+      for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
+      return { status: "undone", ...undone };
+    } finally {
+      this.changing.delete(input.claimId);
+    }
+  }
+
+  /** The name an engine automation id's automation has in its file, or null. */
+  nameOf(automationId: string): string | null {
+    const parsed = parseCollectionAutomationId(automationId);
+    return parsed ? (this.definitionFor(parsed)?.name ?? null) : null;
   }
 
   /** Waits for the open that reads the index. Only the workspace's own open starts one. */
@@ -1088,7 +1186,7 @@ export class CollectionAutomations {
 
   private async executeHeld(claim: AutomationClaim, stop: AbortSignal): Promise<ClaimAction | null> {
     const release = { kind: "release" } as const;
-    if (this.retrying.has(claim.claimId)) return release;
+    if (this.changing.has(claim.claimId)) return release;
     const id = parseCollectionAutomationId(claim.automationId);
     // The definition is read before the roster: a pull that lands while the
     // roster lists cannot bring a step from an editor the roster lacks.

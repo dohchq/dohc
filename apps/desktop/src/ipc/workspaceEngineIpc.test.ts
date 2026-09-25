@@ -74,6 +74,7 @@ async function harness() {
     artifactAssets: [descriptor],
     settleNow: vi.fn(async () => { throw new Error("unused settlement"); }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
+    applyDecidedLocalUpdate: vi.fn(async () => false),
     readArtifactAsset: vi.fn(async (value) => ({ descriptor: value, bytes: new Uint8Array([1, 2, 3]) })),
     close: vi.fn(async () => undefined),
   } satisfies WorkspaceEngineYDocProviderSession;
