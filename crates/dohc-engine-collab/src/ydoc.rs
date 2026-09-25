@@ -547,32 +547,47 @@ impl Ydoc {
             .then_some(source)
     }
 
-    /// The exact Markdown source for a settle into the local workspace, where
-    /// `local_text` is the file's current snapshot. A source whose body is
-    /// that file's body keeps its bytes even when a Markdown reader would see
-    /// structure the engine's reader keeps as text, such as a nested list:
-    /// the body is already the person's file, so settling it writes no bytes
-    /// the file did not hold. Without this, a frontmatter-only engine edit
-    /// rewrote such a body. The source must still rebuild the document. Try
-    /// [`Ydoc::preserved_markdown_source`] first; this admits more.
-    pub fn locally_preserved_markdown_source(
+    /// The exact Markdown source for the version's file, where `snapshot_text`
+    /// reads the file's current snapshot. This is
+    /// [`Ydoc::preserved_markdown_source`], or else a source whose body is the
+    /// snapshot's body and that still rebuilds the document. That body is
+    /// already the version's file, so keeping it writes no bytes the file did
+    /// not hold, even where a Markdown reader sees structure the engine's
+    /// reader keeps as text, such as a nested list. Without it, a
+    /// frontmatter-only engine edit rewrote such a body. Every projection
+    /// compared with the version's file uses this rule, so a settle, a later
+    /// check that the version is settled, and live activation agree. The
+    /// live baseline keeps the strict rule.
+    pub fn settled_markdown_source<E>(
         &self,
         canonical_projection: &str,
-        local_text: &str,
-    ) -> Option<String> {
-        let reference = self.markdown_source_reference()?;
-        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
-            return None;
+        snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
+    ) -> Result<Option<String>, E> {
+        if let Some(source) = self.preserved_markdown_source(canonical_projection) {
+            return Ok(Some(source));
         }
-        let source = self.markdown_source(&reference)?;
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(None);
+        };
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return Ok(None);
+        }
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(None);
+        };
+        let Some(snapshot) = snapshot_text()? else {
+            return Ok(None);
+        };
         let body = |markdown: &'_ str| {
             dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
                 .map_or(markdown.len(), |(_, body)| body.len())
         };
-        let (source_body, local_body) = (body(&source), body(local_text));
-        (source[source.len() - source_body..] == local_text[local_text.len() - local_body..]
-            && self.source_reproduces(&source, canonical_projection, false))
-        .then_some(source)
+        let (source_body, snapshot_body) = (body(&source), body(&snapshot));
+        Ok(
+            (source[source.len() - source_body..] == snapshot[snapshot.len() - snapshot_body..]
+                && self.source_reproduces(&source, canonical_projection, false))
+            .then_some(source),
+        )
     }
 
     /// Whether `source` rebuilds a document that projects
@@ -6913,28 +6928,29 @@ mod projection_tests {
             "---\nid: rec\nrelated: old\n---\n\n- parent\n  - nested\n",
         ] {
             assert_eq!(
-                doc.locally_preserved_markdown_source(&canonical, local)
-                    .as_deref(),
+                settled(&doc, &canonical, local).as_deref(),
                 Some(file),
                 "{local:?}"
             );
         }
-        // Any other body is dropped.
+        // Any other body, or no snapshot, is dropped.
         for local in ["---\nid: rec\n---\n\n- parent\n", "Hello\n"] {
-            assert_eq!(
-                doc.locally_preserved_markdown_source(&canonical, local),
-                None,
-                "{local:?}"
-            );
+            assert_eq!(settled(&doc, &canonical, local), None, "{local:?}");
         }
+        assert_eq!(
+            doc.settled_markdown_source(&canonical, || Ok::<_, ()>(None)),
+            Ok(None)
+        );
         // A source that does not rebuild the document is dropped, even when
         // the file holds it.
         let forged = "---\nid: rec\n---\n\nHidden\n";
         witness_source(&doc, forged);
-        assert_eq!(
-            doc.locally_preserved_markdown_source(&canonical, forged),
-            None
-        );
+        assert_eq!(settled(&doc, &canonical, forged), None);
+    }
+
+    fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
+        doc.settled_markdown_source(canonical, || Ok::<_, ()>(Some(snapshot.to_owned())))
+            .expect("snapshot read")
     }
 
     #[test]

@@ -2072,19 +2072,10 @@ pub fn project_ydoc_with_store(
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && doc.markdown_source_reference().is_some()
+            && let Some(source) =
+                doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
         {
-            // A local settle may keep a source whose body is the file's
-            // current body; see `Ydoc::locally_preserved_markdown_source`.
-            let preserved = match doc.preserved_markdown_source(&projection.content) {
-                Some(source) => Some(source),
-                None => local_snapshot_text(conn, key)?.and_then(|text| {
-                    doc.locally_preserved_markdown_source(&projection.content, &text)
-                }),
-            };
-            if let Some(source) = preserved {
-                projection.content = source;
-            }
+            projection.content = source;
         }
         return Ok(projection);
     }
