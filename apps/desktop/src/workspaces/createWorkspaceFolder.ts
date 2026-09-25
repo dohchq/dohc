@@ -6,7 +6,7 @@ import {
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CreatedWorkspace {
@@ -58,23 +58,6 @@ async function inspectManifest(rootPath: string): Promise<ManifestState> {
   // exists, but narrow defensively.
   const reason = check.status === "invalid" ? check.reason : "unrecognized manifest";
   return { kind: "blocked", reason: `this folder has an invalid .dohc/manifest.json: ${reason}` };
-}
-
-// Rolls a failed join back to an empty folder (0P-C gate fix). The join
-// handler verified the folder was empty before creating anything, so every
-// entry inside it was produced by this join attempt — identity scaffolding
-// (.dohc, shared-with-me), the engine store, and any partially materialized
-// pull output (all of which still lives on the relay). Removing them restores
-// the pre-join state so a retry sees an empty folder again; leaving them
-// would strand a half-joined workspace the empty-folder check then rejects.
-export async function resetFailedJoinFolder(rootPath: string): Promise<void> {
-  const entries = await readdir(rootPath).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  });
-  for (const entry of entries) {
-    await rm(join(rootPath, entry), { recursive: true, force: true });
-  }
 }
 
 export async function createWorkspaceFolder(input: {
