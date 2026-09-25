@@ -2195,7 +2195,7 @@ async function dispatch(
         };
       }
       // A new file, so the stricter materialization rules apply.
-      const validated = validateUserMaterializePath(request.args.path);
+      const validated = validateUserMaterializePath(request.args.path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       if (liveDocumentKindForPath(validated.normalized) !== "richdoc") {
         return { ok: false as const, reason: `a document path ends in .md or .markdown: ${request.args.path}` };
@@ -2223,7 +2223,7 @@ async function dispatch(
           reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
         };
       }
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       const input = {
         path: validated.normalized,
