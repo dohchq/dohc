@@ -63,7 +63,7 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   ["blobs", ["sha256", "text"]],
   ["snapshots", ["path"]],
-  ["ydoc_updates", []],
+  ["ydoc_updates", ["actor_origin_id", "actor_kind"]],
   ["replication_log", ["op_kind", "payload_json"]],
 ];
 
@@ -145,6 +145,23 @@ export function ydocUpdateCount(rootPath: string): number {
         | undefined;
       return Number(row?.n ?? 0);
     }) ?? 0
+  );
+}
+
+// Who each journaled Y.Doc update is recorded under.
+export function ydocUpdateAuthors(
+  rootPath: string,
+): Array<{ actorOriginId: string | null; actorKind: string | null }> {
+  return (
+    withEngineDb(rootPath, (db) =>
+      db
+        .prepare("SELECT actor_origin_id, actor_kind FROM ydoc_updates")
+        .all()
+        .map((row) => ({
+          actorOriginId: row.actor_origin_id === null ? null : String(row.actor_origin_id),
+          actorKind: row.actor_kind === null ? null : String(row.actor_kind),
+        })),
+    ) ?? []
   );
 }
 

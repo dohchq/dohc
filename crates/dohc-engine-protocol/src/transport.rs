@@ -14,8 +14,9 @@
 
 use crate::cancel::CancelSignal;
 use crate::error::WireError;
-use crate::wire::{Request, Response};
+use crate::wire::{Request, RequestId, Response};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
@@ -159,6 +160,110 @@ impl Drop for ConnectionOwner {
     }
 }
 
+/// Where a request reports that its work moved, so a caller can tell a slow
+/// request from a stuck one. The framed host makes an active sink for a
+/// request that set `progress` on a session that negotiated the `progress`
+/// capability. Every other request gets the inactive default, and a report to
+/// it does nothing.
+///
+/// An active sink keeps at most one message waiting to be written: a report
+/// while one waits is folded into it. After [`ProgressSink::finish`], which
+/// the host calls before it queues the terminal response, reports go nowhere,
+/// so no progress follows the response.
+#[derive(Clone, Default)]
+pub struct ProgressSink(Option<Arc<ProgressState>>);
+
+/// Hands one message to the output queue; `None` once the request finished.
+type ProgressSend = Option<Box<dyn Fn(ProgressMessage) + Send>>;
+
+struct ProgressState {
+    id: RequestId,
+    /// Cleared by `finish`, so a clone that gates costly counting on
+    /// `is_active` stops paying once the request has answered.
+    active: AtomicBool,
+    waiting: AtomicBool,
+    send: Mutex<ProgressSend>,
+}
+
+/// One progress message on its way to the writer. Dropping it, written or
+/// not, lets the request report again.
+pub struct ProgressMessage(Arc<ProgressState>);
+
+impl ProgressMessage {
+    pub fn id(&self) -> RequestId {
+        self.0.id
+    }
+}
+
+impl Drop for ProgressMessage {
+    fn drop(&mut self) {
+        self.0.waiting.store(false, Ordering::Release);
+    }
+}
+
+impl std::fmt::Debug for ProgressMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ProgressMessage").field(&self.0.id).finish()
+    }
+}
+
+impl ProgressSink {
+    /// An active sink for request `id`. `send` hands each message to the
+    /// output queue and must not block; a message it cannot queue it drops.
+    pub fn new(id: RequestId, send: impl Fn(ProgressMessage) + Send + 'static) -> Self {
+        ProgressSink(Some(Arc::new(ProgressState {
+            id,
+            active: AtomicBool::new(true),
+            waiting: AtomicBool::new(false),
+            send: Mutex::new(Some(Box::new(send))),
+        })))
+    }
+
+    /// Whether a report can reach anyone: false for the inactive default and
+    /// after [`ProgressSink::finish`]. Work that costs something only to
+    /// report progress checks this first.
+    pub fn is_active(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|state| state.active.load(Ordering::Acquire))
+    }
+
+    pub fn report(&self) {
+        let Some(state) = &self.0 else { return };
+        if !state.active.load(Ordering::Acquire) || state.waiting.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // A report that races `finish` finds no sender under the lock, so no
+        // message can follow the response.
+        if let Some(send) = state
+            .send
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            send(ProgressMessage(Arc::clone(state)));
+        }
+    }
+
+    /// End reporting for this request. Reports that already queued a message
+    /// stay ahead of anything the caller queues after this returns.
+    pub fn finish(&self) {
+        if let Some(state) = &self.0 {
+            state.active.store(false, Ordering::Release);
+            state.send.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(state) => f.debug_tuple("ProgressSink").field(&state.id).finish(),
+            None => f.write_str("ProgressSink(inactive)"),
+        }
+    }
+}
+
 /// Per-request context handed to service implementations.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -175,6 +280,9 @@ pub struct RequestContext {
     /// `hello`. Direct in-process calls default to the engine default.
     pub max_frame_bytes: u32,
     pub connection: Option<ConnectionHandle>,
+    /// Inactive unless the request asked for progress on a session that
+    /// negotiated it.
+    pub progress: ProgressSink,
 }
 
 impl RequestContext {
@@ -185,7 +293,13 @@ impl RequestContext {
             capabilities: Arc::from([]),
             max_frame_bytes: crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
             connection: None,
+            progress: ProgressSink::default(),
         }
+    }
+
+    pub fn with_progress(mut self, progress: ProgressSink) -> Self {
+        self.progress = progress;
+        self
     }
 
     pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
@@ -297,5 +411,70 @@ mod connection_tests {
         assert!(!captured.retain(&(late.clone() as Arc<dyn ConnectionResource>)));
         assert!(late.0.load(Ordering::SeqCst));
         assert!(replacement.handle().is_current());
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    /// A sink whose messages land in a queue the test drains by hand.
+    fn queued(id: RequestId) -> (ProgressSink, Arc<Mutex<Vec<ProgressMessage>>>) {
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        let sent = Arc::clone(&queue);
+        let sink = ProgressSink::new(id, move |message| sent.lock().unwrap().push(message));
+        (sink, queue)
+    }
+
+    #[test]
+    fn an_inactive_sink_reports_nothing() {
+        let sink = ProgressSink::default();
+        assert!(!sink.is_active());
+        sink.report();
+        sink.finish();
+        assert!(!RequestContext::unbounded().progress.is_active());
+    }
+
+    #[test]
+    fn at_most_one_message_waits_per_request() {
+        let (sink, queue) = queued(7);
+        sink.report();
+        sink.clone().report();
+        sink.report();
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert_eq!(queue.lock().unwrap()[0].id(), 7);
+        // The writer takes the message: the next report queues another.
+        drop(queue.lock().unwrap().pop());
+        sink.report();
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_message_the_queue_refused_lets_the_request_report_again() {
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&refused);
+        let sink = ProgressSink::new(1, move |message| {
+            count.fetch_add(1, Ordering::SeqCst);
+            drop(message);
+        });
+        sink.report();
+        sink.report();
+        assert_eq!(refused.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn nothing_is_sent_after_finish() {
+        let (sink, queue) = queued(3);
+        let clone = sink.clone();
+        sink.report();
+        assert!(clone.is_active());
+        sink.finish();
+        assert!(!clone.is_active(), "every clone sees the request finished");
+        // A waiting message stays ahead of the response; it is not recalled.
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        drop(queue.lock().unwrap().pop());
+        sink.report();
+        sink.clone().report();
+        assert!(queue.lock().unwrap().is_empty());
     }
 }

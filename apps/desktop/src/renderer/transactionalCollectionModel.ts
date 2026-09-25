@@ -1,7 +1,8 @@
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
-import type { DatasetField, DatasetOperation } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetColumnField, type DatasetDescription, type DatasetOperation } from "@dohc/security-contract/dataset";
 
-export type TransactionalField = Omit<DatasetField, "sqlColumn">;
+/** A field the table shows and edits: a column. Buttons come with their own interface. */
+export type TransactionalField = Omit<DatasetColumnField, "sqlColumn">;
 export interface TransactionalDatasetDescription {
   datasetId: string;
   name: string;
@@ -9,6 +10,12 @@ export interface TransactionalDatasetDescription {
   revisionSha256: string;
   tables: Array<{ tableId: string; name: string; fields: TransactionalField[] }>;
   operations: DatasetOperation[];
+}
+/** The description's column fields, which the table reads and writes. */
+export function transactionalDescription(description: DatasetDescription): TransactionalDatasetDescription {
+  return { datasetId: description.datasetId, name: description.name, revision: description.revision, revisionSha256: description.revisionSha256,
+    tables: description.tables.map(table => ({ tableId: table.tableId, name: table.name, fields: datasetColumnFields(table) })),
+    operations: description.operations };
 }
 export interface TransactionalRow { id: string | number; version: number; values: Record<string, AppBackendJson> }
 export interface TransactionalCursor { id: string | number; value: AppBackendJson }

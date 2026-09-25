@@ -43,7 +43,7 @@ const post = (channelWireId: string | null, name = "Family"): ReachStep => ({ ki
 const notify = (userId: string, name = "Someone"): ReachStep => ({ kind: "notify", person: { userId, name } });
 const personal = (userId: string, name = "Someone"): ReachStep => ({ kind: "personal", person: { userId, name } });
 const allowed = { allowed: true };
-const stopped = (reason: string) => ({ allowed: false, reason });
+const stopped = (reason: string) => expect.objectContaining({ allowed: false, reason });
 const everyStep = [change(trip), change(budget), find(budget), post("wire-family"), notify(OWNER), personal(OWNER)];
 
 describe("reach check", () => {
@@ -265,6 +265,16 @@ describe("share impact", () => {
         { automationId: "stamp", step: 1, reason: "ana@dohc.test cannot edit Budget." },
         { automationId: "stamp", step: 2, reason: "This step acts as you, and ana@dohc.test can also edit Trip." },
         { automationId: "stamp", step: 3, reason: "ana@dohc.test cannot view Notes." },
+      ]);
+  });
+
+  it("counts whoever opens an Edit link as one new editor, apart from everyone the roster lists", () => {
+    // Ana already edits Trip with the reach Budget needs; the link's opener does not.
+    const roster = owner(grant(ana, { paths: ["Trip", "Budget", "Notes"], access: "edit" }));
+    expect(shareImpactOf(roster, { paths: ["Trip"], versionId: null, access: "edit", recipientEmail: null }, automations))
+      .toEqual([
+        { automationId: "stamp", step: 1, reason: "Someone you shared with cannot edit Budget." },
+        { automationId: "stamp", step: 3, reason: "Someone you shared with cannot view Notes." },
       ]);
   });
 

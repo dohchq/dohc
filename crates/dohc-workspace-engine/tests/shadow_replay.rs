@@ -19,6 +19,7 @@ fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Va
         workspace,
         deadline_ms: None,
         idempotency_key: Some(format!("shadow-{id}")),
+        progress: false,
         params,
     }
 }
@@ -536,7 +537,20 @@ async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store(
         let error = open_error(&transport, &scratch, id, false).await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
         assert_eq!(error.message, "workspace root binding is malformed");
-        assert_eq!(engine_files(&scratch), vec!["ROOT_BINDING".to_owned()]);
+        assert_eq!(
+            engine_files(&scratch),
+            vec!["ROOT_BINDING".to_owned(), "ROOT_BINDING.lock".to_owned()]
+        );
+        assert_eq!(
+            std::fs::read(scratch.join(".dohc/engine/ROOT_BINDING")).expect("marker"),
+            b"0123456789"
+        );
+        assert_eq!(
+            std::fs::metadata(scratch.join(".dohc/engine/ROOT_BINDING.lock"))
+                .expect("lock anchor")
+                .len(),
+            0
+        );
     }
 }
 

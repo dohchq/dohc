@@ -434,6 +434,17 @@ export class PluginAutomations {
       });
       return "settled";
     }
+    // Plugin subscriptions name record changes only, so a claim without a
+    // record never has a plugin handler.
+    const recordId = claim.recordId;
+    if (recordId === null) {
+      await this.settle(claim.claimId, {
+        state: "failed",
+        error: `Plugin automation "${claim.automationId}" runs only for record changes.`,
+        automationId: claim.automationId,
+      });
+      return "settled";
+    }
     this.activeRuns.set(claim.claimId, {
       claimId: claim.claimId,
       automationId: claim.automationId,
@@ -448,7 +459,7 @@ export class PluginAutomations {
       | { kind: "completed" | "refused" | "deadline" | "cancelled" }
       | { kind: "threw"; error: unknown };
     try {
-      attempt = await this.runWithDeadline(registered, claim);
+      attempt = await this.runWithDeadline(registered, claim, recordId);
     } finally {
       // Before the settle, always: once the run is over here, a late tagged
       // write from a still-live handler must refuse.
@@ -495,6 +506,7 @@ export class PluginAutomations {
   private runWithDeadline(
     registered: RegisteredAutomation,
     claim: AutomationClaim,
+    recordId: string,
   ): Promise<
     { kind: "completed" | "refused" | "deadline" | "cancelled" } | { kind: "threw"; error: unknown }
   > {
@@ -521,7 +533,7 @@ export class PluginAutomations {
           handler: registered.declaration.handler,
           facts: {
             collectionPath: claim.collectionPath,
-            recordId: claim.recordId,
+            recordId,
             depth: claim.depth,
           },
         })

@@ -7,7 +7,7 @@ use super::*;
 /// A share-view store with an identity, a main version, and the blobs a
 /// proposed change names. `seed_identity` journals the origin's op 0, so the
 /// first moment below lands at origin_seq 1.
-fn proposal_fixture(texts: &[&str]) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+pub(super) fn proposal_fixture(texts: &[&str]) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
@@ -36,7 +36,7 @@ fn seed_blob(engine: &mut EngineStore, text: &str) -> String {
 
 /// A `moment.append` payload shaped the way this replica's own journal writes
 /// one (`outbound.rs`), carrying the fields the proposal scan reads.
-fn local_moment_payload(
+pub(super) fn local_moment_payload(
     moment_id: &str,
     object_id: &str,
     operation: &str,
@@ -71,7 +71,11 @@ fn local_moment_payload(
     payload
 }
 
-fn journal_local_moment(engine: &mut EngineStore, payload: &serde_json::Value, at_ms: i64) {
+pub(super) fn journal_local_moment(
+    engine: &mut EngineStore,
+    payload: &serde_json::Value,
+    at_ms: i64,
+) {
     journal_local_replication_op(
         engine,
         "ws",
@@ -86,7 +90,7 @@ fn journal_local_moment(engine: &mut EngineStore, payload: &serde_json::Value, a
     .expect("journal moment");
 }
 
-fn proposal_grant(access: crate::ShareAccess) -> ShareGrant {
+pub(super) fn proposal_grant(access: crate::ShareAccess) -> ShareGrant {
     ShareGrant {
         paths: vec!["shared/docs".to_owned()],
         version_id: None,
@@ -1328,7 +1332,7 @@ fn apply_accepted_change(
     engine: &mut EngineStore,
     payload: serde_json::Value,
 ) -> MomentApplyResult {
-    let operation = envelope("share:share-1:recipient", 0, "moment.append", payload);
+    let operation = envelope("relay:share-member:recipient", 0, "moment.append", payload);
     match apply_moment_envelope_detailed(engine, &operation, &NoFaults, &NoLiveLeases)
         .expect("accepted change applies")
     {

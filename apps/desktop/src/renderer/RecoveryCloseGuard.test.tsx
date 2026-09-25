@@ -37,14 +37,14 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_KEY } from "./orphanedDraftStorage";
+import { ORPHANED_DRAFT_STORAGE_PREFIX } from "./orphanedDraftStorage";
 import { deferred } from "../testing/deferred";
 
 // What a previous app run left behind.
 function seedStoredDraft(): void {
   localStorage.setItem(
-    ORPHANED_DRAFT_STORAGE_KEY,
-    JSON.stringify([
+    `${ORPHANED_DRAFT_STORAGE_PREFIX}previous-run`,
+    JSON.stringify(
       {
         id: 7,
         workspaceId: "ws-1",
@@ -52,7 +52,7 @@ function seedStoredDraft(): void {
         text: "Survived the quit",
         capturedAtMs: Date.now(),
       },
-    ]),
+    ),
   );
 }
 

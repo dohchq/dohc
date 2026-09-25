@@ -23,6 +23,7 @@ import {
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -42,6 +43,7 @@ import {
   startCliServer,
   type CliCollectionsPort,
   type CliCollectionWriteSeam,
+  type CliDocumentsPort,
   type CliRegistryWorkspace,
   type CliServerHandle,
   type CliServerOptions,
@@ -1326,6 +1328,200 @@ describe("CLI socket server", () => {
         },
       },
     ]);
+  });
+
+  it("reads and edits documents with provenance the door derives", async () => {
+    const edits: Array<Parameters<CliDocumentsPort["edit"]>[0]> = [];
+    context.documents = {
+      async read(path) {
+        return { path, markdown: "# Plan\n\nDraft." };
+      },
+      async edit(input) {
+        edits.push(input);
+        return { path: input.path, changed: true };
+      },
+    };
+
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", markdown: "# Plan\n\nDraft." });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/plan.md",
+      find: "Draft.",
+      replacement: "Final.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "Appended.",
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    // An agent that names itself is recorded under that name, and one that
+    // does not stays an agent with no name.
+    const agent = { actorKind: "agent", onBehalfOf: "local", depth: 0 };
+    expect(edits).toEqual([
+      {
+        path: "notes/plan.md",
+        edit: { find: "Draft.", replacement: "Final." },
+        origin: { actorOriginId: "claude-code", attribution: agent },
+      },
+      {
+        path: "notes/plan.md",
+        edit: { find: undefined, replacement: "Appended." },
+        origin: { attribution: agent },
+      },
+    ]);
+  });
+
+  it("answers a resent document edit with its first result", async () => {
+    let applied = 0;
+    const saving = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        if (input.edit.replacement === "Refused.") throw new Error("The text to replace is not in the document.");
+        if (input.edit.replacement === "Unsaved.") {
+          applied += 1;
+          throw new LiveDocumentEditAppliedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+        }
+        if (input.edit.replacement === "Lost.") {
+          applied += 1;
+          throw new LiveDocumentEditAppliedError("Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in notes/plan.md.");
+        }
+        applied += 1;
+        await new Promise<void>((resolve) => { saving.release = resolve; });
+        return { path: input.path, changed: true };
+      },
+    };
+    const append = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "Appended.", requestId: "edit-1" };
+
+    // The caller's first request is still saving when it gives up and sends
+    // the edit again; both hear the one result.
+    const first = invoke("documentEdit", append);
+    await vi.waitFor(() => expect(applied).toBe(1));
+    const resent = invoke("documentEdit", append);
+    saving.release();
+    await expect(first).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", append)).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(1);
+    await expect(invoke("documentEdit", { ...append, replacement: "Other." })).resolves.toEqual({
+      ok: false,
+      reason: "request id edit-1 was already used for a different request",
+    });
+
+    // An edit that changed nothing may be sent again under its id. One that
+    // reached the document may not, whether it went unsaved or someone
+    // removed the block it went into.
+    const refused = { ...append, replacement: "Refused.", requestId: "edit-2" };
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false });
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("not in the document") });
+    const unsaved = { ...append, replacement: "Unsaved.", requestId: "edit-3" };
+    const unsavedResult = await invoke("documentEdit", unsaved);
+    expect(unsavedResult).toMatchObject({ ok: false, reason: expect.stringContaining("not saved it") });
+    await expect(invoke("documentEdit", unsaved)).resolves.toEqual(unsavedResult);
+    const lost = { ...append, replacement: "Lost.", requestId: "edit-4" };
+    const lostResult = await invoke("documentEdit", lost);
+    expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("is not in notes/plan.md") });
+    await expect(invoke("documentEdit", lost)).resolves.toEqual(lostResult);
+    expect(applied).toBe(3);
+  });
+
+  it("keeps a running request's id, and refuses a resend whose result it no longer holds", async () => {
+    serverOptions.requestIdLimits = { results: 1, ids: 1 };
+    let applied = 0;
+    const slow = { release: () => undefined as void };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        applied += 1;
+        if (input.edit.replacement === "Slow.") {
+          await new Promise<void>((resolve) => { slow.release = resolve; });
+        }
+        return { path: input.path, changed: true };
+      },
+    };
+    const request = (replacement: string, requestId: string) => ({
+      cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement, requestId,
+    });
+
+    // Other requests finish while the first is still saving, past the limit.
+    const running = invoke("documentEdit", request("Slow.", "slow"));
+    await vi.waitFor(() => expect(applied).toBe(1));
+    for (const id of ["a", "b", "c"]) await invoke("documentEdit", request(`Edit ${id}.`, id));
+    const resent = invoke("documentEdit", request("Slow.", "slow"));
+    slow.release();
+    await expect(running).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    expect(applied).toBe(4);
+
+    // "slow" finished, and a later result pushes it out: its id is still
+    // known, so a resend is refused rather than run again.
+    await invoke("documentEdit", request("Edit d.", "d"));
+    await expect(invoke("documentEdit", request("Slow.", "slow"))).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("no longer holds the result of request id slow, so it did not run it again"),
+    });
+    expect(applied).toBe(5);
+  });
+
+  it("refuses document edits it cannot attribute or place", async () => {
+    let touched = 0;
+    context.documents = {
+      async read() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async edit() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+    };
+    // A person types in the editor. A request claiming to be their edit could
+    // come from any process holding the socket token.
+    for (const agent of [undefined, "claude-code"]) {
+      await expect(invoke("documentEdit", {
+        cwd: workspaceRoot,
+        actor: "human",
+        ...(agent === undefined ? {} : { agent }),
+        path: "notes/plan.md",
+        replacement: "x",
+      })).resolves.toEqual({
+        ok: false,
+        reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+      });
+    }
+    await expect(invoke("documentRead", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "../outside.md",
+      replacement: "x",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+    expect(touched).toBe(0);
+
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    await expect(invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "x",
+    })).rejects.toThrow("document edits are not available in a read-only shared view");
+    expect(touched).toBe(0);
   });
 
   it("answers collection verbs honestly when the port is absent", async () => {

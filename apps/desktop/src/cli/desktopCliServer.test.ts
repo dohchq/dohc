@@ -1,6 +1,10 @@
-import { resolve } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createDesktopCliServer } from "./desktopCliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
@@ -75,6 +79,11 @@ function fixture(rootPath = resolve("cli-workspace")) {
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
     withEngineAdapter: async () => null,
+    liveDocuments: {
+      readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, state: null })),
+      editDocument: vi.fn<Dependencies["liveDocuments"]["editDocument"]>(async ({ path }) => ({ path, changed: false })),
+    },
+    documentProjection: directDocumentProjection,
     chatWrites,
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
@@ -222,7 +231,11 @@ describe("desktop CLI workspace context", () => {
     const events: string[] = [];
     const session = {
       doc, initialUpdate: Y.encodeStateAsUpdate(doc),
-      applyLocalUpdate: (update: Uint8Array, armed?: () => void) => { Y.applyUpdate(doc, update); events.push("apply"); armed?.(); },
+      applyDecidedLocalUpdate: async (decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void) => {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); events.push("apply"); armed?.(); return true;
+      },
       settleNow: async () => { events.push("settle"); return { materialized: true }; },
       close: async () => { events.push("close"); },
     } as unknown as WorkspaceEngineYDocProviderSession;
@@ -230,13 +243,13 @@ describe("desktop CLI workspace context", () => {
     const opened = vi.fn(async () => session);
     f.dependencies.collectionEditContextFor = async (operation, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);
     try {
       expect(await context.collections!.writes.setFields({ recordPath: "tasks/one.md", fields: { status: "done" },
-        author: { kind: "user", userId: "owner" } })).toEqual({ path: "tasks/one.md", replaced: { status: null } });
+        author: { kind: "user", userId: "owner" } })).toEqual({ path: "tasks/one.md", replaced: { status: null }, kept: {} });
       expect(doc.getMap("frontmatter").get("status")).toBe("done");
       expect(events).toEqual(["apply", "settle", "close"]);
       await expect(context.collections!.writes.createRecord({ collectionPath: "tasks", name: "../bad",
@@ -247,13 +260,52 @@ describe("desktop CLI workspace context", () => {
     } finally { doc.destroy(); await f.authorities.close(); }
   });
 
+  it("reads a document from the editor that holds it, and otherwise from its file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-documents-"));
+    try {
+      await writeFile(join(root, "notes.md"), "# Notes\n\n* settled item\n");
+      const f = fixture(root);
+      const held = Y.encodeStateAsUpdate(markdownToYDoc("# Notes\n\nLive text."));
+      const read = vi.mocked(f.dependencies.liveDocuments.readDocument);
+      read.mockResolvedValueOnce({ path: "notes.md", state: held });
+      const context = await f.create().openCliWorkspace(f.workspace);
+      expect(await context.documents!.read("notes.md"))
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\nLive text." });
+      // The file answers in the form an edit matches against.
+      expect(await context.documents!.read("notes.md"))
+        .toEqual({ path: "notes.md", markdown: "# Notes\n\n- settled item" });
+      expect(read.mock.calls).toEqual([
+        [{ workspaceId: "workspace", path: "notes.md" }],
+        [{ workspaceId: "workspace", path: "notes.md" }],
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("hands a document edit to the live sessions as an update against their state", async () => {
+    const f = fixture();
+    const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+    await context.documents!.edit({ path: "notes.md", edit: { find: "Draft", replacement: "Final" }, origin });
+    const [input] = edit.mock.calls[0]!;
+    expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
+    const current = markdownToYDoc("Draft plan.");
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true }))!);
+    expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
+    // A refusal from the projection reaches the caller.
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
+      .rejects.toThrow("not in the document");
+  });
+
   it("refuses a collection edit whose admitted physical workspace retires while its context opens", async () => {
     const f = fixture();
     const held = deferred(); const entered = deferred();
     const opened = vi.fn();
     f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened }, withAdapter: async () => null,
+      return { workspaceRoot: operation.workspace.rootPath, capture: { openYDocSession: opened, writeAuthoredTextFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal };
     };
     const context = await f.create().openCliWorkspace(f.workspace);

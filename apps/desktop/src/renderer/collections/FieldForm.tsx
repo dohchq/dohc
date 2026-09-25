@@ -35,11 +35,13 @@ export const FIELD_TYPE_LABELS: Record<CollectionFieldType, string> = {
   person: "Person",
   relation: "Relation",
   url: "URL",
+  button: "Button",
 };
 
-export const FIELD_TYPES = Object.keys(
-  FIELD_TYPE_LABELS,
-) as CollectionFieldType[];
+// A button field does nothing until an automation uses it, so the form
+// does not offer one yet.
+export const FIELD_TYPES = (Object.keys(FIELD_TYPE_LABELS) as CollectionFieldType[])
+  .filter((type) => type !== "button");
 
 export function emptyFieldDraft(name = "", type: CollectionFieldType = "text"): FieldDraft {
   return { name, type, optionsText: "", relationTarget: "", relationMany: false };

@@ -4,6 +4,43 @@ import { LINK_REVISION_SCAN_LIMIT, SHARED_BLOB_CANDIDATE_LIMIT } from "./limits"
 import { rowToLogRow } from "./rows";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import type { StorageContext } from "./context";
+import { pathCollisionKey } from "../pathCollisionKey";
+
+const CURRENT_FILE_KEYS_MIGRATION_ID = "current-file-collision-keys-v1";
+// A new fold needs a new migration id: the fill below then keys every
+// current file again.
+const CURRENT_FILE_KEY_INSERT_SQL = `
+  INSERT INTO sync_relay_current_file_keys (workspace_id, version_id, path, collision_key)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET collision_key = excluded.collision_key
+    WHERE collision_key <> excluded.collision_key`;
+
+// Each current file's collision key, so "does the owner have this path under
+// any spelling?" is an index lookup, not a scan. A row goes with its current
+// file. The first start with this table fills it from the current files.
+export function initializeCurrentFileKeySchema(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_relay_current_file_keys (
+      workspace_id TEXT NOT NULL,
+      version_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      collision_key TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, version_id, path),
+      FOREIGN KEY (workspace_id, version_id, path)
+        REFERENCES sync_relay_current_files(workspace_id, version_id, path) ON DELETE CASCADE
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_current_file_keys_key
+      ON sync_relay_current_file_keys(workspace_id, version_id, collision_key);
+  `);
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(CURRENT_FILE_KEYS_MIGRATION_ID)) return;
+  const insert = db.prepare(CURRENT_FILE_KEY_INSERT_SQL);
+  for (const row of db.prepare("SELECT workspace_id, version_id, path FROM sync_relay_current_files").iterate()) {
+    const path = String(row.path);
+    insert.run(String(row.workspace_id), String(row.version_id), path, pathCollisionKey(path));
+  }
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(CURRENT_FILE_KEYS_MIGRATION_ID, Date.now());
+}
 
 // Where a `moment.append` payload says its object is after the op: the
 // destination path of a write or a rename (a rename carries the destination in
@@ -112,7 +149,17 @@ export const VERSION_SNAPSHOT_BLOB_INSERT_SQL = `
 interface CurrentFileStatements {
   get: ReturnType<SqliteDb["prepare"]>;
   put: ReturnType<SqliteDb["prepare"]>;
+  key: ReturnType<SqliteDb["prepare"]>;
   remove: ReturnType<SqliteDb["prepare"]>;
+}
+
+// A current file and its collision key. Removing the file removes the key.
+function putCurrentFile(
+  statements: CurrentFileStatements,
+  row: { workspaceId: string; versionId: string; path: string; blobSha256: string; contentKind: string; relaySeq: number },
+): void {
+  statements.put.run(row.workspaceId, row.versionId, row.path, row.blobSha256, row.contentKind, row.relaySeq);
+  statements.key.run(row.workspaceId, row.versionId, row.path, pathCollisionKey(row.path));
 }
 
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
@@ -131,6 +178,7 @@ export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
          content_kind = excluded.content_kind,
          state_relay_seq = excluded.state_relay_seq`,
     ),
+    key: db.prepare(CURRENT_FILE_KEY_INSERT_SQL),
     remove: db.prepare(
       `DELETE FROM sync_relay_current_files
        WHERE workspace_id = ? AND version_id = ? AND path = ?`,
@@ -185,14 +233,14 @@ export function applyCurrentFileOp(
       const blobSha256 = digest(snapshot.blobSha256);
       if (!path || !blobSha256) continue;
       if (statements.get.get(workspaceId, versionId, path) !== undefined) continue;
-      statements.put.run(
+      putCurrentFile(statements, {
         workspaceId,
         versionId,
         path,
         blobSha256,
-        snapshot.contentKind === "binary" ? "binary" : "text",
+        contentKind: snapshot.contentKind === "binary" ? "binary" : "text",
         relaySeq,
-      );
+      });
     }
     return;
   }
@@ -253,14 +301,14 @@ export function applyCurrentFileOp(
       return;
     }
   }
-  statements.put.run(
+  putCurrentFile(statements, {
     workspaceId,
     versionId,
-    afterPath,
-    afterBlobSha256,
-    payload.payloadAfterContentKind === "binary" ? "binary" : "text",
+    path: afterPath,
+    blobSha256: afterBlobSha256,
+    contentKind: payload.payloadAfterContentKind === "binary" ? "binary" : "text",
     relaySeq,
-  );
+  });
 }
 
 function currentFileSelectorClause(selectorPaths: readonly string[], column = "path"): {

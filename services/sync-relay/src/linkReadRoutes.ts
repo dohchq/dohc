@@ -2,6 +2,7 @@ import type { TokenBucketLimiter } from "@dohc/service-http";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   DiscussionActivityCapacityError,
+  linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
@@ -155,7 +156,7 @@ export function createLinkReadRoutes(
           if (remainingHoldMs === 0) break;
           try {
             await discussionActivity.wait(
-              `log:${share.workspaceId}`,
+              linkLogWaitGroup(share.workspaceId),
               `link:${capability.session.capabilityHash}`,
               {
                 holdMs: remainingHoldMs,

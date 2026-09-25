@@ -100,7 +100,7 @@ async function harness() {
   });
   const info = vi.fn(async () => Response.json({
     shareId: "request", granterUserId: "peer", granterEmail: "peer@example.test",
-    selector: { kind: "chat-channel", channelWireId: "channel" }, access: "read-write", createdAtMs: 1,
+    selector: { kind: "chat", channelWireId: "channel" }, access: "read-write", createdAtMs: 1,
   }));
   vi.stubGlobal("fetch", info);
   const writeChannels = vi.fn((_id: string, next: JoinedSharedChannel[]) => {
@@ -232,7 +232,7 @@ describe("registered direct message boundaries", () => {
     if (reason === "renderer") h.retireRenderer();
     else if (reason === "authority") retired = h.authorities.invalidate("workspace");
     else h.rotateCredentials();
-    response.resolve({ received: [{ shareId: "request", selector: { kind: "chat-channel", channelWireId: "channel" } }] });
+    response.resolve({ received: [{ shareId: "request", selector: { kind: "chat", channelWireId: "channel" } }] });
     await rejected;
     await retired;
     expect(h.state.lastKnownDmRequestLanes.get("workspace")).toBeUndefined();
@@ -389,7 +389,7 @@ describe("registered direct message boundaries", () => {
     const rejected = expect(accepted).rejects.toThrow();
     await entered.promise;
     if (reason === "stale") h.rotateCredentials();
-    response.resolve(reason === "revoked" ? new Response(null, { status: 404 }) : Response.json({ selector: { kind: "chat-channel", channelWireId: "channel" }, access: "read-write" }));
+    response.resolve(reason === "revoked" ? new Response(null, { status: 404 }) : Response.json({ selector: { kind: "chat", channelWireId: "channel" }, access: "read-write" }));
     await rejected;
     expect(h.writeChannels).not.toHaveBeenCalled();
     expect(h.pull).not.toHaveBeenCalled();
@@ -433,7 +433,7 @@ describe("registered direct message boundaries", () => {
     h.seedConversation();
     h.relayJson.mockResolvedValueOnce({ granted: [{
       recipientEmail: "PEER@example.test", revokedAtMs: null,
-      selector: { kind: "chat-channel", channelWireId: "channel" },
+      selector: { kind: "chat", channelWireId: "channel" },
     }] });
     await expect(h.invoke(CHANNELS.startDm, startPayload)).resolves.toMatchObject({ dm: { channelId: "channel", threadId: "thread" } });
     expect(h.relayJson).toHaveBeenCalledOnce();

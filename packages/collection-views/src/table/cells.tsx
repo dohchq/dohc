@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -6,6 +6,7 @@ import type {
   FieldValueReasonCode,
 } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
+import { useAcknowledgedSelection } from "../useAcknowledgedSelection";
 import { RelationPicker } from "../relation/RelationPicker";
 
 export interface FieldCellProps {
@@ -60,6 +61,9 @@ export function fieldDisplayText(
   const value = indexed?.value ?? null;
   if (value === null) return "";
   switch (field.type) {
+    // A button stores no value, so a value under its name is never shown.
+    case "button":
+      return "";
     case "person": {
       const id = asText(value);
       return personLabel?.(id) ?? id;
@@ -107,6 +111,8 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "invalid-record-id":
     "This value is not a record id. Edit the value to pick a record.",
   "invalid-url": "This value is not a URL. Edit the value to replace it.",
+  "expected-empty":
+    "A button field stores no value. Remove this value from the record's file.",
 };
 
 function wrapFlagged(
@@ -178,16 +184,6 @@ function AddOptionInput({
   );
 }
 
-type PendingSelection = {
-  writeId: number;
-  added: string[];
-  removed: string[];
-};
-
-function sameSelection(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((option, index) => option === right[index]);
-}
-
 // The indexed result acknowledges saved edits by id, including round trips
 // whose final value equals the original. Later local changes still apply on
 // top of that result, including any external edits it contains.
@@ -208,47 +204,7 @@ function MultiSelectEditor({
   close: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
 }) {
-  const [selection, setSelection] = useState(() => ({
-    observed: asTextArray(value),
-    acknowledgedWriteId,
-    pending: [] as PendingSelection[],
-  }));
-  useEffect(() => subscribeToDiscardedWrites?.((writeId) => {
-    setSelection((current) => ({
-      ...current,
-      pending: current.pending.filter((change) => change.writeId !== writeId),
-    }));
-  }), [subscribeToDiscardedWrites]);
-  const observed = asTextArray(value);
-  let current = selection;
-  if (acknowledgedWriteId !== selection.acknowledgedWriteId || !sameSelection(observed, selection.observed)) {
-    current = {
-      observed,
-      acknowledgedWriteId,
-      pending: selection.pending.filter((change) => change.writeId > acknowledgedWriteId),
-    };
-    setSelection(current);
-  }
-  const previousValues: CollectionValue[] = [value];
-  let selected = current.observed;
-  for (const change of current.pending) {
-    selected = [
-      ...selected.filter((option) => !change.removed.includes(option)),
-      ...change.added.filter((option) => !selected.includes(option)),
-    ];
-    previousValues.push(selected);
-  }
-  const select = (next: string[]) => {
-    const writeId = emit(next, previousValues);
-    setSelection({
-      ...current,
-      pending: [...current.pending, {
-        writeId,
-        added: next.filter((option) => !selected.includes(option)),
-        removed: selected.filter((option) => !next.includes(option)),
-      }],
-    });
-  };
+  const { selected, select, previousValues } = useAcknowledgedSelection({ value, ids: asTextArray(value), acknowledgedWriteId, subscribeToDiscardedWrites, emit });
   return (
     <span className="flex w-full flex-col gap-0.5">
       <span
@@ -427,6 +383,8 @@ export function CellEditor({
         <RelationPicker
           field={field}
           value={value}
+          acknowledgedWriteId={acknowledgedWriteId}
+          subscribeToDiscardedWrites={subscribeToDiscardedWrites}
           executor={relationExecutor}
           emit={emit}
           close={close}
@@ -471,6 +429,14 @@ export function FieldCell({
       ? indexed.validation.reason.code
       : null;
   const value = indexed?.value ?? null;
+
+  // A button field stores no value, so its cell shows the field's name.
+  if (field.type === "button") {
+    return wrapFlagged(
+      reason,
+      <span className="truncate text-[13px] text-muted">{field.name}</span>,
+    );
+  }
 
   if (field.type === "checkbox") {
     const checked = value === true;

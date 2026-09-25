@@ -337,6 +337,24 @@ describe("PluginAutomations", () => {
     expect(h.runs).toEqual([]);
   });
 
+  it("settles a plugin claim without a record as failed and never runs it", async () => {
+    const h = harness();
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() => {
+      expect(h.adapter.subscribeAutomation).toHaveBeenCalled();
+    });
+    h.pendingClaims.push(claimOf({ recordId: null }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() => {
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+        claimId: "claim-1",
+        state: "failed",
+        error: 'Plugin automation "plugin:hello-plugin/triage" runs only for record changes.',
+      });
+    });
+    expect(h.runs).toEqual([]);
+  });
+
   it("resolves a scoped plugin by its whole name before it registers", async () => {
     const h = harness();
     // "@acme/tools" declares triage but has not registered yet: its claim

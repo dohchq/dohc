@@ -1,5 +1,5 @@
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
-import type { DatasetDefinition, DatasetField, DatasetTable } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition, type DatasetTable } from "@dohc/security-contract/dataset";
 import { losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 
 // What one dataset commit changed, record by record, for automation triggers.
@@ -208,7 +208,7 @@ interface TableMap {
   table: DatasetTable;
   primaryKey: number;
   version: number | null;
-  fields: Array<{ field: DatasetField; column: number }>;
+  fields: Array<{ field: DatasetColumnField; column: number }>;
 }
 
 function columnIndex(columns: readonly string[], name: string): number {
@@ -232,7 +232,7 @@ function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: rea
     fail(`The columns reported for ${table} do not match its changes.`);
   }
   const primaryKey = columnIndex(columns, approved.primaryKey);
-  const fields = approved.fields.map((field) => ({ field, column: columnIndex(columns, field.sqlColumn) }));
+  const fields = datasetColumnFields(approved).map((field) => ({ field, column: columnIndex(columns, field.sqlColumn) }));
   if (primaryKey < 0 || fields.some(({ column }) => column < 0)) fail(`The columns reported for ${table} lack an approved field.`);
   const version = columnIndex(columns, VERSION_COLUMN);
   const map = { table: approved, primaryKey, version: version < 0 ? null : version, fields };
@@ -275,7 +275,7 @@ function jsonArray(value: string, name: string): AppBackendJson[] | null {
 // A stored value as the field's type reads it, the way generated operations
 // decode rows: a checkbox is 0 or 1, and a multi-select or a to-many relation
 // is a JSON array in text.
-function fieldValue(field: DatasetField, value: ChangesetValue): AppBackendJson {
+function fieldValue(field: DatasetColumnField, value: ChangesetValue): AppBackendJson {
   if (value === null) return null;
   if (value instanceof Uint8Array) fail(`${field.name} holds bytes, which no field type can hold.`);
   const number = typeof value === "bigint" ? integer(value, field.name) : value;

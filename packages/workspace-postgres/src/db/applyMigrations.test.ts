@@ -83,18 +83,21 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
       session_tbl: string | null;
       device_tbl: string | null;
       workspaces_tbl: string | null;
+      crash_reports_tbl: string | null;
     }>(
       `select
          to_regclass('"${schema}"."user"') as user_tbl,
          to_regclass('"${schema}"."session"') as session_tbl,
          to_regclass('"${schema}"."deviceCode"') as device_tbl,
-         to_regclass('"${schema}".workspaces') as workspaces_tbl`,
+         to_regclass('"${schema}".workspaces') as workspaces_tbl,
+         to_regclass('"${schema}".crash_reports') as crash_reports_tbl`,
     );
     const row = tables.rows[0];
     expect(row.user_tbl).not.toBeNull();
     expect(row.session_tbl).not.toBeNull();
     expect(row.device_tbl).not.toBeNull();
     expect(row.workspaces_tbl).toBeNull();
+    expect(row.crash_reports_tbl).not.toBeNull();
 
     // The ledger records every applied migration.
     const ledger = await client.query<{ id: string }>(
@@ -144,6 +147,7 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
       expect(ran).toEqual([
         "0001_better_auth",
         "0002_remove_retired_workspace_schema",
+        "0003_crash_reports",
       ]);
 
       for (const table of RETIRED_TABLES) {
