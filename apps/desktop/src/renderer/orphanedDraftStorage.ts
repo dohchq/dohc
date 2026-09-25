@@ -28,34 +28,7 @@ function storedKeys(): string[] {
 }
 function remove(key: string): void { try { localStorage.removeItem(key); } catch { /* Refused storage remains unavailable. */ } }
 
-// Preserve existing recoveries on upgrade. Deterministic keys let two starting
-// windows resume a partial transfer without creating duplicate copies.
-function importExistingArray(nowMs: number): StoredOrphanedDraft[] {
-  const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
-  if (raw === null) return [];
-  let rows: unknown;
-  try { rows = JSON.parse(raw); } catch { remove(ORPHANED_DRAFT_STORAGE_KEY); return []; }
-  if (!Array.isArray(rows)) { remove(ORPHANED_DRAFT_STORAGE_KEY); return []; }
-  const remaining: StoredOrphanedDraft[] = [];
-  for (const [index, row] of rows.entries()) {
-    if (!valid(row) || !persistable(row.path)) continue;
-    const normalized = { ...row,
-      id: Number.isSafeInteger(row.id) && row.id > 0 && row.id < Number.MAX_SAFE_INTEGER ? row.id : index + 1,
-      capturedAtMs: Number.isFinite(row.capturedAtMs) && row.capturedAtMs > 0 ? row.capturedAtMs : nowMs,
-    };
-    if (nowMs - normalized.capturedAtMs >= ORPHANED_DRAFT_RETENTION_MS) continue;
-    const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}import:${index}`;
-    try {
-      if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(normalized));
-    } catch { remaining.push(normalized); }
-  }
-  if (remaining.length === 0) remove(ORPHANED_DRAFT_STORAGE_KEY);
-  return remaining;
-}
-
 export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] {
-  let untransferred: StoredOrphanedDraft[] = [];
-  try { untransferred = importExistingArray(nowMs); } catch { /* Storage cannot be read. */ }
   const result: StoredOrphanedDraft[] = [];
   const used = new Set<number>();
   try {
@@ -90,17 +63,6 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
       result.push(restored);
     }
   } catch { /* Storage can be unavailable; capture will retain work in memory. */ }
-  // Quota can prevent splitting an existing array. Keep its text visible and
-  // at risk until it has an independent durable key; never claim a failed transfer.
-  for (const row of untransferred) {
-    let id = row.id;
-    if (used.has(id)) {
-      id = 1;
-      while (used.has(id)) id++;
-    }
-    used.add(id);
-    result.push({ ...row, id });
-  }
   return result;
 }
 function write(draft: StoredOrphanedDraft, key: string): boolean {
@@ -156,6 +118,6 @@ export function remapStoredDraftPaths(workspaceId: string, project: (path: strin
   return dropped;
 }
 export function clearStoredDrafts(): void {
-  try { for (const key of storedKeys()) remove(key); remove(ORPHANED_DRAFT_STORAGE_KEY); } catch { /* Test reset. */ }
+  try { for (const key of storedKeys()) remove(key); } catch { /* Test reset. */ }
   keys.clear(); expected.clear();
 }

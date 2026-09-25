@@ -53,13 +53,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function seedStoredDrafts(raw: string): void {
+  let values: unknown;
+  try { values = JSON.parse(raw); } catch {
+    localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}fixture`, raw);
+    return;
+  }
+  for (const [index, value] of (Array.isArray(values) ? values : [values]).entries()) {
+    localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}fixture:${index}`, JSON.stringify(value, (_key, item) => item === Infinity ? "__overflow__" : item).replace('"__overflow__"', "1e999"));
+  }
+}
 function storedText(): string {
   const rows: unknown[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)!;
-    if (key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX)) rows.push(JSON.parse(localStorage.getItem(key)!));
+    if (key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX)) rows.push(localStorage.getItem(key)!);
   }
-  return (localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY) ?? "") + (rows.length ? JSON.stringify(rows) : "");
+  return (localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY) ?? "") + rows.join("\n");
 }
 
 it("keeps another window's recovery when local handles collide", async () => {
@@ -121,22 +131,6 @@ it("keeps captures interleaved at the storage write boundary", async () => {
   const after = await relaunch();
   expect(draftsFor(after.useOrphanedDrafts, "a", "a.txt").map(row => row.text)).toEqual(["first recovery"]);
   expect(draftsFor(after.useOrphanedDrafts, "b", "b.txt").map(row => row.text)).toEqual(["concurrent recovery"]);
-  localStorage.clear();
-});
-
-it("keeps existing recovery visible when upgrade storage is full", async () => {
-  localStorage.clear();
-  localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, JSON.stringify([
-    { id: 1, workspaceId: "a", path: "a.txt", text: "old recovery", capturedAtMs: Date.now() },
-  ]));
-  const refusal = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("full"); });
-  const next = await relaunch();
-  expect(draftsFor(next.useOrphanedDrafts, "a", "a.txt").map(row => row.text)).toEqual(["old recovery"]);
-  expect(next.atRiskOrphanedDraftIds()).toHaveLength(1);
-  refusal.mockRestore();
-  const after = await relaunch();
-  expect(draftsFor(after.useOrphanedDrafts, "a", "a.txt").map(row => row.text)).toEqual(["old recovery"]);
-  expect(after.atRiskOrphanedDraftIds()).toEqual([]);
   localStorage.clear();
 });
 
@@ -327,8 +321,7 @@ describe("orphanedDrafts persistence", () => {
   // profile leaves in a plaintext key anything in the profile can write.
   it("refuses a stored row whose path the floor calls secret, and scrubs it", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: 1,
@@ -360,8 +353,7 @@ describe("orphanedDrafts persistence", () => {
   // — and the confirm says it deletes the only copy, of one edit.
   it("gives every restored recovery an id of its own", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: 4,
@@ -420,8 +412,7 @@ describe("orphanedDrafts persistence", () => {
   // ever reached storage, and then the test would seed a different bug.
   it("re-keys an id nothing can count from, and keeps every text", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       `[{"id":1e400,"workspaceId":"ws-1","path":"a.md","text":"OVERFLOW","capturedAtMs":${capturedAt}},
         {"id":-3.5,"workspaceId":"ws-1","path":"a.md","text":"FRACTION","capturedAtMs":${capturedAt}},
         {"id":2,"workspaceId":"ws-1","path":"a.md","text":"VALID","capturedAtMs":${capturedAt}}]`,
@@ -465,8 +456,7 @@ describe("orphanedDrafts persistence", () => {
   // delete the text before anything could repair it. (NaN cannot be seeded:
   // JSON has no literal for it, and the whole value fails to parse.)
   it("repairs a capture time nothing can age, and keeps the text", async () => {
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       `[{"id":1,"workspaceId":"ws-1","path":"a.md","text":"OVERFLOWED","capturedAtMs":1e400},
         {"id":2,"workspaceId":"ws-1","path":"a.md","text":"NEGATIVE","capturedAtMs":-5},
         {"id":3,"workspaceId":"ws-1","path":"a.md","text":"EPOCH","capturedAtMs":0}]`,
@@ -497,8 +487,7 @@ describe("orphanedDrafts persistence", () => {
   it("allocates repaired ids inside the safe range, however high the stored ones", async () => {
     const capturedAt = Date.now();
     const top = Number.MAX_SAFE_INTEGER - 1;
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify(
         ["TOP", "DUP1", "DUP2", "DUP3"].map((text) => ({
           id: top,
@@ -546,8 +535,7 @@ describe("orphanedDrafts persistence", () => {
   // and on one path one Dismiss takes both texts.
   it("gives this run's captures ids of their own, however high the restored one", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: Number.MAX_SAFE_INTEGER - 1,
@@ -683,18 +671,16 @@ describe("orphanedDrafts persistence", () => {
     ).toEqual(["Nowhere to put it"]);
   });
 
-  it("restores nothing from storage that is not a list of drafts, and clears it", async () => {
+  it("removes malformed current-format recovery records", async () => {
     // A half-written value still holds whatever draft text reached it.
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       '[{"text":"UNPARSEABLE_BODY',
     );
     const broken = await relaunch();
     expect(draftsFor(broken.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     expect(storedText(), "blob scrub: report no discard when the value does not parse. The bytes stay in plaintext with no row to expire and no notice to dismiss, so nothing can ever remove them.").not.toContain("UNPARSEABLE_BODY");
 
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: "1",
@@ -720,8 +706,7 @@ describe("orphanedDrafts persistence", () => {
   // removal too. So the pass states what it really offers: it runs again.
   it("retries the scrub on the next launch when the store refuses the rewrite", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: 1,
@@ -740,7 +725,7 @@ describe("orphanedDrafts persistence", () => {
       ]),
     );
     const refused = vi
-      .spyOn(Storage.prototype, "setItem")
+      .spyOn(Storage.prototype, "removeItem")
       .mockImplementation(() => {
         throw new Error("QuotaExceededError");
       });
@@ -766,8 +751,7 @@ describe("orphanedDrafts persistence", () => {
   // counts match, so the old check saw a clean store and rewrote nothing.
   it("scrubs a row that is not a draft, and keeps the one beside it", async () => {
     const capturedAt = Date.now();
-    localStorage.setItem(
-      ORPHANED_DRAFT_STORAGE_KEY,
+    seedStoredDrafts(
       JSON.stringify([
         {
           id: "not a number",
@@ -871,4 +855,16 @@ it("does not overwrite a replacement observed before timestamp repair", async ()
     expect(localStorage.getItem(key)).toBe(replacement);
     expect(restarted.atRiskOrphanedDraftIds()).toEqual([1]);
   } finally { intercepted.mockRestore(); localStorage.clear(); }
+});
+
+
+
+it.each(['[{"text":"old recovery"}]', 'arbitrary old bytes'])("leaves obsolete array-key bytes untouched: %s", async raw => {
+  localStorage.clear();
+  localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, raw);
+  const restarted = await relaunch();
+  expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
+  expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)).toBe(raw);
+  expect(localStorage.length).toBe(1);
+  localStorage.clear();
 });
