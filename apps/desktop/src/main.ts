@@ -100,6 +100,7 @@ import {
   WorkspaceSummary,
   UpdateStateEvent,
   ShareHandoffStatus,
+  noticeOperations,
   workspaceSearchOperations,
   workspaceVersionOperations,
 } from "./ipc/bridgeContract";
@@ -174,10 +175,13 @@ import {
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
+  markWorkspaceShareRosterPulled,
+  setWorkspaceShareRoster,
   setWorkspaceShareView,
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import { createShareRosters, listRosterGrants } from "./automations/shareRoster";
 import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
@@ -210,6 +214,8 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
+import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
+import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -254,6 +260,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
+import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
@@ -365,10 +372,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
-import {
-  readCachedUserSettingsFile,
-  writeUserSettingsFile,
-} from "./settings/userSettingsStore";
+import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -704,7 +708,9 @@ const devToolsGranted = devToolsEnabled(process.env, app);
 
 const desktopWindows = createDesktopWindows({
   app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
-  stateDir, readCachedUserSettingsFile, writeUserSettingsFile, createMainWindow,
+  stateDir, readCachedUserSettingsFile, createMainWindow,
+  // Menu clicks arrive after startup, when the settings owner exists.
+  stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
   preloadArguments: devToolsPreloadArguments(devToolsGranted),
   get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
@@ -721,8 +727,7 @@ const {
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
   bindGuestZoom,
-  enqueueUserSettingsWrite,
-  stepWindowZoom,
+  broadcastUserSettings,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
@@ -764,6 +769,7 @@ const credentialSessionCache =
     if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
       .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
+    if (snapshot.credentials) void noticeStore().sync();
   });
 async function refreshCredentialCache(): Promise<void> {
   try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
@@ -793,6 +799,49 @@ function clearCachedCredentials(): void {
     }
   }
 }
+
+// Notices sent to the signed-in person, and this computer's own. The store
+// pulls after each sync pass, at sign-in, and when a window gains focus.
+let cachedNoticeStore: NoticeStore | null = null;
+// The signed-in session from one credential snapshot: the account and every
+// reach read the same credentials, and the session stops being current as
+// soon as the credentials change.
+async function noticeSession(): Promise<NoticeSession | null> {
+  await warmCredentialCache();
+  const { credentials, generation } = credentialSessionCache.snapshot();
+  if (!credentials?.relayUrl) return null;
+  return {
+    account: {
+      key: chatShareSessionKey(credentials)!,
+      userId: credentials.userId,
+      relay: {
+        baseUrl: credentials.relayUrl,
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+      },
+    },
+    isCurrent: () => credentialSessionCache.snapshot().generation === generation,
+    // An owned workspace is named; a share view is reached through its share.
+    reachFor: (workspaceId) => {
+      const workspace = findWorkspace(workspaceId);
+      return workspace ? noticeReachFor(workspace, credentials) : null;
+    },
+  };
+}
+function noticeStore(): NoticeStore {
+  cachedNoticeStore ??= createNoticeStore({
+    directory: join(stateDir(), "notices"),
+    session: noticeSession,
+    installId: localReactorFallbackId,
+    onChanged: () => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send(CHANNELS.noticesChanged);
+      }
+    },
+  });
+  return cachedNoticeStore;
+}
+app.on("browser-window-focus", () => void noticeStore().sync());
 
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   const publicStatus = ShareHandoffStatus.parse(status);
@@ -873,6 +922,13 @@ function relayShareErrorCopy(
       return "That path can't be shared.";
     case "not_found":
       return "That share isn't available anymore.";
+    // One relay code for every chat refusal, and the desktop refuses the
+    // general group, the agent lane, and direct-message-as-group before it
+    // asks the relay. What remains is a group the relay has not synced yet.
+    case "invalid_channel":
+      return "This can't be shared yet. Wait for it to sync, then try again.";
+    case "ambiguous_selector":
+      return "A group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
       return data?.error ?? `Sharing failed (${status}).`;
   }
@@ -1025,6 +1081,37 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
+// Each open workspace's copy of the grants its owner gave, for the automation
+// reach check.
+const shareRosters = createShareRosters({
+  findWorkspace,
+  saveRoster: setWorkspaceShareRoster,
+  markRosterPulled: markWorkspaceShareRosterPulled,
+  listRoster: async (workspace) => {
+    let credentials: CloudSessionCredentials;
+    try {
+      ({ credentials } = await remoteForWorkspace(workspace));
+    } catch (error) {
+      // Signed out, or signed in to another account or server: the message
+      // says which, and dohc could not ask.
+      return { kind: "unanswered", next: error instanceof Error ? error.message : "Sign in to your server first.", partial: false };
+    }
+    if (!credentials.relayUrl) {
+      return { kind: "unanswered", next: "Reconnect your sharing server, then try again.", partial: false };
+    }
+    return listRosterGrants(workspace.workspaceId, async (path) => {
+      const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    });
+  },
+  localUserId: async () => {
+    await warmCredentialCache().catch(() => undefined);
+    return cachedCredentials?.userId ?? null;
+  },
+  logError: (workspaceId, error) =>
+    console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
+});
+
 // MU-C4 shared channels: one best-effort refresh pass over every shared
 // channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
@@ -1172,6 +1259,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     };
     const relayCloseTargets =
       relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
+    shareRosters.close(binding.workspaceId);
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1564,6 +1652,7 @@ const desktopChatBookmarks = createDesktopChatBookmarks({
 const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChatBookmarks;
 
 const {
+  runWorkspaceSharedChannelPass,
   syncWorkspaceSharedChannels,
   syncRendererWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
@@ -1733,17 +1822,23 @@ function engineForWorkspace(
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
-      await withWorkspaceAttachmentAsync(workspace, () =>
-        syncWorkspaceSharedChannels(workspace.workspaceId),
+      const outcome = await withWorkspaceAttachmentAsync(workspace, () =>
+        runWorkspaceSharedChannelPass(workspace.workspaceId),
       );
+      return outcome.changed;
     },
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: () =>
-      withWorkspaceAttachmentAsync(workspace, () =>
+    afterSuccessfulPull: ({ recovered }) => {
+      void noticeStore().sync();
+      void shareRosters.pulled(workspace.workspaceId, recovered);
+      return withWorkspaceAttachmentAsync(workspace, () =>
         projectPendingChatBookmarks(workspace.workspaceId),
-      ),
+      );
+    },
+    // Recorded durably before each pull request goes out.
+    pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
@@ -1869,6 +1964,12 @@ const activity = {
     desktopEngine.retryOwnerDelivery(workspaceId);
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.queueCloudSync(lease.state.activity),
+    );
+  },
+  queueCloudPull: (workspaceId: string): void => {
+    if (!findWorkspace(workspaceId)) return;
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.queueCloudPull(lease.state.activity),
     );
   },
   setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
@@ -2932,6 +3033,7 @@ async function openWorkspaceActivityForOperation(
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
+  shareRosters.open(canonicalWorkspace.workspaceId);
   return result;
 }
 
@@ -3001,9 +3103,11 @@ async function requirePluginEngineCaptureForOperation(
 }
 
 // Workspace authority for one collection write: a writable workspace with a
-// running engine capture, plus the local engine adapter the adoption wait
-// reads through. Collection writes land on the physical workspace's own
-// engine (a received share view is refused as read-only before this).
+// running engine capture, plus the local engine adapter and capture
+// announcements the adoption wait reads through. Collection writes land on
+// the physical workspace's own engine (a received share view is refused as
+// read-only before this). Without a caller's signal, the write lives as long
+// as the workspace operation.
 async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
   editSignal?: AbortSignal,
@@ -3015,7 +3119,12 @@ async function collectionEditContextFor(
     capture,
     workspaceRoot: workspace.rootPath,
     withAdapter: (work) => withEngineAdapter(workspace, work),
-    ...(editSignal ? { signal: editSignal } : {}),
+    onCaptureSettled: (listener) => {
+      const daemon = desktopEngine.daemon;
+      if (!daemon) throw new Error("The workspace engine is not running.");
+      return onWorkspaceCaptureSettled(daemon, workspace.workspaceId, listener);
+    },
+    signal: editSignal ?? operation.signal,
   };
 }
 
@@ -3934,12 +4043,25 @@ const quitGuard = createQuitGuard({
   },
 });
 
+// The owner of the user settings file: every save, zoom step, reset, and
+// edit made in the file goes through it and takes effect there.
+const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+  registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+  assertTrustedSender, stateDir,
+  setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
+  applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
+  chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
+  broadcastUserSettings,
+  openPath: (path) => shell.openPath(path),
+});
+
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
-    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, exitRounds,
+    rememberChromeTheme, titleBarOverlayOptions,
+    stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
   });
   windowIpc.registerReload();
@@ -4106,6 +4228,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
@@ -4407,6 +4530,7 @@ function registerIpcHandlers(): void {
         ...(labelHint.length > 0 ? { labelHint } : {}),
         assertCurrent,
       }),
+    sharesChanged: shareRosters.sharesChanged,
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
@@ -4622,19 +4746,9 @@ function registerIpcHandlers(): void {
 
   agentRunsIpc.registerAgentRuns();
 
-  const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, stateDir, enqueueUserSettingsWrite,
-    setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
-    applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
-    chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
-    broadcastUserSettings: (result) => {
-      for (const window of workspaceWindows.allLive()) {
-        window.webContents.send(CHANNELS.userSettingsChanged, result);
-      }
-    },
-  });
   settingsIpc.registerSettingsIpcHandlers();
+  // The settings file applies when saved. The watch lasts as long as main.
+  settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
 
@@ -4671,6 +4785,12 @@ function registerIpcHandlers(): void {
       console.error("[desktop] workspace search activity:", error);
     },
   }));
+
+  registerOperations(operationBoundary, noticeOperations, {
+    listNotices: async () => ({ notices: await noticeStore().list() }),
+    readNotice: (input) => noticeStore().mark(input, "read"),
+    dismissNotice: (input) => noticeStore().mark(input, "dismissed"),
+  });
 
   workspaceEngineIpc.registerYDoc();
 

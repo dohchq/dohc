@@ -173,7 +173,7 @@ describe("named live browser provider", () => {
     expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
     await host.ack(item);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0, lastApplied: { journalCursor: 1 } });
-  }, 2000);
+  });
   it("uses remaining byte credit and waits for another frame before continuing a submission", async () => {
     const options = { policy: { ...limits().frames, maxQueuedBytes: 586, maxQueuedFrames: 2 }, replenish: false };
     const value = provider(), host = peer(value, 1, options);
@@ -192,7 +192,7 @@ describe("named live browser provider", () => {
     options.replenish = true; await host.credit(586, 2);
     await host.ack(await host.submitted());
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
-  }, 2000);
+  });
   it("releases a partially sent small-queue update on cancellation and retries the same draft", async () => {
     const options = limits(), policy = { ...options.frames, maxQueuedBytes: 586 }, peerPolicy = { ...policy, maxQueuedFrames: 1 };
     const value = provider({ ...options, frames: policy }), doc = document("base");
@@ -211,7 +211,7 @@ describe("named live browser provider", () => {
     expect(retry.begin).toMatchObject(host.frames.find(frame => frame.kind === "begin" && frame.purpose === "submit-update")!);
     await next.ack(retry);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
-  }, 2000);
+  });
   it("retries ambiguous delivery with its original identity and accepts historical host application", async () => {
     const { value, host, doc } = await live(); edit(value, " draft"); const first = await host.submitted();
     // The old host may have applied it before the connection vanished.

@@ -633,6 +633,455 @@ fn public_author_is_refused_from_an_ordinary_origin() {
     );
 }
 
+const NAMED_ORIGIN: &str = "relay:collection-file:grant";
+const TRIP_SCHEMA: &str = "name: Trip\n";
+
+fn named_author(grant_id: &str) -> Value {
+    json!({"kind":"named", "userId":"ana", "grantId":grant_id, "grantGeneration":1})
+}
+
+fn with_author(mut payload: Value, author: Value) -> Value {
+    payload["author"] = author;
+    payload
+}
+
+fn refusal_reason(outcome: ApplyOutcome<i64>) -> String {
+    match outcome.primary {
+        ApplyDisposition::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { reason },
+            ..
+        }) => reason,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+fn seed_trip_collection(store: &mut EngineStore) {
+    seed_text_moment(
+        store,
+        "trip-schema",
+        "trip/collection.yaml",
+        TRIP_SCHEMA,
+        "trip-schema-1",
+        None,
+        true,
+    );
+    seed_text_moment(
+        store,
+        "trip-record",
+        "trip/lisbon.md",
+        "Lisbon",
+        "trip-record-1",
+        None,
+        true,
+    );
+}
+
+#[test]
+fn named_author_writes_a_collections_own_files_from_its_grant_origin() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    let writes = [
+        present_text_payload(
+            "schema-edit",
+            "trip-schema",
+            "write",
+            "trip/collection.yaml",
+            "trip/collection.yaml",
+            TRIP_SCHEMA,
+            "trip-schema-1",
+            "name: Trip plan\n",
+        ),
+        absent_text_payload(
+            "automations-create",
+            "trip-automations",
+            "trip/automations.yaml",
+            "version: 1\n",
+        ),
+        absent_text_payload("record-create", "trip-porto", "trip/porto.md", "Porto"),
+        absent_text_payload(
+            "new-collection",
+            "food-schema",
+            "trip/food/collection.yaml",
+            "name: Food\n",
+        ),
+        absent_text_payload(
+            "new-collection-record",
+            "food-record",
+            "trip/food/pastel.md",
+            "Pastel",
+        ),
+    ];
+    hydrate_texts(
+        &mut store,
+        &[
+            "name: Trip plan\n",
+            "version: 1\n",
+            "Porto",
+            "name: Food\n",
+            "Pastel",
+        ],
+    );
+    for (seq, payload) in (0_i64..).zip(writes) {
+        let op = envelope(
+            NAMED_ORIGIN,
+            seq,
+            "ws",
+            with_author(payload, named_author("grant")),
+        );
+        assert_eq!(
+            apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{}",
+            op.payload["path"]
+        );
+    }
+    let authors = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT author_json FROM moments WHERE author_json IS NOT NULL ORDER BY moment_order",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .expect("read authors");
+    assert_eq!(authors.len(), 5);
+    for author in authors {
+        assert_eq!(
+            serde_json::from_str::<Value>(&author).expect("author JSON"),
+            named_author("grant")
+        );
+    }
+}
+
+#[test]
+fn named_author_and_collection_file_origin_travel_only_together() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    let automations = || {
+        absent_text_payload(
+            "automations-create",
+            "trip-automations",
+            "trip/automations.yaml",
+            "version: 1\n",
+        )
+    };
+    for (origin, author) in [
+        ("device-origin", named_author("grant")),
+        ("relay:collection-create:grant", named_author("grant")),
+        ("relay:collection-file:other-grant", named_author("grant")),
+        (NAMED_ORIGIN, Value::Null),
+        (
+            NAMED_ORIGIN,
+            json!({"kind":"public", "principalId":"holder", "grantId":"grant"}),
+        ),
+        (
+            NAMED_ORIGIN,
+            json!({"kind":"agent", "agentId":"agent", "onBehalfOf":"owner"}),
+        ),
+    ] {
+        let seq = read_replication_acked_seq(&store, "ws", origin).expect("ack") + 1;
+        let payload = if author.is_null() {
+            automations()
+        } else {
+            with_author(automations(), author.clone())
+        };
+        let outcome =
+            apply_moment_envelope(&mut store, &envelope(origin, seq, "ws", payload), &NoFaults)
+                .expect("refusal is recorded");
+        let expected = if matches!(author["kind"].as_str(), Some("public")) {
+            "public moment author requires a relay collection origin"
+        } else {
+            "named moment author requires its grant's relay collection-file origin"
+        };
+        assert_eq!(refusal_reason(outcome), expected, "{origin} {author}");
+    }
+    assert!(snapshot(&store, "trip-automations").is_none());
+}
+
+#[test]
+fn named_author_is_refused_outside_a_collections_own_files() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    seed_text_moment(
+        &mut store,
+        "notes-page",
+        "notes/page.md",
+        "Notes",
+        "notes-page-1",
+        None,
+        true,
+    );
+    seed_text_moment(
+        &mut store,
+        "archive-page",
+        "archive/2025/old.md",
+        "Old",
+        "archive-page-1",
+        None,
+        true,
+    );
+    seed_text_moment(
+        &mut store,
+        "gone-object",
+        "elsewhere/gone.md",
+        "Gone",
+        "gone-object-1",
+        None,
+        false,
+    );
+    hydrate_texts(
+        &mut store,
+        &["version: 1\n", "Changed", "name: Root\n", "code"],
+    );
+    let refused = [
+        // A record update is live editing, never a direct write.
+        present_text_payload(
+            "record-edit",
+            "trip-record",
+            "write",
+            "trip/lisbon.md",
+            "trip/lisbon.md",
+            "Lisbon",
+            "trip-record-1",
+            "Changed",
+        ),
+        present_text_payload(
+            "schema-rename",
+            "trip-schema",
+            "rename",
+            "trip/collection.yaml",
+            "trip/schema.yaml",
+            TRIP_SCHEMA,
+            "trip-schema-1",
+            TRIP_SCHEMA,
+        ),
+        present_text_payload(
+            "schema-delete",
+            "trip-schema",
+            "delete",
+            "trip/collection.yaml",
+            "trip/collection.yaml",
+            TRIP_SCHEMA,
+            "trip-schema-1",
+            TRIP_SCHEMA,
+        ),
+        // A record moved onto the schema path, stated as a write.
+        {
+            let mut moved = present_text_payload(
+                "record-onto-schema",
+                "trip-record",
+                "write",
+                "trip/collection.yaml",
+                "trip/collection.yaml",
+                "Lisbon",
+                "trip-record-1",
+                "name: Root\n",
+            );
+            moved["payloadBeforePath"] = json!("trip/lisbon.md");
+            moved["beforePath"] = json!("trip/lisbon.md");
+            moved
+        },
+        {
+            let mut binary = absent_text_payload(
+                "binary-automations",
+                "binary-automations",
+                "trip/automations.yaml",
+                "version: 1\n",
+            );
+            binary["payloadAfterContentKind"] = json!("binary");
+            binary
+        },
+        absent_text_payload(
+            "root-schema",
+            "root-schema",
+            "collection.yaml",
+            "name: Root\n",
+        ),
+        absent_text_payload(
+            "plain-automations",
+            "plain-automations",
+            "notes/automations.yaml",
+            "version: 1\n",
+        ),
+        absent_text_payload("plain-record", "plain-record", "notes/new.md", "Changed"),
+        absent_text_payload(
+            "nested-record",
+            "nested-record",
+            "trip/days/one.md",
+            "Changed",
+        ),
+        absent_text_payload("code", "code", "trip/stamp.js", "code"),
+        // Another file's object, with every declared path at the schema.
+        present_text_payload(
+            "foreign-object-edit",
+            "trip-record",
+            "write",
+            "trip/collection.yaml",
+            "trip/collection.yaml",
+            "Lisbon",
+            "trip-record-1",
+            "name: Root\n",
+        ),
+        absent_text_payload(
+            "foreign-object-create",
+            "trip-record",
+            "trip/automations.yaml",
+            "version: 1\n",
+        ),
+        // An object this workspace held once, now without a head.
+        absent_text_payload(
+            "deleted-object-create",
+            "gone-object",
+            "trip/automations.yaml",
+            "version: 1\n",
+        ),
+        // A schema created in a folder that holds files, directly or below.
+        absent_text_payload(
+            "schema-in-used-folder",
+            "notes-schema",
+            "notes/collection.yaml",
+            "name: Root\n",
+        ),
+        absent_text_payload(
+            "schema-above-files",
+            "archive-schema",
+            "archive/collection.yaml",
+            "name: Root\n",
+        ),
+    ];
+    for (seq, payload) in (0_i64..).zip(refused) {
+        let path = payload["path"].clone();
+        let op = envelope(
+            NAMED_ORIGIN,
+            seq,
+            "ws",
+            with_author(payload, named_author("grant")),
+        );
+        assert_eq!(
+            refusal_reason(
+                apply_moment_envelope(&mut store, &op, &NoFaults).expect("refusal is recorded")
+            ),
+            "named moment author may write only a Collection's own files",
+            "{path} {}",
+            op.payload["momentId"]
+        );
+    }
+    assert_eq!(
+        snapshot(&store, "trip-record").map(|head| (head.0, head.3)),
+        Some(("trip/lisbon.md".to_owned(), "trip-record-1".to_owned()))
+    );
+    assert_eq!(
+        snapshot(&store, "trip-schema").map(|head| head.3),
+        Some("trip-schema-1".to_owned())
+    );
+    assert!(snapshot(&store, "notes-schema").is_none());
+    assert!(snapshot(&store, "archive-schema").is_none());
+}
+
+#[test]
+fn named_schema_edit_on_a_stale_base_opens_a_conflict() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    seed_text_moment(
+        &mut store,
+        "trip-schema",
+        "trip/collection.yaml",
+        "name: Owner\n",
+        "trip-schema-2",
+        Some(("trip-schema-1", TRIP_SCHEMA)),
+        true,
+    );
+    hydrate_texts(&mut store, &["name: Ana\n"]);
+    let stale = present_text_payload(
+        "stale-schema-edit",
+        "trip-schema",
+        "write",
+        "trip/collection.yaml",
+        "trip/collection.yaml",
+        TRIP_SCHEMA,
+        "trip-schema-1",
+        "name: Ana\n",
+    );
+    let op = envelope(
+        NAMED_ORIGIN,
+        0,
+        "ws",
+        with_author(stale, named_author("grant")),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply"),
+        ApplyOutcome::new(ApplyDisposition::Applied(1))
+    );
+    assert_eq!(
+        snapshot(&store, "trip-schema").map(|head| head.3),
+        Some("trip-schema-2".to_owned())
+    );
+}
+
+#[test]
+fn named_write_to_an_unimported_version_waits_instead_of_refusing() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    hydrate_texts(&mut store, &["version: 1\n"]);
+    let mut payload = absent_text_payload(
+        "draft-automations",
+        "draft-automations",
+        "trip/automations.yaml",
+        "version: 1\n",
+    );
+    payload["versionId"] = json!("draft");
+    let op = envelope(
+        NAMED_ORIGIN,
+        0,
+        "ws",
+        with_author(payload, named_author("grant")),
+    );
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults),
+        Err(SyncError::RetryableState { .. })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", NAMED_ORIGIN).expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn collection_file_origin_carries_only_moment_append() {
+    let (_scratch, mut store) = test_store();
+    for (seq, op_kind) in (0_i64..).zip(["conflict.resolve", "conflict.open", "version.create"]) {
+        let op = ReplicationEnvelope {
+            op_kind: op_kind.to_owned(),
+            ..envelope(NAMED_ORIGIN, seq, "ws", json!({}))
+        };
+        let outcome = apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("refusal is recorded");
+        assert!(
+            matches!(
+                outcome.primary,
+                ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { ref reason },
+                    ..
+                }) if reason == "relay collection-file origin carries only moment.append"
+            ),
+            "{op_kind}: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", NAMED_ORIGIN).expect("ack"),
+        2
+    );
+}
+
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
     store
         .read_with(|tx| {
@@ -1169,6 +1618,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
         &mut store,
         "ws",
         &crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),

@@ -72,6 +72,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(Vec::new());
+    }
     let rows: Vec<(String, String, Option<String>)> = collect_rows(
         tx,
         "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
@@ -763,6 +766,7 @@ mod tests {
         assert_eq!(refusals.len(), 1);
         let refusal_report_id = refusal_report_id.expect("claimed report id");
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1247,7 +1251,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known cross-shard first-pull Y.Doc origination race, tracked in dohc-ai/dohc#1194"]
     fn first_remote_base_claim_prevents_local_ydoc_origination() {
         let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);
@@ -1293,7 +1296,7 @@ mod tests {
                 .expect("copy remote base"),
             remote_sha
         );
-        crate::apply_ydoc_envelope(
+        let outcome = crate::apply_ydoc_envelope(
             &mut local,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
@@ -1309,6 +1312,15 @@ mod tests {
             &crate::NoLiveLeases,
         )
         .expect("first pull applies remote base");
+        let crate::ApplyDisposition::Applied(result) = outcome.primary else {
+            panic!("remote base was not applied");
+        };
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        let replacement = result
+            .lineage_replacement
+            .expect("remote base replaces the offline lineage");
+        assert_eq!(replacement.recovered_paths.len(), 1);
 
         let (claim_status, base_sha, local_updates): (String, String, i64) = local
             .read_with(|conn| {
@@ -1343,9 +1355,20 @@ mod tests {
         );
         assert_eq!(base_sha, remote_sha, "the claimed base is the remote base");
         assert_eq!(
-            local_updates, 1,
-            "the independent local durable update remains stranded behind the remote base"
+            local_updates, 0,
+            "the offline update must not remain in the remote lineage"
         );
+        let recovered_text: String = local
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256
+                     WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                    [&replacement.recovered_paths[0]],
+                    |row| row.get(0),
+                )
+            })
+            .expect("recovered offline edit");
+        assert_eq!(recovered_text, "local edit");
 
         enroll(&mut local).expect("first-position backfill");
         let local_ydoc_ops = local_ops(&local)
@@ -1353,9 +1376,15 @@ mod tests {
             .filter(|(kind, _)| kind == "ydoc.update")
             .count();
         assert_eq!(
-            local_ydoc_ops, 1,
-            "first-position enrolment must originate the pre-existing local Y.Doc history"
+            local_ydoc_ops, 0,
+            "enrollment must not originate a second lineage after the remote claim"
         );
+        let persisted = dohc_engine_collab::load_persisted(&local, &key)
+            .expect("load remote lineage after enrollment")
+            .expect("remote lineage exists");
+        assert_eq!(persisted.marker.lineage_claim_id, Some(remote_sha));
+        assert_eq!(persisted.doc.plaintext_string(), "remote edit");
+        assert!(!persisted.doc.has_pending_dependencies());
     }
 
     #[test]
@@ -2362,6 +2391,7 @@ mod tests {
             .expect("seed oversized local lineage");
 
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 0,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),

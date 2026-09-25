@@ -1482,8 +1482,9 @@ describe("chat IPC contract", () => {
         dms: [],
         pending: [request],
         declined: [{ shareId: "share-2", granterEmail: null }],
+        failed: false,
       }),
-    ).toMatchObject({ pending: [request] });
+    ).toMatchObject({ pending: [request], failed: false });
     expect(
       AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" }),
     ).toEqual({ workspaceId: "workspace-a", shareId: "share-1" });
@@ -1975,7 +1976,7 @@ describe("record IPC contracts", () => {
 describe("settings IPC contract", () => {
   it("accepts bounded user and workspace settings payloads", () => {
     expect(
-      SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS }).settings
+      SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS }).settings
         .appearance.themeMode,
     ).toBe("system");
     // A save carries only the changed controls: main merges them onto the
@@ -1997,6 +1998,7 @@ describe("settings IPC contract", () => {
   it("rejects unknown settings keys, invalid values, bounds, and oversized strings", () => {
     expect(
       SetUserSettingsPayload.safeParse({
+        base: DEFAULT_USER_SETTINGS,
         settings: {
           ...DEFAULT_USER_SETTINGS,
           secretToken: "nope",
@@ -2005,6 +2007,7 @@ describe("settings IPC contract", () => {
     ).toBe(false);
     expect(
       SetUserSettingsPayload.safeParse({
+        base: DEFAULT_USER_SETTINGS,
         settings: {
           ...DEFAULT_USER_SETTINGS,
           appearance: {
@@ -2016,6 +2019,7 @@ describe("settings IPC contract", () => {
     ).toBe(false);
     expect(
       SetUserSettingsPayload.safeParse({
+        base: DEFAULT_USER_SETTINGS,
         settings: {
           ...DEFAULT_USER_SETTINGS,
           editor: {

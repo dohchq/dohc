@@ -1,8 +1,26 @@
 use dohc_engine_collab::{ClaimOutcome, ContentKind, DocKey};
 use dohc_engine_domain::ChangeAttribution;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 
-use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
+use crate::{SyncError, journal_local_op_in_tx};
+
+/// A partial initial pull reserves remote bases, even if local edits are pushed.
+/// A creator that pushed before its first pull already permits local bases.
+pub(crate) fn can_originate_local_bases_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id=?1) \
+           AND COALESCE((SELECT bootstrap_complete FROM sync_relay_cursors WHERE workspace_id=?1), \
+             EXISTS(SELECT 1 FROM sync_relay_push_state p \
+               JOIN sync_identity i ON i.workspace_id=p.workspace_id AND i.origin_id=p.origin_id \
+               WHERE p.workspace_id=?1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
 
 /// Why a lineage that could otherwise share does not: it is too large to
 /// encode as a base. Names the constraint, the configured limit, the unit and
@@ -57,7 +75,7 @@ pub fn originate_ydoc_base_in_tx(
     // Check replication before the claim. A later refusal in the caller's
     // append or backfill transaction would otherwise roll back real work with
     // a claim that should never have started.
-    if !workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)? {
+    if !can_originate_local_bases_in_tx(tx, &key.workspace_id)? {
         return Ok(BaseOrigination::NothingToDo);
     }
     let Some(encoded) =

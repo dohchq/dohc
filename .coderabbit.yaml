@@ -50,7 +50,7 @@ reviews:
     - label: "frontend"
       instructions: "React renderer, editor, workbench, styles, accessibility, or client state."
     - label: "collab"
-      instructions: "Yjs, document sessions, sync relay, sharing, presence, reactions, channels, or direct messages."
+      instructions: "Yjs, document sessions, sync relay, sharing, presence, reactions, groups, or direct messages."
     - label: "brand"
       instructions: "Brand package, logos, tokens, social assets, design system, or identity guard changes."
     - label: "docs"

@@ -14,6 +14,7 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
   const seedUpdate = initialUpdate ?? Y.encodeStateAsUpdate(doc);
 
   const api = {
+    platform: "linux" as const,
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
       return {

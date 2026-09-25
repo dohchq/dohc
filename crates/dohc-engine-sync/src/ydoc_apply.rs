@@ -513,8 +513,13 @@ fn apply_deferred_base(
                 losing_lineage_claim_id,
                 winner,
             } => (winner, Some(losing_lineage_claim_id)),
-            dohc_engine_collab::ClaimOutcome::Claimed { .. }
-            | dohc_engine_collab::ClaimOutcome::Resumed => {
+            // The lineage already holds this base, so its state and projection
+            // are unchanged; the claim only recorded the base's relay position.
+            dohc_engine_collab::ClaimOutcome::Resumed => {
+                clear_base_relay_candidates_in_tx(tx, &key)?;
+                return Ok(None);
+            }
+            dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                 let winner = dohc_engine_collab::read_marker_in(tx, &key)
                     .map_err(map_collab_hard_error)?
                     .ok_or_else(|| local_corruption("parked winning Y.Doc has no marker"))?;
@@ -1376,6 +1381,8 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_deferred_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        "DELETE FROM ydoc_base_relay_candidates \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
     ] {
         tx.execute(
@@ -1384,6 +1391,24 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         )
         .map_err(SyncError::persist)?;
     }
+    Ok(())
+}
+
+/// Drop the local bases still waiting to learn their relay position.
+///
+/// Called once the lineage's position is known from a pulled base, or when the
+/// lineage is gone. The pull resolves pending positions before it applies a
+/// page, so a local base still pending then has not reached the relay, and the
+/// relay will order it after every base the page holds.
+fn clear_base_relay_candidates_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "DELETE FROM ydoc_base_relay_candidates          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
     Ok(())
 }
 
@@ -2629,6 +2654,50 @@ pub fn apply_ydoc_envelope(
             is_base_state: payload.is_base_state,
         };
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
+                op.origin_id.clone(),
+                op.origin_seq,
+                relay_seq,
+            )
+            .map_err(map_collab_hard_error)?;
+            // Another device seeded the same head, or the relay redelivered
+            // this base. The lineage already holds it, so the base adds only
+            // its relay position, and the file keeps every edit made since.
+            // This runs before the path check: the object may have moved
+            // since the other device sent the base.
+            if dohc_engine_collab::read_marker_in(tx, &claim_key)
+                .map_err(map_collab_hard_error)?
+                .is_some_and(|marker| {
+                    marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                        && marker.lineage_claim_id.as_deref() == Some(incoming.lineage_claim_id)
+                })
+            {
+                let resumed = dohc_engine_collab::claim_base_at_relay_in_tx(
+                    tx,
+                    &claim_key,
+                    kind,
+                    &claim_bytes,
+                    &sv_bytes,
+                    &coordinate,
+                    op.recorded_at_ms,
+                )
+                .map_err(|error| {
+                    map_collab_payload_error(error, "ydoc.update base could not be claimed")
+                })?;
+                if !matches!(resumed, dohc_engine_collab::ClaimOutcome::Resumed) {
+                    return Err(local_corruption(
+                        "a Y.Doc base matching the active claim did not resume",
+                    ));
+                }
+                clear_base_relay_candidates_in_tx(tx, &claim_key)?;
+                return Ok(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-base-resumed"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: Vec::new(),
+                });
+            }
             // Cross-origin file edits can temporarily occupy this path before
             // the base arrives. Retrying after the later delete/rename is
             // convergence-safe; refusing and ACKing would lose the base
@@ -2756,12 +2825,7 @@ pub fn apply_ydoc_envelope(
                 kind,
                 &claim_bytes,
                 &sv_bytes,
-                &dohc_engine_collab::BaseRelayCoordinate::new(
-                    op.origin_id.clone(),
-                    op.origin_seq,
-                    relay_seq,
-                )
-                .map_err(map_collab_hard_error)?,
+                &coordinate,
                 op.recorded_at_ms,
             )
             .map_err(|error| {
@@ -2789,8 +2853,13 @@ pub fn apply_ydoc_envelope(
                     losing_lineage_claim_id,
                     winner,
                 } => (winner, Some(losing_lineage_claim_id), true),
-                dohc_engine_collab::ClaimOutcome::Claimed { .. }
-                | dohc_engine_collab::ClaimOutcome::Resumed => {
+                // The matching active claim resumed above, in this transaction.
+                dohc_engine_collab::ClaimOutcome::Resumed => {
+                    return Err(local_corruption(
+                        "a Y.Doc base matching the active claim was not resumed first",
+                    ));
+                }
+                dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                     let winner = dohc_engine_collab::read_marker_in(tx, &claim_key)
                         .map_err(map_collab_hard_error)?
                         .ok_or_else(|| local_corruption("claimed Y.Doc lineage has no marker"))?;

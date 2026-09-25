@@ -330,5 +330,5 @@ describe("workspace database IPC", () => {
     } finally {
       await databaseWorker.dispose();
     }
-  }, 20_000);
+  });
 });

@@ -272,7 +272,7 @@ export async function resolveShareProjectionPath<Mount>(
   relativePath: string,
   mounts: readonly Mount[],
 ): Promise<ResolvedShareProjectionPath<Mount>> {
-  const validated = validateUserReadPath(relativePath);
+  const validated = validateUserReadPath(relativePath, { platform: process.platform });
   if (!validated.ok) return { kind: "local" };
   const resolved = await assertResolvedWorkspacePath({
     rootPath: hostRoot,
@@ -496,7 +496,7 @@ export function assertMountableSelector(
 ): asserts selector is ShareViewSelector {
   if (selector === null) {
     throw new Error(
-      "This code is for a shared chat channel — join it from Chats instead of mounting it.",
+      "This code is for a shared group. Join it from Chats instead of mounting it.",
     );
   }
 }
