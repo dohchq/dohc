@@ -1547,11 +1547,44 @@ fn an_applied_group_message_claims_once_however_it_arrives() {
     );
     let claims = applied_claims(apply_chat_envelope(&mut engine, &automated, &NoFaults));
     assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0].depth, 1);
+    assert_eq!(claims[0].depth, 1, "an automation message without a depth");
     assert_eq!(claims[0].change.author_origin_id, None);
     assert_eq!(
         claims[0].change.actor_kind,
         Some(ChangeActorKind::Automation)
+    );
+
+    // The depth another computer sends keeps a chain's count, within the cap,
+    // so two people's automations answering each other stop at the cap.
+    let mut deeper = group_message(
+        "peer",
+        6,
+        "m-deeper",
+        "thread-imported",
+        "automation",
+        "/task Deeper",
+    );
+    deeper.payload["chainDepth"] = json!(3);
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &deeper, &NoFaults));
+    assert_eq!(claims[0].depth, 3);
+    assert!(!claims[0].chain_stopped());
+    let mut high = group_message(
+        "peer",
+        7,
+        "m-high",
+        "thread-imported",
+        "automation",
+        "/task High",
+    );
+    high.payload["chainDepth"] = json!(9);
+    let claims = applied_claims(apply_chat_envelope(&mut engine, &high, &NoFaults));
+    assert_eq!(
+        claims[0].depth,
+        dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP
+    );
+    assert!(
+        claims[0].chain_stopped(),
+        "a high depth only stops the chain"
     );
 
     let early = group_message(
@@ -1588,52 +1621,77 @@ fn an_applied_group_message_claims_once_however_it_arrives() {
     );
 }
 
-/// A relay pass hands the service every claim its applies took, for the
-/// post-commit wake.
+fn claim_keys(claims: Vec<dohc_engine_domain::AutomationClaim>) -> Vec<String> {
+    claims
+        .into_iter()
+        .map(|claim| match claim.trigger {
+            dohc_engine_domain::AutomationTrigger::Key { key } => key,
+            other => panic!("expected a message claim: {other:?}"),
+        })
+        .collect()
+}
+
+/// A relay pass keeps every claim its applies committed, even when a later
+/// envelope fails the pass, so the wake still goes out. The retry finds the
+/// first message stored and claims only the second.
 #[test]
-fn a_relay_pass_reports_the_group_message_claims_it_applied() {
+fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     imported_chat_fixture(&mut engine, "peer");
     subscribe_imported_group(&mut engine);
+    let trigger = |engine: &mut EngineStore, sql: &'static str| {
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(sql).map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("change the failing trigger");
+    };
+    trigger(
+        &mut engine,
+        "CREATE TRIGGER fail_second_message BEFORE INSERT ON chat_messages \
+         WHEN NEW.message_id = 'm-2' \
+         BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END",
+    );
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![
                 group_message("peer", 3, "m-1", "thread-imported", "human", "/task One"),
-                group_message("peer", 4, "m-2", "thread-imported", "human", "hello"),
+                group_message("peer", 4, "m-2", "thread-imported", "human", "/task Two"),
             ],
             next_cursor: 2,
             has_more: false,
         })),
     });
-    let outcome = client
-        .pull_chat_workspace(
-            &mut engine,
+    let pull = |engine: &mut EngineStore| {
+        client.pull_chat_workspace(
+            engine,
             &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
             1_000,
         )
-        .expect("pull");
-    let SyncPassOutcome::Complete {
-        applied,
-        automation_claims,
-        ..
-    } = outcome
-    else {
-        panic!("expected a complete pass: {outcome:?}");
     };
-    assert_eq!(applied, 2);
+
+    assert!(matches!(pull(&mut engine), Err(RelayError::Local(_))));
     assert_eq!(
-        automation_claims
-            .iter()
-            .map(|claim| claim.trigger.clone())
-            .collect::<Vec<_>>(),
-        vec![dohc_engine_domain::AutomationTrigger::Key {
-            key: "message:m-1".to_owned()
-        }]
+        claim_keys(client.take_automation_claims()),
+        vec!["message:m-1"],
+        "the committed message's claim survives the failed pass"
+    );
+
+    trigger(&mut engine, "DROP TRIGGER fail_second_message");
+    assert!(matches!(
+        pull(&mut engine).expect("retry"),
+        SyncPassOutcome::Complete { .. }
+    ));
+    assert_eq!(
+        claim_keys(client.take_automation_claims()),
+        vec!["message:m-2"],
+        "the retry claims only the message it stored"
     );
 }
 

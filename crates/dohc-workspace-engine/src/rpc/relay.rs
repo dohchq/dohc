@@ -188,10 +188,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             refusals,
             sharing_declined,
-            // Record facts and claims ride the engine event channel, not the
-            // wire result.
+            // Record facts ride the engine event channel, not the wire result.
             record_facts: _,
-            automation_claims: _,
         } => json!({
             "status": "complete",
             "ownerAdmissionPending":owner_admission_pending,
@@ -233,7 +231,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             refusals,
             sharing_declined,
             record_facts: _,
-            automation_claims: _,
         } => json!({
             "status": "crashedAfterApply",
             "applied": applied,
@@ -617,23 +614,6 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
-        // Post-commit: each Group message this pass stored made its claims in
-        // the transaction that stored it.
-        if let RelayOperationOutcome::Sync(
-            SyncPassOutcome::Complete {
-                automation_claims, ..
-            }
-            | SyncPassOutcome::CrashedAfterApply {
-                automation_claims, ..
-            },
-        ) = &outcome
-        {
-            crate::events::emit_automation_claimed(
-                &self.events,
-                &open.workspace_id,
-                automation_claims,
-            );
-        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -941,13 +921,6 @@ impl EngineService {
                 "share.channel.pull",
             )
             .await?;
-        if let RelayOperationOutcome::SharedChannelPulled(pulled) = &outcome {
-            crate::events::emit_automation_claimed(
-                &self.events,
-                &open.workspace_id,
-                &pulled.automation_claims,
-            );
-        }
         relay_outcome_json(outcome)
     }
 
@@ -999,13 +972,8 @@ impl EngineService {
             )
             .await?;
         let pending = match &outcome {
-            RelayOperationOutcome::ShareViewPulled(pulled) => {
-                crate::events::emit_automation_claimed(
-                    &self.events,
-                    &open.workspace_id,
-                    &pulled.automation_claims,
-                );
-                Some(IssuedCursor::ShareView(pulled.pending_cursor.clone()))
+            RelayOperationOutcome::ShareViewPulled(outcome) => {
+                Some(IssuedCursor::ShareView(outcome.pending_cursor.clone()))
             }
             _ => None,
         };
@@ -1189,7 +1157,6 @@ mod tests {
                 observed_bytes: 21,
             }],
             record_facts: Vec::new(),
-            automation_claims: Vec::new(),
         });
 
         assert_eq!(value["status"], "complete");
@@ -1231,7 +1198,6 @@ mod tests {
                     share_id: "share".to_owned(),
                     cursor: 1,
                 },
-                automation_claims: Vec::new(),
             },
         ))
         .expect("serialize share view outcome");

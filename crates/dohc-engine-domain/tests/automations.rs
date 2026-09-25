@@ -1360,6 +1360,28 @@ fn settle_done(store: &mut EngineStore, claim_id: &str, now_ms: i64) {
 fn group_subscriptions_belong_to_collection_automations_and_validate() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_group(&scratch);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
+            .expect("DM");
+        chats
+            .ensure_agent_channel(WS, "agent-1", 5, &NO_FAULTS)
+            .expect("agent channel");
+    }
+    // Only a Group this computer has can be watched: not a DM, the agent
+    // channel, or an id nothing names.
+    for channel_id in ["dm-1", "agent-1", "no-such-group"] {
+        assert!(
+            matches!(
+                subscribe_group(&mut store, TASK, channel_id, None),
+                Err(DomainError::InvalidInput {
+                    reason: "A Group subscription names a Group on this computer."
+                })
+            ),
+            "{channel_id}"
+        );
+    }
     assert!(subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("subscribe"));
     assert!(
         !subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("again"),
@@ -1402,18 +1424,14 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
 
 /// A Group message claims once for each subscription whose starting text it
 /// begins with, in the write that stores it, and the executor gets the
-/// message with the claim. A DM, a removed subscription, and a second store
-/// of the same message claim nothing.
+/// message with the claim. A removed subscription and a second store of the
+/// same message claim nothing.
 #[test]
 fn a_group_message_claims_each_matching_subscription_once() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_group(&scratch);
-    LinkedChatStore::new(&mut store)
-        .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
-        .expect("DM");
     subscribe_group(&mut store, TASK, GROUP, Some("/task")).expect("task");
     subscribe_group(&mut store, ALL, GROUP, None).expect("all");
-    subscribe_group(&mut store, ALL, "dm-1", None).expect("all in the DM");
 
     let claims = posted(&mut store, &post("m1", "  /task Buy tickets", 20));
     assert_eq!(claimed_ids(&claims), vec![ALL, TASK]);
@@ -1471,14 +1489,6 @@ fn a_group_message_claims_each_matching_subscription_once() {
         Some("user-ana")
     );
 
-    // A DM is not a Group, so it never claims.
-    let in_dm = StartChannelThread {
-        channel_id: "dm-1".to_owned(),
-        lane: ChatThreadLane::Chat,
-        ..post("m-dm", "/task Secret", 26)
-    };
-    assert!(posted(&mut store, &in_dm).is_empty());
-
     let (served, facts) = claim_next_pending_automation(&mut store, WS, TASK, 30, &NO_FAULTS)
         .expect("claim next")
         .expect("the task claim");
@@ -1527,7 +1537,8 @@ fn a_group_message_claims_each_matching_subscription_once() {
                     author_user_id: Some("user-ada"),
                     body: "  /task Buy tickets",
                     created_at_ms: 20,
-                    automation: None,
+                    automation_id: None,
+                    chain_depth: None,
                 },
             )
         })

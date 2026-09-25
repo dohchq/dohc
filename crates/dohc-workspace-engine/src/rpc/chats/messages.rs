@@ -534,7 +534,7 @@ impl EngineService {
         let author_kind = parse_actor_kind(&params.author_kind)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let (message, claims) = Self::read_under_ctx(
+        let message = Self::read_under_ctx(
             &cancellation,
             "chats.messages.send",
             open.actor.chat_message_send(
@@ -565,7 +565,6 @@ impl EngineService {
             ),
         )
         .await?;
-        crate::events::emit_automation_claimed(&self.events, &open.workspace_id, &claims);
         Ok(message_json(&message))
     }
 

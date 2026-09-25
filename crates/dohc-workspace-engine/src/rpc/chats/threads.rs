@@ -266,7 +266,7 @@ impl EngineService {
         let author_kind = parse_actor_kind(&params.author_kind)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let (thread, message, claims) = Self::read_under_ctx(
+        let (thread, message) = Self::read_under_ctx(
             &cancellation,
             "chats.threads.start",
             open.actor.chat_thread_start(
@@ -299,7 +299,6 @@ impl EngineService {
             ),
         )
         .await?;
-        crate::events::emit_automation_claimed(&self.events, &open.workspace_id, &claims);
         Ok(json!({ "thread": thread_b2_json(&thread), "message": message_json(&message) }))
     }
 

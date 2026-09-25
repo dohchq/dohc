@@ -1,4 +1,4 @@
-use super::ActorHandle;
+use super::{ActorHandle, ClaimAnnouncer};
 use crate::error::RuntimeError;
 use dohc_engine_collab::{LeaseRegistry, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -1036,6 +1036,7 @@ impl ActorHandle {
             let queued_leases = leases.clone();
             let queued_token = token.clone();
             let queued_reservation = reservation.clone();
+            let queued_claims = self.claims.clone();
             let outcome = self
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
@@ -1048,6 +1049,7 @@ impl ActorHandle {
                             queued_transport,
                             queued_operation,
                             &queued_leases,
+                            &queued_claims,
                         )
                     };
                     // A pull can claim, replace, or advance lineages behind the
@@ -1265,14 +1267,30 @@ fn execute_blocking_http_request(
     }
 }
 
+/// Run one relay operation, then announce every Group automation claim its
+/// applies committed. A pass that fails on a later envelope still announces
+/// them: its retry finds those messages stored and claims nothing again.
 fn execute_relay_operation(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     transport: DeferredRelayTransport,
     operation: RelayOperation,
     leases: &LeaseRegistry,
+    claims: &ClaimAnnouncer,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
+    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases);
+    claims.announce(&client.take_automation_claims());
+    outcome
+}
+
+fn run_relay_operation(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    client: &RelaySyncClient<DeferredRelayTransport>,
+    operation: RelayOperation,
+    leases: &LeaseRegistry,
+) -> Result<RelayOperationOutcome, RuntimeError> {
     match operation {
         RelayOperation::Push {
             workspace_id,
@@ -1525,6 +1543,7 @@ mod share_view_identity_tests {
                 created_at_ms: 1_000,
             },
             &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
         )
         .expect("recording runs");
         match outcome {

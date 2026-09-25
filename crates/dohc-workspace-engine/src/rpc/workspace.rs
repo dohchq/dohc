@@ -603,6 +603,13 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
+        // Chat writes and relay passes announce the Group automation claims
+        // they commit through the actor, whichever request or pass made them.
+        let claim_events = self.events.clone();
+        let claim_workspace_id = params.workspace_id.clone();
+        actor.listen_for_automation_claims(Arc::new(move |claims| {
+            crate::events::emit_automation_claimed(&claim_events, &claim_workspace_id, claims);
+        }));
         if let Err(error) = bound {
             if actor_open.store_freshly_created {
                 // The guard's close finishes on a blocking task; the delete

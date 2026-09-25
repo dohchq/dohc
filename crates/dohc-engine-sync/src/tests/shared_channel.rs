@@ -380,7 +380,6 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             }],
             skipped: 0,
             next_cursor: 1,
-            automation_claims: Vec::new(),
         }
     );
     assert_eq!(
@@ -674,7 +673,8 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
     let first = client
         .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
         .expect("the Group arrives");
-    assert!(first.automation_claims.is_empty());
+    assert_eq!(first.applied, 2);
+    assert!(client.take_automation_claims().is_empty());
     let channel_id: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -702,8 +702,8 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
         .expect("the messages arrive");
     assert_eq!(second.applied, 2);
     assert_eq!(
-        second
-            .automation_claims
+        client
+            .take_automation_claims()
             .iter()
             .map(|claim| claim.trigger.clone())
             .collect::<Vec<_>>(),

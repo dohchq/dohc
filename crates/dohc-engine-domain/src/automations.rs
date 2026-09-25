@@ -156,9 +156,12 @@ pub struct AutomationGroupMessage<'a> {
     pub author_user_id: Option<&'a str>,
     pub body: &'a str,
     pub created_at_ms: i64,
-    /// The automation on this computer that wrote it, and that write's chain
-    /// depth. A message from another computer has none.
-    pub automation: Option<(&'a str, u32)>,
+    /// The automation on this computer that wrote it. A message from another
+    /// computer has none.
+    pub automation_id: Option<&'a str>,
+    /// An automation message's chain depth: this computer's, or the one
+    /// another computer sent with the message.
+    pub chain_depth: Option<u32>,
 }
 
 /// The change a claim runs for and who made it, named as record history
@@ -622,6 +625,19 @@ pub fn subscribe_automation_group_in_tx(
     }
     let channel_id =
         normalize_automation_identifier(&subscription.channel_id, "Group id is invalid.")?;
+    let is_group: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_channels \
+             WHERE workspace_id = ?1 AND channel_id = ?2 AND kind = 'channel')",
+            params![workspace_id, channel_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !is_group {
+        return Err(DomainError::InvalidInput {
+            reason: "A Group subscription names a Group on this computer.",
+        });
+    }
     if let Some(prefix) = &subscription.starts_with
         && (prefix.is_empty()
             || prefix.len() > MAX_IDENTIFIER_BYTES
@@ -706,9 +722,8 @@ fn claim_message(message: &AutomationGroupMessage<'_>, channel_id: &str, lane: &
 /// agent channel, and a file's thread never do. Each claim keys on the
 /// message id, so a message stored again claims nothing. The writing
 /// automation never claims its own message. A message at the chain depth cap
-/// records a failed `chain-stopped` claim instead. An automation's message
-/// from another computer arrives without its depth, so it counts as depth 1.
-/// Returns only the claims this call inserted.
+/// records a failed `chain-stopped` claim instead. Returns only the claims
+/// this call inserted.
 pub fn claim_group_message_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -737,10 +752,17 @@ pub fn claim_group_message_in_tx(
         return Ok(Vec::new());
     }
     let text = message.body.trim_start_matches(is_js_trim_ws);
-    let (writer, depth) = match message.automation {
-        Some((automation_id, depth)) => (Some(automation_id), depth),
-        None if message.author_kind == "automation" => (None, 1),
-        None => (None, 0),
+    let writer = message.automation_id;
+    // An automation message claims at its depth, kept within 1 and the cap, so
+    // a chain stops at the cap across computers. A forged high depth only
+    // stops a chain early; a missing one counts as 1.
+    let depth = if message.author_kind == "automation" {
+        message
+            .chain_depth
+            .unwrap_or(1)
+            .clamp(1, AUTOMATION_CHAIN_DEPTH_CAP)
+    } else {
+        0
     };
     let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
     let mut inserted = Vec::new();
@@ -1877,36 +1899,42 @@ pub(crate) fn settle_automation_claim_in_tx(
     // the row's key is what keeps it from claiming twice. A done message
     // claim keeps its key without its message for the same reason: a message
     // stored again after its thread was removed must not run twice.
-    let older_done = "workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
-         AND claim_id NOT IN ( \
-             SELECT claim_id FROM automation_claims \
-             WHERE workspace_id = ?1 AND automation_id = ?2 \
-             ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
     let prune = params![
         workspace_id,
         settled.automation_id,
         AUTOMATION_CLAIM_HISTORY_LIMIT
     ];
-    conn.execute(
-        &format!(
-            "DELETE FROM automation_claims \
-             WHERE trigger_moment_order IS NULL AND change_kind <> 'message' AND {older_done}"
-        ),
-        prune,
-    )
-    .map_err(DomainError::sql_persist)?;
-    conn.execute(
-        &format!(
-            "UPDATE automation_claims \
-             SET change_fields_json = '[]', change_fields_omitted = 0, message_json = NULL \
-             WHERE (trigger_moment_order IS NOT NULL OR change_kind = 'message') \
-               AND (change_fields_json <> '[]' OR message_json IS NOT NULL) AND {older_done}"
-        ),
-        prune,
-    )
-    .map_err(DomainError::sql_persist)?;
+    conn.execute(PRUNE_SETTLED_RECORD_CLAIMS_SQL, prune)
+        .map_err(DomainError::sql_persist)?;
+    conn.execute(CLEAR_SETTLED_CLAIM_FACTS_SQL, prune)
+        .map_err(DomainError::sql_persist)?;
     Ok(settled)
 }
+
+/// Delete an automation's settled record claims past its history. The terms
+/// before `claim_id` match `idx_automation_claims_prunable`, so the delete
+/// reads only those claims, not the key rows message claims keep.
+pub(crate) const PRUNE_SETTLED_RECORD_CLAIMS_SQL: &str = "DELETE FROM automation_claims \
+     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
+       AND trigger_moment_order IS NULL AND change_kind <> 'message' \
+       AND claim_id NOT IN ( \
+           SELECT claim_id FROM automation_claims \
+           WHERE workspace_id = ?1 AND automation_id = ?2 \
+           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
+
+/// Clear the facts of an automation's settled moment and message claims past
+/// its history. The terms before `claim_id` match
+/// `idx_automation_claims_settled_facts`, so the update reads only claims
+/// that still carry facts.
+pub(crate) const CLEAR_SETTLED_CLAIM_FACTS_SQL: &str = "UPDATE automation_claims \
+     SET change_fields_json = '[]', change_fields_omitted = 0, message_json = NULL \
+     WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
+       AND (trigger_moment_order IS NOT NULL OR change_kind = 'message') \
+       AND (change_fields_json <> '[]' OR message_json IS NOT NULL) \
+       AND claim_id NOT IN ( \
+           SELECT claim_id FROM automation_claims \
+           WHERE workspace_id = ?1 AND automation_id = ?2 \
+           ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)";
 
 /// The startup reaper. A running claim whose process died — running, and not
 /// touched since `stale_before_ms` — is requeued to pending while attempts
@@ -2122,4 +2150,51 @@ pub fn reclaim_running_automations(
             now_ms,
         )
     })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLEAR_SETTLED_CLAIM_FACTS_SQL, PRUNE_SETTLED_RECORD_CLAIMS_SQL};
+    use dohc_engine_storage::EngineStore;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+
+    /// Message claims keep their key rows forever, so settle's pruning must
+    /// read only the claims it can change, through the partial indexes.
+    #[test]
+    fn settle_pruning_reads_through_the_partial_indexes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let store = EngineStore::open(&engine_db_path(&scratch).expect("db"), 1).expect("store");
+        for (sql, index) in [
+            (
+                PRUNE_SETTLED_RECORD_CLAIMS_SQL,
+                "idx_automation_claims_prunable",
+            ),
+            (
+                CLEAR_SETTLED_CLAIM_FACTS_SQL,
+                "idx_automation_claims_settled_facts",
+            ),
+        ] {
+            let plan: Vec<String> = store
+                .read_with(|conn| {
+                    let mut statement = conn
+                        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                        .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                    let rows = statement
+                        .query_map(rusqlite::params!["ws", "collection:Trip#all", 100], |row| {
+                            row.get::<_, String>(3)
+                        })
+                        .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                })
+                .expect("query plan");
+            assert!(
+                plan.iter().any(
+                    |step| step.starts_with("SEARCH automation_claims USING INDEX ")
+                        && step.contains(index)
+                ),
+                "{index}: {plan:?}"
+            );
+        }
+    }
 }

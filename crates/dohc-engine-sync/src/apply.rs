@@ -1601,7 +1601,8 @@ fn apply_message(
             author_user_id: author_user_id.as_deref(),
             body: &body,
             created_at_ms: payload.created_at_ms,
-            automation: None,
+            automation_id: None,
+            chain_depth: payload.chain_depth,
         },
     )
     .map_err(|error| map_chat_rule(error, "Group automation claim failed"))

@@ -1230,3 +1230,138 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
         "a panicked transaction never commits its claim"
     );
 }
+
+/// Every chat write announces the Group automation claims it committed, from
+/// one place in the actor. A follow that replays a parked member message
+/// announces that message's claim, and a post announces its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_chat_write_announces_the_group_claims_it_committed() {
+    use dohc_engine_domain::{
+        AutomationGroupSubscription, ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane,
+        FollowState, FollowTargetKind, LinkedChatStore, SetFollow, StartChannelThread,
+        subscribe_automation_group,
+    };
+    use dohc_engine_sync::apply_chat_envelope;
+
+    const GROUP_WS: &str = "ws-group-claims";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        LinkedChatStore::new(&mut store)
+            .create_group(
+                GROUP_WS,
+                "trip",
+                "Trip",
+                ChatChannelKind::Channel,
+                ChannelGroup::default(),
+                5,
+                &NoFaults,
+            )
+            .expect("Group");
+        subscribe_automation_group(
+            &mut store,
+            GROUP_WS,
+            &AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id: "trip".to_owned(),
+                starts_with: Some("/task".to_owned()),
+            },
+            6,
+            &NoFaults,
+        )
+        .expect("subscribe");
+        // A member's message arrives before its thread and is parked.
+        let early = ReplicationEnvelope {
+            workspace_id: GROUP_WS.to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "chat.message.append".to_owned(),
+            payload: serde_json::json!({
+                "messageId": "m-early",
+                "threadId": "t-late",
+                "authorKind": "human",
+                "authorDisplayName": "Ana",
+                "body": "/task Early",
+                "createdAtMs": 7,
+            }),
+            recorded_at_ms: 7,
+        };
+        apply_chat_envelope(&mut store, &early, &NoFaults).expect("park the message");
+        // Its thread is here now, but nothing has replayed the message yet.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+                     VALUES (?1, 't-late', 'Late', 7, 7, 'trip')",
+                    [GROUP_WS],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("the thread");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener_heard = Arc::clone(&heard);
+    actor.listen_for_automation_claims(Arc::new(move |claims| {
+        listener_heard
+            .lock()
+            .expect("heard")
+            .extend(claims.iter().map(|claim| claim.trigger.clone()));
+    }));
+    let key = |message_id: &str| AutomationTrigger::Key {
+        key: format!("message:{message_id}"),
+    };
+
+    actor
+        .chat_follow_set(
+            SetFollow {
+                workspace_id: GROUP_WS.to_owned(),
+                owner_user_id: "user-ice".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Channel,
+                target_id: "trip".to_owned(),
+                state: FollowState::Following,
+                now_ms: 10,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("follow the Group");
+    assert_eq!(*heard.lock().expect("heard"), vec![key("m-early")]);
+
+    actor
+        .chat_thread_start(
+            StartChannelThread {
+                workspace_id: GROUP_WS.to_owned(),
+                channel_id: "trip".to_owned(),
+                thread_id: "t-now".to_owned(),
+                message_id: "m-now".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ice".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "/task Now".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                automation: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post");
+    assert_eq!(
+        *heard.lock().expect("heard"),
+        vec![key("m-early"), key("m-now")]
+    );
+}

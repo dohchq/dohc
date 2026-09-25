@@ -2286,6 +2286,11 @@ CREATE INDEX idx_chat_mentions_handle
 /// claims a Group message the one time it stores that message, however the
 /// message arrives. A message claim carries the message itself, within the
 /// claim budget.
+///
+/// Two partial indexes let settle prune only the claims it can change: done
+/// record claims, and done moment or message claims that still carry facts.
+/// Their state and run are key columns too, so the planner prefers them to
+/// the automation index when the key rows of message claims pile up.
 const V2_AUTOMATION_TRIGGER_KEYS_DDL: &str = "\
 CREATE TABLE automation_group_subscriptions (
     workspace_id  TEXT    NOT NULL,
@@ -2358,6 +2363,15 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
 CREATE UNIQUE INDEX idx_automation_claims_trigger_key
     ON automation_claims(workspace_id, automation_id, trigger_key)
     WHERE trigger_key IS NOT NULL;
+CREATE INDEX idx_automation_claims_prunable
+    ON automation_claims(workspace_id, automation_id, state, run)
+    WHERE state = 'done' AND run = 1
+      AND trigger_moment_order IS NULL AND change_kind <> 'message';
+CREATE INDEX idx_automation_claims_settled_facts
+    ON automation_claims(workspace_id, automation_id, state, run)
+    WHERE state = 'done' AND run = 1
+      AND (trigger_moment_order IS NOT NULL OR change_kind = 'message')
+      AND (change_fields_json <> '[]' OR message_json IS NOT NULL);
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 CREATE INDEX idx_automation_claims_automation
@@ -2680,7 +2694,7 @@ mod tests {
             ),
             (
                 "v2-automation-trigger-keys",
-                "03b5e42a48083341a41a2b13c0bc4de727f381cbbe5429c7b8dab971089d3dfe",
+                "d8742f41413dcfa45eac008876f1523c5874263030a6cf42ac508b5901b3121d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

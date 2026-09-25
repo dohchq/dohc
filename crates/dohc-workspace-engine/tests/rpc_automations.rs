@@ -1182,6 +1182,15 @@ async fn group_messages_written_here_claim_through_rpc() {
         ErrorCode::InvalidParams,
         "one shape or the other"
     );
+    let missing = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.subscribe",
+        json!({ "automationId": TASK, "groupId": "no-such-group" }),
+    )
+    .await;
+    assert_eq!(missing.code, ErrorCode::InvalidParams, "only a Group here");
     let subscribed = call(
         &transport,
         &handle,

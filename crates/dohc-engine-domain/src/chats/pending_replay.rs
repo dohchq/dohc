@@ -57,6 +57,9 @@ struct PendingMessageAppend {
     origin: Option<String>,
     body: String,
     created_at_ms: i64,
+    /// Another computer's automation message sends its chain depth; sync
+    /// apply checked it before parking the message.
+    chain_depth: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -678,7 +681,8 @@ fn apply_pending_message(
             author_user_id: author_user_id.as_deref(),
             body: &body,
             created_at_ms: payload.created_at_ms,
-            automation: None,
+            automation_id: None,
+            chain_depth: payload.chain_depth,
         },
     )
 }
