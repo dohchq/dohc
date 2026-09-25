@@ -419,6 +419,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         const key = scope(validated.manifest.cursor);
         if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
+        const installer = createRecoveryInstaller({ ...recovery.install!, db, transaction, journal });
+        // Installation and authority claim are separate durable steps. Opening
+        // the identical archive recovers the saved identity after a restart;
+        // the owner still must confirm the old host stopped before claiming.
+        const installed = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND manifest_hash=? AND phase='installed'")
+          .get(key.workspaceId, key.datasetId, raw.manifestSha256);
+        const saved = installed ? installer.status({ ...key, transferId: String(installed.import_id), authorize }) : null;
+        if (saved && equalRecoveryCursor(saved.sourceCursor, validated.manifest.cursor)) {
+          return { ...saved, revision: parseDatasetRevision(JSON.parse(validated.catalog.revisionJson)),
+            dispose: () => validated.dispose(),
+            async install() {
+              const current = installer.status({ ...key, transferId: saved.transferId, authorize });
+              if (!current || current.manifestSha256 !== saved.manifestSha256 || !equalRecoveryCursor(current.sourceCursor, saved.sourceCursor)) {
+                throw new DatasetHostError("conflict", "Recovery transfer differs from its saved receipt.");
+              }
+              return current;
+            } };
+        }
         const assertAbsent = () => { journal.assertNotDeleted(key,authorize); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
         assertAbsent();
         return { transferId: raw.transferId, manifestSha256: raw.manifestSha256, sourceCursor: structuredClone(validated.manifest.cursor),
