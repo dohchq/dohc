@@ -218,17 +218,31 @@ export function createWorkspaceEngineIpc<
       });
     });
     // Answers with the status after the pass, so the notice that offered
-    // Try again can say whether it worked.
+    // Try again can say whether it worked. Only the renderer's own workspace
+    // is admitted. The pass starts inside the operation and is awaited
+    // outside it, so a pass waiting on an unreachable server does not hold
+    // the workspace open.
     registerHandler(CHANNELS.retryCloudSync, async (event, payload) => {
       assertTrustedSender(event);
       const input = RetryCloudSyncPayload.parse(payload);
-      const workspace = requireWorkspace(input.workspaceId);
-      assertWritableWorkspace(workspace);
-      await dependencies.retryCloudSync(input.workspaceId, input.reason);
+      const started = await withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "This workspace is no longer active.",
+        async (operation) => {
+          assertWritableWorkspace(operation.workspace);
+          const workspace = operation.workspace;
+          return {
+            workspace,
+            pass: dependencies.retryCloudSync(workspace.workspaceId, input.reason),
+          };
+        },
+      );
+      await started.pass;
       return SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
-          workspace,
-          activity.getStatus(input.workspaceId),
+          started.workspace,
+          activity.getStatus(started.workspace.workspaceId),
         ),
       );
     });

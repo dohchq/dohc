@@ -34,11 +34,13 @@ const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "asset
 
 async function harness() {
   const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: "C:/alias", kind: "personal", mode: "local-first" };
+  // Open and writable, but not the workspace this renderer shows.
+  const other: RegistryEntry = { workspaceId: "other", rootPath: "C:/other", kind: "personal", mode: "local-first" };
   const sender = new Sender(7);
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
-    findWorkspace: (id) => id === workspace.workspaceId ? workspace : null,
-    canonicalizeRoot: () => "C:/canonical",
+    findWorkspace: (id) => id === workspace.workspaceId ? workspace : id === other.workspaceId ? other : null,
+    canonicalizeRoot: (root) => root === other.rootPath ? "C:/other-canonical" : "C:/canonical",
     createState: (): State => ({ operationLanes: new Map(), lastEngineStoreRebuildResult: null }),
   });
   const canonicalWorkspaceFor = vi.fn((lease: WorkspaceAuthorityLease<RegistryEntry, State>) => {
@@ -123,6 +125,7 @@ async function harness() {
   const notify = vi.fn((_target: { workspaceId: string }) => { events.push("notify"); });
   const writable = vi.fn((_workspace: RegistryEntry) => undefined);
   const requireWorkspace = vi.fn((id: string) => {
+    if (id === other.workspaceId) return other;
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
@@ -201,6 +204,14 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => {throw new Error("readonly");});
     await expect(h.invoke(CHANNELS.retryCloudSync, asked)).rejects.toThrow("readonly");
     expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
+  });
+  // Codex on #1233: a renderer showing one workspace could start another
+  // open workspace's push and pull.
+  it("refuses a sync retry for an open workspace this renderer does not show", async () => {
+    const h = await harness();
+    const foreign = { workspaceId: "other", reason: "person" };
+    await expect(h.invoke(CHANNELS.retryCloudSync, foreign)).rejects.toThrow("This workspace is no longer active.");
+    expect(h.retryCloudSync).not.toHaveBeenCalled();
   });
   it("registers the four groups in order and rejects untrusted callers before parsing", async () => {
     const h = await harness();

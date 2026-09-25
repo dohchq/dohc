@@ -15570,8 +15570,9 @@ describe("owner live documents", () => {
 
   // edges-05, share-09: a relay outage read "Saving…" for its whole length,
   // and the row that came three failures later named no cause and offered
-  // nothing to do. #1233 review: a single failed pass must not interrupt.
-  it("files a failed sync at once, toasts only when it persists, and clears it on recovery", async () => {
+  // nothing to do. Codex on #1233: the first failed pass toasts, and later
+  // passes of the same failure only update the row.
+  it("toasts a failed sync at once, only once per failure, and clears it on recovery", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const failing = (attempts: number): SyncStatusResult => ({
       ...SYNC_STATUS,
@@ -15601,11 +15602,16 @@ describe("owner live documents", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    // One failed pass: the title bar and a Notices row, no toast.
+    // One failed pass: the title bar, a toast with Try again and copy, and a
+    // Notices row.
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").textContent).toBe("Server unreachable"),
     );
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not reach the server.",
+    );
+    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     await waitFor(() =>
       expect(screen.getByTestId("notice-center").textContent).toContain(
@@ -15613,18 +15619,31 @@ describe("owner live documents", () => {
       ),
     );
     await user.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    // The automatic retry failed too: now it interrupts, once.
+    // The automatic retry fails too: the same failure, so no second toast.
+    await user.click(await screen.findByRole("button", { name: "Dismiss workspace error" }));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const readsBefore = vi.mocked(bridge.getSyncStatus).mock.calls.length;
     status = failing(2);
     act(() => bridge.emitWorkspaceActivity());
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain(
+    await waitFor(() =>
+      expect(vi.mocked(bridge.getSyncStatus).mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => undefined);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).toContain(
       "dohc could not reach the server.",
     );
-    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
 
-    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    // Try again from the row, then close Notices so the toast can show.
+    await user.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }),
+    );
+    if (screen.queryByTestId("notice-center")) {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+    }
+
     await waitFor(() => expect(bridge.retryCloudSync).toHaveBeenCalledTimes(1));
     // Still failing: the person asked, so the answer interrupts again.
     expect(

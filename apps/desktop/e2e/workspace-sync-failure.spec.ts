@@ -80,10 +80,12 @@ test("a sync the server cannot take names the server, offers Try again, and clea
     relay = null;
     await writeFile(join(temp.rootPath, "notes/plan.md"), "local draft\n\nwritten while the server is down\n");
 
-    // One failed pass: the title bar names the server and Notices has the
-    // row, with no toast yet.
+    // One failed pass: the title bar and a toast name the server, and
+    // Notices keeps the row after the toast closes.
     await expect(titlebar).toHaveText("Server unreachable", { timeout: 60_000 });
     const toast = page.getByTestId("workspace-shell-error");
+    await expect(toast).toContainText("dohc could not reach the server.");
+    await page.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(toast).toHaveCount(0);
     const notices = page.getByTestId("notice-center");
     await page.getByTestId("notice-center-toggle").click();

@@ -32,10 +32,11 @@ export function forgetSyncFailureNoticesForTests(): void {
   shownFailures.clear();
 }
 
-// A failed sync goes to the titlebar and to a Notices row at once. It
-// interrupts with a toast only when it outlives one automatic retry, once per
-// failure, or when a retry the person asked for fails. Try again runs a pass
-// now; coming back online does the same without a toast of its own.
+// A failed sync goes to the titlebar, a toast, and a Notices row at once. One
+// failure toasts once, however many passes fail before it ends; later passes
+// only update the row. A retry the person asked for that fails toasts again.
+// Recovery clears the row and any open toast. Try again runs a pass now;
+// coming back online does the same without a toast of its own.
 export function useSyncFailureNotice(input: {
   workspaceId: string;
   // `undefined` while the status is still loading: unknown, not recovered.
@@ -144,7 +145,7 @@ export function useSyncFailureNotice(input: {
       shownFailures.set(workspaceId, shown);
     }
     if (shown.dismissed) return;
-    const toast = current.attempts > 1 && !shown.toasted;
+    const toast = !shown.toasted;
     if (toast) shown.toasted = true;
     file(
       { message: syncFailureMessage(current), detail: current.detail, toast },

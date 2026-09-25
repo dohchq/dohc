@@ -75,27 +75,29 @@ function renderNotice(
 }
 
 describe("useSyncFailureNotice", () => {
-  // Opus and Codex on #1233: every network blip raised an alert toast.
-  it("files a row but never toasts a failure that alternates with success", () => {
+  // A blip costs one toast, and recovery takes it away with the row.
+  it("toasts each failure once and clears its toast and row on recovery", () => {
     const view = renderNotice({ failure: null });
-    for (let round = 1; round <= 4; round += 1) {
+    for (let round = 1; round <= 3; round += 1) {
       view.rerender({ workspaceId: "ws-a", failure: unreachable(round * 100, 1) });
       expect(view.rows()).toHaveLength(1);
-      expect(view.toasts()).toEqual([]);
+      expect(view.toasts()).toHaveLength(1);
       view.rerender({ workspaceId: "ws-a", failure: null });
       expect(view.rows()).toEqual([]);
     }
   });
 
-  it("toasts once when a failure outlives one automatic retry, then only updates the row", () => {
+  // Codex on #1233: the first failed pass filed only a quiet row, so a
+  // failure that one retry cleared never reached a toast at all.
+  it("toasts a failure's first pass once, then only updates the row", () => {
     const view = renderNotice({ failure: unreachable(100, 1) });
-    expect(view.toasts()).toEqual([]);
-    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
     expect(view.toasts()).toHaveLength(1);
     expect(view.toasts()[0]!.message).toBe(
       "dohc could not reach the server.",
     );
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
+    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
+    expect(view.toasts()).toEqual([]);
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
     expect(view.toasts()).toEqual([]);
     // The row carries the newest failure, so its copied detail is current.
@@ -140,6 +142,7 @@ describe("useSyncFailureNotice", () => {
       failure: { cause: "unknown", detail: "RelayError: first", sinceMs: 100, attempts: 1 },
     });
     expect(view.rows()[0]!.message).toBe("dohc could not sync this workspace.");
+    act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({
       workspaceId: "ws-a",
       failure: { cause: "server-unreachable", detail: "RelayUnreachableError: reconnect", sinceMs: 100, attempts: 1 },
@@ -150,9 +153,8 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toEqual([]);
   });
 
-  // #1233 review: a retry answered after the shell unmounted marked the
-  // failure as toasted, so coming back showed a quiet row and later failures
-  // never interrupted.
+  // #1233 review: a retry answered after the shell unmounted changed what
+  // the next mount reads, here bringing back a dismissed row.
   it("ignores a retry that answers after the shell unmounted", async () => {
     let answer: ((status: SyncStatusResult) => void) | null = null;
     const retryCloudSync = vi.fn(
@@ -162,7 +164,11 @@ describe("useSyncFailureNotice", () => {
         }),
     );
     const first = renderNotice({ failure: unreachable(100, 1) }, retryCloudSync);
-    act(() => first.result.current.notice.retry());
+    act(() => {
+      first.result.current.notice.noteDismissed();
+      first.result.current.errors.dismissShellError(first.rows()[0]!.id);
+      first.result.current.notice.retry();
+    });
     await waitFor(() => expect(answer).not.toBeNull());
     first.unmount();
     await act(async () => {
@@ -171,7 +177,7 @@ describe("useSyncFailureNotice", () => {
 
     const second = renderNotice({ failure: undefined });
     second.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
-    expect(second.toasts()).toHaveLength(1);
+    expect(second.rows()).toEqual([]);
   });
 
   it("keeps a dismissal through a remount that starts with the status still loading", () => {
@@ -217,6 +223,7 @@ describe("useSyncFailureNotice", () => {
         syncFailure: unreachable(100, 2),
       }));
     const view = renderNotice({ failure: unreachable(100, 1) }, retryCloudSync);
+    act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     expect(view.toasts()).toEqual([]);
 
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
@@ -242,15 +249,20 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.id).toBe(toastId);
   });
 
+  // The status files the failed pass quietly, because this failure already
+  // toasted; the answer then raises the toast the person asked for, once.
   it("files a failed retry once when the status reports it before the answer", async () => {
     const retry = pendingRetry();
     const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
-    expect(view.toasts()).toHaveLength(1);
-    const toastId = view.toasts()[0]!.id;
+    expect(view.rows()).toHaveLength(1);
+    expect(view.toasts()).toEqual([]);
     await act(async () => retry.answer(unreachable(100, 2)));
     expect(view.rows()).toHaveLength(1);
+    expect(view.toasts()).toHaveLength(1);
+    const toastId = view.toasts()[0]!.id;
+    view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
     expect(view.toasts()[0]!.id).toBe(toastId);
   });
 
