@@ -150,6 +150,18 @@ pub(crate) fn claim_report(
     report: &mut Option<String>,
     faults: &dyn FaultInjector,
 ) -> Result<bool, RelayError> {
+    let pending: bool = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops WHERE workspace_id=?1)",
+                [workspace],
+                |row| row.get(0),
+            )
+        })
+        .map_err(local)?;
+    if !pending {
+        return Ok(false);
+    }
     let outcome = store.write_with(faults, |tx| {
         let next: i64 = tx.query_row("SELECT COALESCE(MAX(checked_sequence),0)+1 FROM relay_deferred_ops WHERE workspace_id=?1",
             [workspace], |r| r.get(0)).map_err(SyncError::corrupt)?;
