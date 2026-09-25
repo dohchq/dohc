@@ -41,7 +41,7 @@ const bridge = {
   getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
   onUpdateState: vi.fn(() => () => undefined),
   readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({ report: null, sendTo: null })),
-  sendCrashReport: vi.fn(async () => undefined),
+  sendCrashReport: vi.fn(async () => ({ sent: true })),
   dismissCrashReport: vi.fn(async () => undefined),
   onCrashReportChanged: vi.fn(() => () => undefined),
   windowRole: "workspace",
@@ -307,11 +307,11 @@ describe("workspace manager", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("shows a crash report and sends it only after the person confirms", async () => {
+  it("shows a crash report, and hands Send report to main", async () => {
     const user = userEvent.setup();
     const text = "dohc crash report\n\nProcess: window";
     bridge.readCrashReport.mockResolvedValueOnce({
-      report: { revision: 1, source: "window", problems: 1, atMs: 1_000, text },
+      report: { revision: 1, through: 1, source: "window", problems: 1, atMs: 1_000, text },
       sendTo: "reports.example.test",
     });
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
@@ -320,10 +320,7 @@ describe("workspace manager", () => {
       "A dohc window stopped unexpectedly",
     );
     await user.click(screen.getByTestId("crash-report-toast-send"));
-    expect((await screen.findByTestId("crash-report-send-text")).textContent).toBe(text);
-    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
-    await user.click(screen.getByTestId("crash-report-send-confirm"));
-    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({ revision: 1 }));
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
     // The report is gone, and the manager says it went.
     await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
     expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");

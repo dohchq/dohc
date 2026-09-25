@@ -300,7 +300,7 @@ export function WorkspaceManager(props: {
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
-  const { sendDialog: crashReportSendDialog, ...crashReportNotice } = useCrashReport(connectionNotices);
+  const crashReportNotice = useCrashReport(connectionNotices);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");
@@ -529,7 +529,6 @@ export function WorkspaceManager(props: {
         onDismiss={connectionNotices.dismissNotice}
         {...crashReportNotice}
       />
-      {crashReportSendDialog}
     </div>
   );
 }

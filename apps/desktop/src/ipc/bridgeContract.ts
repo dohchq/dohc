@@ -5822,18 +5822,20 @@ export const workspaceSearchOperations = {
 } satisfies OperationTable;
 
 // Crash reports. Main keeps each crash on this computer as plain text and
-// sends nothing on its own: a report leaves only after the person clicks
-// Send report, reads it, and confirms. One report holds the problems recorded
-// since the last send or dismiss.
+// sends nothing on its own. A report leaves only after the person confirms
+// in main's own dialog, which names where it goes and can show the exact
+// text. One report holds the problems recorded since the last send or
+// dismiss.
 export const CrashReportSource = z.enum(["main", "window", "gpu", "utility", "engine"]);
 export type CrashReportSource = z.infer<typeof CrashReportSource>;
 // Five problems of at most 6,000 characters each, with the header.
 export const CRASH_REPORT_MAX_CHARS = 32_768;
-const CRASH_REPORT_REVISION = z.number().int().positive();
 export const CrashReportView = z.object({
-  // Names the text the person read. Send sends exactly that text, and
-  // dismiss leaves any newer problem in place.
-  revision: CRASH_REPORT_REVISION,
+  // Changes whenever the text does.
+  revision: z.number().int().positive(),
+  // The last problem in this text. Dismiss removes up to it, so a newer
+  // problem stays.
+  through: z.number().int().positive(),
   // Where the newest problem happened. The notice names it.
   source: CrashReportSource,
   problems: z.number().int().positive(),
@@ -5848,7 +5850,6 @@ export const ReadCrashReportResult = z.object({
   sendTo: z.string().min(1).max(255).nullable(),
 });
 export type ReadCrashReportResult = z.infer<typeof ReadCrashReportResult>;
-export const CrashReportRevisionPayload = z.object({ revision: CRASH_REPORT_REVISION });
 export const CrashReportChangedEvent = z.undefined();
 
 export const crashReportOperations = {
@@ -5858,11 +5859,13 @@ export const crashReportOperations = {
   },
   dismissCrashReport: {
     channel: "desktop:dismiss-crash-report",
-    payload: CrashReportRevisionPayload, guard: "trusted-sender",
+    payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
   },
+  // Opens main's dialog. Sent is true only when the person confirmed there
+  // and the server took the report.
   sendCrashReport: {
     channel: "desktop:send-crash-report",
-    payload: CrashReportRevisionPayload, guard: "trusted-sender",
+    payload: z.object({}), result: z.object({ sent: z.boolean() }), guard: "trusted-sender",
   },
 } satisfies OperationTable;
 

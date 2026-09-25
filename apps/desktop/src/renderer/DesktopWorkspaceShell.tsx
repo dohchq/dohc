@@ -3852,7 +3852,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceIsReady,
     reportShellError,
   );
-  const { sendDialog: crashReportSendDialog, ...crashReportNotice } = useCrashReport({
+  const crashReportNotice = useCrashReport({
     reportError: reportShellError,
     showSuccess: showSuccessNotice,
   });
@@ -6039,7 +6039,6 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
-      {crashReportSendDialog}
     </div>
     </AgentSettingsContext.Provider>
   );

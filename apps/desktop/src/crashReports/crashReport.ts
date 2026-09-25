@@ -1,10 +1,11 @@
 import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import type { CrashReportSource } from "../ipc/bridgeContract";
 
-// One problem the desktop saw. Main records it as plain text the person can
-// read, and nothing more: no file text, no paths outside dohc's own
-// installation, no tokens.
+// One problem the desktop saw. A report keeps only what dohc itself wrote:
+// fixed facts, error classes and codes, messages that match a known
+// template, and stack frames inside dohc's own code. Everything else is
+// withheld, because free text can hold a person's file names and content.
 export type CrashEvent =
   // An exception nothing caught in the main process.
   | { kind: "main-exception"; error: unknown; origin: "uncaughtException" | "unhandledRejection" }
@@ -35,10 +36,11 @@ export interface CrashFacts {
 
 // One problem, bounded, so five fit in a report with its header.
 export const CRASH_EVENT_MAX_CHARS = 6_000;
-const LINE_MAX_CHARS = 500;
-const FRAME_MAX_CHARS = 300;
+export const MESSAGE_WITHHELD = "<message withheld>";
+export const FRAME_WITHHELD = "<frame>";
 const FRAMES_PER_ERROR = 25;
 const CAUSE_DEPTH = 3;
+const LINE_MAX_CHARS = 500;
 
 const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], string> = {
   restarting: "The workspace engine failed. dohc restarts it.",
@@ -46,39 +48,55 @@ const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], str
   startup: "The workspace engine did not start.",
 };
 
+// The engine supervisor's messages (engineDaemonLifecycle.ts). Each is a
+// fixed sentence with numbers or a method name in it, never a path or a
+// person's words. A message the list does not match is withheld.
+const ENGINE_MESSAGES = [
+  /^Rust engine daemon exited unexpectedly with (?:code -?\d+|code unknown|signal [A-Z0-9]+)\.$/,
+  /^Rust engine restart limit exceeded after \d+ attempts\.$/,
+  /^The Rust engine crashed again after \d+ restarts in the last [\w ]+\. The limit is \d+ restarts per [\w ]+\. dohc stopped restarting it\.$/,
+  /^The Rust engine went silent on \d+ launches: \d+ probes in a row expired after \d+ms each with no frame of any kind from the engine\. The limit is \d+ wedges with no traffic in between\. dohc stopped restarting it\.$/,
+  /^The Rust engine is running but sent nothing: \d+ probes in a row expired after \d+ms each with no frame of any kind from the engine\. The limit is \d+ probes with no traffic\. dohc is restarting it\.$/,
+  /^Rust engine [a-z][\w.]{0,63} (?:returned an invalid result|timed out after \d+ms)\.$/,
+  /^Rust engine (?:failed its startup handshake|exited during its startup handshake|exited during its startup health check|exited while retiring the previous generation's work|daemon is not available|lifecycle is already stopping|workspace\.open returned no workspace handle)\.$/,
+  /^Electron resources path is unavailable for the packaged Rust engine\.$/,
+];
+const IDENTIFIER = /^[A-Za-z_$][\w$]{0,63}$/;
+const CODE = /^[A-Za-z][\w.-]{0,63}$/;
+
 /** The event as report lines: facts first, then errors and their stacks. */
 export function formatCrashEvent(
   event: CrashEvent,
   facts: CrashFacts,
-  scrub: (text: string) => string,
+  codeFrame: (frame: string) => string,
 ): string {
   const lines: string[] = [];
-  const fact = (label: string, value: string) => lines.push(`${label}: ${bounded(value, LINE_MAX_CHARS)}`);
+  const fact = (label: string, value: string) => lines.push(`${label}: ${value}`);
   fact("Time", new Date(facts.atMs).toISOString());
   if (event.kind === "main-exception") {
     fact("Process", "main");
     fact("What happened", event.origin === "unhandledRejection" ? "Unhandled promise rejection" : "Uncaught exception");
   } else if (event.kind === "process-gone") {
-    // Chromium names the service and the reason, so neither holds a
-    // person's data, and a dotted service name is not a host.
-    fact("Process", event.source === "utility" && event.name ? `utility (${event.name})` : event.source);
+    const name = event.name && /^[\w .-]{1,100}$/.test(event.name) ? event.name : null;
+    fact("Process", event.source === "utility" && name ? `utility (${name})` : event.source);
     fact("What happened", "The process ended");
-    fact("Reason", event.reason);
+    fact("Reason", /^[a-z-]{1,40}$/.test(event.reason) ? event.reason : "unknown");
     fact("Exit code", String(event.exitCode));
   } else {
     fact("Process", "workspace engine");
     fact("What happened", ENGINE_STAGE[event.stage]);
   }
-  fact("Version", `${facts.version} (${facts.channel}${facts.packaged ? "" : ", development build"})`);
-  fact("System", `${facts.system} ${facts.arch}`);
-  fact("Electron", facts.electron);
+  fact("Version", clip(`${facts.version} (${facts.channel}${facts.packaged ? "" : ", development build"})`));
+  fact("System", clip(`${facts.system} ${facts.arch}`));
+  fact("Electron", clip(facts.electron));
   fact("Running for", `${facts.uptimeSeconds} s`);
   if (event.kind !== "process-gone") {
     // The engine's errors come from the supervisor, whose stack names only
     // its own restart code. The message and its causes carry the facts.
-    lines.push(...errorLines(event.error, scrub, event.kind === "main-exception"));
+    lines.push(...errorLines(event.error, codeFrame, event.kind === "main-exception"));
   }
-  return clip(lines.join("\n"), CRASH_EVENT_MAX_CHARS);
+  const text = lines.join("\n");
+  return text.length > CRASH_EVENT_MAX_CHARS ? `${text.slice(0, CRASH_EVENT_MAX_CHARS - 1)}…` : text;
 }
 
 /** The whole report: a header, then each problem, oldest first. */
@@ -90,131 +108,83 @@ export function crashReportText(events: readonly string[], leftOut: number): str
   ].join("\n\n");
 }
 
-function errorLines(error: unknown, scrub: (text: string) => string, withStack: boolean): string[] {
+function errorLines(error: unknown, codeFrame: (frame: string) => string, withStack: boolean): string[] {
   const lines: string[] = [];
   let current: unknown = error;
   for (let depth = 0; depth <= CAUSE_DEPTH && current !== undefined; depth += 1) {
     const label = depth === 0 ? "Error" : "Caused by";
     if (!(current instanceof Error)) {
-      // A thrown string can be anything a person typed; an object is not
-      // spelled out at all.
-      const value = typeof current === "string"
-        ? bounded(current, LINE_MAX_CHARS, scrub)
-        : `a value of type ${current === null ? "null" : typeof current}`;
-      lines.push(`${label}: ${value}`);
+      // A thrown value can be anything a person typed.
+      lines.push(`${label}: a value of type ${current === null ? "null" : typeof current}`);
       break;
     }
-    lines.push(`${label}: ${bounded(`${current.name}: ${current.message}`, LINE_MAX_CHARS, scrub)}`);
+    lines.push(`${label}: ${errorSummary(current)}`);
     if (withStack) {
-      const frames = (current.stack ?? "")
-        .split("\n")
-        .filter((line) => /^\s*at\s/.test(line))
-        .slice(0, FRAMES_PER_ERROR)
-        .map((line) => `    ${bounded(line.trim(), FRAME_MAX_CHARS, scrub)}`);
-      lines.push(...frames);
+      const frames: string[] = [];
+      for (const line of (current.stack ?? "").split("\n")) {
+        if (!/^\s*at\s/.test(line)) continue;
+        const frame = codeFrame(line.trim());
+        // Runs of frames outside dohc read as one.
+        if (frame !== FRAME_WITHHELD || frames.at(-1) !== FRAME_WITHHELD) frames.push(frame);
+        if (frames.length === FRAMES_PER_ERROR) break;
+      }
+      lines.push(...frames.map((frame) => `    ${frame}`));
     }
     current = current.cause;
   }
   return lines;
 }
 
-// One line of at most `max` characters. The text is clipped before the
-// scrub as well as after, so a scrub inside a crash handler never sees more
-// than one line's worth, however long the message was.
-function bounded(text: string, max: number, scrub?: (text: string) => string): string {
-  const line = oneLine(clip(text, max));
-  return clip(scrub ? scrub(line) : line, max);
+// The class, the message only when it matches a known template, and the
+// codes Node and the engine attach.
+function errorSummary(error: Error): string {
+  const name = IDENTIFIER.test(error.name) ? error.name : "Error";
+  const message = name === "EngineDaemonUnavailableError" && ENGINE_MESSAGES.some((template) => template.test(error.message))
+    ? error.message
+    : MESSAGE_WITHHELD;
+  const fields = error as Error & { code?: unknown; wireCode?: unknown; syscall?: unknown };
+  const codes = [
+    ...[fields.code, fields.wireCode].filter((code): code is string => typeof code === "string" && CODE.test(code))
+      .map((code) => `code ${code}`),
+    ...(typeof fields.syscall === "string" && /^[a-z_]{1,40}$/.test(fields.syscall) ? [`syscall ${fields.syscall}`] : []),
+  ];
+  return `${name}: ${message}${codes.length > 0 ? ` (${codes.join(", ")})` : ""}`;
 }
 
-function oneLine(text: string): string {
-  return text.replace(/\s*[\r\n]+\s*/g, " ").trim();
-}
-
-function clip(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-// A dotted name ending in letters, or a wildcard certificate name, not
-// inside a word, path, or placeholder. A label holds no dot, so the match
-// is linear.
-const HOST = /(?<![\w/\\.<>@-])(?:\*\.)?(?:[a-z0-9-]+\.)+([a-z]{2,})(?![\w-])(?::\d+)?/gi;
-const CODE_EXTENSIONS = new Set([
-  "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "json", "node", "asar",
-  "map", "wasm", "rs", "exe", "dll", "dylib", "so", "html", "css",
-]);
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// One line of at most `max` characters.
+function clip(text: string, max = LINE_MAX_CHARS): string {
+  const line = text.replace(/\s*[\r\n]+\s*/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
 /**
- * Removes what a report must not carry. `roots` are dohc's own install and
- * source folders: a path inside one keeps its dohc-relative part, so a stack
- * still says which file failed. Every other path, URL, email address, IP
- * address, quoted value, and token-shaped run is replaced, because each can
- * name a person's files, server, or secrets. Quoted values go because error
- * messages quote what they were given, which is often what a person typed.
+ * Turns a V8 stack line into `at <dohc>/…:line:col` when it points into one
+ * of `roots`, dohc's own code, and into `<frame>` otherwise. The function
+ * name is dropped, and a path is kept only when every character in it is one
+ * dohc's own file names use.
  */
-export function createCrashScrubber(roots: readonly string[], platform: NodeJS.Platform): (text: string) => string {
-  const spellings = roots
-    .filter((root) => root.length > 3)
-    .flatMap((root) => {
-      const trimmed = root.replace(/[\\/]+$/, "");
-      return [trimmed, trimmed.replace(/\\/g, "/"), pathToFileURL(trimmed).href];
-    })
-    .sort((left, right) => right.length - left.length);
-  // A root ends at a separator, so a sibling such as `dohc-notes` is not
-  // dohc's own folder.
-  const rootPattern = spellings.length === 0
-    ? null
-    : new RegExp(
-        `(?:${spellings.map(escapeRegExp).join("|")})(?![\\w.-])((?:[\\\\/][^\\s'"()<>|]*)?)`,
-        platform === "win32" ? "gi" : "g",
-      );
-  // Rules that could start at every character of a long run have a
-  // lookbehind, so each run is tried once.
-  return (text) => {
-    const frame = /^at\s/.test(text);
-    let result = rootPattern
-      ? text.replace(rootPattern, (_match, rest: string) => `<dohc>${rest.replace(/\\/g, "/")}`)
-      : text;
-    result = result
-      // URLs, including file:// and dohc's own schemes, which carry paths.
-      .replace(/(?<![\w+.-])[a-z][a-z0-9+.-]*:\/\/[^\s'"()<>]*/gi, "<url>")
-      // Node's network errors name the host after the error code, or after
-      // the call when no code is given.
-      .replace(/\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)(\s+)[^\s,;'"()<>]+/g, "$1$2<host>")
-      .replace(/\b((?:getaddrinfo|connect)\s+E[A-Z_]+)(\s+)[^\s,;'"()<>]+/g, "$1$2<host>")
-      .replace(/\b(getaddrinfo|connect)(\s+)(?![A-Z][A-Z_]*\b)(?=[^\s,;'"()<>]*[.:])[^\s,;'"()<>]+/g, "$1$2<host>")
-      .replace(/\b(attempted address:?\s*)[^\s,;'"()<>]+/gi, "$1<host>")
-      .replace(/(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>")
-      // A quote that opens after a word character is an apostrophe, and so
-      // is one inside a quoted value that a letter follows. The third rule
-      // is bounded so a line of unclosed quotes stays linear.
-      .replace(/(?<!\w)"[^"\n]*"(?!\w)/g, "\"…\"")
-      .replace(/(?<!\w)'[^'\n]*'(?!\w)/g, "'…'")
-      .replace(/(?<!\w)'(?:[^'\n]|'(?=\w)){1,500}'(?!\w)/g, "'…'")
-      .replace(/(?<!\w)`[^`\n]*`(?!\w)/g, "`…`")
-      // A quote left open, as clipping leaves one, runs to the end of the
-      // line. A replaced value's own quotes are not openings.
-      .replace(/(?<![\w…])(['"`])(?!…['"`])[^\n]*/g, "$1…")
-      // Windows drive and UNC paths run to the next quote or bracket, since
-      // their folder names can hold spaces and apostrophes.
-      .replace(/(?:\b[A-Za-z]:[\\/]|\\\\(?=[^\\\s]))(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
-      // POSIX paths with at least two parts, not inside a word or a dohc path.
-      .replace(/(?<![\w.:/<>-])\/(?:[^\s/'"()<>|]+\/)+(?:[^\n\r'"()<>|]|'(?=\w))*/g, "<path>")
-      .replace(/\b(bearer|basic)\s+[^\s'"]+/gi, "$1 <redacted>")
-      .replace(/(?<![\w-])([\w-]*(?:token|secret|password|passphrase|authorization|cookie|signature|api[_-]?key))(\s*[=:]\s*)[^\s,;&'"]+/gi, "$1$2<redacted>")
-      // A JSON Web Token: its header always starts `{"`, which is `eyJ`.
-      .replace(/\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, "<redacted>")
-      .replace(/(?<![\w+=-])(?=[\w+=-]*\d)[\w+=-]{32,}/g, "<redacted>")
-      // Any other host name, with its port. A stack frame's dotted names are
-      // code, and a code file keeps its name.
-      .replace(HOST, (host: string, label: string) =>
-        frame || CODE_EXTENSIONS.has(label.toLowerCase()) ? host : "<host>")
-      .replace(/(?<![\w:])(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/gi, "<ip>")
-      .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>");
-    return result;
+export function createCodeFrames(roots: readonly string[], platform: NodeJS.Platform): (frame: string) => string {
+  const fold = (text: string) => platform === "win32" ? text.toLowerCase().replace(/\\/g, "/") : text;
+  const rootPaths = roots.map((root) => fold(root.replace(/[\\/]+$/, "")));
+  return (frame) => {
+    const location = frame.length > 1_000 ? null : /(?:^at (?:async )?|\()([^()]+):(\d+):(\d+)\)?$/.exec(frame);
+    if (!location) return FRAME_WITHHELD;
+    let path = location[1]!;
+    if (path.startsWith("file://")) {
+      try {
+        path = fileURLToPath(path);
+      } catch {
+        return FRAME_WITHHELD;
+      }
+    }
+    const folded = fold(path);
+    for (const root of rootPaths) {
+      if (!folded.startsWith(`${root}/`)) continue;
+      const relative = folded.slice(root.length);
+      if (!/^(?:\/[\w@+-][\w.@+-]*)+$/.test(relative) || relative.includes("/..")) return FRAME_WITHHELD;
+      return `at <dohc>${relative}:${location[2]}:${location[3]}`;
+    }
+    return FRAME_WITHHELD;
   };
 }
 

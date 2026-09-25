@@ -56,7 +56,8 @@ export interface WorkspaceErrorNotice {
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
-// what Copy report copies and what Send report shows before it sends.
+// what Copy report copies. Send report asks main, which shows the text in
+// its own dialog before anything leaves.
 export interface CrashReportNotice {
   revision: number;
   title: string;
@@ -264,7 +265,7 @@ export function NoticeCenter(props: {
     generation: number,
   ) => void;
   // A crash report waiting on this computer. Send report is absent when this
-  // build has no report server; the shell owns the dialog it opens.
+  // build has no report server; main owns the dialog it opens.
   crashReport?: CrashReportNotice | null;
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;

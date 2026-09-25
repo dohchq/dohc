@@ -88,7 +88,7 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { release as osRelease, type as osType } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -383,7 +383,8 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { installCrashCapture } from "./crashReports/crashCapture";
-import { createCrashScrubber, crashReportRoot } from "./crashReports/crashReport";
+import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
+import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
@@ -399,11 +400,11 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 makeProcessDiagnosticsNonFatal();
 
 // Crashes are recorded on this computer before anything else can crash. A
-// report leaves only when the person clicks Send report and confirms, and
+// report leaves only when the person confirms in main's own dialog, and
 // only to the report server this build names.
 const crashReports = createCrashReportStore({
   path: join(stateDir(), "crash-report.json"),
-  endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL),
+  endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL, app.isPackaged),
   facts: () => ({
     atMs: Date.now(),
     version: app.getVersion(),
@@ -414,7 +415,7 @@ const crashReports = createCrashReportStore({
     electron: process.versions.electron ?? "unknown",
     uptimeSeconds: Math.round(process.uptime()),
   }),
-  scrub: createCrashScrubber(
+  codeFrame: createCodeFrames(
     [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
     process.platform,
   ),
@@ -4681,8 +4682,22 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),
-    dismissCrashReport: ({ revision }) => crashReports.dismiss(revision),
-    sendCrashReport: async ({ revision }) => await crashReports.send(revision),
+    dismissCrashReport: ({ through }) => crashReports.dismiss(through),
+    // The renderer only opens the dialog. The answer comes from the person.
+    sendCrashReport: async (_input, { event }) => ({
+      sent: await crashReports.send((request) => confirmCrashReportSend({
+        showMessageBox: async (options) => {
+          const window = BrowserWindow.fromWebContents(event.sender);
+          return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+        },
+        openText: async (text) => {
+          const path = join(stateDir(), "crash-report-to-send.txt");
+          await writeFile(path, text, { mode: 0o600 });
+          const failure = await shell.openPath(path);
+          if (failure) throw new Error(`dohc could not open the report: ${failure}`);
+        },
+      }, request)),
+    }),
   });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<

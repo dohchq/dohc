@@ -720,8 +720,8 @@ function makeBaseBridge(
         sendTo: null,
       }),
     ),
-    dismissCrashReport: vi.fn(async (_payload: { revision: number }) => undefined),
-    sendCrashReport: vi.fn(async (_payload: { revision: number }) => undefined),
+    dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
+    sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
     },
@@ -9372,6 +9372,7 @@ describe("automation failure notices", () => {
 describe("crash report notice", () => {
   const REPORT = {
     revision: 3,
+    through: 3,
     source: "engine" as const,
     problems: 1,
     atMs: 5_000,
@@ -9396,26 +9397,24 @@ describe("crash report notice", () => {
     expect(bridge.sendCrashReport).not.toHaveBeenCalled();
   });
 
-  it("sends only after the person reads the report and confirms", async () => {
+  it("hands Send report to main, which asks, and says Report sent only when it went", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
     bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
+    // The person cancelled main's dialog.
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: false });
     renderShell(bridge);
 
     await user.click(await screen.findByTestId("crash-report-toast-send"));
-    const dialog = await screen.findByTestId("crash-report-send");
-    expect(dialog.textContent).toContain("reports.example.test");
-    expect(screen.getByTestId("crash-report-send-text").textContent).toBe(REPORT.text);
-    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
+    // No dialog of the renderer's own: main asks.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("crash-report-toast-send")).toBeTruthy());
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
 
-    await user.click(screen.getByTestId("crash-report-send-cancel"));
-    await waitFor(() => expect(screen.queryByTestId("crash-report-send")).toBeNull());
-    expect(bridge.sendCrashReport).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("crash-report-toast-send"));
+    bridge.sendCrashReport.mockResolvedValueOnce({ sent: true });
     bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: "reports.example.test" });
-    await user.click(await screen.findByTestId("crash-report-send-confirm"));
-    await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({ revision: 3 }));
+    await user.click(screen.getByTestId("crash-report-toast-send"));
     await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
     expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Report sent");
   });
@@ -9425,44 +9424,19 @@ describe("crash report notice", () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
     bridge.sendCrashReport.mockRejectedValueOnce(
-      new Error("Error invoking remote method 'desktop:send-crash-report': Error: The report server did not answer."),
+      new Error("Error invoking remote method 'desktop:send-crash-report': Error: The connection to the report server failed."),
     );
     renderShell(bridge);
 
     await user.click(await screen.findByTestId("crash-report-toast-send"));
-    await user.click(await screen.findByTestId("crash-report-send-confirm"));
     const error = await screen.findByTestId("workspace-shell-error");
-    expect(error.textContent).toContain("dohc could not send the crash report. The report server did not answer.");
+    expect(error.textContent).toContain("dohc could not send the crash report. The connection to the report server failed.");
 
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledTimes(2));
-    expect(bridge.sendCrashReport).toHaveBeenLastCalledWith({ revision: 3 });
   });
 
-  it("shows a report that changed before its Try again sends anything", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: "reports.example.test" });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("crash-report-toast-send"));
-    const newer = {
-      ...REPORT, revision: 4, source: "window" as const, problems: 2, text: `${REPORT.text}\n\nProcess: window`,
-    };
-    bridge.readCrashReport.mockResolvedValue({ report: newer, sendTo: "reports.example.test" });
-    bridge.sendCrashReport.mockRejectedValueOnce(
-      new Error("The crash report changed. Open it again to read it before you send it."),
-    );
-    await user.click(await screen.findByTestId("crash-report-send-confirm"));
-    await screen.findByTestId("workspace-shell-error");
-    await waitFor(() => expect(screen.getByTestId("crash-report-toast").textContent).toContain("window"));
-
-    await user.click(screen.getByTestId("workspace-shell-error-retry"));
-    expect((await screen.findByTestId("crash-report-send-text")).textContent).toBe(newer.text);
-    expect(bridge.sendCrashReport).toHaveBeenCalledTimes(1);
-  });
-
-  it("dismisses the revision on screen and shows a newer report on the poke", async () => {
+  it("dismisses up to the problem on screen and shows a newer report on the poke", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
     bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
@@ -9472,10 +9446,10 @@ describe("crash report notice", () => {
     bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
     await user.click(await screen.findByTestId("notice-crash-report-dismiss"));
     await waitFor(() => expect(screen.queryByTestId("notice-crash-report")).toBeNull());
-    expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ revision: 3 });
+    expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ through: 3 });
 
     bridge.readCrashReport.mockResolvedValue({
-      report: { ...REPORT, revision: 4, source: "window", problems: 2 },
+      report: { ...REPORT, revision: 5, through: 4, source: "window", problems: 2 },
       sendTo: null,
     });
     act(() => bridge.emitCrashReportChanged());

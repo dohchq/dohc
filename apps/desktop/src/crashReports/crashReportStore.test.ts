@@ -7,9 +7,9 @@ import { createTestScratch } from "../workspaces/testTemp";
 import type { CrashEvent, CrashFacts } from "./crashReport";
 import {
   CRASH_REPORT_MAX_PROBLEMS,
-  CrashReportChangedError,
   crashReportEndpoint,
   createCrashReportStore,
+  type CrashReportSendRequest,
 } from "./crashReportStore";
 
 interface Received {
@@ -70,21 +70,39 @@ function store(endpoint: URL | null, onChanged: () => void = () => undefined) {
     path: join(directory, "crash-report.json"),
     endpoint,
     facts,
-    scrub: (text) => text,
+    codeFrame: () => "<frame>",
     onChanged,
   });
 }
 
+function engineError(code: number): Error {
+  return Object.assign(new Error(`Rust engine daemon exited unexpectedly with code ${code}.`), {
+    name: "EngineDaemonUnavailableError",
+  });
+}
+
 const EVERY_KIND: CrashEvent[] = [
-  { kind: "main-exception", error: new Error("main broke"), origin: "uncaughtException" },
+  { kind: "main-exception", error: new TypeError("main broke"), origin: "uncaughtException" },
   { kind: "process-gone", source: "window", name: null, reason: "crashed", exitCode: -1 },
   { kind: "process-gone", source: "gpu", name: "GPU", reason: "oom", exitCode: 1 },
-  { kind: "engine", error: new Error("engine exited"), stage: "restarting" },
-  { kind: "engine", error: new Error("engine stopped"), stage: "stopped" },
+  { kind: "engine", error: engineError(1), stage: "restarting" },
+  { kind: "engine", error: engineError(2), stage: "stopped" },
 ];
 
+// Main's dialog, answered the way the test says, and what it was shown.
+function dialog(answer: boolean) {
+  const shown: CrashReportSendRequest[] = [];
+  return {
+    shown,
+    confirm: async (request: CrashReportSendRequest) => {
+      shown.push(request);
+      return answer;
+    },
+  };
+}
+
 describe("crash report store", () => {
-  it("sends nothing until Send, then posts exactly the text the person read", async () => {
+  it("sends nothing until the person confirms in main's dialog, then posts exactly what it showed", async () => {
     const reportServer = await startReportServer();
     servers.push(reportServer.server);
     // Every network call from the store goes through the global fetch.
@@ -93,68 +111,106 @@ describe("crash report store", () => {
     const reports = store(reportServer.url, onChanged);
 
     for (const event of EVERY_KIND) reports.record(event);
-    const first = reports.read();
-    reports.dismiss(first.report!.revision);
+    reports.dismiss(reports.read().report!.through);
     reports.record(EVERY_KIND[1]!);
     const shown = reports.read();
-
     expect(onChanged).toHaveBeenCalledTimes(EVERY_KIND.length + 2);
     expect(shown.sendTo).toBe(reportServer.url.host);
+
+    // A renderer can open the dialog, but a Cancel there sends nothing.
+    const cancelled = dialog(false);
+    expect(await reports.send(cancelled.confirm)).toBe(false);
+    expect(cancelled.shown).toEqual([{ host: reportServer.url.host, text: shown.report!.text }]);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(reportServer.received).toEqual([]);
+    expect(reports.read().report).not.toBeNull();
 
-    await reports.send(shown.report!.revision);
-
+    const confirmed = dialog(true);
+    expect(await reports.send(confirmed.confirm)).toBe(true);
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(reportServer.received).toEqual([{
       method: "POST",
       url: "/crash-reports",
       contentType: "text/plain; charset=utf-8",
-      body: shown.report!.text,
+      body: confirmed.shown[0]!.text,
     }]);
     expect(reports.read().report).toBeNull();
+  });
+
+  it("posts the text the dialog showed, and keeps a crash recorded while it was open", async () => {
+    const reportServer = await startReportServer();
+    servers.push(reportServer.server);
+    const reports = store(reportServer.url);
+    reports.record(EVERY_KIND[0]!);
+    let shownText = "";
+    const sent = await reports.send(async ({ text }) => {
+      shownText = text;
+      reports.record(EVERY_KIND[1]!);
+      return true;
+    });
+    expect(sent).toBe(true);
+    expect(reportServer.received.map((request) => request.body)).toEqual([shownText]);
+    expect(shownText).not.toContain("Process: window");
+    const left = reports.read().report!;
+    expect(left.source).toBe("window");
+    expect(left.problems).toBe(1);
+  });
+
+  it("asks once at a time", async () => {
+    const reportServer = await startReportServer();
+    servers.push(reportServer.server);
+    const reports = store(reportServer.url);
+    reports.record(EVERY_KIND[0]!);
+    let answer: (value: boolean) => void = () => undefined;
+    const first = reports.send(() => new Promise<boolean>((resolve) => { answer = resolve; }));
+    const second = dialog(true);
+    expect(await reports.send(second.confirm)).toBe(false);
+    expect(second.shown).toEqual([]);
+    answer(false);
+    expect(await first).toBe(false);
+  });
+
+  it("changes the revision whenever the text changes", () => {
+    const reports = store(null);
+    reports.record(EVERY_KIND[0]!);
+    reports.record(EVERY_KIND[1]!);
+    const before = reports.read().report!;
+    reports.dismiss(before.through - 1);
+    const after = reports.read().report!;
+    expect(after.through).toBe(before.through);
+    expect(after.text).not.toBe(before.text);
+    expect(after.revision).not.toBe(before.revision);
   });
 
   it("keeps a report for the next launch", () => {
     store(null).record(EVERY_KIND[0]!);
     const next = store(null).read().report;
     expect(next?.source).toBe("main");
-    expect(next?.text).toContain("Error: Error: main broke");
+    expect(next?.text).toContain("Error: TypeError: <message withheld>");
   });
 
   it("keeps the newest problems and counts the rest", () => {
     const reports = store(null);
     for (let index = 0; index < CRASH_REPORT_MAX_PROBLEMS + 2; index += 1) {
-      reports.record({ kind: "engine", error: new Error(`failure ${index}`), stage: "restarting" });
+      reports.record({ kind: "engine", error: engineError(100 + index), stage: "restarting" });
     }
     const report = reports.read().report!;
     expect(report.problems).toBe(CRASH_REPORT_MAX_PROBLEMS + 2);
     expect(report.text).toContain("Earlier problems left out: 2");
-    expect(report.text).not.toContain("failure 1.");
-    expect(report.text).toContain(`failure ${CRASH_REPORT_MAX_PROBLEMS + 1}`);
+    expect(report.text).not.toContain("code 101.");
+    expect(report.text).toContain(`code ${100 + CRASH_REPORT_MAX_PROBLEMS + 1}.`);
   });
 
   it("dismisses what the person saw and keeps a newer problem", () => {
     const reports = store(null);
     reports.record(EVERY_KIND[0]!);
-    const seen = reports.read().report!.revision;
+    const seen = reports.read().report!.through;
     reports.record(EVERY_KIND[3]!);
     reports.dismiss(seen);
     const left = reports.read().report!;
     expect(left.problems).toBe(1);
     expect(left.source).toBe("engine");
-    expect(left.text).not.toContain("main broke");
-  });
-
-  it("refuses to send a report that changed after the person read it", async () => {
-    const reportServer = await startReportServer();
-    servers.push(reportServer.server);
-    const reports = store(reportServer.url);
-    reports.record(EVERY_KIND[0]!);
-    const seen = reports.read().report!.revision;
-    reports.record(EVERY_KIND[1]!);
-    await expect(reports.send(seen)).rejects.toBeInstanceOf(CrashReportChangedError);
-    expect(reportServer.received).toEqual([]);
+    expect(left.text).not.toContain("TypeError");
   });
 
   it("keeps the report when the server refuses it or redirects", async () => {
@@ -167,24 +223,23 @@ describe("crash report store", () => {
 
     const refused = store(refusing.url);
     refused.record(EVERY_KIND[0]!);
-    await expect(refused.send(refused.read().report!.revision)).rejects.toThrow("The report server answered 500.");
+    await expect(refused.send(dialog(true).confirm)).rejects.toThrow("The report server answered 500.");
     expect(refused.read().report).not.toBeNull();
 
     const redirected = store(redirecting.url);
-    await expect(redirected.send(redirected.read().report!.revision)).rejects.toThrow(
-      "The connection to the report server failed.",
-    );
+    await expect(redirected.send(dialog(true).confirm)).rejects.toThrow("The connection to the report server failed.");
     expect(redirected.read().report).not.toBeNull();
     expect(elsewhere.received).toEqual([]);
   });
 
-  it("offers no Send and sends nothing without a report server", async () => {
+  it("offers no Send and asks nothing without a report server", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const reports = store(null);
     reports.record(EVERY_KIND[0]!);
-    const read = reports.read();
-    expect(read.sendTo).toBeNull();
-    await expect(reports.send(read.report!.revision)).rejects.toThrow("no report server");
+    expect(reports.read().sendTo).toBeNull();
+    const asked = dialog(true);
+    await expect(reports.send(asked.confirm)).rejects.toThrow("no report server");
+    expect(asked.shown).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -199,15 +254,21 @@ describe("crash report store", () => {
 });
 
 describe("report server address", () => {
-  it("accepts https, and http only to this computer", () => {
-    expect(crashReportEndpoint(undefined)).toBeNull();
-    expect(crashReportEndpoint("  ")).toBeNull();
-    expect(crashReportEndpoint("not a url")).toBeNull();
-    expect(crashReportEndpoint("https://reports.example.test/v1")?.host).toBe("reports.example.test");
-    expect(crashReportEndpoint("http://127.0.0.1:4000/r")?.host).toBe("127.0.0.1:4000");
-    expect(crashReportEndpoint("http://localhost:4000/r")?.host).toBe("localhost:4000");
-    expect(crashReportEndpoint("http://reports.example.test/v1")).toBeNull();
-    expect(crashReportEndpoint("https://user:secret@reports.example.test/v1")).toBeNull();
-    expect(crashReportEndpoint("ftp://reports.example.test/v1")).toBeNull();
+  it("lets a development build name any https server, or http to this computer", () => {
+    expect(crashReportEndpoint(undefined, false)).toBeNull();
+    expect(crashReportEndpoint("  ", false)).toBeNull();
+    expect(crashReportEndpoint("not a url", false)).toBeNull();
+    expect(crashReportEndpoint("https://reports.example.test/v1", false)?.host).toBe("reports.example.test");
+    expect(crashReportEndpoint("http://127.0.0.1:4000/r", false)?.host).toBe("127.0.0.1:4000");
+    expect(crashReportEndpoint("http://localhost:4000/r", false)?.host).toBe("localhost:4000");
+    expect(crashReportEndpoint("http://reports.example.test/v1", false)).toBeNull();
+    expect(crashReportEndpoint("https://user:secret@reports.example.test/v1", false)).toBeNull();
+    expect(crashReportEndpoint("ftp://reports.example.test/v1", false)).toBeNull();
+  });
+
+  it("ignores the override in a packaged build, which has no report server yet", () => {
+    expect(crashReportEndpoint("https://third-party.example/collect", true)).toBeNull();
+    expect(crashReportEndpoint("http://127.0.0.1:4000/r", true)).toBeNull();
+    expect(crashReportEndpoint(undefined, true)).toBeNull();
   });
 });
