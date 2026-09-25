@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { buildDrillApp, DIALOG_RECORDER, FEED_VERSION, feedManifest, injectFault, readDrillLog } from "./release-drill.mjs";
+import { buildDrillApp, DIALOG_RECORDER, FEED_VERSION, feedManifest, injectFault, readDrillLog, runDrill } from "./release-drill.mjs";
 
 function scratchDir(t) {
   const directory = mkdtempSync(join(tmpdir(), "release-drill-test-"));
@@ -95,4 +95,41 @@ test("records dialogs, holds the restart question, and closes the notice with it
   assert.equal(answered, false);
   assert.deepEqual(readDrillLog(log).map((entry) => entry.kind), ["entry", "error-box", "notice", "dialog"]);
   assert.deepEqual(readDrillLog(log)[3].buttons, ["Restart now", "Quit"]);
+});
+
+test("a failed setup closes the feed and deletes the scratch app, keeping only evidence", async (t) => {
+  const root = scratchDir(t);
+  const source = join(root, "desktop");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "package.json"), '{"type":"module"}\n');
+  const engine = join(root, "engine.exe");
+  writeFileSync(engine, "engine");
+  let feedUrl = null;
+  await assert.rejects(
+    runDrill({ scenario: "main-fails-to-load", source, engine, tempRoot: root, onFeed: (feed) => { feedUrl = feed.url; } }),
+    /pnpm qa:prepare/,
+  );
+  assert.ok(feedUrl, "the feed started before the failure");
+  await assert.rejects(fetch(`${feedUrl}latest.yml`), /fetch failed/);
+  const left = readdirSync(root).filter((name) => name.startsWith("dohc-release-drill-"));
+  assert.equal(left.length, 1);
+  assert.match(left[0], /^dohc-release-drill-evidence-/);
+  const evidence = join(root, left[0]);
+  assert.deepEqual(readdirSync(evidence).sort(), ["result.json"]);
+  const result = JSON.parse(readFileSync(join(evidence, "result.json"), "utf8"));
+  assert.equal(result.passed, false);
+  assert.match(result.error, /pnpm qa:prepare/);
+});
+
+test("a failure after linking the real app deletes the links, not what they point at", async (t) => {
+  const root = scratchDir(t);
+  const source = fakeDesktop(root);
+  mkdirSync(join(source, "node_modules", "kept"), { recursive: true });
+  writeFileSync(join(source, "node_modules", "kept", "index.js"), "kept\n");
+  // A directory passes the existence check and then fails to copy.
+  const engine = join(root, "engine-directory");
+  mkdirSync(engine);
+  await assert.rejects(runDrill({ scenario: "main-crashes-every-launch", source, engine, tempRoot: root }));
+  assert.deepEqual(readdirSync(root).filter((name) => /^dohc-release-drill-(?!evidence)/.test(name)), []);
+  assert.equal(readFileSync(join(source, "node_modules", "kept", "index.js"), "utf8"), "kept\n");
 });

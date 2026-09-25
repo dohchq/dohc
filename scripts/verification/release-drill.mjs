@@ -14,7 +14,7 @@
 // feed's installer is placeholder bytes, and nothing installs or relaunches.
 
 import { createHash, randomBytes } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -94,10 +94,15 @@ export function feedManifest(installer) {
   ].join("\n");
 }
 
+// Reads complete lines only: the app may still be writing the last one.
 export function readDrillLog(path) {
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return readFileSync(path, "utf8").split("\n").slice(0, -1).filter(Boolean).map((line) => JSON.parse(line));
 }
+
+// The scratch app links these to the real app. They are removed as links
+// first, so deleting the scratch directory never reaches the real app.
+const LINKED = ["node_modules", "resources", "build"];
 
 /** Builds the scratch app: a copy of dist with the fault, linked to the real dependencies. */
 export function buildDrillApp({ scenario, scratch, feedUrl, source = desktopRoot }) {
@@ -114,8 +119,7 @@ export function buildDrillApp({ scenario, scratch, feedUrl, source = desktopRoot
   }
   cpSync(join(source, "dist"), join(app, "dist"), { recursive: true });
   copyFileSync(join(source, "package.json"), join(app, "package.json"));
-  // The copy resolves packages, resources, and icons from the real app.
-  for (const name of ["node_modules", "resources", "build"]) {
+  for (const name of LINKED) {
     if (existsSync(join(source, name))) symlinkSync(join(source, name), join(app, name), "junction");
   }
   writeFileSync(join(main, "drill-dialogs.mjs"), DIALOG_RECORDER);
@@ -127,12 +131,30 @@ export function buildDrillApp({ scenario, scratch, feedUrl, source = desktopRoot
   return { app, entry: join(main, "main.js") };
 }
 
-function startFeed(directory) {
+function removeScratch(scratch) {
+  for (const name of LINKED) {
+    const link = join(scratch, "app", name);
+    try {
+      if (lstatSync(link).isSymbolicLink()) rmdirSync(link);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  remove(scratch);
+}
+
+function remove(path) {
+  rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+}
+
+function startFeed(directory, logPath) {
   const requests = [];
   let published = false;
   const server = createServer((request, response) => {
     const name = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(1));
-    requests.push({ at: Date.now(), name, published });
+    const entry = { at: Date.now(), name, published };
+    requests.push(entry);
+    appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
     const path = join(directory, name);
     if (!published || name.includes("..") || !existsSync(path)) {
       response.writeHead(404).end();
@@ -140,15 +162,15 @@ function startFeed(directory) {
     }
     response.writeHead(200, { "content-type": "application/octet-stream" }).end(readFileSync(path));
   });
-  return new Promise((resolveFeed) => {
+  const close = () => new Promise((done) => {
+    server.closeAllConnections();
+    server.close(() => done());
+  });
+  return new Promise((resolveFeed, rejectFeed) => {
+    server.once("error", rejectFeed);
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
-      resolveFeed({
-        url: `http://127.0.0.1:${port}/`,
-        requests,
-        publish: () => { published = true; },
-        close: () => new Promise((done) => server.close(() => done())),
-      });
+      resolveFeed({ url: `http://127.0.0.1:${port}/`, requests, publish: () => { published = true; }, close });
     });
   });
 }
@@ -169,13 +191,26 @@ function launchEnv(scratch, logPath, feedUrl) {
   return env;
 }
 
-async function waitFor(check, deadlineMs, describe) {
+function sleep(ms, signal) {
+  return new Promise((done) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      done();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+async function waitFor(check, deadlineMs, describe, signal) {
   const deadline = Date.now() + deadlineMs;
   for (;;) {
+    if (signal.aborted) throw new Error(`Stopped waiting for ${describe}.`);
     const found = check();
     if (found) return found;
     if (Date.now() > deadline) throw new Error(`Timed out after ${deadlineMs} ms waiting for ${describe}.`);
-    await new Promise((done) => setTimeout(done, 250));
+    await sleep(250, signal);
   }
 }
 
@@ -183,36 +218,39 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export async function runDrill({ scenario, keep = false }) {
-  assert(process.platform === "win32", "The release drill runs on Windows only.");
+/**
+ * Runs one scenario. Every resource it acquires is released before it
+ * settles: launched jobs are ended and awaited, the feed closes, and the
+ * scratch app, engine copy, profile, and updater cache are deleted. A failed
+ * run keeps only its small evidence directory. --keep keeps everything from
+ * a passing run.
+ */
+export async function runDrill({
+  scenario,
+  keep = false,
+  source = desktopRoot,
+  engine = join(desktopRoot, "target", "debug", ENGINE),
+  tempRoot = tmpdir(),
+  onFeed,
+}) {
   assert(SCENARIOS.includes(scenario), `Choose --scenario ${SCENARIOS.join(" or ")}.`);
-  const electron = createRequire(join(desktopRoot, "package.json"))("electron");
-  const engine = join(desktopRoot, "target", "debug", ENGINE);
   assert(existsSync(engine), `The drill needs the staged engine at ${engine}. Run \`pnpm qa:prepare\` first.`);
+  const electron = createRequire(join(desktopRoot, "package.json"))("electron");
 
-  const scratch = mkdtempSync(join(tmpdir(), "dohc-release-drill-"));
-  const evidence = join(scratch, "evidence");
-  const feedDir = join(scratch, "feed");
-  for (const directory of [evidence, feedDir, join(scratch, "home"), join(scratch, "localappdata")]) mkdirSync(directory, { recursive: true });
+  const evidence = mkdtempSync(join(tempRoot, "dohc-release-drill-evidence-"));
   const logPath = join(evidence, "dialogs.jsonl");
-  const profile = join(scratch, "profile");
-  const markerPath = join(profile, "dohc-launch.json");
-  const installer = randomBytes(64 * 1024);
-  writeFileSync(join(feedDir, INSTALLER), installer);
-  writeFileSync(join(feedDir, "latest.yml"), feedManifest(installer));
-  const feed = await startFeed(feedDir);
-  const result = { scenario, feedVersion: FEED_VERSION, scratch, launches: [], checks: [], passed: false };
+  const result = { scenario, feedVersion: FEED_VERSION, evidence, launches: [], checks: [], passed: false };
   const check = (name, condition, detail) => {
     result.checks.push({ name, passed: Boolean(condition), ...(detail === undefined ? {} : { detail }) });
     assert(condition, `${name} failed${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
   };
+  const stopping = new AbortController();
+  const jobs = new Set();
+  let scratch = null;
+  let feed = null;
 
-  const { entry } = buildDrillApp({ scenario, scratch, feedUrl: feed.url });
-  mkdirSync(join(scratch, "app", "target", "debug"), { recursive: true });
-  copyFileSync(engine, join(scratch, "app", "target", "debug", ENGINE));
-
-  const launch = async (number, { until } = {}) => {
-    let child;
+  const launch = async (number, { entry, profile, until }) => {
+    let child = null;
     const started = Date.now();
     const exited = run(electron, [`--user-data-dir=${profile}`, "--dohc-isolated-test", entry], {
       env: launchEnv(scratch, logPath, feed.url),
@@ -221,47 +259,69 @@ export async function runDrill({ scenario, keep = false }) {
       quietStdout: true,
       timeoutMs: LAUNCH_BOUND_MS,
     }).then((done) => ({ code: done.code }), (error) => ({ error: error.message }));
-    let seen = null;
-    if (until) {
-      seen = await Promise.race([
-        waitFor(() => until(readDrillLog(logPath)), LAUNCH_BOUND_MS, `launch ${number} to offer the restart`),
+    // The job object owns the app and every process it started, so ending
+    // the job owner ends them all.
+    const end = async () => {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      return await exited;
+    };
+    jobs.add(end);
+    const polling = new AbortController();
+    const stopPolling = () => polling.abort();
+    stopping.signal.addEventListener("abort", stopPolling, { once: true });
+    try {
+      if (!until) return null;
+      return await Promise.race([
+        waitFor(() => until(readDrillLog(logPath)), LAUNCH_BOUND_MS, `launch ${number} to offer the restart`, polling.signal),
         exited.then((outcome) => { throw new Error(`Launch ${number} ended before it offered the restart: ${JSON.stringify(outcome)}`); }),
       ]);
-      // The job object owns the app and every process it started.
-      child?.kill("SIGKILL");
+    } finally {
+      polling.abort();
+      stopping.signal.removeEventListener("abort", stopPolling);
+      const outcome = await end();
+      jobs.delete(end);
+      result.launches.push({ number, ms: Date.now() - started, ...outcome });
     }
-    const outcome = await exited;
-    result.launches.push({ number, ms: Date.now() - started, ...outcome });
-    return seen;
   };
 
   try {
+    scratch = mkdtempSync(join(tempRoot, "dohc-release-drill-"));
+    const feedDir = join(scratch, "feed");
+    for (const directory of [feedDir, join(scratch, "home"), join(scratch, "localappdata")]) mkdirSync(directory, { recursive: true });
+    const installer = randomBytes(64 * 1024);
+    writeFileSync(join(feedDir, INSTALLER), installer);
+    writeFileSync(join(feedDir, "latest.yml"), feedManifest(installer));
+    feed = await startFeed(feedDir, join(evidence, "feed.jsonl"));
+    onFeed?.(feed);
+    const { entry } = buildDrillApp({ scenario, scratch, feedUrl: feed.url, source });
+    mkdirSync(join(scratch, "app", "target", "debug"), { recursive: true });
+    copyFileSync(engine, join(scratch, "app", "target", "debug", ENGINE));
+    const profile = join(scratch, "profile");
+    const markerPath = join(profile, "dohc-launch.json");
+    const offered = (entries) => entries.find((logged) => logged.kind === "dialog");
+
     if (scenario === "main-fails-to-load") {
       feed.publish();
-      const dialog = await launch(1, {
-        until: (entries) => entries.find((entry) => entry.kind === "dialog"),
-      });
+      const dialog = await launch(1, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
-      check("reports that dohc failed to start", entries.some((entry) => entry.kind === "error-box" && entry.title === "dohc failed to start"));
+      check("reports that dohc failed to start", entries.some((logged) => logged.kind === "error-box" && logged.title === "dohc failed to start"));
       check("offers the restart into the newer build", dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
     } else {
       for (const number of [1, 2]) {
-        await launch(number);
+        await launch(number, { entry, profile });
         const entries = readDrillLog(logPath);
         check(`launch ${number} loads main and exits after its first window loads`,
-          entries.filter((entry) => entry.kind === "fault-exit").length === number);
-        check(`launch ${number} offers nothing`, !entries.some((entry) => entry.kind === "dialog" || entry.kind === "error-box"));
+          entries.filter((logged) => logged.kind === "fault-exit").length === number);
+        check(`launch ${number} offers nothing`, !entries.some((logged) => logged.kind === "dialog" || logged.kind === "error-box"));
         const marker = JSON.parse(readFileSync(markerPath, "utf8"));
         check(`launch ${number} leaves ${number} unfinished`, marker.unfinished === number, marker);
       }
       // The corrective build is published after the bad one broke.
       feed.publish();
-      const dialog = await launch(3, {
-        until: (entries) => entries.find((entry) => entry.kind === "dialog"),
-      });
+      const dialog = await launch(3, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
-      check("launch 3 checks before main loads", entries.filter((entry) => entry.kind === "main-loaded").length === 2);
+      check("launch 3 checks before main loads", entries.filter((logged) => logged.kind === "main-loaded").length === 2);
       check("launch 3 offers the restart into the newer build", dialog.message === "dohc closed before it finished starting." &&
         dialog.detail?.startsWith(`Update ${FEED_VERSION} is downloaded.`) &&
         JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
@@ -269,15 +329,18 @@ export async function runDrill({ scenario, keep = false }) {
     check("the feed served the manifest and the installer", ["latest.yml", INSTALLER].every((name) =>
       feed.requests.some((request) => request.published && request.name === name)), feed.requests);
     result.passed = true;
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+    throw error;
   } finally {
-    await feed.close();
+    stopping.abort();
+    await Promise.all([...jobs].map((end) => end()));
+    await feed?.close();
     result.dialogs = readDrillLog(logPath);
-    result.feedRequests = feed.requests;
+    if (keep && result.passed) result.scratch = scratch;
     writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-    if (!result.passed) console.error(`[release-drill] Evidence: ${evidence}`);
-    if (result.passed && !keep) {
-      rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
-    }
+    if (scratch && !result.scratch) removeScratch(scratch);
+    if (result.passed && !keep) remove(evidence);
   }
   return result;
 }
@@ -286,9 +349,12 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
   const scenarioIndex = process.argv.indexOf("--scenario");
   const scenario = scenarioIndex >= 0 ? process.argv[scenarioIndex + 1] : undefined;
   const keep = process.argv.includes("--keep");
-  runDrill({ scenario, keep }).then((result) => {
+  const drill = process.platform === "win32"
+    ? runDrill({ scenario, keep })
+    : Promise.reject(new Error("The release drill runs on Windows only."));
+  drill.then((result) => {
     console.log(`[release-drill] ${scenario}: passed. ${result.checks.map((check) => check.name).join("; ")}.`);
-    if (keep) console.log(`[release-drill] Evidence: ${join(result.scratch, "evidence")}`);
+    if (keep) console.log(`[release-drill] Evidence: ${result.evidence}. Scratch app: ${result.scratch}.`);
   }, (error) => {
     console.error(`[release-drill] ${scenario ?? "(no scenario)"}: failed. ${error.message}`);
     process.exitCode = 1;
