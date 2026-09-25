@@ -4,12 +4,13 @@ use dohc_engine_collab::{LeaseRegistry, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
-    BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
-    ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse,
-    RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
+    BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
+    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
+    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
+    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
     ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, adopt_join_identity,
@@ -128,6 +129,14 @@ pub enum RelayOperation {
         submit_id: String,
         max_read_bytes: usize,
     },
+    /// Write this replica's changes to a Collection's own files directly into
+    /// the granter's workspace. Every other change stays on proposals.
+    PushDirectWrites {
+        workspace_id: String,
+        share_id: String,
+        granted: dohc_engine_sync::ShareGrant,
+        max_read_bytes: usize,
+    },
     CommitShareViewCursor {
         workspace_id: String,
         cursor: ShareCursor,
@@ -155,6 +164,7 @@ enum RelayIoRequest {
     ShareBlob(ShareBlobRequest),
     ShareBlobUpload(ShareBlobUploadRequest),
     ShareProposalSubmit(ShareProposalSubmitRequest),
+    ShareCollectionWrite(ShareCollectionWriteRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +186,7 @@ enum RelayIoResponse {
     ShareBlob(BlobDownloadResponse),
     ShareBlobUpload,
     ShareProposalSubmit(ShareProposalSubmitResponse),
+    ShareCollectionWrite(ShareCollectionWriteResponse),
 }
 
 #[derive(Default)]
@@ -428,6 +439,13 @@ impl RelayTransport for DeferredRelayTransport {
         ShareProposalSubmitResponse,
         ShareProposalSubmit
     );
+    relay_transport_method!(
+        share_collection_write,
+        ShareCollectionWriteRequest,
+        ShareCollectionWrite,
+        ShareCollectionWriteResponse,
+        ShareCollectionWrite
+    );
 }
 
 #[cfg(test)]
@@ -486,6 +504,29 @@ mod deferred_relay_tests {
                 )),
             "a kept upload holds no content",
         );
+    }
+
+    #[test]
+    fn a_completed_direct_write_answers_every_rerun_of_its_operation() {
+        let transport = DeferredRelayTransport::default();
+        let request = ShareCollectionWriteRequest {
+            share_id: "share".to_owned(),
+            submit_id: "direct-1".to_owned(),
+            changes: Vec::new(),
+        };
+        let written = ShareCollectionWriteResponse::Written {
+            paths: vec!["trip/packing/collection.yaml".to_owned()],
+        };
+        transport.complete(
+            RelayIoRequest::ShareCollectionWrite(request.clone()),
+            Ok(RelayIoResponse::ShareCollectionWrite(written.clone())),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                transport.share_collection_write(request.clone()),
+                Ok(written.clone())
+            );
+        }
     }
 
     #[test]
@@ -1069,6 +1110,7 @@ pub enum RelayOperationOutcome {
     ShareViewPulled(ShareViewPullOutcome),
     ShareViewIdentity(ShareViewIdentityRecord),
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
+    DirectWritesPushed(DirectWritePushOutcome),
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -1349,6 +1391,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::ShareProposalSubmit(request) => transport
             .share_proposal_submit(request)
             .map(RelayIoResponse::ShareProposalSubmit),
+        RelayIoRequest::ShareCollectionWrite(request) => transport
+            .share_collection_write(request)
+            .map(RelayIoResponse::ShareCollectionWrite),
     }
 }
 
@@ -1590,6 +1635,22 @@ fn run_relay_operation(
                 max_read_bytes,
             )
             .map(RelayOperationOutcome::ShareProposalSubmitted)
+            .map_err(RuntimeError::from),
+        RelayOperation::PushDirectWrites {
+            workspace_id,
+            share_id,
+            granted,
+            max_read_bytes,
+        } => client
+            .push_direct_writes(
+                store,
+                &workspace_id,
+                &share_id,
+                &granted,
+                &NoFaults,
+                max_read_bytes,
+            )
+            .map(RelayOperationOutcome::DirectWritesPushed)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {
             workspace_id,
