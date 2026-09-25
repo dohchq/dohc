@@ -1665,9 +1665,11 @@ fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
     let mut resolved = String::with_capacity(text.len());
     let mut syntax = Vec::new();
     if matches!(place, TextPlace::Block | TextPlace::Item) {
+        // A list item's text starts a paragraph too, so a link reference
+        // definition can open it.
         for (index, line) in text.split('\n').enumerate() {
             let starts = index == 0;
-            if let Some(kind) = block_start(line, starts, place == TextPlace::Block && starts) {
+            if let Some(kind) = block_start(line, starts, starts) {
                 syntax.push(format!("line {index}: {kind}"));
             }
         }
@@ -6725,6 +6727,10 @@ mod projection_tests {
             // and hides a row, a link reference definition, raw HTML, an
             // autolink, and a character reference the importer decodes.
             ("- # Title", "- # Title\n"),
+            (
+                "- [x]: https://example.com/private",
+                "* [x]: https://example.com/private\n",
+            ),
             (
                 "| a |\n|---|\n| <!-- x |\n| secret |\n| --> |",
                 "| a |\n|---|\n<!-- x |\nsecret |\n--> |\n",
