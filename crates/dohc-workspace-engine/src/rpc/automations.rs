@@ -9,7 +9,11 @@ use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationFailure;
 use dohc_engine_domain::AutomationFieldFacts;
 use dohc_engine_domain::AutomationGroupSubscription;
+use dohc_engine_domain::AutomationPress;
+use dohc_engine_domain::AutomationPressed;
 use dohc_engine_domain::AutomationRetry;
+use dohc_engine_domain::AutomationScheduleClaim;
+use dohc_engine_domain::AutomationScheduleMark;
 use dohc_engine_domain::AutomationSettle;
 use dohc_engine_domain::AutomationSubscription;
 use dohc_engine_domain::AutomationTrigger;
@@ -114,6 +118,34 @@ struct AutomationReleaseParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationListClaimsParams {
     automation_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationPressParams {
+    press_id: String,
+    automation_id: String,
+    record_id: String,
+    pressed_by: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationClaimScheduleParams {
+    automation_id: String,
+    schedule_hash: String,
+    run: Vec<i64>,
+    through_ms: i64,
+    now_ms: Option<i64>,
+}
+
+fn automation_schedule_mark_json(mark: &AutomationScheduleMark) -> Value {
+    json!({
+        "automationId": mark.automation_id,
+        "scheduleHash": mark.schedule_hash,
+        "throughMs": mark.through_ms,
+    })
 }
 
 fn automation_failure_json(failure: &AutomationFailure) -> Value {
@@ -463,5 +495,113 @@ impl EngineService {
             AutomationRetry::Unchanged(claim) => claim,
         };
         Ok(automation_claim_json(&claim))
+    }
+
+    /// A person pressed a Button field. Answers `{ busy, claim }`: the claim
+    /// that runs the press, either a new pending claim, which announces
+    /// itself post-commit to wake the executor, or the claim this person's
+    /// earlier press of the same button on the same record holds. `busy` is
+    /// true, with no claim, while the button runs on the record for someone
+    /// else. `pressedBy` must be the person main checked, not a value the
+    /// renderer sent.
+    pub(super) async fn automations_press(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationPressParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let pressed = Self::read_under_ctx(
+            &cancellation,
+            "automations.press",
+            open.actor.automation_press(
+                open.workspace_id.clone(),
+                AutomationPress {
+                    press_id: params.press_id,
+                    automation_id: params.automation_id,
+                    record_id: params.record_id,
+                    pressed_by: params.pressed_by,
+                },
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        let claim = match pressed {
+            AutomationPressed::Claimed(claim) => {
+                emit_automation_claimed(
+                    &self.events,
+                    &open.workspace_id,
+                    std::slice::from_ref(&claim),
+                );
+                claim
+            }
+            AutomationPressed::Joined(claim) => claim,
+            AutomationPressed::Busy => {
+                return Ok(json!({ "busy": true, "claim": null }));
+            }
+        };
+        Ok(json!({ "busy": false, "claim": automation_claim_json(&claim) }))
+    }
+
+    /// The scheduler claims the due times it runs and moves the schedule's
+    /// mark past the ones it skips, in one transaction. Answers the new
+    /// claims, which announce themselves post-commit, and the mark after the
+    /// step.
+    pub(super) async fn automations_claim_schedule(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationClaimScheduleParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claimed = Self::read_under_ctx(
+            &cancellation,
+            "automations.claimSchedule",
+            open.actor.automation_claim_schedule(
+                open.workspace_id.clone(),
+                AutomationScheduleClaim {
+                    automation_id: params.automation_id,
+                    schedule_hash: params.schedule_hash,
+                    run: params.run,
+                    through_ms: params.through_ms,
+                },
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        emit_automation_claimed(&self.events, &open.workspace_id, &claimed.claims);
+        Ok(json!({
+            "claims": claimed.claims.iter().map(automation_claim_json).collect::<Vec<_>>(),
+            "mark": automation_schedule_mark_json(&claimed.mark),
+        }))
+    }
+
+    /// Every schedule's mark: the scheduler reads them at start to tell the
+    /// due times it missed.
+    pub(super) async fn automations_schedule_marks(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let marks = Self::read_under_ctx(
+            &cancellation,
+            "automations.scheduleMarks",
+            open.actor
+                .automation_schedule_marks(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({
+            "marks": marks.iter().map(automation_schedule_mark_json).collect::<Vec<_>>(),
+        }))
     }
 }

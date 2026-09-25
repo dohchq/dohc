@@ -2378,6 +2378,43 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
+/// Buttons and schedules. A button claim keys on `press:<press id>` and a
+/// schedule claim on `schedule:<due ms>`, in the trigger key the claims
+/// table already has. One button claim at a time is pending or running per
+/// automation and record, so a double click runs once. A press key is
+/// looked up across the workspace's buttons, so a press id sent to another
+/// button is recognized. `automation_presses` remembers each press for 30
+/// days, so a press sent again after a lost reply finds its claim.
+/// `automation_schedule_marks` records, per schedule, the time up to which
+/// every due time was claimed or skipped.
+const V2_AUTOMATION_BUTTONS_AND_SCHEDULES_DDL: &str = "\
+CREATE UNIQUE INDEX idx_automation_claims_active_button
+    ON automation_claims(workspace_id, automation_id, record_id)
+    WHERE change_kind = 'button' AND state IN ('pending', 'running');
+CREATE INDEX idx_automation_claims_press_key
+    ON automation_claims(workspace_id, trigger_key)
+    WHERE change_kind = 'button';
+CREATE TABLE automation_presses (
+    workspace_id  TEXT    NOT NULL,
+    press_id      TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    record_id     TEXT    NOT NULL,
+    pressed_by    TEXT    NOT NULL,
+    pressed_at_ms INTEGER NOT NULL,
+    claim_id      TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, press_id)
+) STRICT;
+CREATE INDEX automation_presses_by_claim ON automation_presses(workspace_id, claim_id);
+CREATE INDEX automation_presses_by_time ON automation_presses(workspace_id, pressed_at_ms);
+CREATE TABLE automation_schedule_marks (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    schedule_hash TEXT    NOT NULL,
+    through_ms    INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id)
+) STRICT;
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2438,6 +2475,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 9,
         id: "v2-automation-trigger-keys",
         sql: V2_AUTOMATION_TRIGGER_KEYS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 10,
+        id: "v2-automation-buttons-and-schedules",
+        sql: V2_AUTOMATION_BUTTONS_AND_SCHEDULES_DDL,
         sets_user_version: None,
     },
 ];
@@ -2696,6 +2739,10 @@ mod tests {
                 "v2-automation-trigger-keys",
                 "57599cccea26a02546761c6e3ea414ceff2a38d7bdbe631807ed9c4db910f03a",
             ),
+            (
+                "v2-automation-buttons-and-schedules",
+                "64a653b710618fbc4ae3031f6cd1382c4fab7f8c730c9e79392ca6f45fa0ab00",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2905,6 +2952,46 @@ mod tests {
             [],
         )
         .expect("a Group subscription");
+    }
+
+    /// One button claim at a time is pending or running per automation and
+    /// record, and a store gains the press and schedule mark tables.
+    #[test]
+    fn one_button_claim_is_active_per_automation_and_record() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("migrate");
+        let insert = |claim_id: &str, record_id: &str, state: &str| {
+            conn.execute(
+                "INSERT INTO automation_claims \
+                     (workspace_id, claim_id, automation_id, trigger_key, record_id, \
+                      collection_path, depth, state, created_at_ms, updated_at_ms, change_kind) \
+                 VALUES ('ws', ?1, 'collection:Invoices#pay', 'press:' || ?1, ?2, 'Invoices', \
+                         0, ?3, 5, 5, 'button')",
+                rusqlite::params![claim_id, record_id, state],
+            )
+        };
+        insert("atc_done", "rec", "done").expect("a finished press");
+        insert("atc_failed", "rec", "failed").expect("a failed press");
+        insert("atc_pending", "rec", "pending").expect("an unfinished press");
+        assert!(
+            insert("atc_running", "rec", "running").is_err(),
+            "a second unfinished press of the same button on the same record"
+        );
+        insert("atc_other", "rec_2", "running").expect("another record");
+        conn.execute_batch(
+            "INSERT INTO automation_presses \
+                 (workspace_id, press_id, automation_id, record_id, pressed_by, pressed_at_ms, \
+                  claim_id) \
+                 VALUES ('ws', 'p1', 'collection:Invoices#pay', 'rec', 'user:ada', 5, \
+                         'atc_pending'); \
+             INSERT INTO automation_schedule_marks \
+                 (workspace_id, automation_id, schedule_hash, through_ms) \
+                 VALUES ('ws', 'collection:Invoices#report', 'h', 5);",
+        )
+        .expect("a press and a schedule mark");
     }
 
     /// Messages and mentions written before automations could post keep every
