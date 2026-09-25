@@ -823,3 +823,52 @@ describe("orphanedDrafts persistence", () => {
     expect(fresh.id, "id watermark: drop the nextId bump in restoreOrphanedDrafts. The new draft reuses the restored one's id, and dismissing either one deletes the other's stored copy.").not.toBe(restored.id);
   });
 });
+
+it.each([0, -1])("persists repaired timestamp %s so retention survives restarts", async capturedAtMs => {
+  localStorage.clear();
+  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
+  const now = 1_800_000_000_000;
+  localStorage.setItem(key, JSON.stringify({ id: 1, workspaceId: "ws", path: "a.md", text: "keep", capturedAtMs }));
+  const first = await relaunch(now);
+  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+  expect(JSON.parse(localStorage.getItem(key)!).capturedAtMs).toBe(now);
+  const second = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS - 1);
+  expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md")[0]?.capturedAtMs).toBe(now);
+  const expired = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS);
+  expect(draftsFor(expired.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
+  expect(localStorage.getItem(key)).toBeNull();
+  localStorage.clear();
+});
+
+it("keeps a refused timestamp repair visible and at risk", async () => {
+  localStorage.clear();
+  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
+  const raw = JSON.stringify({ id: 1, workspaceId: "ws", path: "a.md", text: "keep", capturedAtMs: 0 });
+  localStorage.setItem(key, raw);
+  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("full"); });
+  try {
+    const restarted = await relaunch(1_800_000_000_000);
+    expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep"]);
+    expect(restarted.atRiskOrphanedDraftIds()).toEqual([1]);
+    expect(localStorage.getItem(key)).toBe(raw);
+  } finally { refused.mockRestore(); localStorage.clear(); }
+});
+
+it("does not overwrite a replacement observed before timestamp repair", async () => {
+  localStorage.clear();
+  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
+  const row = { id: 1, workspaceId: "ws", path: "a.md", text: "old", capturedAtMs: 0 };
+  localStorage.setItem(key, JSON.stringify(row));
+  const replacement = JSON.stringify({ ...row, text: "new", capturedAtMs: 1_800_000_000_000 });
+  const get = Storage.prototype.getItem;
+  let reads = 0;
+  const intercepted = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, name) {
+    if (name === key && ++reads === 2) this.setItem(key, replacement);
+    return get.call(this, name);
+  });
+  try {
+    const restarted = await relaunch(1_800_000_000_001);
+    expect(localStorage.getItem(key)).toBe(replacement);
+    expect(restarted.atRiskOrphanedDraftIds()).toEqual([1]);
+  } finally { intercepted.mockRestore(); localStorage.clear(); }
+});

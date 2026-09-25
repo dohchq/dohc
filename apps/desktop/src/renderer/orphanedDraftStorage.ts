@@ -72,11 +72,21 @@ export function loadStoredDrafts(nowMs: number): readonly StoredOrphanedDraft[] 
         while (used.has(id)) id++;
       }
       used.add(id);
-      // Repairs are local. Loading a recovery cannot race a replacement by
-      // writing an older snapshot back over its key.
+      let durableRaw: string | undefined = raw!;
+      if (capturedAtMs !== row.capturedAtMs) {
+        durableRaw = undefined;
+        try {
+          if (localStorage.getItem(key) === raw) {
+            const normalized = JSON.stringify({ ...row, capturedAtMs });
+            localStorage.setItem(key, normalized);
+            durableRaw = normalized;
+          }
+        } catch { /* Keep refused repairs visible and at risk. */ }
+      }
       const restored = { ...row, id, capturedAtMs };
       keys.set(id, key);
-      expected.set(id, raw!);
+      if (durableRaw !== undefined) expected.set(id, durableRaw);
+      else expected.delete(id);
       result.push(restored);
     }
   } catch { /* Storage can be unavailable; capture will retain work in memory. */ }
