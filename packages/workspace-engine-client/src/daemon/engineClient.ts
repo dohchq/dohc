@@ -33,7 +33,7 @@ const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // frame sniffing.
 const BLOB_CAPABILITY = "blobs";
 // A request can ask for progress only on a session that negotiated this.
-export const PROGRESS_CAPABILITY = "progress";
+const PROGRESS_CAPABILITY = "progress";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 // Mirrors MIN_NEGOTIABLE_FRAME_BYTES in crates/dohc-engine-protocol/src/limits.rs:
