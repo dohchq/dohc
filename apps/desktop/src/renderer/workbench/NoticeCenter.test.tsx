@@ -518,6 +518,30 @@ describe("notice center", () => {
     expect(notice.textContent).toContain("Restart dohc to try again.");
   });
 
+  it.each([
+    ["app", "Update dohc to sync", "This server needs a newer version of dohc. Update dohc to sync again."],
+    ["server", "Server needs an update", "Ask the person who runs it to update it. Then restart dohc."],
+  ] as const)("says who must update when sync stopped on the relay API version (%s)", async (updateRequired, title, next) => {
+    renderNotices({
+      syncStatus: {
+        state: "cloud-disconnected",
+        pendingChangeCount: 1,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        updateRequired,
+      },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-relay-update-required");
+    expect(notice.textContent).toContain(title);
+    expect(notice.textContent).toContain(next);
+    expect(notice.textContent).toContain("Your changes stay on this computer.");
+    // Reconnecting would not help, so the disconnected notice stays away.
+    expect(screen.queryByTestId("notice-cloud-disconnected")).toBeNull();
+  });
+
   // A shared view records no history by design, a capability, not a
   // failure. The share banner speaks and this surface stays quiet.
   it("raises no history-off notice for a shared view", async () => {

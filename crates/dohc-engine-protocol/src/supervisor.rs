@@ -28,7 +28,9 @@
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};
-use crate::transport::{ConnectionHandle, EngineService, RequestContext, ServiceResponse};
+use crate::transport::{
+    ConnectionHandle, EngineService, ProgressSink, RequestContext, ServiceResponse,
+};
 #[cfg(test)]
 use crate::wire::Response;
 use crate::wire::{Request, RequestId};
@@ -131,11 +133,14 @@ impl<S: EngineService + 'static> Supervisor<S> {
             max_frame_bytes,
             None,
             None,
+            ProgressSink::default(),
             before_cancel_release,
         )
     }
 
     /// Move a service attachment through the same bounded request queue.
+    /// `progress` reaches the handler as `ctx.progress`.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_submit_input<F>(
         &self,
         request: Request,
@@ -143,6 +148,7 @@ impl<S: EngineService + 'static> Supervisor<S> {
         max_frame_bytes: u32,
         connection: Option<ConnectionHandle>,
         input: Option<S::Input>,
+        progress: ProgressSink,
         before_cancel_release: F,
     ) -> Result<oneshot::Receiver<RequestOutcome>, WireError>
     where
@@ -197,6 +203,7 @@ impl<S: EngineService + 'static> Supervisor<S> {
                 max_frame_bytes,
                 connection,
                 input,
+                progress,
             )
             .await;
             before_cancel_release(&outcome);
@@ -233,6 +240,7 @@ async fn acquire_and_run<S: EngineService>(
     max_frame_bytes: u32,
     connection: Option<ConnectionHandle>,
     input: Option<S::Input>,
+    progress: ProgressSink,
 ) -> RequestOutcome {
     let _permit = tokio::select! {
         biased;
@@ -259,6 +267,7 @@ async fn acquire_and_run<S: EngineService>(
         max_frame_bytes,
         connection,
         input,
+        progress,
     )
     .await
 }
@@ -273,6 +282,7 @@ async fn run_job<S: EngineService>(
     max_frame_bytes: u32,
     connection: Option<ConnectionHandle>,
     input: Option<S::Input>,
+    progress: ProgressSink,
 ) -> RequestOutcome {
     if cancel.is_cancelled() {
         return Err(WireError::new(
@@ -286,6 +296,7 @@ async fn run_job<S: EngineService>(
         capabilities,
         max_frame_bytes,
         connection,
+        progress,
     };
     tokio::select! {
         () = cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "request cancelled")),
@@ -378,6 +389,7 @@ mod tests {
                 1024,
                 None,
                 Some(OwnedInput(first_drops.clone())),
+                ProgressSink::default(),
                 |_| {},
             )
             .unwrap();
@@ -389,6 +401,7 @@ mod tests {
                 1024,
                 None,
                 Some(OwnedInput(queued_drops.clone())),
+                ProgressSink::default(),
                 |_| {},
             )
             .unwrap();
@@ -414,6 +427,7 @@ mod tests {
             deadline_ms: None,
             idempotency_key: None,
             params: Value::Null,
+            progress: false,
         }
     }
 

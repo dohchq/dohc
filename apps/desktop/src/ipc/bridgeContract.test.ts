@@ -242,7 +242,7 @@ describe("owner relay share link IPC contract", () => {
         },
         {
           ...damaged,
-          selectorKind: "chat-channel",
+          selectorKind: "chat",
           url: "https://share.example.test/s/#must-not-cross",
           secret: "must-not-cross",
           credentialId: "must-not-cross",

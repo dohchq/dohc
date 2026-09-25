@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createReadinessProbe, REQUIRED_TABLES, type TableQuery } from "./readiness";
+import { CRASH_REPORT_TABLE, createReadinessProbe, REQUIRED_TABLES, type TableQuery } from "./readiness";
 
 function answering(tables: readonly string[]): TableQuery {
   return {
@@ -19,6 +19,14 @@ describe("createReadinessProbe", () => {
   it("is not ready until account email is configured", async () => {
     const report = await createReadinessProbe(answering(REQUIRED_TABLES), { emailConfigured: false })();
     expect(report).toMatchObject({ ok: false, database: "ok", detail: "Configure SMTP for account email." });
+  });
+
+  it("needs the crash report table only while crash reports are on", async () => {
+    expect((await createReadinessProbe(answering(REQUIRED_TABLES))()).ok).toBe(true);
+    const report = await createReadinessProbe(answering(REQUIRED_TABLES), { crashReports: true })();
+    expect(report).toMatchObject({ ok: false, schema: "incomplete", missingTables: [CRASH_REPORT_TABLE] });
+    const complete = await createReadinessProbe(answering([...REQUIRED_TABLES, CRASH_REPORT_TABLE]), { crashReports: true })();
+    expect(complete.ok).toBe(true);
   });
 
   it("names the tables a migration has not created yet", async () => {

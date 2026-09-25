@@ -791,6 +791,7 @@ pub(crate) mod tests {
                     workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(workspace)),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: serde_json::Value::Null,
                 },
             )
@@ -857,7 +858,7 @@ pub(crate) mod tests {
         drop(store);
         let supervisor = Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
-        let response = service.call(RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
+        let response = service.call(RequestContext::unbounded(), Request { id: 1, method: "workspace.open".into(), workspace: None, deadline_ms: None, idempotency_key: None, progress: false, params: json!({ "rootDir": scratch.path(), "workspaceId": "workspace", "captureMode": "none" }) }).await.unwrap();
         let workspace = response.response.result["workspace"]
             .as_str()
             .unwrap()
@@ -893,6 +894,7 @@ pub(crate) mod tests {
                     )),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: json!({ "binding": binding }),
                 },
             )
@@ -948,6 +950,7 @@ pub(crate) mod tests {
             )),
             deadline_ms: Some(30_000),
             idempotency_key: None,
+            progress: false,
             params: json!({
                 "accepted": { "receipt": { "deliveryId": "delivery", "updateDigest": hex_sha256(bytes), "journalCursor": 1, "acceptingHostEpoch": 1 }, "binding": binding, "authority": { "principalKind": "owner", "principalId": "owner", "grantId": null, "grantGeneration": null }, "receivedAtMs": 0 },
                 "registrationId": registration, "rangeCount": ranges.len()/16, "rangeStreamId": 2, "rangeDigest": hex_sha256(ranges), "updateStreamId": 1, "updateByteLength": bytes.len(),
@@ -1042,6 +1045,7 @@ pub(crate) mod tests {
                     )),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: json!({"binding":binding}),
                 },
             )
@@ -1061,6 +1065,7 @@ pub(crate) mod tests {
                 )),
                 deadline_ms: Some(30_000),
                 idempotency_key: None,
+                progress: false,
                 params: json!({"registrationId":registration,"baselineStreamId":sequence,"baseline":{
                     "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
                     "baselineDigest":hex_sha256(&bytes),"baselineByteLength":bytes.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
@@ -1106,6 +1111,7 @@ pub(crate) mod tests {
                     workspace: Some(dohc_engine_protocol::wire::WorkspaceHandle(workspace)),
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: serde_json::Value::Null,
                 },
             )
@@ -1195,6 +1201,7 @@ pub(crate) mod tests {
                         )),
                         deadline_ms: None,
                         idempotency_key: None,
+                        progress: false,
                         params: json!({"binding": binding}),
                     },
                 )

@@ -138,7 +138,7 @@ export interface AgentSetupSummary {
 // (workspace switches and rapid navigation must never repaint stale data).
 //
 // Shared channels (MU-C4): a channel can be shared to other accounts through
-// a relay chat-channel grant. This view marks shared/joined channels, offers
+// a relay chat grant. This view marks shared/joined channels, offers
 // share/revoke on channels you own, lists invitations under "Shared with
 // you", and disables composers in read-only channels. All sharing affordances
 // require the signed-in collaboration surface — when share listing fails
@@ -2884,7 +2884,7 @@ export function ChatsView(props: {
   //    functionally unchanged. A thread keys on its own id (already cross-machine)
   //    so typing in one thread never bleeds into a sibling thread.
   //
-  // A DIRECT MESSAGE is a kind:"dm" chat channel backed by a chat-channel
+  // A DIRECT MESSAGE is a kind:"dm" chat channel backed by a chat
   // grant, so it folds into the same derivation: its TOPIC is the DM channel's
   // cross-machine wireId (channel-level co-presence — a DM has one running
   // thread, so this is the natural "who's here", and both participants agree on
