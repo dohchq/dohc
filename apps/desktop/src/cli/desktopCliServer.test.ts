@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
@@ -23,6 +23,7 @@ function deferred() {
 
 type State = Record<string, never>;
 type Dependencies = Parameters<typeof createDesktopCliServer<State>>[0];
+type Capture = NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>;
 
 function fixture(rootPath = resolve("cli-workspace")) {
   const workspace: RegistryEntry = {
@@ -45,6 +46,12 @@ function fixture(rootPath = resolve("cli-workspace")) {
     filePathForObjectId: vi.fn(async () => "notes.md"),
     listMoments: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listMoments"]>(),
     readMoment: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["readMoment"]>(),
+    // Writes the file as the capture chain does, refusing one that exists.
+    writeAuthoredTextFile: vi.fn<Capture["writeAuthoredTextFile"]>(async (absolutePath, text, _author, options) => {
+      await mkdir(dirname(absolutePath), { recursive: true });
+      await writeFile(absolutePath, text, { flag: options?.createOnly ? "wx" : "w" });
+      return { resolvedAbsolutePath: absolutePath };
+    }),
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
     method === WORKSPACE_METHOD.searchQueryChatMessagesGranular
@@ -297,6 +304,69 @@ describe("desktop CLI workspace context", () => {
     // A refusal from the projection reaches the caller.
     await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
       .rejects.toThrow("not in the document");
+  });
+
+  it("creates a document as an empty file, then writes its text through the live session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-create-"));
+    try {
+      await writeFile(join(root, "taken.md"), "Already here.\n");
+      const f = fixture(root);
+      const edit = vi.mocked(f.dependencies.liveDocuments.editDocument);
+      const created = new Map<string, Y.Doc>();
+      edit.mockImplementation(async (input) => {
+        // The file is on disk, empty, before the text goes to its session.
+        expect(await readFile(join(root, input.path), "utf8")).toBe("");
+        const doc = new Y.Doc();
+        const update = await input.change(Y.encodeStateAsUpdate(doc), { keepBlocks: false });
+        if (update) Y.applyUpdate(doc, update);
+        created.set(input.path, doc);
+        return { path: input.path, changed: update !== null };
+      });
+      const context = await f.create().openCliWorkspace(f.workspace);
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+
+      await expect(context.documents!.create({ path: "notes/new.md", markdown: "# New\n\nFirst line.", origin }))
+        .resolves.toEqual({ path: "notes/new.md" });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(created.get("notes/new.md")!))).toBe("# New\n\nFirst line.");
+      expect(edit.mock.calls[0]![0]).toMatchObject({ workspaceId: "workspace", path: "notes/new.md", origin });
+      // An agent that gave no name is not invented one; a named agent is
+      // the file's author in History.
+      const write = vi.mocked(f.capture.writeAuthoredTextFile);
+      expect(write.mock.calls[0]).toEqual([join(root, "notes/new.md"), "", null, { createOnly: true }]);
+      await context.documents!.create({ path: "named.md", markdown: "Hi.", origin: { ...origin, actorOriginId: "Codex" } });
+      expect(write.mock.calls[1]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "local" });
+
+      await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
+        .rejects.toThrow("taken.md already exists. Edit it instead.");
+      expect(await readFile(join(root, "taken.md"), "utf8")).toBe("Already here.\n");
+
+      // The file stays, and the refusal names it, so the caller edits it
+      // instead of creating a second one.
+      edit.mockRejectedValueOnce(new Error("engine busy"));
+      await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
+        .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
+      expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
+      expect(edit).toHaveBeenCalledTimes(3);
+
+      // Two creates of one path: one creates it, the other is told it exists.
+      const race = await Promise.allSettled([
+        context.documents!.create({ path: "race.md", markdown: "First.", origin }),
+        context.documents!.create({ path: "race.md", markdown: "Second.", origin }),
+      ]);
+      expect(race.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+      expect(race.find((outcome) => outcome.status === "rejected")).toMatchObject({
+        reason: expect.objectContaining({ message: "race.md already exists. Edit it instead." }),
+      });
+
+      // Frontmatter, even an empty envelope, is refused before a file exists.
+      const writes = write.mock.calls.length;
+      await expect(context.documents!.create({ path: "front.md", markdown: "---\n{}\n---\n\nBody.", origin }))
+        .rejects.toThrow("A new document starts without frontmatter.");
+      await expect(lstat(join(root, "front.md"))).rejects.toThrow();
+      expect(write.mock.calls.length).toBe(writes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("refuses a collection edit whose admitted physical workspace retires while its context opens", async () => {

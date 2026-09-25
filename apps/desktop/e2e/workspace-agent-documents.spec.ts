@@ -15,6 +15,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openFileChatsPanel,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -206,6 +207,82 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     expect(await fileText(temp, "notes/closed.md")).toContain("Added with no editor open.");
     await openDocument(page, "notes/closed.md");
     await expect(page.getByTestId("markdown-editor")).toContainText("Added with no editor open.");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("an agent creates a document and comments on it where the person reads comments", async ({}, testInfo) => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  let desktop: Desktop | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes/readme.md", contents: "# Notes\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/readme.md");
+    await waitForCliEndpoint(temp.homeDir);
+
+    // The agent creates a document. Its text is in the file when the call
+    // returns.
+    const created = await agentCli(temp, "documentCreate", {
+      agent: "e2e-agent",
+      path: "notes/itinerary.md",
+      markdown: "# Kyoto\n\n## Friday 14\n\n- Fushimi Inari at dawn",
+    });
+    expect(created).toEqual({ ok: true, path: "notes/itinerary.md" });
+    expect(await fileText(temp, "notes/itinerary.md")).toContain("## Friday 14");
+    await expect(agentCli(temp, "documentCreate", {
+      path: "notes/itinerary.md",
+      markdown: "Again",
+    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
+
+    // The person sees the new document and opens it.
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/itinerary.md");
+    await openDocument(page, "notes/itinerary.md");
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor.getByRole("heading", { name: "Friday 14" })).toBeVisible();
+    await expect(editor).toContainText("Fushimi Inari at dawn");
+
+    // The agent comments on it right after the person opened it: a chat
+    // linked to the file, the same kind a person starts from the file's Chats
+    // panel. Finding the file first waits for dohc to finish capturing the
+    // workspace, which an open editor on the new file does not hold up.
+    const comment = await agentCli(temp, "fileChatStart", {
+      path: "notes/itinerary.md",
+      title: "Friday plan",
+      body: "Dawn is 5:40. Should we leave the hotel at 5?",
+    });
+    if (!comment.ok) throw new Error(`fileChatStart failed: ${comment.reason}`);
+    const threadId = comment.threadId;
+    await expect(agentCli(temp, "fileChats", { path: "notes/itinerary.md" }))
+      .resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
+
+    await openFileChatsPanel(page);
+    await page.getByTestId("linked-chat-open").click();
+    await expect(page.getByTestId("linked-chat-title")).toContainText("Friday plan");
+    await expect(page.getByTestId("linked-chat-message-body"))
+      .toContainText("Dawn is 5:40. Should we leave the hotel at 5?");
+    await expect(
+      page.locator('[data-testid="linked-chat-message-author"][data-author-kind="agent"]'),
+    ).toHaveCount(1);
+
+    // The person answers in the same chat, and the agent reads the answer.
+    const composer = page.getByTestId("linked-chat-composer");
+    await composer.fill("Yes, 5 is fine.");
+    await composer.press("Enter");
+    await expect
+      .poll(async () => {
+        const chat = await agentCli(temp, "chat", { threadId });
+        return chat.ok ? chat.messages.map((message) => [message.authorKind, message.body]) : [];
+      }, { timeout: 30_000 })
+      .toEqual([
+        ["agent", "Dawn is 5:40. Should we leave the hotel at 5?"],
+        ["human", "Yes, 5 is fine."],
+      ]);
+    await page.screenshot({ path: testInfo.outputPath("agent-comment.png") });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
