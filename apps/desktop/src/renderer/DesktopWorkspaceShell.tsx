@@ -25,6 +25,7 @@ import type {
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
+  ShareAccess,
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
@@ -4326,14 +4327,19 @@ export function DesktopWorkspaceShell(props: {
     workspacePath: props.workspace.rootPath,
   } as const;
 
-  function handleMountedShare(label: string) {
+  function handleMountedShare(label: string, access: ShareAccess | null) {
     setOpenShareOpen(false);
     void reloadShareMounts();
     void refreshFiles().catch(() => undefined);
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    showShellNotice(
-      `Added ${label} to shared-with-me — read-only, kept up to date.`,
+    // A mount is read-only whatever the grant allows. Open a share defaults
+    // an Edit grant to Open separately; a person who chose Add is told how
+    // to reach the access they have.
+    showSuccessNotice(
+      access === "edit"
+        ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
+        : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
     );
   }
 
