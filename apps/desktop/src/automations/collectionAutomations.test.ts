@@ -1254,7 +1254,7 @@ describe("Collection automations", () => {
     const claim = w.claim("collection:Tasks#seen", task);
     await w.executor.open();
     await w.until(() => w.events.includes(`released ${claim.claimId}`));
-    expect(w.executor.holdState()).toEqual({ holds: [], unreadable: true });
+    expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true });
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
     // Nothing overwrote the file dohc could not read.
     expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
@@ -1420,5 +1420,83 @@ describe("Collection automations", () => {
     await w.executor.confirmReach(bumpHold()!);
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([{ field: "Count", automations: ["Bump", "Stamp"] }]);
     await expect(w.executor.fieldMarks("Log")).resolves.toEqual([{ field: "Title", automations: ["Bump"] }]);
+  });
+
+  it("says before a share which steps it would stop, and after it, names the steps it stopped until dismissed", async () => {
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+      "  - id: idle",
+      "    name: Idle",
+      "    enabled: false",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 1}, collection: Budget}]",
+    ].join("\n") } });
+    await w.executor.open();
+    await w.executor.automationsIn("Trip");
+    const share = { paths: ["Trip"], versionId: null, access: "edit" as const, recipientEmail: "ana@dohc.test" };
+    // A switched-off automation stops nothing it was doing.
+    await expect(w.executor.shareImpact(share)).resolves.toEqual([
+      { automationId: "collection:Trip#spend", automationName: "Spend", collectionPath: "Trip", target: "Budget", action: "change" },
+    ]);
+    await expect(w.executor.shareImpact({ ...share, recipientEmail: null })).resolves.toHaveLength(1);
+    await expect(w.executor.shareImpact({ ...share, access: "view" })).resolves.toEqual([]);
+
+    // Ana gets Edit on Trip. Her reach stops the step, and one notice says so.
+    const before = w.holdsChanged();
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Trip"])] });
+    w.executor.rosterChanged();
+    await w.until(() => w.holdsChanged() > before);
+    const [stop, ...rest] = w.executor.stops();
+    expect(rest).toEqual([]);
+    expect(stop).toMatchObject({
+      automationName: "Spend", collection: "Trip", target: "Budget", action: "change", stoppedFor: "ana@dohc.test",
+    });
+
+    // Reading the verdicts again keeps the notice; dismissing the verdict it showed ends it.
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.stops()).toHaveLength(1);
+    await w.executor.dismissStops([{ ...stop!, seq: stop!.seq + 1 }]);
+    expect(w.executor.stops()).toHaveLength(1);
+    await w.executor.dismissStops([stop!]);
+    expect(w.executor.stops()).toEqual([]);
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.stops()).toEqual([]);
+    // After a restart the dismissal holds, because the verdicts are saved.
+    await w.executor.dispose();
+    const restarted = w.makeExecutor();
+    await restarted.open();
+    await restarted.automationsIn("Trip");
+    expect(restarted.stops()).toEqual([]);
+  });
+
+  it("ends the notice for a stopped step when its automation is switched off, and does not raise it again", async () => {
+    const spend = [
+      "  - id: spend",
+      "    name: Spend",
+      "    when: {field-changed: Status}",
+      "    do: [{add-record: {Amount: 5}, collection: Budget}]",
+    ].join("\n");
+    const w = await world({ collections: ["Trip", "Budget"], automations: { Trip: spend } });
+    await w.executor.open();
+    await w.executor.automationsIn("Trip");
+    w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Trip"])] });
+    w.executor.rosterChanged();
+    await w.until(() => w.executor.stops().length === 1);
+
+    await w.writeAutomations("Trip", spend.replace("    name: Spend", "    name: Spend\n    enabled: false"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Trip/automations.yaml" }]);
+    await w.until(() => !w.subscriptions.has("collection:Trip#spend"));
+    expect(w.executor.stops()).toEqual([]);
+    // Reading the verdicts records them under the switched-off definition.
+    await w.executor.automationsIn("Trip");
+    // Switched on again, it is still stopped, and the ⚡ panel says so; the notice is not raised again.
+    await w.writeAutomations("Trip", spend);
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Trip/automations.yaml" }]);
+    await w.until(() => w.subscriptions.has("collection:Trip#spend"));
+    await w.executor.automationsIn("Trip");
+    expect(w.executor.stops()).toEqual([]);
   });
 });
