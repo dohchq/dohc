@@ -606,7 +606,17 @@ export function registerShareProposalsIpcHandlers<
       "Share changes stopped because this window changed workspaces.",
       async (operation) => {
         requireShareViewProposalScope(operation.workspace.shareView);
-        return await directWrites.pushNow(operation.workspace.workspaceId);
+        const workspaceId = operation.workspace.workspaceId;
+        const result = await directWrites.pushNow(workspaceId);
+        try {
+          operation.assertCurrent();
+        } catch (error) {
+          // The window left the view while the push ran, so its answer goes
+          // where a background push's goes: to a window on the view, or held.
+          directWrites.report(workspaceId, result);
+          throw error;
+        }
+        return result;
       },
     );
   });

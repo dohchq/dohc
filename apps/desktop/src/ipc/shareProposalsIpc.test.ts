@@ -270,6 +270,21 @@ describe("registered share proposal handlers", () => {
     expect(h.pushDirect).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the answer of a push on open whose window left the view before it finished", async () => {
+    const h = await harness(); h.recipient();
+    const held = deferred<Awaited<ReturnType<EngineRelayWorkspaceClient["pushDirectWrites"]>>>();
+    h.pushDirect.mockImplementationOnce(() => held.promise);
+    const opened = h.invoke(CHANNELS.pushShareDirectWrites);
+    await vi.waitFor(() => expect(h.pushDirect).toHaveBeenCalledTimes(1));
+    h.retireRenderer();
+    held.resolve({ writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }], morePending: false });
+    await expect(opened).rejects.toThrow();
+    expect(h.reported).toHaveBeenCalledWith("workspace", {
+      status: "pushed",
+      writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+    });
+  });
+
   it("pushes after a save in main, after the window left the view, and reports the answer", async () => {
     vi.useFakeTimers();
     try {
