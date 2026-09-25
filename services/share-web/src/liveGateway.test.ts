@@ -18,8 +18,10 @@ const discriminator = "abcdefghijkl";
 const token = "ab".repeat(32);
 const limits: LiveGatewayLimits = {
   maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5,
+  // Upgrades open a real host socket and forward real frames; a loaded gate host
+  // can stall either past 2 s. Tests of these bounds override them.
   maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
-  upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100,
+  upgradeTimeoutMs: 10_000, idleTimeoutMs: 10_000, drainTimeoutMs: 100,
 };
 const session = { kind: "named" as const, userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "edit" };
 function deferred<T>() {

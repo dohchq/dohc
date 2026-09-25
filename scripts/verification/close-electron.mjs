@@ -1,6 +1,10 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
+// taskkill /T walks the tree and a forced exit still has to reach the parent.
+// Beside other work both took over 2 s, so this bound only stops a hang.
+const FORCED_CLEANUP_TIMEOUT_MS = 10_000;
+
 function isRunning(child) {
   return child.exitCode === null && child.signalCode === null;
 }
@@ -25,7 +29,7 @@ async function terminateOwnedProcess(child) {
   if (process.platform === "win32") {
     await new Promise((resolve, reject) => {
       execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
-        { windowsHide: true, timeout: 2000 }, (error) => {
+        { windowsHide: true, timeout: FORCED_CLEANUP_TIMEOUT_MS }, (error) => {
           if (error && isRunning(child)) reject(error);
           else resolve();
         });
@@ -36,7 +40,7 @@ async function terminateOwnedProcess(child) {
     try { process.kill(-child.pid, "SIGKILL"); }
     catch (error) { if (error.code !== "ESRCH") throw error; }
   }
-  if (!(await waitForExit(child, 1000))) {
+  if (!(await waitForExit(child, FORCED_CLEANUP_TIMEOUT_MS))) {
     throw new Error(`Electron process ${child.pid} did not exit after forced cleanup.`);
   }
 }

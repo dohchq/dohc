@@ -69,6 +69,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
       {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
+      {...(props.onWorkspaceErrorAction ? { onWorkspaceErrorAction: props.onWorkspaceErrorAction } : {})}
       {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
@@ -478,6 +479,33 @@ describe("notice center", () => {
       .filter((row) => /^notice-shell-error-\d+$/.test(row.getAttribute("data-testid") ?? ""))
       .map((row) => row.getAttribute("data-testid"));
     expect(rows).toEqual(["notice-shell-error-2", "notice-shell-error-1"]);
+  });
+
+  it("offers a workspace error its fixing step beside Try again, on the toast and the row", async () => {
+    const onWorkspaceErrorAction = vi.fn();
+    const onRetryWorkspaceError = vi.fn();
+    const user = userEvent.setup();
+    const error = {
+      id: "shell-error-2",
+      message: "dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.",
+      details: "Error: dohc ignored accent",
+      atMs: 1_000,
+      canRetry: true,
+      actionLabel: "Open settings file",
+      seen: false,
+    };
+    renderNotices({ workspaceErrors: [error], onWorkspaceErrorAction, onRetryWorkspaceError });
+    const toast = screen.getByTestId("workspace-shell-error");
+    await user.click(within(toast).getByRole("button", { name: "Open settings file" }));
+    expect(onWorkspaceErrorAction).toHaveBeenCalledWith("shell-error-2");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-shell-error-2");
+    expect(within(row).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(expect.arrayContaining(["Open settings file", "Try again"]));
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-2");
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {

@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 
+export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
   | "singleton-tab-split"
   | "tab-limit"
   | "workspace-search"
   | "import-files"
-  | "share-refresh";
+  | "share-refresh"
+  | SettingsFileKind;
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -25,6 +27,8 @@ export interface ShellError {
   // cause. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
   retry: (() => void) | null;
+  // A step that fixes the cause, offered beside Try again.
+  action?: { label: string; run: () => void };
   kind?: ShellErrorKind;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
@@ -168,6 +172,31 @@ export function useShellError(workspaceId: string) {
     [push],
   );
 
+  // One row per settings file: a newer read replaces it, and a read with
+  // nothing to report clears it. Try again reads the file again; the action
+  // opens it.
+  const showSettingsFileNotice = useCallback(
+    (
+      kind: SettingsFileKind,
+      message: string | null,
+      steps: { retry: () => void; open: () => void },
+    ) => {
+      if (message === null) clearKind(kind);
+      else {
+        push({
+          message,
+          retry: steps.retry,
+          action: { label: "Open settings file", run: steps.open },
+          kind,
+        });
+      }
+    },
+    [clearKind, push],
+  );
+  // The row stays: the file is still wrong until the person saves it.
+  const runShellErrorAction = useCallback((id: string) => {
+    shellErrorsRef.current.find((error) => error.id === id)?.action?.run();
+  }, []);
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
@@ -204,9 +233,11 @@ export function useShellError(workspaceId: string) {
     clearTabLimitError,
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
+    showSettingsFileNotice,
     showSuccessNotice,
     hideShellError,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   };
 }

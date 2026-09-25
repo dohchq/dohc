@@ -280,7 +280,7 @@ async function applyShareViewFileCreate(
   },
 ): Promise<string> {
   const path = requireValidPath(
-    validateUserMaterializePath(input.relativePath),
+    validateUserMaterializePath(input.relativePath, { platform: process.platform }),
     "file path",
     input.relativePath,
   );
@@ -359,7 +359,7 @@ async function applyShareViewPathMove(
     input.fromPath,
   );
   const to = requireValidPath(
-    validateUserMaterializePath(input.toPath),
+    validateUserMaterializePath(input.toPath, { platform: process.platform }),
     "move destination",
     input.toPath,
   );
@@ -678,7 +678,7 @@ async function applyShareViewFileImport(
   let skipped = screened.refused;
   try {
     for (const source of screened.usable) {
-      const validated = validateUserMaterializePath(basename(source));
+      const validated = validateUserMaterializePath(basename(source), { platform: process.platform });
       if (!validated.ok) {
         skipped += 1;
         continue;
@@ -739,7 +739,7 @@ async function repairMissingCanonicalImportFolder(
   store: CaptureVersionedTextStore,
 ): Promise<void> {
   if (targetDir === undefined || targetDir === "") return;
-  const validated = validateUserMaterializePath(targetDir);
+  const validated = validateUserMaterializePath(targetDir, { platform: process.platform });
   if (!validated.ok) return;
   const folder = validated.normalized;
   const canonicalFiles = [...held.entries()].filter(([path]) =>

@@ -290,12 +290,15 @@ export async function listFiles(
   return { files: entries, folders };
 }
 
+// An existing file at the path is left as it is. By default the create then
+// succeeds; with `exclusive` it rejects with the EEXIST error.
 export async function createFile(
   rootPath: string,
   relativePath: string,
   initialText: string,
+  options: { exclusive?: boolean } = {},
 ): Promise<string> {
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
@@ -326,7 +329,9 @@ export async function createFile(
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
   await writeFile(target, initialText, { flag: "wx" }).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
   });
   return validated.normalized;
 }
@@ -376,7 +381,7 @@ export async function resolveImportDestination(
   if (targetDir === undefined || targetDir === "") {
     return { absDir: realRoot, relDir: "" };
   }
-  const validated = validateUserMaterializePath(targetDir);
+  const validated = validateUserMaterializePath(targetDir, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid import destination (${validated.reason}): ${targetDir}`);
   }
@@ -696,7 +701,7 @@ export async function copyIntoWorkspace(
   let skipped = 0;
   for (const source of absolutePaths) {
     const name = basename(source);
-    const validated = validateUserMaterializePath(name);
+    const validated = validateUserMaterializePath(name, { platform: process.platform });
     if (!validated.ok) {
       skipped += 1;
       continue;
@@ -839,7 +844,7 @@ export async function createFolder(
   rootPath: string,
   relativePath: string,
 ): Promise<string> {
-  const validated = validateUserMaterializePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
@@ -902,7 +907,7 @@ export function normalizeWorkspaceMovePaths(
   if (!fromValidated.ok) {
     throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
   }
-  const toValidated = validateUserMaterializePath(toPath);
+  const toValidated = validateUserMaterializePath(toPath, { platform: process.platform });
   if (!toValidated.ok) {
     throw new Error(`Invalid move destination (${toValidated.reason}): ${toPath}`);
   }
@@ -1284,7 +1289,7 @@ export async function collectZipEntries(
   if (relativePath !== undefined) {
     // Read-side validation: export is a read, so mounted shares
     // (shared-with-me/…) export like the ordinary files they appear to be.
-    const validated = validateUserReadPath(relativePath);
+    const validated = validateUserReadPath(relativePath, { platform: process.platform });
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
     }
@@ -1303,8 +1308,8 @@ export async function collectZipEntries(
       access: "read",
     });
     if (
-      classifyEngineFilePathForRead(validated.normalized).kind === "secret" ||
-      classifyEngineFilePathForRead(realRelative).kind === "secret"
+      classifyEngineFilePathForRead(validated.normalized, process.platform).kind === "secret" ||
+      classifyEngineFilePathForRead(realRelative, process.platform).kind === "secret"
     ) {
       throw new Error(
         `Secret files never leave the workspace in an export: ${validated.normalized}`,
@@ -1376,7 +1381,7 @@ export async function collectZipEntries(
       } else if (dirent.isFile()) {
         // Secret-classified files (.env family) stay out of archives —
         // including inside mounted shares (read-aware classification).
-        if (classifyEngineFilePathForRead(relPath).kind === "secret") continue;
+        if (classifyEngineFilePathForRead(relPath, process.platform).kind === "secret") continue;
         await add(join(dir, dirent.name), archivePath);
       }
     }

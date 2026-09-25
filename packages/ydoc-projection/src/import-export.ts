@@ -334,7 +334,10 @@ const schema = getSchema(extensions)
 
 type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
-export function markdownToYDoc(markdown: string): Y.Doc {
+export function markdownToYDoc(
+  markdown: string,
+  options: { clientID?: number } = {},
+): Y.Doc {
   const {
     meta,
     body,
@@ -342,6 +345,7 @@ export function markdownToYDoc(markdown: string): Y.Doc {
     taggedFrontmatterBaseline,
   } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
+  if (options.clientID !== undefined) doc.clientID = options.clientID
   const usesCrlf = markdown.includes('\r\n')
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)

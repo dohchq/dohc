@@ -518,7 +518,7 @@ describe("ChatsView panel navigator unread badges", () => {
     // nouns the surface already uses, not the lane names main uses.
     expect(notice.textContent).toContain("dohc cannot list this many shares.");
     expect(notice.textContent).toContain(
-      "You have 4097 shares of your channels; the limit is 4096.",
+      "You have 4097 shares of your groups; the limit is 4096.",
     );
     expect(notice.textContent).toContain(
       "You have 5000 shares from other people; the limit is 4096.",
@@ -553,7 +553,7 @@ describe("ChatsView panel navigator unread badges", () => {
     render(navigator(0));
     expect(
       (await screen.findByTestId("chats-shares-unreadable")).textContent,
-    ).toContain("You have 4097 shares of your channels");
+    ).toContain("You have 4097 shares of your groups");
 
     // The user switches accounts, and the new account's listing never
     // arrives — the window in which a retained failure lies loudest.

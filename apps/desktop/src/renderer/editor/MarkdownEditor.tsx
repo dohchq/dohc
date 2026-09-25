@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { Extension, type Editor } from "@tiptap/core";
+import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
@@ -370,6 +370,28 @@ function renderInlineText(editor: Editor, source: string): string {
   }
 }
 
+/** Tab focus leaves Chromium's caret at the editor root, (view.dom, 0), and
+ *  here the Selection API usually reports no range at all. ProseMirror's
+ *  focus handler finds that equal to its last, empty, selection and writes
+ *  nothing, so typed text has no caret. Write the state selection unless the
+ *  DOM caret is already inside the content. A click places its caret later. */
+function placeCaretOnFocus(view: EditorView): void {
+  const anchor = view.dom.ownerDocument.getSelection()?.anchorNode;
+  if (anchor && anchor !== view.dom && view.dom.contains(anchor)) return;
+  view.focus();
+}
+
+/** ProseMirror reads a caret the browser moved when selectionchange arrives,
+ *  and Chromium can deliver that event after the next key. Enter right after
+ *  a click then split the block at the old selection. Read the DOM selection
+ *  first. ProseMirror's own keydown flushes only pending DOM mutations. */
+function readCaretBeforeKey(view: EditorView, event: KeyboardEvent): false {
+  if (event.keyCode !== 229) {
+    (view as EditorView & { domObserver: { flush(): void } }).domObserver.flush();
+  }
+  return false;
+}
+
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
   function MarkdownEditorInner(
     {
@@ -724,10 +746,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
+          handleKeyDown: readCaretBeforeKey,
           handleDOMEvents: {
-            focus: () => {
+            focus: (view) => {
               collaborationHistory?.stopCapturing();
               onFocusRef.current?.();
+              placeCaretOnFocus(view);
               return false;
             },
           },
@@ -975,8 +999,18 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useImperativeHandle(
       ref,
       () => ({
+        // Synchronous on purpose. The page title's Enter handler calls this,
+        // and Tiptap's focus command defers to the next frame, which let the
+        // next character typed land in the title instead of the body.
+        // ProseMirror scrolls only to a caret already inside the editor, so
+        // the scroll request comes after focus.
         focus(position) {
-          editor?.commands.focus(position);
+          if (!editor || editor.isDestroyed) return;
+          const { view } = editor;
+          const selection = resolveFocusPosition(view.state.doc, position);
+          if (selection) view.dispatch(view.state.tr.setSelection(selection));
+          view.focus();
+          view.dispatch(view.state.tr.scrollIntoView());
         },
         getMarkdown() {
           if (!editor) return value;

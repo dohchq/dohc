@@ -32,7 +32,9 @@ const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPa
   maxDeleteClientGroupVisits: 10000, maxDeleteIntervalVisits: 10000, maxIndexOperations: 100000 };
 const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
-  upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100 };
+  // Open routes idle between frames while a test sets up its next peer over real
+  // sockets; a loaded gate host can stretch that past 5 s.
+  upgradeTimeoutMs: 1000, idleTimeoutMs: 10_000, drainTimeoutMs: 100 };
 const cleanups: (() => Promise<void>)[] = [];
 
 it("admits the authenticated desktop recipient through the named ticket and host path", async () => {
@@ -210,9 +212,10 @@ it.each(["link", "desktop", "owner"])("shares total connection capacity with the
   const current = first.connect(firstTicket.token); expect(await current.status).toBe(101);
   expect(await second.connect(secondTicket.token).status).toBe(404);
   const released = once(current.ws, "close"); current.ws.terminate(); await released;
+  // The route releases capacity when it sees the socket close.
   await vi.waitFor(() => {
     const release = admission.reserve([["connections", 1]]); expect(release).not.toBeNull(); release?.();
-  });
+  }, {timeout: 10_000});
   expect(await second.connect(secondTicket.token).status).toBe(101);
 });
 

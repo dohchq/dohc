@@ -635,7 +635,7 @@ const demoBridge = {
     return { joined: answerDemoJoinedLane(payload.channelWireIds) };
   },
   async syncDms() {
-    return { available: false, dms: [], pending: [], declined: [] };
+    return { available: false, dms: [], pending: [], declined: [], failed: false };
   },
   async acceptDm() {
     throw new Error("Message requests aren't available in the demo.");

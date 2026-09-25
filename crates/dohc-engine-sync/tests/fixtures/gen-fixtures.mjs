@@ -113,11 +113,14 @@ const inputs = [
   ["./config/.env", false],
 ];
 
+// The drift check regenerates these vectors on any OS, so the read side names
+// a fixed platform. The platform only changes a colon in a relative path, and
+// no input here has one.
 const vectors = inputs.map(([path, rustClaimed]) => ({
   path,
   rustClaimed,
   write: classifyEngineFilePath(path).kind,
-  read: classifyEngineFilePathForRead(path).kind,
+  read: classifyEngineFilePathForRead(path, "linux").kind,
 }));
 
 // The selector's VERSION dimension, asked of the same oracle. The share

@@ -33,26 +33,26 @@ describe("sendCliRequest", () => {
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
       result: {
-        channels: [{ id: "ch_one", name: "One", slug: "one", kind: "channel" }],
+        groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group" }],
       },
     }));
     const result = await sendCliRequest(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "/workspace", actor: "human" },
       },
       { stateDir, transport, platform: "linux" },
     );
     expect(result).toEqual({
-      channels: [{ id: "ch_one", name: "One", slug: "one", kind: "channel" }],
+      groups: [{ id: "ch_one", name: "One", slug: "one", kind: "group" }],
     });
     expect(transport).toHaveBeenCalledWith(
       join(stateDir, "dohc-cli.sock"),
       JSON.stringify({
         token: TOKEN,
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "/workspace", actor: "human" },
       }),
       undefined,
@@ -65,7 +65,7 @@ describe("sendCliRequest", () => {
       sendCliRequest(
         {
           protocolVersion: CLI_PROTOCOL_VERSION,
-          verb: "channels",
+          verb: "groups",
           args: { cwd: "/workspace", actor: "human" },
         },
         {
@@ -86,12 +86,12 @@ describe("sendCliRequest", () => {
     const transport = vi.fn(async () => ({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
-      result: { channels: [] },
+      result: { groups: [] },
     }));
     await sendCliRequest(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "/workspace", actor: "human" },
       },
       { stateDir, timeoutMs: 1_234, transport, platform: "linux" },
@@ -109,7 +109,7 @@ describe("sendCliRequest", () => {
       sendCliRequest(
         {
           protocolVersion: CLI_PROTOCOL_VERSION,
-          verb: "channels",
+          verb: "groups",
           args: { cwd: "/workspace", actor: "human" },
         },
         {
@@ -118,7 +118,7 @@ describe("sendCliRequest", () => {
           transport: async () => ({
             protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
-            result: { channels: [{ id: 5 }] },
+            result: { groups: [{ id: 5 }] },
           }),
         },
       ),
@@ -131,7 +131,7 @@ describe("sendCliRequest", () => {
       sendCliRequest(
         {
           protocolVersion: CLI_PROTOCOL_VERSION,
-          verb: "channels",
+          verb: "groups",
           args: { cwd: "/workspace", actor: "human" },
         },
         { stateDir, platform: "linux" },
@@ -154,7 +154,7 @@ describe("sendCliRequest", () => {
     const result = await sendCliRequest(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "/workspace", actor: "human" },
       },
       {
@@ -169,12 +169,12 @@ describe("sendCliRequest", () => {
           return {
             protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
-            result: { channels: [] },
+            result: { groups: [] },
           };
         },
       },
     );
-    expect(result).toEqual({ channels: [] });
+    expect(result).toEqual({ groups: [] });
     expect(attempted).toEqual([
       join(stale, "dohc-cli.sock"),
       join(active, "dohc-cli.sock"),
@@ -187,17 +187,17 @@ describe("sendCliRequest", () => {
     const transport = vi.fn(async () => ({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
-      result: { channels: [] },
+      result: { groups: [] },
     }));
     const result = await sendCliRequest(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "C:\\workspace", actor: "human" },
       },
       { stateDir, transport, platform: "win32" },
     );
-    expect(result).toEqual({ channels: [] });
+    expect(result).toEqual({ groups: [] });
     // The app randomizes the pipe name each boot, so it must come from the
     // descriptor rather than from the state dir path.
     expect(transport).toHaveBeenCalledWith(PIPE, expect.any(String), undefined);
@@ -207,7 +207,7 @@ describe("sendCliRequest", () => {
     const transport = vi.fn(async () => ({
       protocolVersion: CLI_PROTOCOL_VERSION,
       ok: true,
-      result: { channels: [] },
+      result: { groups: [] },
     }));
     for (
       const described of [
@@ -223,7 +223,7 @@ describe("sendCliRequest", () => {
         sendCliRequest(
           {
             protocolVersion: CLI_PROTOCOL_VERSION,
-            verb: "channels",
+            verb: "groups",
             args: { cwd: "C:\\workspace", actor: "human" },
           },
           { stateDir, transport, platform: "win32" },
@@ -251,7 +251,7 @@ describe("sendCliRequest", () => {
     const result = await sendCliRequest(
       {
         protocolVersion: CLI_PROTOCOL_VERSION,
-        verb: "channels",
+        verb: "groups",
         args: { cwd: "C:\\workspace", actor: "human" },
       },
       {
@@ -263,12 +263,12 @@ describe("sendCliRequest", () => {
           return {
             protocolVersion: CLI_PROTOCOL_VERSION,
             ok: true,
-            result: { channels: [] },
+            result: { groups: [] },
           };
         },
       },
     );
-    expect(result).toEqual({ channels: [] });
+    expect(result).toEqual({ groups: [] });
     expect(attempted).toEqual([PIPE]);
   });
 });

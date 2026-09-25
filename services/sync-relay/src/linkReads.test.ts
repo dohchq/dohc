@@ -3495,7 +3495,7 @@ describe("relay capability reads", () => {
       hasMore: false,
       epochLogFloor: 0,
     });
-  }, 20_000);
+  });
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();
