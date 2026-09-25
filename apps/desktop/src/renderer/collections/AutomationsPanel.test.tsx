@@ -690,4 +690,36 @@ describe("the builder", () => {
     expect(await screen.findByTestId("automation-stamp")).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
   });
+
+  it("checks the file again when the person agrees to the new layout, and writes nothing over a change since", async () => {
+    const { bridge, written, writeResults, replaceFile } = makeBridge(read([summary(stamp)]));
+    writeResults.push({ status: "reformats" });
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(<Panel onError={onError} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByTestId("automations-reformat");
+    const reads = bridge.listCollectionAutomations.mock.calls.length;
+    replaceFile(read([summary({ ...stamp, enabled: false })]));
+    await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBeGreaterThan(reads));
+    await user.click(screen.getByTestId("automations-reformat-confirm"));
+    await waitFor(() => expect(onError).toHaveBeenLastCalledWith(
+      '"Stamp the finish date!" changed in automations.yaml while you were editing, so dohc did not save. Save again to replace it with yours.',
+      null,
+    ));
+    expect(written).toHaveLength(1);
+  });
+
+  it("closes only for a close asked while it is open", async () => {
+    makeBridge(read([summary(stamp)]));
+    const onClose = vi.fn();
+    // The page asked once before; this panel opened after that.
+    const { rerender } = render(<Panel onClose={onClose} closeAsk={1} />);
+    await screen.findByTestId("automation-stamp");
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(<Panel onClose={onClose} closeAsk={2} />);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
 });

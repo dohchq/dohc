@@ -407,8 +407,14 @@ export function AutomationsPanel(props: {
     // Only a new ask moves the panel; a reload does not.
   }, [props.focus?.seq]);
 
+  // Only an ask made while this panel is open closes it: one from before
+  // it opened was already answered.
+  const answeredCloseAsk = useRef(props.closeAsk ?? 0);
   useEffect(() => {
-    if (props.closeAsk) leave(props.onClose);
+    const ask = props.closeAsk ?? 0;
+    if (ask <= answeredCloseAsk.current) return;
+    answeredCloseAsk.current = ask;
+    leave(props.onClose);
   }, [props.closeAsk]);
 
   const { retry, dialog: retryDialog } = useAutomationRetry({ workspaceId, onError, onQueued: () => void load() });
@@ -424,8 +430,10 @@ export function AutomationsPanel(props: {
       onSaved: () => void = () => undefined,
       agreed = false,
       onNotSaved: () => void = () => undefined,
-      // What the toast's Try again runs, when it must check more than the file hash.
+      // What the toast's Try again runs, and what saving in the new layout
+      // runs, when either must check more than the file hash.
       retry?: () => void,
+      agreeAndSave?: () => void,
     ) => {
       const current = fileRef.current;
       const editable = current === null || current.status === "unavailable" ? null : editableOf(current);
@@ -443,7 +451,9 @@ export function AutomationsPanel(props: {
         })
         .then(async (result) => {
           if (!scope.isCurrent(epoch)) return;
-          if (result.status === "reformats") setReformat(() => () => save(change, onSaved, true, onNotSaved));
+          if (result.status === "reformats") {
+            setReformat(() => agreeAndSave ?? (() => save(change, onSaved, true, onNotSaved)));
+          }
           await load();
           if (!scope.isCurrent(epoch)) return;
           if (result.status === "written") {
@@ -568,7 +578,7 @@ export function AutomationsPanel(props: {
    * theirs on purpose. A Try again from the toast checks again against the
    * file as it is then, even after the builder closed.
    */
-  const saveEdited = (automation: Automation, open: Editing | null = editingRef.current) => {
+  const saveEdited = (automation: Automation, open: Editing | null = editingRef.current, agreed = false) => {
     const current = fileRef.current;
     const listed = current === null || current.status === "unavailable" ? undefined : editableOf(current)?.automations;
     if (!open || !listed) return;
@@ -602,9 +612,10 @@ export function AutomationsPanel(props: {
         setLeaving(null);
         then?.();
       },
-      false,
+      agreed,
       stopLeaving,
-      () => saveEdited(automation, open),
+      () => saveEdited(automation, open, agreed),
+      () => saveEdited(automation, open, true),
     );
   };
   // A draft saved or discarded is not kept when the panel goes away.
