@@ -260,6 +260,7 @@ fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body
     chats
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 channel_id: channel_id.to_owned(),
                 thread_id: thread_id.to_owned(),
@@ -288,6 +289,7 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
     chats
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: WS.to_owned(),
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),

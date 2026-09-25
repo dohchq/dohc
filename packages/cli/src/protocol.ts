@@ -10,8 +10,11 @@ import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 export const CLI_PROTOCOL_VERSION = 4;
 export const CLI_JSON_SCHEMA_VERSION = 2;
 
+// Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
+// Who wrote a message the CLI reads back.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -339,7 +342,7 @@ export type CliGroup = z.infer<typeof cliGroupSchema>;
 
 const cliAuthorSchema = z
   .object({
-    kind: cliActorSchema,
+    kind: cliAuthorKindSchema,
     displayName: z.string().min(1),
   })
   .strict();
@@ -582,7 +585,7 @@ const rawChatMessageSchema = z
   .object({
     id: rawMessageIdSchema,
     threadId: rawThreadIdSchema,
-    authorKind: cliActorSchema,
+    authorKind: cliAuthorKindSchema,
     authorDisplayName: z.string().min(1),
     authorOwnerDisplayName: z.string().min(1).optional(),
     body: z.string(),

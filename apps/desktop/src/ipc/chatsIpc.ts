@@ -104,6 +104,10 @@ function chatAttachmentForIpc(
   };
 }
 
+function automationForIpc(automation: NonNullable<ChatMessage["automation"]>) {
+  return { automationId: automation.automationId, collectionPath: automation.collectionPath };
+}
+
 export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
   return {
     id: message.id,
@@ -118,6 +122,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     ...(message.origin ? { origin: message.origin } : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
+    ...(message.automation ? { automation: automationForIpc(message.automation) } : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
   };
 }
@@ -571,6 +576,7 @@ export function registerChatsIpcHandlers<
             ...(summary.openingMessage.authorUserId ? { authorUserId: summary.openingMessage.authorUserId } : {}),
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
+            ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation) } : {}),
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,
@@ -729,6 +735,9 @@ export function registerChatsIpcHandlers<
       if (!message?.authorUserId) {
         throw new Error("That author cannot be followed until their identity is verified.");
       }
+      if (message.author.kind === "automation") {
+        throw new Error("An automation cannot be followed. Follow its Group instead.");
+      }
       targetKind = message.author.kind === "agent" ? "agent" : "person";
       targetId = message.authorUserId;
     }
@@ -808,7 +817,8 @@ export function registerChatsIpcHandlers<
         message: chatMessageForIpc(item.message),
         thread: chatThreadForIpc(item.thread),
         viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
-        ...(item.message.authorUserId
+        // An automation is neither a person nor an agent to follow.
+        ...(item.message.authorUserId && item.message.author.kind !== "automation"
           ? {
               authorFollowTarget: {
                 targetKind:
