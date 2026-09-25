@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { buildDrillApp, DIALOG_RECORDER, FEED_VERSION, feedManifest, injectFault, readDrillLog, runDrill } from "./release-drill.mjs";
+import { buildDrillApp, DIALOG_RECORDER, FEED_VERSION, feedManifest, injectFault, launchApp, readDrillLog, runDrill } from "./release-drill.mjs";
 
 function scratchDir(t) {
   const directory = mkdtempSync(join(tmpdir(), "release-drill-test-"));
@@ -132,4 +132,59 @@ test("a failure after linking the real app deletes the links, not what they poin
   await assert.rejects(runDrill({ scenario: "main-crashes-every-launch", source, engine, tempRoot: root }));
   assert.deepEqual(readdirSync(root).filter((name) => /^dohc-release-drill-(?!evidence)/.test(name)), []);
   assert.equal(readFileSync(join(source, "node_modules", "kept", "index.js"), "utf8"), "kept\n");
+});
+
+// A stand-in for the job owner: it exits by itself after `exitAfterMs`, or
+// when it is killed.
+function fakeLaunch({ exitAfterMs = null } = {}) {
+  const events = [];
+  const child = { exitCode: null, signalCode: null, kill: (signal) => { events.push(`kill:${signal}`); exit(null, signal); } };
+  let exit = () => undefined;
+  const start = (onSpawn) => {
+    onSpawn(child);
+    return new Promise((resolve) => {
+      exit = (code, signal) => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        child.exitCode = code;
+        child.signalCode = signal;
+        events.push("exited");
+        resolve(signal ? { error: `killed by ${signal}` } : { code });
+      };
+      if (exitAfterMs !== null) setTimeout(() => exit(70, null), exitAfterMs);
+    });
+  };
+  return { start, events };
+}
+
+test("a launch with nothing to wait for runs until the app exits by itself", async () => {
+  const app = fakeLaunch({ exitAfterMs: 50 });
+  const ended = [];
+  const seen = await launchApp({
+    start: app.start, readLog: () => [], boundMs: 60_000, describe: "nothing", onEnded: (outcome) => ended.push(outcome),
+  });
+  assert.equal(seen, null);
+  assert.deepEqual(app.events, ["exited"]);
+  assert.deepEqual(ended, [{ code: 70 }]);
+});
+
+test("a launch waiting for a dialog ends the app once the dialog shows", async () => {
+  const app = fakeLaunch();
+  const log = [];
+  setTimeout(() => log.push({ kind: "dialog", message: "offered" }), 50);
+  const ended = [];
+  const seen = await launchApp({
+    start: app.start, until: (entries) => entries.find((entry) => entry.kind === "dialog"), readLog: () => log,
+    boundMs: 60_000, describe: "the dialog", onEnded: (outcome) => ended.push(outcome),
+  });
+  assert.equal(seen.message, "offered");
+  assert.deepEqual(app.events, ["kill:SIGKILL", "exited"]);
+  assert.equal(ended.length, 1);
+});
+
+test("a launch waiting for a dialog fails when the app exits first", async () => {
+  const app = fakeLaunch({ exitAfterMs: 50 });
+  await assert.rejects(launchApp({
+    start: app.start, until: () => null, readLog: () => [], boundMs: 60_000, describe: "the dialog",
+  }), /The app ended before the dialog/);
+  assert.deepEqual(app.events, ["exited"]);
 });

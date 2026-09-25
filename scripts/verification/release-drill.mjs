@@ -214,13 +214,41 @@ async function waitFor(check, deadlineMs, describe, signal) {
   }
 }
 
+/**
+ * Runs one launch of the app. Without `until`, it waits for the app to exit
+ * by itself, bounded by the runner's timeout. With `until`, it waits until
+ * the drill log shows what `until` looks for, then ends the app. Either way
+ * the app has ended, with every process it started, when this settles.
+ */
+export async function launchApp({ start, until, readLog, boundMs, describe, onEnded }) {
+  let child = null;
+  const exited = start((spawned) => { child = spawned; });
+  const polling = new AbortController();
+  try {
+    if (!until) {
+      await exited;
+      return null;
+    }
+    return await Promise.race([
+      waitFor(() => until(readLog()), boundMs, describe, polling.signal),
+      exited.then((outcome) => { throw new Error(`The app ended before ${describe}: ${JSON.stringify(outcome)}`); }),
+    ]);
+  } finally {
+    polling.abort();
+    // The job object owns the app and every process it started, so ending
+    // the job owner ends them all.
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    onEnded?.(await exited);
+  }
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 /**
  * Runs one scenario. Every resource it acquires is released before it
- * settles: launched jobs are ended and awaited, the feed closes, and the
+ * settles: each launch ends and awaits its app, the feed closes, and the
  * scratch app, engine copy, profile, and updater cache are deleted. A failed
  * run keeps only its small evidence directory. --keep keeps everything from
  * a passing run.
@@ -244,44 +272,25 @@ export async function runDrill({
     result.checks.push({ name, passed: Boolean(condition), ...(detail === undefined ? {} : { detail }) });
     assert(condition, `${name} failed${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
   };
-  const stopping = new AbortController();
-  const jobs = new Set();
   let scratch = null;
   let feed = null;
 
-  const launch = async (number, { entry, profile, until }) => {
-    let child = null;
+  const launch = (number, { entry, profile, until }) => {
     const started = Date.now();
-    const exited = run(electron, [`--user-data-dir=${profile}`, "--dohc-isolated-test", entry], {
-      env: launchEnv(scratch, logPath, feed.url),
-      log: join(evidence, `launch-${number}.log`),
-      onSpawn: (spawned) => { child = spawned; },
-      quietStdout: true,
-      timeoutMs: LAUNCH_BOUND_MS,
-    }).then((done) => ({ code: done.code }), (error) => ({ error: error.message }));
-    // The job object owns the app and every process it started, so ending
-    // the job owner ends them all.
-    const end = async () => {
-      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      return await exited;
-    };
-    jobs.add(end);
-    const polling = new AbortController();
-    const stopPolling = () => polling.abort();
-    stopping.signal.addEventListener("abort", stopPolling, { once: true });
-    try {
-      if (!until) return null;
-      return await Promise.race([
-        waitFor(() => until(readDrillLog(logPath)), LAUNCH_BOUND_MS, `launch ${number} to offer the restart`, polling.signal),
-        exited.then((outcome) => { throw new Error(`Launch ${number} ended before it offered the restart: ${JSON.stringify(outcome)}`); }),
-      ]);
-    } finally {
-      polling.abort();
-      stopping.signal.removeEventListener("abort", stopPolling);
-      const outcome = await end();
-      jobs.delete(end);
-      result.launches.push({ number, ms: Date.now() - started, ...outcome });
-    }
+    return launchApp({
+      start: (onSpawn) => run(electron, [`--user-data-dir=${profile}`, "--dohc-isolated-test", entry], {
+        env: launchEnv(scratch, logPath, feed.url),
+        log: join(evidence, `launch-${number}.log`),
+        onSpawn,
+        quietStdout: true,
+        timeoutMs: LAUNCH_BOUND_MS,
+      }).then((done) => ({ code: done.code }), (error) => ({ error: error.message })),
+      until,
+      readLog: () => readDrillLog(logPath),
+      boundMs: LAUNCH_BOUND_MS,
+      describe: `launch ${number} to offer the restart`,
+      onEnded: (outcome) => result.launches.push({ number, ms: Date.now() - started, ...outcome }),
+    });
   };
 
   try {
@@ -333,8 +342,7 @@ export async function runDrill({
     result.error = error instanceof Error ? error.message : String(error);
     throw error;
   } finally {
-    stopping.abort();
-    await Promise.all([...jobs].map((end) => end()));
+    // Each launch has already ended and awaited its app before this runs.
     await feed?.close();
     result.dialogs = readDrillLog(logPath);
     if (keep && result.passed) result.scratch = scratch;
