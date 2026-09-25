@@ -211,7 +211,7 @@ export function Titlebar(props: {
           className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden />
-          <span className="truncate">Search files…</span>
+          <span className="truncate">Go to…</span>
           <kbd className="ml-auto font-mono text-[10px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}

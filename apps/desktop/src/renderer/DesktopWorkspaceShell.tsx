@@ -3588,7 +3588,7 @@ export function DesktopWorkspaceShell(props: {
           ]),
       {
         id: "quick-open",
-        label: "Go to file",
+        label: "Go to",
         run: () => setQuickOpenOpen(true),
       },
       {
@@ -5385,7 +5385,7 @@ export function DesktopWorkspaceShell(props: {
                     onClick={() => setQuickOpenOpen(true)}
                     className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
                   >
-                    Ctrl P · go to file
+                    Ctrl P · go to
                   </button>
                 </div>
               </div>
