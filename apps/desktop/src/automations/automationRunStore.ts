@@ -75,8 +75,10 @@ const WriteSchema = z.union([
   }),
   z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }),
 ]);
+// Version 2 keeps progress in a file beside the plan. A run in any other
+// format cannot be read, and the claim fails instead of starting over.
 const StoredRunSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -104,7 +106,7 @@ export type RunWrite = z.infer<typeof WriteSchema>;
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 1;
+  version: 2;
   claimId: string;
   /** The engine automation id, "collection:<collection path>#<id>". */
   automationId: string;
@@ -338,13 +340,15 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
   const readRun = async (folder: string, name: string, automationId: string): Promise<StoredRun | null> => {
     const header = StoredRunSchema.omit({ applied: true, created: true }).safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
     if (!header.success || header.data.automationId !== automationId) return null;
+    if (runName(header.data.claimId, header.data.keySeed) !== name) return null;
     const run: StoredRun = { ...header.data, applied: [], created: [] };
     if (run.compacted) return run;
+    // A run that can resume always has its progress file, empty or not.
     const progress = await readBounded(join(folder, `${name}${PROGRESS_SUFFIX}`));
-    if (progress === null) return null;
+    if (progress === null || progress === undefined) return null;
     // A line cut short by a crash is an effect that may have landed and was
     // not recorded; the run resumes it as one.
-    const lines = (progress ?? "").split("\n").slice(0, -1);
+    const lines = progress.split("\n").slice(0, -1);
     for (const line of lines) {
       let parsed: unknown;
       try {
@@ -355,7 +359,11 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
       const entry = ProgressLineSchema.safeParse(parsed);
       if (!entry.success) return null;
       if (entry.data.kind === "effect") run.applied.push({ ordinal: entry.data.ordinal, writes: entry.data.writes });
-      else run.created.push({ ordinal: entry.data.ordinal, recordId: entry.data.recordId, path: entry.data.path });
+      else {
+        // The newest line for a step is the record it created.
+        const { ordinal, recordId, path } = entry.data;
+        run.created = [...run.created.filter((created) => created.ordinal !== ordinal), { ordinal, recordId, path }];
+      }
     }
     return run;
   };
@@ -400,12 +408,13 @@ export function createAutomationRunStore(rootPath: string): AutomationRunStore {
 
   return {
     async runsOf(automationId, claimId) {
-      const metadata = await existingFolder(join(rootPath, ".dohc"));
-      const automations = typeof metadata === "string" ? await existingFolder(join(metadata, "automations")) : metadata;
-      const runs = typeof automations === "string" ? await existingFolder(join(automations, "runs")) : automations;
-      const folder = typeof runs === "string" ? await existingFolder(join(runs, hashName(automationId))) : runs;
-      if (folder === null) return { runs: [], unreadable: false };
-      if (folder === "unusable") return { runs: [], unreadable: true };
+      let folder = rootPath;
+      for (const segment of [".dohc", "automations", "runs", hashName(automationId)]) {
+        const found = await existingFolder(join(folder, segment));
+        if (found === null) return { runs: [], unreadable: false };
+        if (found === "unusable") return { runs: [], unreadable: true };
+        folder = found;
+      }
       const prefix = `${hashName(claimId)}-`;
       const found: StoredRun[] = [];
       let unreadable = false;

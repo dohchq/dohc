@@ -1,4 +1,4 @@
-import { appendFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -8,7 +8,7 @@ const AUTOMATION = "collection:Tasks#bump";
 
 function run(claimId: string, state: "done" | "failed" | null, updatedAtMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 1, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 2, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: updatedAtMs, updatedAtMs, plan: null,
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
     created: [], superseded: false, settled, compacted: false,
@@ -135,5 +135,48 @@ describe("the automation run store", () => {
     await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: false });
     await writeFile(await store.reachVerdictsPath(), "{ torn");
     await expect(store.readReachVerdicts()).resolves.toEqual({ verdicts: [], unreadable: true });
+  });
+
+  it("reads a run in another format, a run without its progress, or a renamed run as unreadable", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    const saved = { ...run("atc_one", null, 1), applied: [] };
+    await store.save(saved);
+    const folder = join(root, ".dohc", "automations", "runs");
+    const [automationFolder] = await readdir(folder);
+    const files = join(folder, automationFolder!);
+    const header = (await readdir(files)).find((file) => file.endsWith(".json"))!;
+    const progress = (await readdir(files)).find((file) => file.endsWith(".progress.jsonl"))!;
+    const text = await readFile(join(files, header), "utf8");
+
+    // An earlier format kept its progress inside the run.
+    await writeFile(join(files, header), text.replace('"version":2', '"version":1'));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
+    await writeFile(join(files, header), text);
+    await rm(join(files, progress));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
+    await writeFile(join(files, progress), "");
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ unreadable: false });
+    await rename(join(files, header), join(files, header.replace(".json", "x.json")));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
+  });
+
+  it("reads an unusable runs folder as unreadable, not as empty history", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    await store.saveTimeouts(new Map());
+    await writeFile(join(root, ".dohc", "automations", "runs"), "not a folder");
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+  });
+
+  it("keeps the newest record a step created", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root);
+    const saved = { ...run("atc_one", null, 1), applied: [] };
+    await store.save(saved);
+    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_first", path: "Log/a.md" });
+    await store.recordCreated(saved, { ordinal: 1, recordId: "rec_second", path: "Log/a.md" });
+    const [read] = (await store.runsOf(AUTOMATION, "atc_one")).runs;
+    expect(read!.created).toEqual([{ ordinal: 1, recordId: "rec_second", path: "Log/a.md" }]);
   });
 });
