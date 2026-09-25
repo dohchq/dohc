@@ -4,8 +4,10 @@ import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-cont
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
   AutomationShareImpactPayload,
-  ConfirmCollectionAutomationStepPayload,
   DismissAutomationStopsPayload,
+  CheckCollectionAutomationPayload,
+  ConfirmCollectionAutomationStepPayload,
+  ListAutomationTargetsPayload,
   ListAutomationHoldsPayload,
   ResetAutomationHoldsPayload,
   RevealAutomationHoldsPayload,
@@ -16,7 +18,9 @@ import {
   UndoCollectionAutomationRunPayload,
   WriteCollectionAutomationsPayload,
   type AutomationShareImpactResult,
+  type CheckCollectionAutomationResult,
   type ConfirmCollectionAutomationStepResult,
+  type ListAutomationTargetsResult,
   type DeleteWorkspacePathPayload,
   type ListAutomationHoldsResult,
   type ResetAutomationHoldsResult,
@@ -30,6 +34,7 @@ import {
   type WriteWorkspaceTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { expressionProblem } from "../automations/automationPlan";
 import { AUTOMATIONS_FILE_NAME, type CollectionAutomations } from "../automations/collectionAutomations";
 
 // The ⚡ panel's view of a Collection's automations. Main parses, checks,
@@ -108,6 +113,35 @@ export function registerCollectionAutomationsIpc<
       await operation.state.collectionAutomations.undo(input, async (relativePath) => {
         await dependencies.deletePath(event, { workspaceId: input.workspaceId, relativePath });
       }));
+  });
+
+  registerHandler(CHANNELS.listAutomationTargets, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationTargetsPayload.parse(payload);
+    assertCollectionPath(input.collectionPath);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListAutomationTargetsResult> =>
+      dependencies.sharedViewOf(input.workspaceId)
+        ? { status: "unavailable" }
+        : { collections: await operation.state.collectionAutomations.targetsFor(input.collectionPath) });
+  });
+
+  // The builder's check, the same one a save makes: the writer reads the
+  // automation back through the file contract. It reads nothing in the
+  // workspace, but answers only the window that has the workspace open,
+  // like every other automations call.
+  registerHandler(CHANNELS.checkCollectionAutomation, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CheckCollectionAutomationPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<CheckCollectionAutomationResult> => {
+      let diagnostics: CheckCollectionAutomationResult["diagnostics"];
+      try {
+        const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
+        diagnostics = written.status === "refused" ? written.diagnostics : [];
+      } catch {
+        diagnostics = [{ code: "changed-on-reread", path: "/automations/0" }];
+      }
+      return { diagnostics, formulaProblems: input.formulas.map(expressionProblem) };
+    });
   });
 
   registerHandler(CHANNELS.listAutomationHolds, async (event, payload) => {
