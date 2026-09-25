@@ -145,13 +145,13 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       path: "notes/plan.md",
       find: "person writes here",
       replacement: "person wrote here",
-    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true, warning: expect.stringContaining("Someone may be changing this document") });
     await expect(agentCli(temp, "documentEdit", {
       agent: "e2e-agent",
       path: "notes/plan.md",
       find: "The agent edits this line.",
       replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
-    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true, warning: expect.stringContaining("Someone may be changing this document") });
     // Turning the paragraph the person is typing in into a heading would
     // lose their typing, so the edit is refused with what to do instead.
     await expect(agentCli(temp, "documentEdit", {

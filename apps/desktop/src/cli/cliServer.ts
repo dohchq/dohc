@@ -77,7 +77,11 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import { LiveDocumentEditAppliedError, type LiveDocumentEditOrigin } from "../workspaces/engineYDocSessionIpc";
+import {
+  LiveDocumentEditAppliedError,
+  type LiveDocumentEditOrigin,
+  type LiveDocumentEditOutcome,
+} from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DocumentEdit } from "@dohc/ydoc-projection";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -186,7 +190,7 @@ export interface CliDocumentsPort {
     path: string;
     edit: DocumentEdit;
     origin: LiveDocumentEditOrigin;
-  }): Promise<{ path: string; changed: boolean }>;
+  }): Promise<LiveDocumentEditOutcome>;
   // Creates the file the way the explorer does, then writes `markdown`
   // into its live session. Refuses a path that already exists.
   create(input: {
@@ -256,6 +260,8 @@ export interface CliServerOptions {
   chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  /** How many finished results and forgotten request ids each workspace keeps; tests lower them. */
+  requestIdLimits?: { results: number; ids: number };
   runMessageLinkForegroundBudgetMs?: number;
   runMessageLinkRecoveryRetryMs?: number;
   runMessageLinkRecoveryMaxPending?: number;
@@ -1663,45 +1669,107 @@ async function startFileChat(
   };
 }
 
-// The results of requests a caller sent with a request id. A caller whose
-// request passed the socket deadline sends it again with the same id and gets
-// the first result instead of the work done twice. Kept in memory while dohc
-// runs. `run` says whether its work may have happened; a request that did
-// nothing is forgotten, so the same id may try again.
-const MAX_REMEMBERED_REQUESTS = 256;
-const rememberedRequests = new Map<string, { input: string; result: Promise<unknown> }>();
+// The results of requests a caller sent with a request id, per workspace. A
+// caller whose request passed the socket deadline sends it again with the same
+// id and gets the first result instead of the work done twice. Kept in memory
+// while dohc runs.
+//
+// A running request is never dropped; the socket's connection limit bounds how
+// many run at once. A finished one is kept as a digest of its input and its
+// small result. Past the limit the oldest finished result is dropped and only
+// its id is kept, so a resend is refused instead of run again. Past that
+// limit too, the oldest ids go, and only then could a very old id run again.
+const REQUEST_ID_LIMITS = { results: 1_024, ids: 16_384 };
+
+interface RememberedRequest {
+  input: string;
+  result: Promise<unknown>;
+  finished: boolean;
+}
+
+interface WorkspaceRequests {
+  requests: Map<string, RememberedRequest>;
+  forgotten: Set<string>;
+}
+
+const requestMemory = new WeakMap<CliServerOptions, Map<string, WorkspaceRequests>>();
+
+function workspaceRequests(options: CliServerOptions, workspaceId: string): WorkspaceRequests {
+  let workspaces = requestMemory.get(options);
+  if (!workspaces) {
+    workspaces = new Map();
+    requestMemory.set(options, workspaces);
+  }
+  let memory = workspaces.get(workspaceId);
+  if (!memory) {
+    memory = { requests: new Map(), forgotten: new Set() };
+    workspaces.set(workspaceId, memory);
+  }
+  return memory;
+}
+
+function forgetOldestResults(memory: WorkspaceRequests, limits: { results: number; ids: number }): void {
+  let finished = 0;
+  for (const request of memory.requests.values()) if (request.finished) finished += 1;
+  for (const [requestId, request] of memory.requests) {
+    if (finished <= limits.results) break;
+    if (!request.finished) continue;
+    memory.requests.delete(requestId);
+    memory.forgotten.add(requestId);
+    finished -= 1;
+  }
+  for (const requestId of memory.forgotten) {
+    if (memory.forgotten.size <= limits.ids) break;
+    memory.forgotten.delete(requestId);
+  }
+}
 
 async function onceForRequestId(
   context: CliWorkspaceContext,
+  options: CliServerOptions,
   requestId: string,
   input: unknown,
   run: () => Promise<{ done: boolean; result: unknown }>,
 ): Promise<unknown> {
-  const key = `${context.workspaceId}\u0000${requestId}`;
+  const memory = workspaceRequests(options, context.workspaceId);
   // A digest, so a remembered edit does not keep its text in memory.
   const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-  const remembered = rememberedRequests.get(key);
+  const remembered = memory.requests.get(requestId);
   if (remembered) {
     if (remembered.input !== inputKey) {
       return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
     }
     return await remembered.result;
   }
+  if (memory.forgotten.has(requestId)) {
+    return {
+      ok: false as const,
+      reason: `dohc no longer holds the result of request id ${requestId}, so it did not run it again. Read the document or the chat to see whether it happened, and send any new request with a new id.`,
+    };
+  }
   const started = run();
   const result = started.then((outcome) => outcome.result);
   // A retry may never come to await it.
   result.catch(() => undefined);
-  rememberedRequests.set(key, { input: inputKey, result });
-  if (rememberedRequests.size > MAX_REMEMBERED_REQUESTS) {
-    const oldest = rememberedRequests.keys().next().value;
-    if (oldest !== undefined) rememberedRequests.delete(oldest);
-  }
+  const entry: RememberedRequest = { input: inputKey, result, finished: false };
+  memory.requests.set(requestId, entry);
+  const limits = options.requestIdLimits ?? REQUEST_ID_LIMITS;
   try {
     const outcome = await started;
-    if (!outcome.done) rememberedRequests.delete(key);
+    if (outcome.done) {
+      // Finished results leave in the order they finished.
+      entry.finished = true;
+      if (memory.requests.get(requestId) === entry) {
+        memory.requests.delete(requestId);
+        memory.requests.set(requestId, entry);
+      }
+      forgetOldestResults(memory, limits);
+    } else {
+      memory.requests.delete(requestId);
+    }
     return outcome.result;
   } catch (error) {
-    rememberedRequests.delete(key);
+    memory.requests.delete(requestId);
     throw error;
   }
 }
@@ -2100,7 +2168,7 @@ async function dispatch(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, requestId, [path, find ?? null, replacement, agent ?? null], edit);
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
     }
 
     case "documentCreate": {
@@ -2154,6 +2222,7 @@ async function dispatch(
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
       return await onceForRequestId(
         context,
+        options,
         requestId,
         [input.path, input.title, input.body, input.runId ?? null],
         async () => {
