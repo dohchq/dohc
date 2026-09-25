@@ -1014,6 +1014,19 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    /// How many changes that did not originate on this computer the engine
+    /// has applied to the workspace; 0 before the first.
+    pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_storage::remote_changes_applied_in(conn, &workspace_id)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn relay(
         &self,
         configuration: RelayConfiguration,

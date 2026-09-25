@@ -4343,28 +4343,30 @@ fn replay_share_write<T: RelayTransport>(
         ));
     }
     let deduped = {
-        let mut versioned = VersionedTextStore::new(store);
         if content_kind == "binary" {
-            versioned
-                .write_binary(
-                    &WriteBinary {
-                        workspace_id: workspace_id.to_owned(),
-                        version_id: version_id.to_owned(),
-                        object_id: format!("object-share-{key}"),
-                        path: path.to_owned(),
-                        bytes,
-                        moment_id: format!("moment-share-{key}"),
-                        metadata_origin: "sync".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: envelope.recorded_at_ms,
-                        request_id: Some(request_id.clone()),
-                    },
-                    faults,
-                )
-                .map_err(domain)?
-                .deduped
+            let input = WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: format!("object-share-{key}"),
+                path: path.to_owned(),
+                bytes,
+                moment_id: format!("moment-share-{key}"),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: envelope.recorded_at_ms,
+                request_id: Some(request_id.clone()),
+            };
+            replay_share_change(
+                store,
+                workspace_id,
+                faults,
+                |tx| dohc_engine_domain::write_binary_in_tx(tx, &input),
+                |result| result.deduped,
+            )
+            .map_err(domain)?
+            .deduped
         } else {
             // These bytes already matched the sha the op named, so they are
             // the content the granter shared. The op calling them text is the
@@ -4377,26 +4379,29 @@ fn replay_share_write<T: RelayTransport>(
                     },
                 )
             })?;
-            versioned
-                .write_text(
-                    &WriteText {
-                        workspace_id: workspace_id.to_owned(),
-                        version_id: version_id.to_owned(),
-                        object_id: format!("object-share-{key}"),
-                        path: path.to_owned(),
-                        text,
-                        moment_id: format!("moment-share-{key}"),
-                        metadata_origin: "sync".to_owned(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: envelope.recorded_at_ms,
-                        request_id: Some(request_id),
-                    },
-                    faults,
-                )
-                .map_err(domain)?
-                .deduped
+            let input = WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: format!("object-share-{key}"),
+                path: path.to_owned(),
+                text,
+                moment_id: format!("moment-share-{key}"),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: envelope.recorded_at_ms,
+                request_id: Some(request_id),
+            };
+            replay_share_change(
+                store,
+                workspace_id,
+                faults,
+                |tx| dohc_engine_domain::write_text_in_tx(tx, &input),
+                |result| result.deduped,
+            )
+            .map_err(domain)?
+            .deduped
         }
     };
     if !deduped {
@@ -4411,6 +4416,31 @@ fn replay_share_write<T: RelayTransport>(
         },
     );
     Ok(())
+}
+
+/// Commit one share-view replay, and count it as a change from another
+/// computer in the same transaction when it changed the store. The replay's
+/// request record makes a repeat a deduped no-op that counts nothing.
+fn replay_share_change<T>(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+    change: impl FnOnce(&Transaction<'_>) -> Result<T, DomainError>,
+    deduped: impl Fn(&T) -> bool,
+) -> Result<T, DomainError> {
+    let outcome = store.write_with(faults, |tx| {
+        let result = change(tx)?;
+        if !deduped(&result) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
+        }
+        Ok::<_, DomainError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(DomainError::Storage(StorageError::persist_public(
+            std::io::Error::other("crash fault fired before ack"),
+        ))),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4452,24 +4482,25 @@ fn replay_share_delete(
         return Ok(());
     };
     let key = replay_id(share_id, envelope, "delete", path);
-    let result = {
-        let mut versioned = VersionedTextStore::new(store);
-        versioned.delete_text_file(
-            &DeleteTextFile {
-                workspace_id: workspace_id.to_owned(),
-                version_id: version_id.to_owned(),
-                path: path.to_owned(),
-                moment_id: format!("moment-share-{key}"),
-                request_id: Some(format!("share-view:{key}")),
-                metadata_origin: "sync".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: envelope.recorded_at_ms,
-            },
-            faults,
-        )
+    let input = DeleteTextFile {
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        path: path.to_owned(),
+        moment_id: format!("moment-share-{key}"),
+        request_id: Some(format!("share-view:{key}")),
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: envelope.recorded_at_ms,
     };
+    let result = replay_share_change(
+        store,
+        workspace_id,
+        faults,
+        |tx| dohc_engine_domain::delete_text_in_tx(tx, &input),
+        |result| result.deduped,
+    );
     match result {
         Ok(value) => {
             if !value.deduped {

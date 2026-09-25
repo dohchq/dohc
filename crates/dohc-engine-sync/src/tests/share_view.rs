@@ -618,6 +618,48 @@ fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
     );
 }
 
+/// A share-view write replays the granter's change into this computer's
+/// store, so it counts as a change from elsewhere, once: serving the same
+/// page again replays nothing.
+#[test]
+fn a_share_view_replay_counts_as_a_change_from_elsewhere_once() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"granted body".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![share_view_write_op(1, "docs/a.md", &sha)],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    let remote_changes = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| dohc_engine_storage::remote_changes_applied_in(conn, "ws"))
+            .expect("read the count")
+    };
+    for pass in 0..2 {
+        client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .expect("pull the share view");
+        assert_eq!(remote_changes(&engine), 1, "pass {pass}");
+    }
+}
+
 /// A refusal class the pull's skip arm does not list does not merely lose its
 /// copy: it falls to the error arm, ABORTS the pull, and the cursor never
 /// advances — so the same page is fetched forever and every valid op behind
