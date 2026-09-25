@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import {
@@ -12,7 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
 
 const temporaryDirectories = [];
@@ -262,6 +264,118 @@ test("mock update server serves files and blocks traversal/directory-link escape
     assert.equal(nul.status, 404);
   } finally {
     await server.close();
+  }
+});
+
+// The release workflow runs these commands from the repository root on every
+// runner, Windows included. Run them the same way so a script that exits
+// without doing its work fails here.
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const runScript = promisify(execFile);
+function runReleaseScript(script, args, env = {}) {
+  return runScript(process.execPath, [`scripts/${script}`, ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, ...env },
+  });
+}
+
+test("resolve-desktop-release prints release metadata when run as a command", async () => {
+  const root = await fixtureRoot();
+  const { stdout } = await runReleaseScript("resolve-desktop-release.mjs", [
+    "--root", root, "--channel", "nightly", "--date", "20260621",
+    "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
+  ]);
+  assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
+});
+
+// Node resolves links in the entry path before it sets import.meta.url, so a
+// guard that compares that URL with argv[1] fails in a checkout reached
+// through a junction or symlink, such as a runner's work directory or /var on
+// macOS.
+test("release commands run from a checkout reached through a link", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "dohc-linked-checkout-"));
+  const linkedRoot = join(parent, "checkout");
+  await symlink(repoRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
+  const root = await fixtureRoot();
+  const { stdout } = await runScript(
+    process.execPath,
+    [
+      "scripts/resolve-desktop-release.mjs",
+      "--root", root, "--channel", "nightly", "--date", "20260621",
+      "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
+    ],
+    { cwd: linkedRoot },
+  );
+  assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
+});
+
+test("update-desktop-package-version stamps the version when run as a command", async () => {
+  const root = await fixtureRoot();
+  const { stdout } = await runReleaseScript(
+    "update-desktop-package-version.mjs",
+    ["--root", root],
+    { DESKTOP_VERSION: "0.1.1-nightly.20260621.2.1" },
+  );
+  assert.match(stdout, /^updated /);
+  const packageJson = JSON.parse(await readFile(join(root, "apps/desktop/package.json"), "utf8"));
+  assert.equal(packageJson.version, "0.1.1-nightly.20260621.2.1");
+});
+
+test("merge-update-manifests writes the merged manifest when run as a command", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-merge-command-"));
+  const manifest = (arch) =>
+    [
+      "version: 0.1.0",
+      "files:",
+      `  - url: dohc-0.1.0-mac-${arch}.zip`,
+      `    sha512: ${arch}`,
+      "    size: 1",
+      `path: dohc-0.1.0-mac-${arch}.zip`,
+      `sha512: ${arch}`,
+      "",
+    ].join("\n");
+  await writeFile(join(directory, "arm64.yml"), manifest("arm64"));
+  await writeFile(join(directory, "x64.yml"), manifest("x64"));
+  await runReleaseScript("merge-update-manifests.mjs", [
+    "--platform", "mac",
+    join(directory, "arm64.yml"), join(directory, "x64.yml"), join(directory, "merged.yml"),
+  ]);
+  const merged = parseUpdateManifest(await readFile(join(directory, "merged.yml"), "utf8"));
+  assert.deepEqual(
+    merged.files.map((file) => file.url).sort(),
+    ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
+  );
+});
+
+test("mock-update-server serves its root when run as a command", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-update-command-"));
+  await writeFile(join(root, "latest.yml"), "version: 0.1.0\n");
+  const child = spawn(
+    process.execPath,
+    ["scripts/mock-update-server.mjs", "--root", root, "--port", "0"],
+    { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
+  try {
+    const url = await new Promise((resolveUrl, reject) => {
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+        const serving = / at (http:\/\/127\.0\.0\.1:\d+)\s*$/m.exec(output);
+        if (serving) resolveUrl(serving[1]);
+      });
+      child.once("error", reject);
+      exited.then((code) =>
+        reject(new Error(`mock-update-server exited with ${code} before serving: ${output}`)),
+      );
+    });
+    const response = await fetch(`${url}/latest.yml`);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "version: 0.1.0\n");
+  } finally {
+    child.kill();
+    await exited;
   }
 });
 
@@ -588,6 +702,22 @@ test("release verification rejects changed bytes, version, and legacy updater me
   await writeFile(manifestPath, serializeUpdateManifest(manifest));
   await writeFile(join(options.directory, name), "different package bytes!");
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /size or SHA-512/);
+});
+
+test("verify-desktop-release-artifacts reports its verdict when run as a command", async () => {
+  const { options, name } = await artifactFixture();
+  const args = Object.entries(options).flatMap(([key, value]) => [`--${key}`, value]);
+  const { stdout } = await runReleaseScript("verify-desktop-release-artifacts.mjs", args);
+  const result = JSON.parse(stdout);
+  assert.equal(result.status, "passed");
+  assert.equal(result.version, options.version);
+  assert.deepEqual(result.artifacts.map((artifact) => artifact.name), [name]);
+
+  await writeFile(join(options.directory, name), "different package bytes!");
+  await assert.rejects(
+    runReleaseScript("verify-desktop-release-artifacts.mjs", args),
+    (error) => error.code === 1 && /size or SHA-512/.test(error.stderr),
+  );
 });
 
 test("release verification rejects missing installers and wrong update architecture", async () => {
