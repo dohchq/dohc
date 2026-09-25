@@ -466,6 +466,12 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     principalId: z.string().min(1),
     grantId: z.string().min(1),
   }).strict(),
+  z.object({
+    kind: z.literal("automation"),
+    automationId: z.string().min(1),
+    onBehalfOf: z.string().min(1),
+    depth: z.number().int().nonnegative(),
+  }).strict(),
 ]);
 const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
 const rawMomentFileSchema = z

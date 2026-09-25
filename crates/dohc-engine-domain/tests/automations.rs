@@ -14,8 +14,8 @@ use dohc_engine_domain::{
     MAX_AUTOMATION_FIELD_FACTS_BYTES, MAX_AUTOMATION_SUBSCRIPTION_FIELDS,
     MAX_FIELD_FACT_VALUE_BYTES, NoFaults, TxnOutcome, claim_automation_triggers_in_tx,
     claim_next_pending_automation, list_automation_claims, list_automation_failures,
-    reclaim_running_automations, retry_automation_claim, settle_automation_claim,
-    subscribe_automation, unsubscribe_automation,
+    reclaim_running_automations, release_automation_claim, retry_automation_claim,
+    settle_automation_claim, subscribe_automation, unsubscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -278,15 +278,25 @@ fn subscriptions_claim_only_the_change_kinds_and_fields_they_name() {
         subscribe_automation(&mut store, WS, &filter, 10, &NO_FAULTS).expect("subscribe");
     }
 
+    // A record is added when reconcile binds it. The apply that writes its
+    // first fields is a field change like any other.
     let mut created = field_change(1, &["status", "title"]);
     created.created = true;
     let claims = claim_for(&mut store, WS, &created, 20);
     assert_eq!(
         claimed_ids(&claims),
-        vec!["collection:tasks#added"],
-        "the apply that writes a record's first fields is an added record"
+        vec![
+            "collection:tasks#any-field",
+            "collection:tasks#split",
+            "collection:tasks#status",
+        ],
+        "writing a record's first fields is a changed record"
     );
-    assert_eq!(claims[0].change.kind, AutomationChangeKind::Added);
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.change.kind == AutomationChangeKind::Changed)
+    );
 
     let title = claim_for(&mut store, WS, &field_change(2, &["title"]), 30);
     assert_eq!(
@@ -447,7 +457,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         vec![
             AutomationFieldFact {
                 field_name: "body".to_owned(),
-                history_id: 11,
+                history_id: Some(11),
                 previous: Some(AutomationFactValue::Truncated {
                     truncated: true,
                     bytes: big.len(),
@@ -459,7 +469,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
             },
             AutomationFieldFact {
                 field_name: "status".to_owned(),
-                history_id: 12,
+                history_id: Some(12),
                 previous: None,
                 next: Some(AutomationFactValue::Whole {
                     value: json!("done"),
@@ -1136,6 +1146,66 @@ fn the_claim_history_lists_newest_first_and_settle_prunes_old_done_claims() {
             .expect("list claims")
             .is_empty()
     );
+}
+
+/// An executor that cannot run a claim yet hands it back: pending again,
+/// with the attempts it had before the serve and the same run, and served
+/// again by the next `claimNext`. Only a running claim can be released, and
+/// a claim whose holder dies after being served again still goes to the
+/// reaper.
+#[test]
+fn a_released_claim_is_pending_again_without_an_attempt() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, "plugin:triage", "tasks");
+    let claims = claim_for(&mut store, WS, &field_change(1, &["status"]), 20);
+    let claim_id = claims[0].claim_id.clone();
+    let release = |store: &mut EngineStore, now_ms| {
+        release_automation_claim(store, WS, &claim_id, now_ms, &NO_FAULTS)
+    };
+    let refused = |result: Result<AutomationClaim, DomainError>| {
+        matches!(result, Err(DomainError::InvalidInput { .. }))
+    };
+    assert!(
+        refused(release(&mut store, 21)),
+        "a pending claim is refused"
+    );
+
+    let served = claim_next(&mut store, "plugin:", 22).expect("served");
+    assert_eq!((served.attempts, served.run), (1, 1));
+    let released = release(&mut store, 23).expect("release");
+    assert_eq!(released.state, AutomationClaimState::Pending);
+    assert_eq!(
+        (released.attempts, released.run),
+        (claims[0].attempts, 1),
+        "a release is not an attempt"
+    );
+
+    let again = claim_next(&mut store, "plugin:", 24).expect("served again");
+    assert_eq!(again.claim_id, claim_id);
+    assert_eq!((again.attempts, again.run), (1, 1));
+    let reclaimed = reclaim_running_automations(&mut store, WS, None, 3, 24, 100, &NO_FAULTS)
+        .expect("reclaim running");
+    assert_eq!(
+        reclaimed
+            .iter()
+            .map(|claim| (claim.claim_id.as_str(), claim.state))
+            .collect::<Vec<_>>(),
+        vec![(claim_id.as_str(), AutomationClaimState::Pending)],
+        "the reaper requeues a claim whose holder died"
+    );
+
+    claim_next(&mut store, "plugin:", 110).expect("served after the reaper");
+    settle_automation_claim(
+        &mut store,
+        WS,
+        &claim_id,
+        &AutomationSettle::Done,
+        111,
+        &NO_FAULTS,
+    )
+    .expect("settle done");
+    assert!(refused(release(&mut store, 112)), "a done claim is refused");
 }
 
 #[test]

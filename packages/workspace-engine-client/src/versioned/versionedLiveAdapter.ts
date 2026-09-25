@@ -19,6 +19,7 @@ import {
   type AutomationFailuresResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
+  type AutomationReleaseParams,
   type AutomationRetryParams,
   type AutomationSettleParams,
   type AutomationSubscribeParams,
@@ -1184,6 +1185,19 @@ export class VersionedLiveAdapter {
     input: AutomationRetryParams,
   ): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsRetry, input);
+  }
+
+  /**
+   * Hands back a running claim the executor cannot run yet. It is pending
+   * again with its attempts as they were before `claimNext` served it, and
+   * the same run. A claim that is not running is refused. The engine
+   * announces nothing, so the executor drains again when what held the
+   * claim clears.
+   */
+  async releaseAutomationClaim(
+    input: AutomationReleaseParams,
+  ): Promise<AutomationClaimSummary> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRelease, input);
   }
 
   /** One automation's run history: its newest claims, newest first. */

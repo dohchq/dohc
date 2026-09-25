@@ -2135,6 +2135,7 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
                         text: "edited during join",
                     },
                     None,
+                    None,
                     1_203,
                 )
             })

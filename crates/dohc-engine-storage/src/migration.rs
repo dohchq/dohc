@@ -2130,6 +2130,84 @@ CREATE INDEX idx_automation_claims_automation
     ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
 ";
 
+/// Added and removed records. Reconcile claims them keyed by the moment that
+/// brought the record's file into its Collection or took it out, so a claim
+/// may now hold a third trigger shape. SQLite cannot change a CHECK in
+/// place, so the claims table is rebuilt with every row kept. Capture now
+/// looks up the record a written file is bound to, so bindings gain an index
+/// by object. `merged_moments` names the moments a merge wrote: they replay
+/// another version's changes, which claimed where they were made. A Y.Doc
+/// lineage keeps the author of its first update in `creator_author_json`,
+/// so the settle that creates its file names that author after compaction
+/// folds the update away.
+const V2_AUTOMATION_RECORD_LIFECYCLE_DDL: &str = "\
+CREATE TABLE automation_claims_next (
+    workspace_id          TEXT    NOT NULL,
+    claim_id              TEXT    NOT NULL,
+    automation_id         TEXT    NOT NULL,
+    trigger_origin_id     TEXT,
+    trigger_origin_seq    INTEGER,
+    trigger_history_id    INTEGER,
+    trigger_moment_order  INTEGER,
+    record_id             TEXT    NOT NULL,
+    collection_path       TEXT    NOT NULL,
+    depth                 INTEGER NOT NULL CHECK (depth >= 0),
+    state                 TEXT    NOT NULL
+                          CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts              INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error                 TEXT,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    change_kind           TEXT    NOT NULL DEFAULT 'changed'
+                          CHECK (change_kind IN ('added', 'changed', 'removed')),
+    author_origin_id      TEXT,
+    actor_kind            TEXT
+                          CHECK (actor_kind IS NULL OR actor_kind IN ('human', 'agent', 'automation')),
+    on_behalf_of          TEXT,
+    change_fields_json    TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(change_fields_json)),
+    change_fields_omitted INTEGER NOT NULL DEFAULT 0 CHECK (change_fields_omitted >= 0),
+    run                   INTEGER NOT NULL DEFAULT 1 CHECK (run >= 1),
+    PRIMARY KEY (workspace_id, claim_id),
+    CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
+    CHECK ((trigger_origin_id IS NOT NULL) + (trigger_history_id IS NOT NULL)
+           + (trigger_moment_order IS NOT NULL) = 1)
+) STRICT;
+INSERT INTO automation_claims_next
+    (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+     trigger_history_id, record_id, collection_path, depth, state, attempts, error,
+     created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of,
+     change_fields_json, change_fields_omitted, run)
+SELECT workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq,
+       trigger_history_id, record_id, collection_path, depth, state, attempts, error,
+       created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of,
+       change_fields_json, change_fields_omitted, run
+FROM automation_claims;
+DROP TABLE automation_claims;
+ALTER TABLE automation_claims_next RENAME TO automation_claims;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
+    ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
+    WHERE trigger_origin_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_history
+    ON automation_claims(workspace_id, automation_id, trigger_history_id)
+    WHERE trigger_history_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_moment
+    ON automation_claims(workspace_id, automation_id, trigger_moment_order, change_kind, record_id)
+    WHERE trigger_moment_order IS NOT NULL;
+CREATE INDEX idx_automation_claims_state
+    ON automation_claims(workspace_id, state, created_at_ms, claim_id);
+CREATE INDEX idx_automation_claims_automation
+    ON automation_claims(workspace_id, automation_id, created_at_ms, claim_id);
+CREATE INDEX collection_records_by_object
+    ON collection_records(workspace_id, version_id, object_id);
+CREATE TABLE merged_moments (
+    workspace_id TEXT    NOT NULL,
+    moment_order INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, moment_order)
+) STRICT;
+ALTER TABLE ydoc_docs ADD COLUMN creator_author_json TEXT
+    CHECK (creator_author_json IS NULL OR json_valid(creator_author_json));
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2172,6 +2250,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 6,
         id: "v2-relay-bootstrap-complete",
         sql: "ALTER TABLE sync_relay_cursors ADD COLUMN bootstrap_complete INTEGER NOT NULL DEFAULT 1 CHECK (bootstrap_complete IN (0, 1));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 7,
+        id: "v2-automation-record-lifecycle",
+        sql: V2_AUTOMATION_RECORD_LIFECYCLE_DDL,
         sets_user_version: None,
     },
 ];
@@ -2417,6 +2501,10 @@ mod tests {
             (
                 "v2-relay-bootstrap-complete",
                 "bb22e47bbdec585d028462a7927b7f87c04437dbe9f8bd9940ce9ba3117e1001",
+            ),
+            (
+                "v2-automation-record-lifecycle",
+                "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

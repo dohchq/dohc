@@ -41,6 +41,7 @@ export const WORKSPACE_METHOD = {
   automationsListClaims: "automations.listClaims",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
+  automationsRelease: "automations.release",
 } as const;
 
 /**
@@ -201,6 +202,11 @@ export type AutomationRetryParams = WorkspaceJsonObject & {
   nowMs?: number;
 };
 
+export type AutomationReleaseParams = WorkspaceJsonObject & {
+  claimId: string;
+  nowMs?: number;
+};
+
 export type AutomationListClaimsParams = WorkspaceJsonObject & {
   automationId: string;
 };
@@ -208,7 +214,7 @@ export type AutomationListClaimsParams = WorkspaceJsonObject & {
 /** A claim `automations.claimNext` serves, with its change's field facts. */
 export type AutomationClaim = typeof AutomationClaimSchema.Type;
 
-/** A claim without its field facts, as settle, retry, and the history answer. */
+/** A claim without its field facts, as settle, retry, release, and the history answer. */
 export type AutomationClaimSummary = typeof AutomationClaimSummarySchema.Type;
 
 export type AutomationSubscribeResult =
@@ -263,6 +269,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
+  [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
 };
 
 type CollectionMethodResultMap = {
@@ -806,13 +813,16 @@ const automationClaimFields = {
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**
-   * The change that inserted the claim, keyed either by its replication
-   * coordinate or — on a never-synced lineage — by the device-local history
-   * row id. Exactly one of the two shapes.
+   * The change that inserted the claim. A field change keys on its
+   * replication coordinate or, on a never-synced lineage, on the
+   * device-local history row id. An added or removed record keys on the
+   * moment that moved its file into or out of the Collection. Exactly one
+   * of the three shapes.
    */
   trigger: Schema.Union([
     mutableStruct({ originId: Schema.NonEmptyString, originSeq: Schema.Int }),
     mutableStruct({ historyId: Schema.Int }),
+    mutableStruct({ momentOrder: Schema.Int }),
   ]),
   recordId: Schema.NonEmptyString,
   collectionPath: Schema.NonEmptyString,
@@ -869,12 +879,17 @@ const AutomationClaimSchema = mutableStruct({
   ...automationClaimFields,
   change: mutableStruct({
     ...automationChangeFields,
-    /** The changed fields in field-name order. */
+    /**
+     * The fields in field-name order. A changed record lists its changed
+     * fields with the history row that recorded each. An added record lists
+     * its values as next, a removed record its last values as previous;
+     * neither has a history row.
+     */
     fields: Schema.mutable(
       Schema.Array(
         mutableStruct({
           field: Schema.String,
-          historyId: Schema.Int,
+          historyId: NullableInt,
           previous: AutomationFactValueSchema,
           next: AutomationFactValueSchema,
         }),
@@ -965,6 +980,7 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
+  [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,
 } as const;
 
 function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
