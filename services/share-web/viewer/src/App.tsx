@@ -285,7 +285,7 @@ export async function loadLog(
       }`,
       signal,
     );
-    if (!response.ok) throw new ViewResponseError(response.status);
+    if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
@@ -444,7 +444,7 @@ export async function loadCurrentState(
 
 async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
   const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
-  if (!response.ok) throw new ViewResponseError(response.status);
+  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const meta = viewMeta(await response.json());
   if (!meta) throw new Error("refused");
   return meta;
@@ -1094,6 +1094,13 @@ export function App() {
     let followerController: AbortController | null = null;
     const sessionController = new AbortController();
     const refuseIfTerminal = (error: unknown): boolean => {
+      // A version mismatch lasts until the server is updated, so the open
+      // page stops following and says so.
+      if (current && error instanceof VersionMismatchError) {
+        readyStateRef.current = null;
+        setState({ status: "version-mismatch", message: error.message });
+        return true;
+      }
       if (
         current &&
         error instanceof ViewResponseError &&
