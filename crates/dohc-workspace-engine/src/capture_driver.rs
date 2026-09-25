@@ -1453,9 +1453,12 @@ const MAX_FLUSH_CYCLES: u32 = 32;
 /// What one `capture.flush` could actually promise.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FlushOutcome {
-    /// The reconcile loop reached converged: every change visible on disk at
-    /// entry has been captured and acknowledged. False means the cycle bound
-    /// was hit, the layer is down, or teardown raced the flush.
+    /// Capture is quiet: the reconcile loop reached converged, and every change
+    /// visible on disk at entry has been captured, acknowledged, or deferred
+    /// to a live document session. It does not mean every edit is on disk: a
+    /// live Y.Doc's edits can still be on their way, and the session's settle
+    /// or close writes them. False means the cycle bound was hit, the layer is
+    /// down, or teardown raced the flush.
     pub(crate) settled: bool,
     /// The files layer was up when the flush was answered.
     pub(crate) running: bool,

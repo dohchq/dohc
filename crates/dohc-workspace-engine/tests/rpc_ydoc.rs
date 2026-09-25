@@ -2232,11 +2232,17 @@ async fn wait_for_capture_to_defer_under_live_session(
 /// Capture defers an empty new file a live session holds: the file is the
 /// session's creation baseline, and the session's settle records it. That is
 /// not a failure, so capture settles healthy with the file still unrecorded.
+///
+/// A healthy flush alone could come before capture saw the file. The forced
+/// reconcile rebuilds the files layer, whose first pass scans the whole
+/// workspace, so the settled flush after it covers the file.
 async fn wait_for_capture_to_settle_around_live_session(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
     id_base: u64,
 ) {
+    call(transport, handle, id_base, "capture.reconcile", json!({})).await;
+    let id_base = id_base + 1;
     let mut last_flush = Value::Null;
     for attempt in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
