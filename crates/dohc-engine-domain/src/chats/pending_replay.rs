@@ -505,7 +505,7 @@ fn apply_pending_message(
     payload: PendingMessageAppend,
 ) -> Result<(), DomainError> {
     let owner_name = normalize_agent_owner_name(
-        payload.author_kind == "agent",
+        payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
     )
     .map_err(|_| DomainError::StateCorrupt {
@@ -640,7 +640,7 @@ fn apply_pending_message(
         &payload.thread_id,
         &payload.message_id,
         &author_display_name,
-        payload.author_kind == "agent",
+        &payload.author_kind,
         &body,
     )?;
     bump_chat_conversation_revision(tx, workspace_id, &payload.thread_id)?;
