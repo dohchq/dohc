@@ -18,6 +18,7 @@ import {
   type ValidAutomationSummary,
 } from "./automationSentence";
 import { useAutomationRetry } from "./useAutomationRetry";
+import { AUTOMATION_HOLDS_UNREADABLE } from "../workbench/NoticeCenter";
 
 // The ⚡ panel: a Collection's automations in plain words, each with an on
 // and off switch and its runs on this computer. Main reads and writes
@@ -293,13 +294,22 @@ function RowMenu(props: { label: string; items: readonly MenuItem[] }) {
  * newer one.
  */
 export function useCollectionAutomations(workspaceId: string, collectionPath: string, onError: ErrorReport) {
-  const [state, setState] = useState<{ file: ListCollectionAutomationsResult | null; version: number }>({ file: null, version: 0 });
+  const [state, setState] = useState<{ file: ListCollectionAutomationsResult | null; holdsUnreadable: boolean; version: number }>({
+    file: null, holdsUnreadable: false, version: 0,
+  });
   const request = useRequestSequence([workspaceId, collectionPath]);
   const reload = useCallback(async () => {
     const token = request.next();
     try {
-      const result = await bridge().listCollectionAutomations({ workspaceId, collectionPath });
-      if (request.isCurrent(token)) setState((current) => ({ file: result, version: current.version + 1 }));
+      // When dohc cannot read which steps were allowed, every automation
+      // waits, and the panel offers the way back the notice does.
+      const [result, holds] = await Promise.all([
+        bridge().listCollectionAutomations({ workspaceId, collectionPath }),
+        bridge().listAutomationHolds({ workspaceId }),
+      ]);
+      if (request.isCurrent(token)) {
+        setState((current) => ({ file: result, holdsUnreadable: holds.unreadable, version: current.version + 1 }));
+      }
     } catch (error) {
       if (request.isCurrent(token)) onError("dohc could not read this Collection's automations.", error, () => void reload());
     }
@@ -322,7 +332,7 @@ export function AutomationsPanel(props: {
   onNotice: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, collectionPath, onError, onNotice } = props;
-  const { file, version, reload: load } = props.automations;
+  const { file, holdsUnreadable, version, reload: load } = props.automations;
   const fileRef = useRef(file);
   fileRef.current = file;
   const [runsOf, setRunsOf] = useState<{ automationId: string; name: string } | null>(null);
@@ -432,6 +442,30 @@ export function AutomationsPanel(props: {
     setFocusAfterDelete(null);
   }, [focusAfterDelete, saving]);
 
+  // The way back when dohc cannot read which steps were allowed: hold every
+  // step for Allow again, or open the folder to fix the file.
+  const resetHolds = () => {
+    const epoch = scope.current();
+    void bridge()
+      .resetAutomationHolds({ workspaceId })
+      .then((result) => {
+        if (!scope.isCurrent(epoch)) return;
+        if (result.status === "roster-unknown") {
+          onError("Couldn't reset automation holds.", new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."), resetHolds);
+        } else {
+          void load();
+        }
+      })
+      .catch((error: unknown) => {
+        if (scope.isCurrent(epoch)) onError("Couldn't reset automation holds.", error, resetHolds);
+      });
+  };
+  const revealHolds = () => {
+    void bridge()
+      .revealAutomationHolds({ workspaceId })
+      .catch((error: unknown) => onError("Couldn't open the automations folder.", error));
+  };
+
   const allow = (automationId: string, definitionHash: string, step: number, seq: number) => {
     const epoch = scope.current();
     void bridge()
@@ -527,6 +561,15 @@ export function AutomationsPanel(props: {
           <p className="m-0 px-3 py-4 text-[12px] text-muted">No automations in this Collection yet.</p>
         ) : (
           <>
+            {holdsUnreadable ? (
+              <div data-testid="automation-holds-unreadable" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+                <p className="m-0">{AUTOMATION_HOLDS_UNREADABLE}</p>
+                <div className="mt-1.5 flex gap-1.5">
+                  <SecondaryButton size="compact" onClick={resetHolds}>Reset holds</SecondaryButton>
+                  <SecondaryButton size="compact" onClick={revealHolds}>Open folder</SecondaryButton>
+                </div>
+              </div>
+            ) : null}
             {editable === null ? (
               <div className="border-b border-line px-3 py-2 text-[12px] text-muted">
                 <p className="m-0">Fix the automations dohc cannot read to edit them here.</p>

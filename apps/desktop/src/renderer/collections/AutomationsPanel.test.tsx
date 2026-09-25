@@ -43,14 +43,15 @@ function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsR
   return { status: "read", contentHash: HASH, automations };
 }
 
-type Run = ListCollectionAutomationRunsResult["runs"][number];
+type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 const run = (overrides: Partial<Run>): Run => ({
   claimId: "atc_1", state: "done", error: null, createdAtMs: Date.now(), updatedAtMs: Date.now(),
   writes: [], definitionChanged: false, chainStopped: false, undone: false, ...overrides,
 });
 
-function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = []) {
+function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: { holdsUnreadable?: boolean } = {}) {
   let current = file;
+  let holdsUnreadable = options.holdsUnreadable ?? false;
   const written: WriteCollectionAutomationsPayload[] = [];
   const writeResults: WriteCollectionAutomationsResult[] = [];
   const bridge = {
@@ -61,7 +62,13 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = []) {
       if (result.status === "written") current = read(payload.automations.map((automation) => summary(automation)));
       return result;
     }),
-    listCollectionAutomationRuns: vi.fn(async (): Promise<ListCollectionAutomationRunsResult> => ({ runs })),
+    listCollectionAutomationRuns: vi.fn(async (): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs })),
+    listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: holdsUnreadable })),
+    resetAutomationHolds: vi.fn(async () => {
+      holdsUnreadable = false;
+      return { status: "reset" as const };
+    }),
+    revealAutomationHolds: vi.fn(async () => undefined),
     retryCollectionAutomation: vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" })),
     undoCollectionAutomationRun: vi.fn(async (): Promise<UndoCollectionAutomationRunResult> =>
       ({ status: "undone", reverted: 1, removed: 0, changedSince: 1, missing: 0 })),
@@ -221,6 +228,19 @@ describe("the ⚡ panel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Open file" }));
     expect(onOpenFile).toHaveBeenCalledWith("Tasks/automations.yaml");
     expect(bridge.writeCollectionAutomations).not.toHaveBeenCalled();
+  });
+
+  it("offers Reset holds and Open folder when dohc cannot read which steps were allowed", async () => {
+    const { bridge } = makeBridge(read([summary(stamp, { reach: { kind: "waiting", reason: "" } })]), [], { holdsUnreadable: true });
+    const user = userEvent.setup();
+    render(<Panel />);
+    const line = await screen.findByTestId("automation-holds-unreadable");
+    expect(line.textContent).toContain("dohc cannot read .dohc/automations/reach.json");
+    await user.click(within(line).getByRole("button", { name: "Open folder" }));
+    expect(bridge.revealAutomationHolds).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await user.click(within(line).getByRole("button", { name: "Reset holds" }));
+    expect(bridge.resetAutomationHolds).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(screen.queryByTestId("automation-holds-unreadable")).toBeNull());
   });
 
   it("says an automation waits to check who can edit, and lets a person allow a held step", async () => {

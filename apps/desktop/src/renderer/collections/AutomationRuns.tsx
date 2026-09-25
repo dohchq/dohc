@@ -13,7 +13,7 @@ import { useRequestSequence } from "../useRequestSequence";
 // so run history is too). A failed run offers Try again unless the chain
 // cap stopped it, and a run that changed records offers Undo.
 
-type Run = ListCollectionAutomationRunsResult["runs"][number];
+type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 type RunWrite = Run["writes"][number];
 type Undone = Extract<UndoCollectionAutomationRunResult, { status: "undone" }>;
 
@@ -146,7 +146,8 @@ export function AutomationRuns(props: {
   onNotice: (message: string) => void;
 }) {
   const { workspaceId, automationId, onError, onNotice } = props;
-  const [runs, setRuns] = useState<Run[] | null>(null);
+  // "unavailable" in a shared view: its automations run on the owner's computer.
+  const [runs, setRuns] = useState<Run[] | "unavailable" | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
   const request = useRequestSequence([workspaceId, automationId]);
   // Rises only when the workspace or automation changes, or the view
@@ -156,7 +157,7 @@ export function AutomationRuns(props: {
     const token = request.next();
     try {
       const result = await bridge().listCollectionAutomationRuns({ workspaceId, automationId });
-      if (request.isCurrent(token)) setRuns(result.runs);
+      if (request.isCurrent(token)) setRuns(result.status === "listed" ? result.runs : "unavailable");
     } catch (error) {
       if (request.isCurrent(token)) onError("dohc could not read this automation's runs.", error, () => void load());
     }
@@ -192,6 +193,9 @@ export function AutomationRuns(props: {
   };
 
   if (runs === null) return null;
+  if (runs === "unavailable") {
+    return <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>;
+  }
   if (runs.length === 0) {
     return <p className="m-0 px-3 py-4 text-[12px] text-muted">This automation has not run on this computer yet.</p>;
   }

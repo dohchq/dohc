@@ -220,6 +220,7 @@ function makeBridge(
     ),
     // The header's ⚡ count reads the Collection's automations.
     listCollectionAutomations: vi.fn(async () => ({ status: "missing" as const })),
+    listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: false })),
   };
 }
 
@@ -357,7 +358,7 @@ describe("CollectionPage", () => {
         valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
         unsupported: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
-      listCollectionAutomationRuns: vi.fn(async () => ({ runs: [] })),
+      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
       onAutomationFailuresChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
     });

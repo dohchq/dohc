@@ -168,6 +168,10 @@ function automationFailureNotice(
   };
 }
 
+// The notice, and the ⚡ panel, when dohc cannot read which steps were allowed.
+export const AUTOMATION_HOLDS_UNREADABLE =
+  "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
+
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
 // again, so it never offers Try again — resuming a document there would
@@ -551,7 +555,7 @@ export function NoticeCenter(props: {
         id: "automation-holds-unreadable",
         tone: "warning",
         title: "Automations are waiting",
-        body: "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.",
+        body: AUTOMATION_HOLDS_UNREADABLE,
         Icon: AlertTriangle,
         actions: [
           ...(props.onResetAutomationHolds ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }] : []),

@@ -707,7 +707,7 @@ function makeBaseBridge(
       async (): Promise<ListCollectionAutomationsResult> => ({ status: "missing" }),
     ),
     listCollectionAutomationRuns: vi.fn(
-      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ runs: [] }),
+      async (_payload: { workspaceId: string; automationId: string }): Promise<ListCollectionAutomationRunsResult> => ({ status: "listed", runs: [] }),
     ),
     retryCollectionAutomation: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued" }),
@@ -9376,7 +9376,7 @@ describe("automation failure notices", () => {
       collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
     }));
     bridge.listAutomationFailures.mockResolvedValue({ failures: [failure] });
-    bridge.listCollectionAutomationRuns.mockResolvedValue({ runs: [{
+    bridge.listCollectionAutomationRuns.mockResolvedValue({ status: "listed", runs: [{
       claimId: "atc_failed", state: "failed", error: failure.error, createdAtMs: 5_000, updatedAtMs: 5_000,
       writes: [], definitionChanged: false, chainStopped: false, undone: false,
     }] });
@@ -9413,7 +9413,7 @@ describe("automation failure notices", () => {
       collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
     }));
     bridge.listAutomationFailures.mockResolvedValue({ failures: [failure("first", "atc_first"), failure("second", "atc_second")] });
-    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ runs: [{
+    bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
       writes: [], definitionChanged: false, chainStopped: false, undone: false,
