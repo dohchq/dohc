@@ -210,15 +210,15 @@ export function registerSharedViewsIpcHandlers<
       },
       rollbackLabel: "open-share",
       cleanupFailureMessage:
-        "Couldn't safely roll back the shared view. Its folder was left in place; restart dohc before retrying.",
+        `dohc could not close the failed share download. Files remain in ${rootPath}. Restart dohc, then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof ShareUnavailableError) {
           return new Error(
-            "This share was ended before it could be opened. Nothing was added on this machine.",
+            `This share ended before it could be opened. Files remain in ${rootPath}. Ask the owner to share again, then choose another empty folder.`,
           );
         }
         return new Error(
-          "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
+          `dohc could not open the share. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
         );
       },
     });

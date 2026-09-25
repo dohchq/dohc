@@ -152,7 +152,6 @@ import {
 } from "./window/createMainWindow";
 import {
   createWorkspaceFolder,
-  resetFailedJoinFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import { createFolder } from "./workspaces/workspaceFiles";
@@ -1610,14 +1609,6 @@ function removePhysicalWorkspace(
   });
 }
 
-async function cleanupFailedPhysicalWorkspace(
-  workspaceId: string,
-  rootPath: string,
-): Promise<void> {
-  await closeRelayTransportWorkspace(workspaceId);
-  await resetFailedJoinFolder(rootPath);
-}
-
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
   createFolder: createWorkspaceFolder,
@@ -1625,7 +1616,7 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
   remove: removePhysicalWorkspace,
   release: (reservation, cleanup) =>
     workspaceAuthorities.releaseReservation(reservation, cleanup),
-  cleanup: cleanupFailedPhysicalWorkspace,
+  closeRelay: (workspaceId) => closeRelayTransportWorkspace(workspaceId),
   rollbackComplete: () => {
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();

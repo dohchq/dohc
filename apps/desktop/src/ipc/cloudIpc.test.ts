@@ -101,7 +101,7 @@ async function harness() {
       finalize, removeBinding: () => { registry.delete(binding.workspaceId); },
     }),
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
-    cleanup, rollbackComplete: notify, logError: vi.fn(),
+    closeRelay: cleanup, rollbackComplete: notify, logError: vi.fn(),
   });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerCloudIpcHandlers<string, Event, Operation>({
@@ -351,11 +351,14 @@ describe("registered cloud handlers", () => {
     expect(h.bindRelay.mock.calls[0]?.[0]).not.toHaveProperty("attachmentId");
   });
 
-  it("uses the joined-workspace owner to roll back a failed bootstrap while preserving passphrase errors", async () => {
+  it.each(["Passphrase required to unlock synced secrets.", "download interrupted"])("preserves the failed join folder and explains retry after %s", async (message) => {
     const h = await harness();
-    h.bootstrap.mockRejectedValue(new Error("Passphrase required to unlock synced secrets."));
-    await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow("Passphrase required");
-    expect(h.cleanup).toHaveBeenCalledWith("joined", h.joinPayload.rootPath);
+    h.bootstrap.mockRejectedValue(new Error(message));
+    const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow(/choose another empty folder/i);
+    if (message.startsWith("Passphrase")) await expect(result).rejects.toThrow("Passphrase required");
+    expect(h.cleanup).toHaveBeenCalledWith("joined");
     expect(h.registry.has("joined")).toBe(false);
     expect(h.enable).not.toHaveBeenCalled();
   });

@@ -77,7 +77,7 @@ async function harness() {
       finalize, removeBinding: () => { steps.push("remove"); registry.delete(binding.workspaceId); },
     }),
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
-    cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
+    closeRelay: cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
   });
   const setView = vi.fn<Dependencies["setWorkspaceShareView"]>((id, shareView) => { steps.push("pin"); registry.get(id)!.shareView = shareView; });
   const recordIdentity = vi.fn<EngineRelayWorkspaceClient["recordShareViewIdentity"]>(async () => { steps.push("identity"); return { identity: "recorded" }; });
@@ -166,15 +166,26 @@ describe("registered received-view handlers", () => {
 
   it("rolls back a failed first refresh before opening activity", async () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("ended before it could be opened");
-    expect(h.cleanup).toHaveBeenCalledWith(expect.any(String), h.openPayload.rootPath);
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow("ended before it could be opened");
+    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose another empty folder");
+    expect(h.cleanup).toHaveBeenCalledWith(expect.any(String));
     expect(h.registry.size).toBe(1); expect(h.open).not.toHaveBeenCalled();
     expect(h.steps.indexOf("cleanup")).toBeLessThan(h.steps.indexOf("remove"));
   });
 
+  it("names the preserved folder and another empty folder when the share download fails", async () => {
+    const h = await harness(); h.reconcile.mockRejectedValue(new Error("download interrupted"));
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose another empty folder");
+    expect(h.registry.size).toBe(1);
+  });
+
   it("retains the registered view and reports the recovery path if rollback cleanup fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("pull failed")); h.cleanup.mockRejectedValue(new Error("folder busy"));
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("folder was left in place");
+    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("Files remain in");
     expect(h.registry.size).toBe(2); expect(h.open).not.toHaveBeenCalled();
   });
 

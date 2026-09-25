@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createWorkspaceFolder, resetFailedJoinFolder } from "./createWorkspaceFolder";
+import { createWorkspaceFolder } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 
 let base: string;
@@ -61,28 +61,6 @@ describe("createWorkspaceFolder", () => {
       await readFile(join(root, ".dohc", "manifest.json"), "utf8"),
     );
     expect(manifest.workspaceId).toBe("ws-synced-elsewhere");
-  });
-
-  // Failed-first-pull contract (0P-C gate fix): a join that could not
-  // complete its first pull rolls the folder back to empty, so nothing
-  // half-joined is left behind and a retry passes the empty-folder check.
-  it("resetFailedJoinFolder returns a failed join's folder to empty", async () => {
-    const root = join(base, "failed-join");
-    await createWorkspaceFolder({
-      rootPath: root,
-      kind: "personal",
-      workspaceId: "ws-failed-join",
-    });
-    // Simulate partially materialized pull output alongside the scaffolding.
-    await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-    await writeFile(join(root, ".dohc", "engine", "engine.db"), "stub");
-    await writeFile(join(root, "partial.md"), "half-pulled\n");
-
-    await resetFailedJoinFolder(root);
-    expect(await readdir(root)).toEqual([]);
-    // Idempotent (and tolerant of an already-gone folder).
-    await resetFailedJoinFolder(root);
-    await resetFailedJoinFolder(join(base, "never-existed"));
   });
 
   it("never rebinds an existing manifest to a requested identity", async () => {
