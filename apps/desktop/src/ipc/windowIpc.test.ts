@@ -4,8 +4,7 @@ import { CHANNELS } from "./channels";
 import { decideNavigation } from "../security/electronSecurity";
 import { createExitRounds, createQuitGuard } from "../quitGuard";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
-import { createUserSettingsWriteQueue, createZoomMutation } from "../window/windowZoom";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type ZoomStep } from "../settings/userSettings";
 import { createMarkRecorder } from "../performance/desktopMarks";
 import { deferred } from "../testing/deferred";
 
@@ -42,11 +41,15 @@ async function harness(isPackaged = false) {
     send: (_value, message) => { if (message.kind === "request") requestIds.push(message.roundId); },
     confirmProceed,
   });
-  const enqueue = createUserSettingsWriteQueue();
-  let stored: DesktopUserSettings = structuredClone(DEFAULT_USER_SETTINGS);
-  const apply = vi.fn();
-  const write = vi.fn(async (next: DesktopUserSettings) => { stored = next; });
-  const stepWindowZoom = createZoomMutation({ enqueue, read: async () => ({ settings: stored, source: "stored" }), write, apply });
+  // The settings file owner computes, saves, and applies the step; its tests
+  // cover that. This handler only admits the request and hands it over.
+  const stepWindowZoom = vi.fn(async (step: ZoomStep) => ({
+    settings: {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: step === "in" ? 1 : 0 },
+    },
+    source: "stored" as const,
+  }));
   const clipboard = { writeText: vi.fn() };
   const shell = { openExternal: vi.fn(async (_url: string) => undefined) };
   const overlay = vi.fn();
@@ -78,7 +81,7 @@ async function harness(isPackaged = false) {
     ...capability, first, second, handlers, events, order, sessions, retiring,
     prepareForRendererReload, setRetirement: (next: Promise<void>) => { retirement = next; },
     quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
-    enqueue, write, apply, stored: () => stored, clipboard, shell, overlay, windows,
+    stepWindowZoom, clipboard, shell, overlay, windows,
     BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
     logLaunchMarksOnce,
     registerAll() { capability.registerReload(); capability.registerExternalUrl(); capability.registerWindowControls(); capability.registerQuitAndMarks(); },
@@ -119,7 +122,7 @@ describe("registered window IPC", () => {
     expect(h.clipboard.writeText).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
-    expect(h.write).not.toHaveBeenCalled();
+    expect(h.stepWindowZoom).not.toHaveBeenCalled();
     expect(h.quit).not.toHaveBeenCalled();
     expect(h.launchMarks.snapshot).not.toHaveBeenCalled();
   });
@@ -137,7 +140,7 @@ describe("registered window IPC", () => {
     expect(h.prepareForRendererReload).not.toHaveBeenCalled();
     expect(h.clipboard.writeText).not.toHaveBeenCalled();
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
-    expect(h.write).not.toHaveBeenCalled();
+    expect(h.stepWindowZoom).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
   });
 
@@ -231,34 +234,14 @@ describe("registered window IPC", () => {
     expect(h.rememberChromeTheme).toHaveBeenCalledTimes(2);
   });
 
-  it("queues zoom behind another settings write and persists before applying", async () => {
+  it("hands a zoom step to the settings file owner and answers its result", async () => {
     const h = await harness(); h.registerWindowControls();
-    const reached = deferred(), release = deferred();
-    const settingsWrite = h.enqueue(async () => {
-      reached.resolve(); await release.promise;
-      await h.write({ ...h.stored(), appearance: { ...h.stored().appearance, zoomLevel: 2 } });
+    await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "in" })).resolves.toMatchObject({
+      source: "stored", settings: { appearance: { zoomLevel: 1 } },
     });
-    await reached.promise;
-    const zoom = h.invoke(CHANNELS.stepWindowZoom, { step: "in" });
-    h.apply.mockImplementation(level => { expect(h.stored().appearance.zoomLevel).toBe(level); });
-    try { expect(h.apply).not.toHaveBeenCalled(); } finally {
-      release.resolve();
-      await Promise.allSettled([settingsWrite, zoom]);
-    }
-    await settingsWrite;
-    await expect(zoom).resolves.toMatchObject({ source: "stored", settings: { appearance: { zoomLevel: 3 } } });
-    expect(h.apply).toHaveBeenCalledWith(3);
-    await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "out" })).resolves.toMatchObject({ settings: { appearance: { zoomLevel: 2 } } });
-  });
-
-  it("does not apply failed zoom persistence and accepts the next queued mutation", async () => {
-    const h = await harness(); h.registerWindowControls();
-    const initial = h.stored().appearance.zoomLevel;
-    h.write.mockRejectedValueOnce(new Error("disk failed"));
+    expect(h.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
+    h.stepWindowZoom.mockRejectedValueOnce(new Error("disk failed"));
     await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "in" })).rejects.toThrow("disk failed");
-    expect(h.apply).not.toHaveBeenCalled();
-    expect(h.stored().appearance.zoomLevel).toBe(initial);
-    await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "in" })).resolves.toMatchObject({ settings: { appearance: { zoomLevel: initial + 1 } } });
   });
 
   it("holds an approved quit until the registered resume answer", async () => {

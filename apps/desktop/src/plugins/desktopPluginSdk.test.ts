@@ -105,6 +105,12 @@ async function fixture() {
     return {
       doc, initialUpdate: Y.encodeStateAsUpdate(doc), path, contentKind: "richdoc",
       applyLocalUpdate(update, armed, options) { Y.applyUpdate(doc, update); journal.push(options); armed?.(); },
+      async applyDecidedLocalUpdate(decide, armed, options) {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); journal.push(options); armed?.();
+        return true;
+      },
       settleNow: async () => ({ momentId: "moment", path, content: null, sha256: "fixture", materialized: true,
         projection: { contentKind: "richdoc", sourceStateVectorSha256: "fixture", destructive: false } }),
       close: async () => undefined,
@@ -132,12 +138,15 @@ async function fixture() {
     ensureWorkspaceActivityOpen: vi.fn(async () => activityStatus),
     activity: { engineCaptureFor: () => captureAvailable ? capture : null },
     collectionEditContextFor: vi.fn<Dependencies["collectionEditContextFor"]>(async (operation, signal) => ({
-      workspaceRoot: operation.workspace.rootPath, capture, signal,
-      withAdapter: async work => work({ queryCollectionRecords: async () => ({
-        collection: { path: "tasks", status: "valid", reasons: [] },
-        records: [{ id: "created-record", path: "tasks/new.md", conflicted: false, values: [] }],
-        groups: null, nextCursor: null,
-      }) }),
+      workspaceRoot: operation.workspace.rootPath, capture, signal: signal ?? operation.signal,
+      // The engine has adopted tasks/new.md, under the id its file carries, once the file exists.
+      withAdapter: async work => work({ getCollectionRecord: async ({ recordId }) => {
+        const text = await readFile(join(operation.workspace.rootPath, "tasks", "new.md"), "utf8").catch(() => "");
+        if (!text.includes(`id: ${recordId}`)) throw new Error("collection-record-not-found");
+        return { collection: { path: "tasks", status: "valid", reasons: [] },
+          record: { id: recordId, path: "tasks/new.md", conflicted: false, values: [] }, history: [], nextBeforeHistoryId: null };
+      } }),
+      onCaptureSettled: () => () => undefined,
     })),
     requirePluginEngineCaptureForOperation: vi.fn<Dependencies["requirePluginEngineCaptureForOperation"]>(async operation => {
       operation.assertCurrent();
@@ -174,8 +183,10 @@ async function fixture() {
 }
 
 function claim(): AutomationClaim {
-  return { claimId: "claim", automationId: "plugin/triage", trigger: { originId: "origin", originSeq: 4 },
-    recordId: "record", collectionPath: "tasks", depth: 2, state: "running", attempts: 1, createdAtMs: 1, updatedAtMs: 1 };
+  return { claimId: "claim", automationId: "plugin:plugin/triage", trigger: { originId: "origin", originSeq: 4 },
+    recordId: "record", collectionPath: "tasks", depth: 2,
+    change: { kind: "changed", authorOriginId: null, actorKind: "human", onBehalfOf: null, fields: [], fieldsOmitted: 0 },
+    state: "running", attempts: 1, run: 1, createdAtMs: 1, updatedAtMs: 1 };
 }
 
 describe("desktop plugin SDK authority", () => {
@@ -295,9 +306,14 @@ describe("desktop plugin SDK runtime ownership", () => {
       expect(f.dependencies.collectionEditContextFor).not.toHaveBeenCalled();
       await f.invoke("collections.setFields", { path: "tasks/one.md", fields: { status: "done" }, author: { depth: 99 }, idempotencyKey: "forged" }, { automationClaimId: "claim" });
       await mkdir(join(f.workspace.rootPath, "tasks"));
-      await expect(f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" })).resolves.toEqual({ path: "tasks/new.md", recordId: "created-record" });
-      expect(f.journal).toEqual([0, 1].map(ordinal => ({ actorOriginId: "plugin/triage",
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/${ordinal}` })));
+      const created = await f.invoke("collections.createRecord", { path: "tasks", name: "new", fields: { title: "Created" } }, { automationClaimId: "claim" });
+      expect(created).toEqual({ path: "tasks/new.md", recordId: expect.stringMatching(/^rec_[a-z2-7]{26}$/) });
+      await expect(readFile(join(f.workspace.rootPath, "tasks", "new.md"), "utf8")).resolves.toBe(`---\nid: ${(created as { recordId: string }).recordId}\n---\n`);
+      expect(f.journal).toEqual([["0", "status"], ["1", "title"]].map(([ordinal, field]) => ({ actorOriginId: "plugin:plugin/triage",
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 3 }, idempotencyKey: `claim/1/${ordinal}/${field}` })));
+      // The automation creates the file itself as the moment's author, so the added record's claim carries its depth.
+      expect(f.writeCapture).toHaveBeenCalledWith(join(f.workspace.rootPath, "tasks", "new.md"), expect.any(String),
+        { kind: "automation", automationId: "plugin:plugin/triage", onBehalfOf: "local", depth: 3 }, expect.objectContaining({ createOnly: true }));
       expect(f.documents.map(doc => doc.getMap("frontmatter").toJSON())).toEqual([{ status: "done" }, { title: "Created" }]);
       expect(vi.mocked(f.dependencies.collectionEditContextFor).mock.calls.map(call => call[1])).toEqual(
         vi.mocked(f.dependencies.workerDatabaseReader).mock.calls.slice(1).map(call => call[0]));

@@ -138,7 +138,7 @@ export function registerSharedViewsIpcHandlers<
       }
       throw error;
     }
-    // A chat-channel code has no file selector, so there is no scope to
+    // A chat code has no file selector, so there is no scope to
     // enforce and nothing to project. Refuse it here rather than record a
     // grant of "everything" (the mount path says the same through
     // assertMountableSelector).
@@ -210,15 +210,15 @@ export function registerSharedViewsIpcHandlers<
       },
       rollbackLabel: "open-share",
       cleanupFailureMessage:
-        "Couldn't safely roll back the shared view. Its folder was left in place; restart dohc before retrying.",
+        `dohc could not close the failed share download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before opening the share again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof ShareUnavailableError) {
           return new Error(
-            "This share was ended before it could be opened. Nothing was added on this machine.",
+            `This share ended before it could be opened. Files remain in ${rootPath}. Ask the owner to share again, then choose another empty folder.`,
           );
         }
         return new Error(
-          "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
+          `dohc could not open the share. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
         );
       },
     });

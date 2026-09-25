@@ -1,15 +1,19 @@
 //! The origin-device automation trigger (ADR 0008) through the real local
 //! apply path: a committed `ydoc_record_update` with a registered
 //! subscription inserts exactly one pending claim, in the append's own
-//! transaction, keyed by the journaled replication coordinate. A replay of
-//! the same update dedupes into no second claim, and a peer applying the
-//! same ops by replication claims nothing at all — the non-origin device's
-//! half of the two-device exactly-once rule.
+//! transaction, keyed by the journaled replication coordinate and carrying
+//! the change's kind, actor, and field facts. A field-filtered subscription
+//! claims only its fields' changes, and each executor drains only its own
+//! automation id prefix. A replay of the same update dedupes into no second
+//! claim, and a peer applying the same ops by replication claims nothing at
+//! all — the non-origin device's half of the two-device exactly-once rule.
 
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_domain::{
-    AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaimState, AutomationSettle, AutomationTrigger,
-    ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText, subscribe_automation,
+    AUTOMATION_RECLAIM_EXHAUSTED, AutomationChange, AutomationChangeKind, AutomationClaimState,
+    AutomationFactValue, AutomationFieldFact, AutomationSettle, AutomationSubscription,
+    AutomationTrigger, ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText,
+    subscribe_automation,
 };
 use dohc_engine_runtime::{
     CancellationToken, LifecycleState, NoFaults, RuntimeError, WorkspaceSupervisor,
@@ -25,6 +29,16 @@ const PATH: &str = "tasks/alpha.md";
 const OBJECT: &str = "automation-claim-record-object";
 const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const AUTOMATION: &str = "plugin:triage";
+
+/// Added and changed records under "tasks", on any field or only `field`.
+fn subscription(automation_id: &str, field: Option<&str>) -> AutomationSubscription {
+    AutomationSubscription {
+        automation_id: automation_id.to_owned(),
+        prefix: "tasks".to_owned(),
+        kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+        fields: field.map(|field| vec![field.to_owned()]),
+    }
+}
 
 fn seed_identity(db: &Path, workspace_id: &str) {
     let mut store = EngineStore::open(db, 9_103).expect("open store");
@@ -228,14 +242,25 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     handle
         .automation_subscribe(
             WS.to_owned(),
-            AUTOMATION.to_owned(),
-            "tasks".to_owned(),
+            subscription(AUTOMATION, None),
             150,
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
         .expect("subscribe automation");
+    // A second automation watches only another field: the status edit
+    // below costs it nothing.
+    handle
+        .automation_subscribe(
+            WS.to_owned(),
+            subscription("collection:tasks#priority", Some("priority")),
+            150,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("subscribe field-filtered automation");
 
     let edit = doc.frontmatter_set("status", "done");
     let append = handle
@@ -275,7 +300,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     assert_eq!(claim.automation_id, AUTOMATION);
     assert_eq!(claim.state, AutomationClaimState::Pending);
     assert_eq!(claim.collection_path, "tasks");
-    assert_eq!(claim.record_id, RECORD);
+    assert_eq!(claim.record_id.as_deref(), Some(RECORD));
     let facts = append
         .outcome
         .record_facts
@@ -293,6 +318,53 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         },
         "the claim key is the same coordinate every peer derives"
     );
+    assert_eq!(
+        claim.change,
+        AutomationChange {
+            kind: AutomationChangeKind::Changed,
+            author_origin_id: Some("agent-editor".to_owned()),
+            actor_kind: Some(ChangeActorKind::Agent),
+            on_behalf_of: Some("user:ice".to_owned()),
+        },
+        "the claim names the change's kind and actor"
+    );
+    let (served, served_facts) = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            250,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next")
+        .expect("the status claim is pending");
+    assert_eq!(served.claim_id, claim.claim_id);
+    assert_eq!(
+        served_facts.fields,
+        vec![AutomationFieldFact {
+            field_name: "status".to_owned(),
+            history_id: Some(facts.fields[0].history_id),
+            previous: Some(AutomationFactValue::Whole {
+                value: serde_json::json!("open"),
+            }),
+            next: Some(AutomationFactValue::Whole {
+                value: serde_json::json!("done"),
+            }),
+        }],
+        "the served claim carries the field's previous and next values"
+    );
+    handle
+        .automation_settle(
+            WS.to_owned(),
+            served.claim_id,
+            AutomationSettle::Done,
+            260,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle the status claim");
 
     // The identical update again: the append dedupes, derives no facts, and
     // therefore claims nothing — one durable claim per change, ever.
@@ -366,14 +438,79 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         at_cap.automation_claims[0].error.as_deref(),
         Some(dohc_engine_domain::AUTOMATION_CHAIN_STOPPED),
     );
+
+    // A priority edit wakes both automations.
+    let priority = handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            doc.frontmatter_set("priority", "high"),
+            None,
+            Some(ChangeAttribution {
+                actor_kind: ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+            }),
+            at_cap.lineage_claim_id.clone(),
+            false,
+            None,
+            None,
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("apply priority edit");
+    assert_eq!(
+        priority
+            .automation_claims
+            .iter()
+            .map(|claim| claim.automation_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["collection:tasks#priority", AUTOMATION],
+    );
+    // Each executor drains only its own namespace.
+    let (collection_claim, _) = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            "collection:".to_owned(),
+            510,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next")
+        .expect("the collection claim is pending");
+    assert_eq!(collection_claim.automation_id, "collection:tasks#priority");
+    assert_eq!(
+        collection_claim.change.actor_kind,
+        Some(ChangeActorKind::Human)
+    );
+    assert!(
+        handle
+            .automation_claim_next(
+                WS.to_owned(),
+                "collection:".to_owned(),
+                520,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claim next")
+            .is_none(),
+        "the plugin automation's claim waits for its own executor"
+    );
     supervisor.close(&source_db).expect("close source actor");
 
     let source_claims = claim_rows(&source_db, WS);
     assert_eq!(
         source_claims.len(),
-        2,
-        "the origin device holds exactly one claim for the change plus the \
-         recorded chain stop: {source_claims:?}"
+        4,
+        "the origin device holds exactly one claim per automation per change, \
+         plus the recorded chain stop: {source_claims:?}"
     );
     assert_eq!(source_claims[1].1, "failed", "the stop row is terminal");
 
@@ -381,8 +518,14 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     // subscription registered — and claims nothing: the sync apply path has
     // no claim hook (ADR 0008's origin test is structural).
     let mut peer = EngineStore::open(&peer_db, 300).expect("open peer store");
-    subscribe_automation(&mut peer, WS, AUTOMATION, "tasks", 310, &NoFaults)
-        .expect("peer subscribes the same automation");
+    subscribe_automation(
+        &mut peer,
+        WS,
+        &subscription(AUTOMATION, None),
+        310,
+        &NoFaults,
+    )
+    .expect("peer subscribes the same automation");
     let ops = local_ydoc_ops(&source_db);
     assert!(ops.len() >= 2, "base plus edits journaled: {}", ops.len());
     let first_origin_seq = ops[0].origin_seq;
@@ -426,6 +569,229 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
 // ---------------------------------------------------------------------------
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
+
+/// A record created in a document session is its creator's change: the
+/// settle that creates its file names the author of the lineage's first
+/// update, which compaction cannot fold away, whoever edited it after.
+/// Reconcile then adds the record for every automation but an automation
+/// that created it, at the creator's chain depth; a creation at the depth
+/// cap stops the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_created_in_a_document_session_is_added_as_its_creators_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = EngineStore::open(&db, 9_130).expect("open store");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "collection-schema-object".to_owned(),
+                    path: "tasks/collection.yaml".to_owned(),
+                    text: "fields:\n  status:\n    type: text\n".to_owned(),
+                    moment_id: "collection-schema-moment".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed collection schema");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let mut handle = supervisor.open(&db, 10).expect("open actor").actor;
+    for automation_id in [AUTOMATION, "collection:tasks#other"] {
+        handle
+            .automation_subscribe(
+                WS.to_owned(),
+                subscription(automation_id, None),
+                50,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("subscribe");
+    }
+    let automation = |depth| {
+        Some(ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("user:ice".to_owned()),
+            depth,
+        })
+    };
+
+    let cap = dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP;
+    // (name, record, creator's depth or a person, editor's depth or a
+    // person or nobody, compact before settling, who claims, at what depth)
+    struct Case {
+        name: &'static str,
+        record_id: &'static str,
+        creator: Option<u32>,
+        editor: Option<Option<u32>>,
+        compact: bool,
+        claimers: &'static [&'static str],
+        depth: u32,
+    }
+    for case in [
+        Case {
+            name: "beta",
+            record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            creator: Some(1),
+            editor: Some(None),
+            compact: true,
+            claimers: &["collection:tasks#other"],
+            depth: 1,
+        },
+        Case {
+            name: "gamma",
+            record_id: "rec_cccccccccccccccccccccccccc",
+            creator: Some(cap),
+            editor: None,
+            compact: false,
+            claimers: &["collection:tasks#other"],
+            depth: cap,
+        },
+        Case {
+            name: "delta",
+            record_id: "rec_dddddddddddddddddddddddddd",
+            creator: None,
+            editor: Some(Some(1)),
+            compact: false,
+            claimers: &["collection:tasks#other", AUTOMATION],
+            depth: 0,
+        },
+    ] {
+        let path = format!("tasks/{}.md", case.name);
+        let key = DocKey::new(WS, "main", format!("{}-object", case.name)).expect("key");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {}\nstatus: open\n---\n\nBody", case.record_id),
+        )
+        .expect("record document");
+        let created = handle
+            .ydoc_record_update(
+                key.clone(),
+                path.clone(),
+                ContentKind::Richdoc,
+                Regime::LocalOnly,
+                doc.encode_full_state(),
+                case.creator.map(|_| AUTOMATION.to_owned()),
+                case.creator.and_then(automation),
+                None,
+                true,
+                None,
+                None,
+                100,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("create the record");
+        if let Some(editor) = case.editor {
+            handle
+                .ydoc_record_update(
+                    key.clone(),
+                    path.clone(),
+                    ContentKind::Richdoc,
+                    Regime::LocalOnly,
+                    doc.frontmatter_set("status", "doing"),
+                    editor.map(|_| AUTOMATION.to_owned()),
+                    editor.and_then(automation),
+                    created.lineage_claim_id.clone(),
+                    false,
+                    None,
+                    None,
+                    101,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("edit the record");
+        }
+        if case.compact {
+            supervisor.close(&db).expect("close actor");
+            let mut store = EngineStore::open(&db, 9_131).expect("open store");
+            dohc_engine_collab::maybe_compact(&mut store, &key, 0, &NoFaults, 105)
+                .expect("compact");
+            let updates: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_updates WHERE object_id = ?1",
+                        [&key.object_id],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("count updates");
+            assert_eq!(updates, 0, "compaction folded every update");
+            drop(store);
+            handle = supervisor.open(&db, 11).expect("reopen actor").actor;
+        }
+        handle
+            .ydoc_settle(
+                scratch.path().to_path_buf(),
+                key,
+                path,
+                ContentKind::Richdoc,
+                None,
+                None,
+                format!("{}-session", case.name),
+                Arc::new(()),
+                110,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("settle the record");
+        let claims = handle
+            .reconcile_collections(
+                WS.to_owned(),
+                "main".to_owned(),
+                scratch.path().to_path_buf(),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(()),
+                120,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("reconcile")
+            .automation_claims;
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.automation_id.as_str())
+                .collect::<Vec<_>>(),
+            case.claimers,
+            "{}: an automation does not claim a record it created",
+            case.name
+        );
+        for claim in &claims {
+            assert_eq!(claim.record_id.as_deref(), Some(case.record_id));
+            assert_eq!(claim.change.kind, AutomationChangeKind::Added);
+            assert_eq!(
+                claim.change.author_origin_id.as_deref(),
+                case.creator.map(|_| AUTOMATION),
+                "{}: the creator is the author",
+                case.name
+            );
+            assert_eq!(claim.depth, case.depth, "{}", case.name);
+            assert_eq!(claim.chain_stopped(), case.depth == cap);
+        }
+    }
+    supervisor.close(&db).expect("close actor");
+}
 
 /// A pending claim seeded straight into the ledger (History trigger shape),
 /// so the crash tests exercise the claim/settle/reclaim transitions alone.
@@ -471,9 +837,10 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
     // Attempt 1: the claim is served exactly once.
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -487,6 +854,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             210,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -537,9 +905,10 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
         .expect("reclaim after restart");
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].state, AutomationClaimState::Pending);
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             1_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -591,6 +960,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let none = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             2_100,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -619,7 +989,13 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     handle
-        .automation_claim_next(WS.to_owned(), 200, faults.clone(), CancellationToken::new())
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            200,
+            faults.clone(),
+            CancellationToken::new(),
+        )
         .await
         .expect_err("the injected mid-claim crash surfaces as an error");
     assert!(faults.fired());
@@ -632,9 +1008,10 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
 
     // Restart: the retry serves the claim exactly once, as attempt 1.
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
-    let claim = handle
+    let (claim, _) = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -674,7 +1051,13 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let error = handle
-        .automation_claim_next(WS.to_owned(), 200, Arc::new(NoFaults), cancelled.clone())
+        .automation_claim_next(
+            WS.to_owned(),
+            "plugin:".to_owned(),
+            200,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
         .await
         .expect_err("a cancelled claim next returns the cancellation error");
     assert!(matches!(error, RuntimeError::Cancelled));
@@ -704,10 +1087,20 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
         .expect_err("a cancelled settle returns the cancellation error");
     assert!(matches!(error, RuntimeError::Cancelled));
     let error = handle
+        .automation_retry(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            300,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled retry returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
         .automation_subscribe(
             WS.to_owned(),
-            AUTOMATION.to_owned(),
-            "tasks".to_owned(),
+            subscription(AUTOMATION, None),
             400,
             Arc::new(NoFaults),
             cancelled.clone(),
@@ -757,7 +1150,13 @@ async fn abandoning_a_claim_request_does_not_cancel_its_admitted_transaction() {
         let gate = Arc::clone(&gate);
         tokio::spawn(async move {
             handle
-                .automation_claim_next(WS.to_owned(), 200, gate, CancellationToken::new())
+                .automation_claim_next(
+                    WS.to_owned(),
+                    "plugin:".to_owned(),
+                    200,
+                    gate,
+                    CancellationToken::new(),
+                )
                 .await
         })
     };
@@ -802,6 +1201,7 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
     let error = handle
         .automation_claim_next(
             WS.to_owned(),
+            "plugin:".to_owned(),
             200,
             PanicFaults::at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),
@@ -828,5 +1228,140 @@ async fn a_panicked_claim_rolls_back_and_closes_async_and_blocking_handles() {
         claim_ledger(&db, WS, CRASH_CLAIM),
         ("pending".to_owned(), 0, None),
         "a panicked transaction never commits its claim"
+    );
+}
+
+/// Every chat write announces the Group automation claims it committed, from
+/// one place in the actor. A follow that replays a parked member message
+/// announces that message's claim, and a post announces its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_chat_write_announces_the_group_claims_it_committed() {
+    use dohc_engine_domain::{
+        AutomationGroupSubscription, ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane,
+        FollowState, FollowTargetKind, LinkedChatStore, SetFollow, StartChannelThread,
+        subscribe_automation_group,
+    };
+    use dohc_engine_sync::apply_chat_envelope;
+
+    const GROUP_WS: &str = "ws-group-claims";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        LinkedChatStore::new(&mut store)
+            .create_group(
+                GROUP_WS,
+                "trip",
+                "Trip",
+                ChatChannelKind::Channel,
+                ChannelGroup::default(),
+                5,
+                &NoFaults,
+            )
+            .expect("Group");
+        subscribe_automation_group(
+            &mut store,
+            GROUP_WS,
+            &AutomationGroupSubscription {
+                automation_id: "collection:Trip/Tasks#task".to_owned(),
+                channel_id: "trip".to_owned(),
+                starts_with: Some("/task".to_owned()),
+            },
+            6,
+            &NoFaults,
+        )
+        .expect("subscribe");
+        // A member's message arrives before its thread and is parked.
+        let early = ReplicationEnvelope {
+            workspace_id: GROUP_WS.to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "chat.message.append".to_owned(),
+            payload: serde_json::json!({
+                "messageId": "m-early",
+                "threadId": "t-late",
+                "authorKind": "human",
+                "authorDisplayName": "Ana",
+                "body": "/task Early",
+                "createdAtMs": 7,
+            }),
+            recorded_at_ms: 7,
+        };
+        apply_chat_envelope(&mut store, &early, &NoFaults).expect("park the message");
+        // Its thread is here now, but nothing has replayed the message yet.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
+                     VALUES (?1, 't-late', 'Late', 7, 7, 'trip')",
+                    [GROUP_WS],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("the thread");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener_heard = Arc::clone(&heard);
+    actor.listen_for_automation_claims(Arc::new(move |claims| {
+        listener_heard
+            .lock()
+            .expect("heard")
+            .extend(claims.iter().map(|claim| claim.trigger.clone()));
+    }));
+    let key = |message_id: &str| AutomationTrigger::Key {
+        key: format!("message:{message_id}"),
+    };
+
+    actor
+        .chat_follow_set(
+            SetFollow {
+                workspace_id: GROUP_WS.to_owned(),
+                owner_user_id: "user-ice".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Channel,
+                target_id: "trip".to_owned(),
+                state: FollowState::Following,
+                now_ms: 10,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("follow the Group");
+    assert_eq!(*heard.lock().expect("heard"), vec![key("m-early")]);
+
+    actor
+        .chat_thread_start(
+            StartChannelThread {
+                workspace_id: GROUP_WS.to_owned(),
+                channel_id: "trip".to_owned(),
+                thread_id: "t-now".to_owned(),
+                message_id: "m-now".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ice".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "/task Now".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                automation: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post");
+    assert_eq!(
+        *heard.lock().expect("heard"),
+        vec![key("m-early"), key("m-now")]
     );
 }

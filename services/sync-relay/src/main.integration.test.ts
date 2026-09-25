@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 import { initializeRelayDeployment } from "./relayDeployment";
+import { RELAY_API_VERSIONS } from "./apiVersion";
+import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -28,7 +30,11 @@ const loopbackListenDenied = await new Promise<boolean>((resolve) => {
 
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";
-const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
+// Outlasts SHUTDOWN_EXIT_WAIT_MS, so an exit within that wait shows shutdown did
+// not wait out its grace period. The wait itself only has to outlast a loaded
+// gate host: a 1 s bound there measured the host, not the relay.
+const TEST_SHUTDOWN_GRACE_PERIOD_MS = 60_000;
+const SHUTDOWN_EXIT_WAIT_MS = 10_000;
 const OUTPUT_BARRIER_MESSAGE_TYPE = "dohc-sync-relay-test-output-barrier";
 const OUTPUT_BARRIER_PREFIX = "SYNC_RELAY_TEST_OUTPUT_BARRIER=";
 const OUTPUT_BARRIER_TIMEOUT_MS = 10_000;
@@ -425,6 +431,21 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
   });
 
+  it("refuses a relay API version it does not serve before it reads the credential", async () => {
+    const relay = await spawnRelay(join(await tempRoot("api-version"), "relay.sqlite"));
+    const ready = await (await fetch(`${relay}/ready`)).json() as {apiVersions: unknown};
+    expect(ready.apiVersions).toEqual(RELAY_API_VERSIONS);
+    const newer = String(RELAY_API_VERSIONS.max + 1);
+    for (const headers of [new Headers({[RELAY_API_VERSION_HEADER]: newer}), authHeaders({[RELAY_API_VERSION_HEADER]: newer})]) {
+      const refused = await fetch(`${relay}/sync/${WORKSPACE_ID}/log`, {headers});
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ok: false, code: "api_version_too_new", error: "this relay is older than the dohc that sent the request"});
+    }
+    const current = authHeaders({[RELAY_API_VERSION_HEADER]: String(RELAY_API_VERSIONS.max), "content-type": "application/json"});
+    expect((await fetch(`${relay}/sync/workspaces`, {method: "POST", headers: current,
+      body: JSON.stringify({workspaceId: WORKSPACE_ID})})).status).toBe(200);
+  });
+
   it("ignores inherited device-delivery config in an isolated relay child", async () => {
     vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
     try {
@@ -446,7 +467,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     sendTerminationSignal(relay.child);
 
     expect(
-      await settleWithin(exited, 1_000),
+      await settleWithin(exited, SHUTDOWN_EXIT_WAIT_MS),
       `quiet sync relay did not exit promptly\n${relay.stderr()}`,
     ).toEqual({
       kind: "settled",
@@ -461,13 +482,14 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       SYNC_RELAY_BIND: "127.0.0.1",
       BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
       POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(TEST_SHUTDOWN_GRACE_PERIOD_MS),
     });
     const exited = waitForExit(relay.child);
 
     sendDoubleTerminationSignal(relay.child);
 
     expect(
-      await settleWithin(exited, 1_000),
+      await settleWithin(exited, SHUTDOWN_EXIT_WAIT_MS),
       `sync relay did not exit cleanly after duplicate SIGTERM\n${relay.stderr()}`,
     ).toEqual({
       kind: "settled",
@@ -484,6 +506,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
         SYNC_RELAY_BIND: "127.0.0.1",
         BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
         POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(TEST_SHUTDOWN_GRACE_PERIOD_MS),
       },
       { rejectPoolEnd: true },
     );
@@ -494,7 +517,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     sendTerminationSignal(relay.child);
 
     expect(
-      await settleWithin(closed, 1_000),
+      await settleWithin(closed, SHUTDOWN_EXIT_WAIT_MS),
       `sync relay did not exit cleanly after pool shutdown rejection\n${relay.stderr()}`,
     ).toEqual({
       kind: "settled",
@@ -928,17 +951,19 @@ describe("sync relay startup guards", () => {
   it("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
     const root = await tempRoot("self-host-ready"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
-    const baseUrl = await spawnRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
+    const relay = await spawnRunningRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
       DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
       DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
+    // An empty deployment reconciles before the relay listens, so a relay still
+    // unready after 10 s is stuck; its stderr says why.
     await vi.waitFor(async () => {
-      const response = await fetch(`${baseUrl}/ready`);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true});
+      const response = await fetch(`${relay.baseUrl}/ready`);
+      expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
+      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS});
     }, {timeout: 10_000});
-    expect((await fetch(`${baseUrl}/sync/workspace/live-host`)).status).toBe(404);
+    expect((await fetch(`${relay.baseUrl}/sync/workspace/live-host`)).status).toBe(404);
   });
 
   it.each(["true", "", "2"])("refuses an invalid self-host live flag before opening storage: %j", async value => {

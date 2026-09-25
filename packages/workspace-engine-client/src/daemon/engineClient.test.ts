@@ -620,6 +620,81 @@ function nextImmediate(): Promise<void> {
 }
 
 describe("outbound backpressure", () => {
+  it.each(["deadline", "abort", "cancelRequest"])("drops an unsent request after %s without sending cancellation", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    peer.backpressured = true;
+    const first = transport.sendRequest(request(1, "first")).catch(error => error);
+    const controller = new AbortController();
+    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, controller.signal).catch(error => error);
+    let cancellation: Promise<void> | undefined;
+    try {
+      if (mode === "abort") controller.abort(new Error("cancelled"));
+      if (mode === "cancelRequest") cancellation = transport.cancelRequest(2);
+      expect(await second).toBeInstanceOf(Error);
+      peer.drain(); await cancellation; await nextImmediate();
+      expect(peer.received.filter(envelope => envelope.type === "request" || envelope.type === "cancel"))
+        .toMatchObject([{ type: "request", method: "first" }]);
+    } finally { transport.close(); await first; }
+  });
+
+  it("subtracts queue time from the wire deadline and refuses an overdue unsent request before its timer runs", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready(); peer.backpressured = true;
+    const first = transport.sendRequest(request(1, "first")).catch(error => error);
+    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: 1000 }).catch(error => error);
+    const expired = transport.sendRequest({ ...request(3, "expired"), deadlineMs: 100 }).catch(error => error);
+    try {
+      clock.mockReturnValue(400); peer.drain(); await nextImmediate();
+      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(peer.received.find(envelope => envelope.type === "request" && envelope.method === "second"))
+        .toMatchObject({ deadlineMs: 700 });
+      expect(peer.received.some(envelope => envelope.type === "request" && envelope.method === "expired")).toBe(false);
+    } finally { transport.close(); await Promise.all([first, second]); clock.mockRestore(); }
+  });
+
+  it("bounds ordinary retained request bytes and releases admission when an unsent request is aborted", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready(); peer.backpressured = true;
+    const first = transport.sendRequest(request(1, "first")).catch(error => error);
+    const controllers: AbortController[] = [], queued: Promise<unknown>[] = [];
+    let overflow: Promise<unknown> | undefined;
+    // Each 960 KiB request fits the negotiated frame and string limits.
+    const payload = Array.from({ length: 15 }, () => "x".repeat(LIMITS.maxStringBytes));
+    try {
+      for (let id = 2; id < 70; id++) {
+        const controller = new AbortController(); controllers.push(controller);
+        queued.push(transport.sendRequest({ id, method: "bulk", params: { payload } }, controller.signal).catch(error => error));
+      }
+      let refusal: unknown;
+      overflow = transport.sendRequest({ id: 70, method: "overflow", params: { payload } }).catch(error => { refusal = error; });
+      await nextImmediate();
+      expect(refusal).toMatchObject({ wireError: { code: "OVERLOADED" } });
+      for (const controller of controllers) controller.abort();
+      await Promise.all(queued);
+      const after = transport.sendRequest({ id: 71, method: "after", params: { payload } }).catch(error => error);
+      peer.onEnvelope = envelope => { if (envelope.type === "request" && envelope.method === "after") peer.send({ type: "response", id: envelope.id, result: {} }); };
+      peer.drain(); await expect(after).resolves.toMatchObject({ result: {} });
+      expect(peer.received.some(envelope => envelope.type === "request" && envelope.method === "bulk")).toBe(false);
+    } finally { transport.close(); await first; await overflow; await Promise.all(queued); }
+  });
+
+  it("bounds outstanding ordinary requests even when their frames are small", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready(); peer.backpressured = true;
+    const requests: Promise<unknown>[] = [];
+    let overflow: Promise<unknown> | undefined;
+    try {
+      for (let id = 1; id <= 1024; id++) requests.push(transport.sendRequest(request(id, "small")).catch(error => error));
+      let refusal: unknown;
+      overflow = transport.sendRequest(request(1025, "overflow")).catch(error => { refusal = error; });
+      await nextImmediate();
+      expect(refusal).toMatchObject({ wireError: { code: "OVERLOADED", retry: "afterBackoff" } });
+      expect(peer.received.filter(envelope => envelope.type === "request")).toHaveLength(1);
+    } finally { transport.close(); await overflow; await Promise.all(requests); }
+  });
+
   it("holds later frames until drain and releases the writer on close", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
@@ -1204,6 +1279,220 @@ describe("request cancellation", () => {
       expect(peer.received.filter(envelope => envelope.type === "request")).toEqual([]);
     } finally { transport.close(); }
   });
+});
+
+describe("request progress", () => {
+  async function session(clientCapabilities: string[], ackCapabilities: string[]) {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { capabilities: clientCapabilities });
+    peer.send(helloAck(LIMITS, ackCapabilities));
+    await transport.ready();
+    const requests: Extract<Envelope, { type: "request" }>[] = [];
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") requests.push(envelope);
+    };
+    return { peer, transport, requests };
+  }
+
+  it.each([1, 2])("does not transmit when serialization pass %s consumes the deadline", async (pass) => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const stringify = JSON.stringify;
+    let serializations = 0;
+    const serializer = vi.spyOn(JSON, "stringify").mockImplementation((value, ...args) => {
+      const result = stringify(value, ...args);
+      if (value?.method === "serialization.expiry" && ++serializations === pass) clock.mockReturnValue(1100);
+      return result;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onProgress = vi.fn();
+    try {
+      const expired = transport.sendRequest({ ...request(1, "serialization.expiry"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
+      await nextImmediate();
+      expect(requests).toEqual([]);
+      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(vi.getTimerCount()).toBe(0);
+      peer.send({ type: "progress", id: 1 });
+      expect(onProgress).not.toHaveBeenCalled();
+      expect(peer.received.some(entry => entry.type === "cancel")).toBe(false);
+      const pending = Array.from({ length: 1024 }, (_, index) => transport.sendRequest(request(index + 2, "after.expiry")));
+      await nextImmediate();
+      expect(requests).toHaveLength(1024);
+      for (const wire of requests) peer.send({ type: "response", id: wire.id, result: null });
+      await Promise.all(pending);
+    } finally {
+      transport.close();
+      serializer.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("deducts serialization time from the wire deadline and response timer", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const stringify = JSON.stringify;
+    const serializer = vi.spyOn(JSON, "stringify").mockImplementation((value, ...args) => {
+      const result = stringify(value, ...args);
+      if (value?.method === "serialization.partial") clock.mockReturnValue(400);
+      return result;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onProgress = vi.fn();
+    try {
+      const pending = transport.sendRequest({ ...request(1, "serialization.partial"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
+      const settled = vi.fn();
+      void pending.then(settled);
+      await nextImmediate();
+      expect(requests[0]).toMatchObject({ deadlineMs: 700, progress: true });
+      peer.send({ type: "progress", id: requests[0]!.id });
+      expect(onProgress).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(699);
+      await nextImmediate();
+      expect(settled).not.toHaveBeenCalled();
+      clock.mockReturnValue(1100);
+      await vi.advanceTimersByTimeAsync(1);
+      await nextImmediate();
+      expect(settled).toHaveBeenCalledWith(expect.any(EngineRequestDeadlineError));
+      expect(vi.getTimerCount()).toBe(0);
+      peer.send({ type: "progress", id: requests[0]!.id });
+      expect(onProgress).toHaveBeenCalledTimes(1);
+    } finally {
+      transport.close();
+      serializer.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves queued progress through deadline adjustment while removing a cancelled peer", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const onProgress = vi.fn();
+    const cancelledProgress = vi.fn();
+    peer.backpressured = true;
+    const first = transport.sendRequest(request(1, "first")).catch(error => error);
+    const queued = transport.sendRequest({ ...request(2, "queued"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
+    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress).catch(error => error);
+    try {
+      await transport.cancelRequest(3);
+      expect(await cancelled).toMatchObject({ wireError: { code: "CANCELLED" } });
+      clock.mockReturnValue(400);
+      peer.drain();
+      await nextImmediate();
+      expect(requests.map(entry => entry.method)).toEqual(["first", "queued"]);
+      const wire = requests[1]!;
+      expect(wire).toMatchObject({ progress: true, deadlineMs: 700 });
+      peer.send({ type: "progress", id: wire.id });
+      expect(onProgress).toHaveBeenCalledTimes(1);
+      expect(cancelledProgress).not.toHaveBeenCalled();
+      expect(peer.received.some(entry => entry.type === "cancel")).toBe(false);
+      peer.send({ type: "response", id: wire.id, result: null });
+      await expect(queued).resolves.toMatchObject({ id: 2 });
+    } finally {
+      transport.close();
+      await Promise.all([first, queued, cancelled]);
+      clock.mockRestore();
+    }
+  });
+
+  it.each([
+    { clientAsks: true, engineAgrees: true, callerAsks: true, flagged: true },
+    { clientAsks: true, engineAgrees: false, callerAsks: true, flagged: false },
+    { clientAsks: false, engineAgrees: true, callerAsks: true, flagged: false },
+    { clientAsks: true, engineAgrees: true, callerAsks: false, flagged: false },
+  ])("flags a request only when the caller asks on a negotiated session: %o", async (row) => {
+    const { peer, transport, requests } = await session(
+      row.clientAsks ? ["core", "progress"] : ["core"],
+      row.engineAgrees ? ["core", "progress"] : ["core"],
+    );
+    try {
+      const sent = transport.sendRequest(request(1, "workspace.open"), undefined, row.callerAsks ? () => undefined : undefined);
+      await nextImmediate();
+      expect(transport.reportsProgress()).toBe(row.clientAsks && row.engineAgrees);
+      const [wire] = requests;
+      // Absent, not false: a request that does not ask is unchanged on the wire.
+      expect("progress" in wire!).toBe(row.flagged);
+      if (row.flagged) expect(wire!.progress).toBe(true);
+      peer.send({ type: "response", id: wire!.id, result: null });
+      await expect(sent).resolves.toMatchObject({ id: 1 });
+    } finally { transport.close(); }
+  });
+
+  it("hands each report to the request that asked, until its response", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const reports: number[] = [];
+      let count = 0;
+      const sent = transport.sendRequest(request(4, "workspace.open"), undefined, () => {
+        reports.push(++count);
+      });
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      const framesBefore = transport.inboundActivity();
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "progress", id: wireId });
+      expect(reports).toEqual([1, 2]);
+      expect(transport.inboundActivity()).toBe(framesBefore + 2);
+      peer.send({ type: "response", id: wireId, result: { workspace: "ws-1" } });
+      await expect(sent).resolves.toEqual({ id: 4, result: { workspace: "ws-1" } });
+    } finally { transport.close(); }
+  });
+
+  it("ignores progress for a request the caller stopped waiting for", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const controller = new AbortController();
+      const stopped = new Error("stopped waiting");
+      const onProgress = vi.fn();
+      const sent = transport.sendRequest(request(5, "workspace.open"), controller.signal, onProgress);
+      const rejected = expect(sent).rejects.toBe(stopped);
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      controller.abort(stopped);
+      await rejected;
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "response", id: wireId, result: null });
+      expect(onProgress).not.toHaveBeenCalled();
+      peer.onEnvelope = (envelope) => {
+        if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+      };
+      await expect(transport.sendRequest(request(6, "engine.ping"))).resolves.toMatchObject({ result: { ok: true } });
+    } finally { transport.close(); }
+  });
+
+  it("keeps the request when a progress observer throws", async () => {
+    const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+    try {
+      const sent = transport.sendRequest(request(7, "workspace.open"), undefined, () => {
+        throw new Error("observer failed");
+      });
+      await nextImmediate();
+      const wireId = requests[0]!.id;
+      peer.send({ type: "progress", id: wireId });
+      peer.send({ type: "response", id: wireId, result: null });
+      await expect(sent).resolves.toMatchObject({ id: 7 });
+    } finally { transport.close(); }
+  });
+
+  it.each(["a request that did not ask", "an unknown request"])(
+    "ignores progress for %s and keeps the transport",
+    async (target) => {
+      const { peer, transport, requests } = await session(["core", "progress"], ["core", "progress"]);
+      try {
+        const sent = transport.sendRequest(request(8, "workspace.open"));
+        await nextImmediate();
+        const wireId = requests[0]!.id;
+        peer.send({ type: "progress", id: target === "an unknown request" ? wireId + 100 : wireId });
+        peer.send({ type: "response", id: wireId, result: { workspace: "ws-1" } });
+        await expect(sent).resolves.toEqual({ id: 8, result: { workspace: "ws-1" } });
+        peer.onEnvelope = (envelope) => {
+          if (envelope.type === "request") peer.send({ type: "response", id: envelope.id, result: { ok: true } });
+        };
+        await expect(transport.sendRequest(request(9, "engine.ping"))).resolves.toMatchObject({ result: { ok: true } });
+      } finally { transport.close(); }
+    },
+  );
 });
 
 describe("private application range ordering", () => {
@@ -1831,6 +2120,38 @@ describe("EngineClient", () => {
       );
       peer.send({ type: "response", id: requests[2]!.id, result: "alive" });
       await expect(afterTimeout).resolves.toEqual({ id: 57, result: "alive" });
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts requests still waiting by method, and drops one abandoned at its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const peer = new FakePeerConnection();
+      const transport = client(peer);
+      peer.acknowledge();
+      await transport.ready();
+      const requests: Array<Extract<Envelope, { type: "request" }>> = [];
+      peer.onEnvelope = (envelope) => {
+        if (envelope.type === "request") requests.push(envelope);
+      };
+      const abandoned = transport.sendRequest({ ...request(60, "workspace.open"), deadlineMs: 25 });
+      void abandoned.catch(() => undefined);
+      const answered = transport.sendRequest(request(61, "workspace.open"));
+      const other = transport.sendRequest(request(62, "versions.active"));
+      const opens = (request: { method: string }) => request.method === "workspace.open";
+      expect(transport.outstandingRequests(opens)).toBe(2);
+      await vi.advanceTimersByTimeAsync(25);
+      await vi.advanceTimersToNextTimerAsync();
+      expect(transport.outstandingRequests(opens)).toBe(1);
+      peer.send({ type: "response", id: requests[1]!.id, result: null });
+      await answered;
+      expect(transport.outstandingRequests(opens)).toBe(0);
+      expect(transport.outstandingRequests(({ method }) => method === "versions.active")).toBe(1);
+      peer.send({ type: "response", id: requests[2]!.id, result: null });
+      await other;
       transport.close();
     } finally {
       vi.useRealTimers();

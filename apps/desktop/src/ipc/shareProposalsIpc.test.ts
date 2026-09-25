@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
-import type { ShareProposalOp } from "@dohc/workspace-contracts/relay";
+import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { CHANNELS } from "./channels";
 import { registerShareProposalsIpcHandlers } from "./shareProposalsIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -58,12 +59,16 @@ async function harness() {
     kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [], collisionRecordQuarantined: false,
   }));
   const submit = vi.fn<EngineRelayWorkspaceClient["submitShareProposal"]>(async () => ({ submitted: 1, proposalId: "proposal", skippedOutsideShare: 0, morePending: false }));
-  const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit } as unknown as EngineRelayWorkspaceClient));
+  const pushDirect = vi.fn<EngineRelayWorkspaceClient["pushDirectWrites"]>(async () => ({ writes: [], morePending: false }));
+  const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit, pushDirectWrites: pushDirect } as unknown as EngineRelayWorkspaceClient));
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerShareProposalsIpcHandlers<string, Event, Operation>({
+  const reported = vi.fn<Dependencies["reportDirectWrites"]>(() => true);
+  const directWrites = registerShareProposalsIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withRendererWorkspaceOperation, warmCredentialCache: warm,
+    withWorkspaceAuthority: (id, work) => authorities.withOperation(id, work),
+    reportDirectWrites: reported,
     currentCredentials: () => cache.snapshot().credentials, currentCredentialGeneration: () => cache.snapshot().generation,
     normalizeServerUrl: url => url.replace(/\/+$/u, ""),
     isRecordValue: (value): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value),
@@ -82,7 +87,7 @@ async function harness() {
     };
   };
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,
-    readText, queue, reconcile, submit, relayFor, handlers, invoke, recipient,
+    readText, queue, reconcile, submit, pushDirect, relayFor, handlers, invoke, recipient, reported, directWrites,
     retireRenderer: () => { rendererCurrent = false; } };
 }
 
@@ -93,7 +98,8 @@ describe("registered share proposal handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.listShareProposals, CHANNELS.readShareProposalChanges, CHANNELS.readShareProposalFileContent,
-      CHANNELS.settleShareProposal, CHANNELS.submitShareChanges, CHANNELS.listMyShareChanges, CHANNELS.withdrawShareChanges,
+      CHANNELS.settleShareProposal, CHANNELS.submitShareChanges, CHANNELS.pushShareDirectWrites,
+      CHANNELS.listMyShareChanges, CHANNELS.withdrawShareChanges,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     await expect(h.invoke(CHANNELS.listShareProposals, { workspaceId: "" })).rejects.toThrow();
@@ -152,7 +158,9 @@ describe("registered share proposal handlers", () => {
     const payload = { workspaceId: "workspace", proposalId: "proposal", opIndex: 0 };
     await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: "current", incomingText: "incoming" });
     expect(h.readText).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: h.attachmentId }), "current.md");
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/sync/workspace/blobs/"), expect.objectContaining({ headers: { authorization: "Bearer token" } }));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/sync/workspace/blobs/"), expect.anything());
+    const sent = new Headers(fetch.mock.calls[0]?.[1]?.headers);
+    expect([sent.get("authorization"), sent.get(RELAY_API_VERSION_HEADER)]).toEqual(["Bearer token", String(RELAY_API_VERSION)]);
     h.readText.mockResolvedValue({ text: "prefix", truncated: true, contentHash: null });
     fetch.mockResolvedValue(new Response(new Uint8Array(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)));
     await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: null, incomingText: null });
@@ -202,6 +210,128 @@ describe("registered share proposal handlers", () => {
     expect(h.submit.mock.calls[0]![0].submitId).not.toBe(h.submit.mock.calls[1]![0].submitId);
     h.submit.mockRejectedValue(new Error("offline"));
     await expect(h.invoke(CHANNELS.submitShareChanges)).resolves.toEqual({ ok: false, capturedLocalChanges: 3, errorMessage: "offline" });
+  });
+
+  it("pushes direct writes through the pinned grant without settling files first", async () => {
+    const h = await harness(); h.recipient();
+    h.pushDirect
+      .mockResolvedValueOnce({
+        writes: [
+          { paths: ["docs/packing/collection.yaml"], result: "written" },
+          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", currentBlobSha256: null },
+        ],
+        morePending: true,
+      })
+      .mockResolvedValueOnce({
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+        morePending: false,
+      });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toEqual({
+      status: "pushed",
+      writes: [
+        { paths: ["docs/packing/collection.yaml"], result: "written" },
+        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas" },
+        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
+      ],
+    });
+    expect(h.reconcile).not.toHaveBeenCalled();
+    expect(h.pushDirect).toHaveBeenCalledTimes(2);
+    expect(h.pushDirect).toHaveBeenCalledWith({
+      shareId: "pinned-share", grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+  });
+
+  it("reports a failed push with the writes answered before it, and whether trying again can help", async () => {
+    const h = await harness(); h.recipient();
+    h.pushDirect
+      .mockResolvedValueOnce({
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+        morePending: true,
+      })
+      .mockRejectedValueOnce(new Error("offline"));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({
+      status: "failed",
+      writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+      errorMessage: "offline",
+      lasting: false,
+    });
+    h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("too large"), { wireCode: "PAYLOAD_TOO_LARGE" }));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    h.pushDirect.mockRejectedValueOnce(new RelayConflictError());
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("busy"), { wireCode: "OVERLOADED" }));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: false });
+  });
+
+  it("says when the relay does not take direct writes, and stops asking", async () => {
+    const h = await harness(); h.recipient();
+    h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
+    expect(h.pushDirect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the answer of a push on open whose window left the view before it finished", async () => {
+    const h = await harness(); h.recipient();
+    const held = deferred<Awaited<ReturnType<EngineRelayWorkspaceClient["pushDirectWrites"]>>>();
+    h.pushDirect.mockImplementationOnce(() => held.promise);
+    const opened = h.invoke(CHANNELS.pushShareDirectWrites);
+    await vi.waitFor(() => expect(h.pushDirect).toHaveBeenCalledTimes(1));
+    h.retireRenderer();
+    held.resolve({ writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }], morePending: false });
+    await expect(opened).rejects.toThrow();
+    expect(h.reported).toHaveBeenCalledWith("workspace", {
+      status: "pushed",
+      writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+    });
+  });
+
+  it("pushes after a save in main, after the window left the view, and reports the answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = await harness(); h.recipient();
+      h.pushDirect.mockResolvedValueOnce({
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+        morePending: false,
+      });
+      h.directWrites.shareViewEdited("workspace");
+      h.directWrites.shareViewEdited("workspace");
+      h.retireRenderer();
+      await vi.advanceTimersByTimeAsync(800);
+      await vi.waitFor(() => expect(h.reported).toHaveBeenCalledTimes(1));
+      expect(h.pushDirect).toHaveBeenCalledTimes(1);
+      expect(h.reported).toHaveBeenCalledWith("workspace", {
+        status: "pushed",
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends rows past one answer's bound to the windows as an answer of their own", async () => {
+    const h = await harness(); h.recipient();
+    const page = (count: number, morePending = true) => ({
+      writes: Array.from({ length: count }, (_, index) => ({ paths: [`docs/c${index}/collection.yaml`], result: "refused" as const, reason: "" })),
+      morePending,
+    });
+    h.pushDirect.mockResolvedValueOnce(page(2_000)).mockResolvedValueOnce(page(501)).mockResolvedValueOnce(page(1, false));
+    const result = await h.invoke(CHANNELS.pushShareDirectWrites) as { status: string; writes: unknown[] };
+    expect(h.pushDirect).toHaveBeenCalledTimes(3);
+    expect(h.reported).toHaveBeenCalledTimes(1);
+    const [workspaceId, first] = h.reported.mock.calls[0]!;
+    expect(workspaceId).toBe("workspace");
+    expect(first.status === "pushed" && first.writes).toHaveLength(2_500);
+    expect(result.status).toBe("pushed");
+    expect(result.writes).toHaveLength(2);
+  });
+
+  it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {
+    const h = await harness(); h.recipient(access);
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).rejects.toThrow();
+    expect(h.pushDirect).not.toHaveBeenCalled();
   });
 
   it("refuses a changed grant after local reconciliation without submitting", async () => {

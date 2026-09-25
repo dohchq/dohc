@@ -476,6 +476,17 @@ fn apply_deferred_base(
         .map_err(|error| {
             map_collab_payload_error(error, "parked Y.Doc base could not be claimed")
         })?;
+        // A base this drain installs is a document from elsewhere. A resumed
+        // claim was installed by an earlier attempt, and one another base
+        // already won installs nothing.
+        if matches!(
+            claim,
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+                | dohc_engine_collab::ClaimOutcome::Replaced { .. }
+        ) {
+            dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)
+                .map_err(SyncError::Storage)?;
+        }
         let (winner, losing_claim_id) = match claim {
             dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
                 // A winner/fresh replica cannot recover this incoming loser:
@@ -513,8 +524,13 @@ fn apply_deferred_base(
                 losing_lineage_claim_id,
                 winner,
             } => (winner, Some(losing_lineage_claim_id)),
-            dohc_engine_collab::ClaimOutcome::Claimed { .. }
-            | dohc_engine_collab::ClaimOutcome::Resumed => {
+            // The lineage already holds this base, so its state and projection
+            // are unchanged; the claim only recorded the base's relay position.
+            dohc_engine_collab::ClaimOutcome::Resumed => {
+                clear_base_relay_candidates_in_tx(tx, &key)?;
+                return Ok(None);
+            }
+            dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                 let winner = dohc_engine_collab::read_marker_in(tx, &key)
                     .map_err(map_collab_hard_error)?
                     .ok_or_else(|| local_corruption("parked winning Y.Doc has no marker"))?;
@@ -682,6 +698,44 @@ pub fn drain_deferred_ydoc_for_live_session(
         faults,
     )?;
     complete_drain(store, drained, cleanup, faults)
+}
+
+/// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
+/// an open editor bound to `lineage_claim_id`: the replicated lineage is still
+/// the one the editor opened, and the first deferred coordinate in relay order
+/// belongs to it. A queue that starts with another claim waits for the session
+/// to end, so it answers false.
+pub fn live_session_has_drainable_deferred_ydoc(
+    store: &EngineStore,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> Result<bool, SyncError> {
+    let marker = dohc_engine_collab::read_marker(store, key).map_err(map_collab_hard_error)?;
+    if !marker.is_some_and(|marker| {
+        marker.regime == dohc_engine_collab::Regime::Replicated
+            && marker.lineage_claim_id.as_deref() == Some(lineage_claim_id)
+    }) {
+        return Ok(false);
+    }
+    let first: Option<Option<String>> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT deferred.lineage_claim_id \
+             FROM ydoc_deferred_updates AS deferred \
+             JOIN replication_log AS log \
+               ON log.workspace_id = deferred.workspace_id \
+              AND log.origin_id = deferred.origin_id \
+              AND log.origin_seq = deferred.origin_seq \
+             WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2 \
+               AND deferred.object_id = ?3 AND log.op_kind = 'ydoc.update' \
+             ORDER BY deferred.relay_seq,log.origin_id,log.origin_seq \
+             LIMIT 1",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })?;
+    Ok(first.flatten().as_deref() == Some(lineage_claim_id))
 }
 
 #[derive(Clone, Copy)]
@@ -1376,6 +1430,8 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_deferred_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        "DELETE FROM ydoc_base_relay_candidates \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
     ] {
         tx.execute(
@@ -1384,6 +1440,24 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         )
         .map_err(SyncError::persist)?;
     }
+    Ok(())
+}
+
+/// Drop the local bases still waiting to learn their relay position.
+///
+/// Called once the lineage's position is known from a pulled base, or when the
+/// lineage is gone. The pull resolves pending positions before it applies a
+/// page, so a local base still pending then has not reached the relay, and the
+/// relay will order it after every base the page holds.
+fn clear_base_relay_candidates_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "DELETE FROM ydoc_base_relay_candidates          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(SyncError::persist)?;
     Ok(())
 }
 
@@ -1602,16 +1676,27 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 ) -> Result<(), SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
-        }
+        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+            tx,
+            &complete,
+            path,
+            text,
+            LineageFoldAuthor::default(),
+            now_ms,
+            false,
+        )
+        .map(|_| ()),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
 }
 
 /// Reconcile a locally-originated file mutation with its closed Y.Doc
 /// lineage. The generated CRDT update is journaled before the mutation's
-/// artifact operation, so every peer applies one canonical rewrite.
+/// artifact operation, so every peer applies one canonical rewrite. Returns
+/// the collection record fields the mutation changed, if it wrote a bound
+/// record's frontmatter: from the lineage's fold, or, when the lineage holds
+/// no content, from the record's index against the written text.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_local_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -1619,25 +1704,61 @@ pub fn reconcile_local_resulting_head_in_tx(
     object_id: &str,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let key =
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
             text,
-            actor_origin_id,
+            LineageFoldAuthor {
+                actor_origin_id,
+                attribution,
+            },
             now_ms,
             true,
-        ),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded(facts) => Ok(facts),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                workspace_id,
+                version_id,
+                object_id,
+                path,
+                text,
+                actor_origin_id,
+                attribution,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
+}
+
+/// Who wrote the text a fold folds in.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LineageFoldAuthor<'a> {
+    pub(crate) actor_origin_id: Option<&'a str>,
+    pub(crate) attribution: Option<&'a dohc_engine_domain::ChangeAttribution>,
+}
+
+/// What folding a file's text into its Y.Doc lineage did.
+pub(crate) enum LineageFold {
+    /// The lineage holds no content: the file alone carries the text.
+    NoContent,
+    /// The lineage holds the text now, with the record fields its append
+    /// changed, if any.
+    Folded(Option<dohc_engine_domain::CollectionRecordApplyFacts>),
 }
 
 /// Finalize an imported file mutation without creating a second CRDT edit.
@@ -1755,7 +1876,16 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
-    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
+    fold_complete_ydoc_lineage_in_tx(
+        tx,
+        &complete,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+        true,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1763,15 +1893,19 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
     path: &str,
     chosen_text: &str,
-    actor_origin_id: Option<&str>,
+    author: LineageFoldAuthor<'_>,
     now_ms: i64,
     journal: bool,
-) -> Result<(), SyncError> {
+) -> Result<LineageFold, SyncError> {
+    let LineageFoldAuthor {
+        actor_origin_id,
+        attribution,
+    } = author;
     let key = &complete.key;
     ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
     require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     };
     let has_content = marker.lineage_claim_status.has_claimed_base()
         || marker.head_update_seq > 0
@@ -1789,8 +1923,9 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             ],
         )
         .map_err(SyncError::persist)?;
-        return Ok(());
+        return Ok(LineageFold::NoContent);
     }
+    let mut record_facts = None;
     let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
     if projection.content != chosen_text {
         if marker.content_kind == ContentKind::Scene {
@@ -1801,7 +1936,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             // scene. The durable file head is canonical: retire the lineage
             // and let the next open seed a fresh scene from the artifact,
             // exactly like a first open.
-            return retire_complete_ydoc_lineage_in_tx(tx, complete);
+            return retire_complete_ydoc_lineage_in_tx(tx, complete)
+                .map(|()| LineageFold::Folded(None));
         }
         let canonical_projection = doc
             .project(marker.content_kind)
@@ -1854,7 +1990,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             key,
             &update,
             actor_origin_id,
-            None,
+            attribution,
             now_ms,
         )
         .map_err(|error| {
@@ -1884,17 +2020,19 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
                     actor_origin_id,
-                    None,
+                    attribution,
                     false,
                 ),
                 now_ms,
             )?;
         }
+        record_facts = outcome.record_facts;
     }
     // The resolution's head IS the settled artifact now: align the settle
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
-    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)
+    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)?;
+    Ok(LineageFold::Folded(record_facts))
 }
 
 fn settle_ydoc_marker_to_text(
@@ -2629,6 +2767,50 @@ pub fn apply_ydoc_envelope(
             is_base_state: payload.is_base_state,
         };
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
+                op.origin_id.clone(),
+                op.origin_seq,
+                relay_seq,
+            )
+            .map_err(map_collab_hard_error)?;
+            // Another device seeded the same head, or the relay redelivered
+            // this base. The lineage already holds it, so the base adds only
+            // its relay position, and the file keeps every edit made since.
+            // This runs before the path check: the object may have moved
+            // since the other device sent the base.
+            if dohc_engine_collab::read_marker_in(tx, &claim_key)
+                .map_err(map_collab_hard_error)?
+                .is_some_and(|marker| {
+                    marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                        && marker.lineage_claim_id.as_deref() == Some(incoming.lineage_claim_id)
+                })
+            {
+                let resumed = dohc_engine_collab::claim_base_at_relay_in_tx(
+                    tx,
+                    &claim_key,
+                    kind,
+                    &claim_bytes,
+                    &sv_bytes,
+                    &coordinate,
+                    op.recorded_at_ms,
+                )
+                .map_err(|error| {
+                    map_collab_payload_error(error, "ydoc.update base could not be claimed")
+                })?;
+                if !matches!(resumed, dohc_engine_collab::ClaimOutcome::Resumed) {
+                    return Err(local_corruption(
+                        "a Y.Doc base matching the active claim did not resume",
+                    ));
+                }
+                clear_base_relay_candidates_in_tx(tx, &claim_key)?;
+                return Ok(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-base-resumed"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: Vec::new(),
+                });
+            }
             // Cross-origin file edits can temporarily occupy this path before
             // the base arrives. Retrying after the later delete/rename is
             // convergence-safe; refusing and ACKing would lose the base
@@ -2756,12 +2938,7 @@ pub fn apply_ydoc_envelope(
                 kind,
                 &claim_bytes,
                 &sv_bytes,
-                &dohc_engine_collab::BaseRelayCoordinate::new(
-                    op.origin_id.clone(),
-                    op.origin_seq,
-                    relay_seq,
-                )
-                .map_err(map_collab_hard_error)?,
+                &coordinate,
                 op.recorded_at_ms,
             )
             .map_err(|error| {
@@ -2789,8 +2966,13 @@ pub fn apply_ydoc_envelope(
                     losing_lineage_claim_id,
                     winner,
                 } => (winner, Some(losing_lineage_claim_id), true),
-                dohc_engine_collab::ClaimOutcome::Claimed { .. }
-                | dohc_engine_collab::ClaimOutcome::Resumed => {
+                // The matching active claim resumed above, in this transaction.
+                dohc_engine_collab::ClaimOutcome::Resumed => {
+                    return Err(local_corruption(
+                        "a Y.Doc base matching the active claim was not resumed first",
+                    ));
+                }
+                dohc_engine_collab::ClaimOutcome::Claimed { .. } => {
                     let winner = dohc_engine_collab::read_marker_in(tx, &claim_key)
                         .map_err(map_collab_hard_error)?
                         .ok_or_else(|| local_corruption("claimed Y.Doc lineage has no marker"))?;

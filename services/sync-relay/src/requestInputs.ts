@@ -3,6 +3,12 @@ import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS } from "./wireLimits";
 import { badRequest, notFound } from "./errors";
 
+// A request path's segments as the relay routes them: empty segments
+// dropped and each one decoded. Throws a URIError for a malformed escape.
+export function relayPathSegments(pathname: string): string[] {
+  return pathname.split("/").filter(Boolean).map(decodeURIComponent);
+}
+
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
@@ -109,10 +115,10 @@ export function cursorCodec<Cursor extends object>(
 
 export function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." is the share-route namespace. A
-  // workspace with this id could never be addressed, so refuse the claim
-  // rather than strand it.
-  if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
+  // Reserved: "/sync/shares/..." and "/sync/notices/..." are account-level
+  // namespaces. A workspace with either id could never be addressed, so
+  // refuse the claim rather than strand it.
+  if (workspaceId === "shares" || workspaceId === "notices") throw badRequest("workspaceId is reserved");
   return workspaceId;
 }
 

@@ -67,4 +67,24 @@ describe("bridgeAutomationClaimsToExecutors", () => {
     expect(failed).toEqual(["ws-a"]);
     expect(woken).toEqual(["ws-a"]);
   });
+
+  it("routes a retried claim to both the drain and the failure surface", () => {
+    const stub = daemonStub();
+    const woken: string[] = [];
+    const failed: string[] = [];
+    bridgeAutomationClaimsToExecutors(
+      stub.daemon,
+      (workspaceId) => ({ notifyClaimed: () => woken.push(workspaceId) }),
+      (workspaceId) => failed.push(workspaceId),
+    );
+
+    // automations.retry announces the requeued claim as run 2: it is work
+    // to drain, and one fewer failure for the owner's notice.
+    stub.emit(
+      claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "pending", run: 2 }),
+    );
+
+    expect(woken).toEqual(["ws-a"]);
+    expect(failed).toEqual(["ws-a"]);
+  });
 });

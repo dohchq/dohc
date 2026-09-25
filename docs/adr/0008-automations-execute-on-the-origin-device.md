@@ -18,3 +18,5 @@ Run-anywhere with idempotency keys alone was rejected as the primary mechanism b
 - A claim that exhausts its attempt cap, or an automation that throws, lands terminal in the ledger with its failure reason and attempt count, stays listed to the owner, and re-runs only by the owner's explicit action. Nothing silently disarms; this is the Phase 4 contract's visibility rule made concrete in ledger rows.
 - The Phase 4 gate's two-device race passes by construction, not by timing.
 - Agent-authored edits execute their automations on the device that applied the agent's op as local, which is the device whose engine journaled it. Execution runs under that workspace's authorization like any other write, and its writes carry the automation as the actor with the owner as `onBehalfOf`, so record history attributes them next to human and agent edits per the plan.
+
+ADR 0012 amends this for two triggers without a local origin that should run them: a schedule, and a message in a Group. Both run on the workspace owner's main computer, the owner's server, or the computer the owner chose.

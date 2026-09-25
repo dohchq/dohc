@@ -14,6 +14,11 @@ import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./
 import { createLinkAppCollectionRoutes, type LinkAppCollectionRoute, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
+import {
+  createCollectionWriteRateLimiter,
+  createCollectionWriteRoutes,
+  type CollectionWriteRoute,
+} from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -21,11 +26,28 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes, type NamedShareTransportRoute } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
+import {
+  createNoticeRoutes,
+  NOTICE_POST_BUCKET_CAPACITY,
+  NOTICE_POST_MAX_SENDERS,
+  NOTICE_POST_REFILL_PER_SECOND,
+  type NoticeRoute,
+} from "./noticeRoutes";
+import {
+  AUTOMATION_HOST_BUCKET_CAPACITY,
+  AUTOMATION_HOST_MAX_OWNERS,
+  AUTOMATION_HOST_REFILL_PER_SECOND,
+  createAutomationHostRoutes,
+  isAutomationHostPath,
+  parseAutomationHostAction,
+  type AutomationHostRoute,
+} from "./automationHostRoutes";
 import { createWorkspaceBlobRoutes, type WorkspaceBlobRoute } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes, type WorkspaceReplicationRoute } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
-import { createDiscussionRoutes } from "./discussionRoutes";
+import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
+import { isNoticeLine, NOTICE_SENDER_LABEL_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkReadRoutes, type LinkReadRoute } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
@@ -61,7 +83,7 @@ import {
   type ShareProposalRoute,
   type WorkspaceProposalRoute,
 } from "./proposalRoutes";
-import { parseShareId, parseString, parseWorkspaceId } from "./requestInputs";
+import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import type { ShareSelector } from "./shareFilter";
 import { type SyncRelayStorage } from "./storage";
 import {
@@ -121,6 +143,10 @@ export interface CreateSyncRelayHandlerOptions {
   relayExchangeKey?: string;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
+  // Direct writes to a Collection's own files under Edit. Off unless the
+  // deployment opts in.
+  collectionWritesEnabled?: boolean;
+  collectionWriteRateLimiter?: TokenBucketLimiter;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
   linkExchangeGrantRateLimiter?: TokenBucketLimiter;
@@ -130,6 +156,10 @@ export interface CreateSyncRelayHandlerOptions {
   linkLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
+  // Posts of notices to other people, keyed by sender.
+  noticePostRateLimiter?: TokenBucketLimiter;
+  // Changes to a workspace's automation host, keyed by owner.
+  automationHostRateLimiter?: TokenBucketLimiter;
   linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
@@ -154,6 +184,8 @@ type SyncRelayRoute =
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
   | { route: "workspaces" }
+  | NoticeRoute
+  | AutomationHostRoute
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
@@ -165,6 +197,7 @@ type SyncRelayRoute =
   | { route: "share-discussion-activity"; shareId: string }
   | { route: "share-discussion-moderation"; shareId: string }
   | ShareProposalRoute
+  | CollectionWriteRoute
   | WorkspaceProposalRoute
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
@@ -194,6 +227,8 @@ export function createSyncRelayHandler({
   relayExchangeKey,
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
+  collectionWritesEnabled = false,
+  collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
   linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -215,6 +250,16 @@ export function createSyncRelayHandler({
     LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
+  noticePostRateLimiter = new TokenBucketLimiter(
+    NOTICE_POST_BUCKET_CAPACITY,
+    NOTICE_POST_REFILL_PER_SECOND,
+    NOTICE_POST_MAX_SENDERS,
+  ),
+  automationHostRateLimiter = new TokenBucketLimiter(
+    AUTOMATION_HOST_BUCKET_CAPACITY,
+    AUTOMATION_HOST_REFILL_PER_SECOND,
+    AUTOMATION_HOST_MAX_OWNERS,
+  ),
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -274,6 +319,36 @@ export function createSyncRelayHandler({
     newestFilteredOpFreshness,
     historicalSharedBlob,
   } = createShareReadQueries(storage, linkFreshnessPageSize);
+
+  // A granter's name on the notice a share sends: their display name, or
+  // the email the recipient already sees beside the share.
+  const shareSenderLabel = async (granterUserId: string): Promise<string> => {
+    const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
+    if (name !== null) return name;
+    const email = await lookupUserEmail?.(granterUserId);
+    return isNoticeLine(email, NOTICE_SENDER_LABEL_MAX_CHARS) ? email : "Someone";
+  };
+
+  // Delivers the share notices this person can receive now, before their
+  // pull; only those look up a granter's name, once per granter. A failure
+  // leaves a delivery waiting for the next pull. The share routes do no
+  // delivery work, so sharing takes the same time whether or not the
+  // address has an account.
+  const deliverPendingShareNotices = async (userId: string): Promise<void> => {
+    const labels = new Map<string, Promise<string>>();
+    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+      try {
+        let label = labels.get(granterUserId);
+        if (label === undefined) {
+          label = shareSenderLabel(granterUserId);
+          labels.set(granterUserId, label);
+        }
+        storage.noticeShareReceived({ grantId, senderLabel: await label, nowMs: nowMs() });
+      } catch (error) {
+        console.error("[sync-relay] share notice failed", error);
+      }
+    }
+  };
 
   // Claim email invites only after the authenticated account verifies its address.
   const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
@@ -351,6 +426,16 @@ export function createSyncRelayHandler({
     nowMs,
   );
 
+  const respondToNotices = createNoticeRoutes(
+    storage,
+    nowMs,
+    lookupUserDisplayName,
+    claimPendingShares,
+    deliverPendingShareNotices,
+    noticePostRateLimiter,
+  );
+  const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs, automationHostRateLimiter);
+
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
     nowMs,
@@ -372,6 +457,16 @@ export function createSyncRelayHandler({
     shareActionGuard,
     discussionActivity,
   );
+
+  const respondToCollectionWrites = createCollectionWriteRoutes({
+    storage,
+    enabled: collectionWritesEnabled,
+    rateLimiter: collectionWriteRateLimiter,
+    nowMs,
+    newId,
+    claimPendingShares,
+    discussionActivity,
+  });
 
   const {
     grantedShareSummary,
@@ -572,7 +667,7 @@ export function createSyncRelayHandler({
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
-    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes}});
+    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes},discussionActivity});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -700,6 +795,25 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
+      if (route.route === "automation-host") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToAutomationHost(request, route, actor.userId);
+      }
+      if (route.route === "notices" || route.route === "notice-marks") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), "");
+        return await respondToNotices(request, route, actor.userId);
+      }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -738,6 +852,10 @@ export function createSyncRelayHandler({
         route.route === "share-proposal-withdraw"
       ) {
         return await respondToShareProposals(request, route, actor.userId);
+      }
+
+      if (route.route === "share-collection-writes") {
+        return await respondToCollectionWrites(request, route, actor.userId);
       }
 
       if (route.route === "share-presence") {
@@ -795,7 +913,10 @@ export function createSyncRelayHandler({
       }
 
       if (route.route === "log" || route.route === "log-coordinate") {
-        return await respondToWorkspaceReplication(request, route, actor);
+        return await respondToWorkspaceReplication(request, route, actor, undefined, async () => {
+          const current = await resolveActor(request, route.workspaceId);
+          if (current.userId !== actor.userId) throw notFound();
+        });
       }
 
       throw relayError("method_not_allowed");
@@ -808,8 +929,17 @@ export function createSyncRelayHandler({
   });
 }
 
-function parseRoute(request: Request): SyncRelayRoute {
-  const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+/** Only recovery imports have an authenticated, bounded streaming body reader. */
+export function isDatasetRecoveryUpload(url: URL, method: string): boolean {
+  if (method !== "POST") return false;
+  try {
+    const route = parseRoute({ url: url.href });
+    return route.route === "dataset" && route.action === "import";
+  } catch { return false; }
+}
+
+function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
+  const parts = relayPathSegments(new URL(request.url).pathname);
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "link-app-publication"};
     const publicationId = parts[3];
@@ -863,6 +993,12 @@ function parseRoute(request: Request): SyncRelayRoute {
     return { route: "workspaces" };
   }
   if (parts[0] !== "sync" || !parts[1]) throw notFound();
+  // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
+  if (parts[1] === "notices") {
+    if (parts.length === 2) return { route: "notices" };
+    if (parts.length === 3 && parts[2] === "marks") return { route: "notice-marks" };
+    throw notFound();
+  }
   // "/sync/shares/..." is the share-scoped namespace; "shares" is reserved as
   // a workspace id (parseWorkspaceId) so the two can never collide.
   if (parts[1] === "shares") {
@@ -931,6 +1067,9 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 4 && parts[3] === "proposals") {
       return { route: "share-proposals", shareId };
     }
+    if (parts.length === 4 && parts[3] === "collection-writes") {
+      return { route: "share-collection-writes", shareId };
+    }
     if (parts.length === 6 && parts[3] === "proposals" && parts[5] === "withdraw") {
       return {
         route: "share-proposal-withdraw",
@@ -952,6 +1091,11 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();
+  }
+  if (isAutomationHostPath(parts)) {
+    const action = parseAutomationHostAction(parts[3]);
+    if (!action) throw notFound();
+    return { route: "automation-host", workspaceId, action };
   }
   if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {

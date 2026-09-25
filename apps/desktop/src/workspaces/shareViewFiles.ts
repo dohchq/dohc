@@ -370,7 +370,7 @@ function assertPathWithinGrant(
 }
 
 function validatedReadPath(path: string): string {
-  const validated = validateUserReadPath(path);
+  const validated = validateUserReadPath(path, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid shared file path (${validated.reason}): ${path}`);
   }
@@ -503,7 +503,7 @@ function canonicalEffects(
 }
 
 function normalizedMaterializePath(path: string): string | null {
-  const validated = validateUserMaterializePath(path);
+  const validated = validateUserMaterializePath(path, { platform: process.platform });
   return validated.ok ? validated.normalized : null;
 }
 

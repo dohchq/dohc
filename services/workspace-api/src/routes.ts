@@ -1,6 +1,7 @@
 import type { EmailMessage } from "@dohc/workspace-auth/smtp";
 import { ACCOUNT_CSS, ACCOUNT_CSS_PATH, ACCOUNT_JS, ACCOUNT_JS_PATH } from "./assets";
 import type { EmailTransport, ServerDescriptor } from "./config";
+import { CRASH_REPORT_PATH, type CrashReportIntake } from "./crashReports";
 import {
   accountPage,
   devicePage,
@@ -38,6 +39,8 @@ export interface RouterOptions {
   emailTransport: EmailTransport;
   /** Origins answered with CORS headers; everything else gets none. */
   allowedOrigins: string[];
+  /** Present only when the operator turned on crash reports. */
+  crashReports?: CrashReportIntake;
   /** Development and test only. main.ts decides whether these exist. */
   seams?: {
     deviceApprove?: (request: Request) => Promise<Response>;
@@ -104,6 +107,12 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
       response.headers.set("cache-control", "no-store");
       for (const [name, value] of Object.entries(cors)) response.headers.set(name, value);
       return response;
+    }
+
+    if (path === CRASH_REPORT_PATH && options.crashReports) {
+      if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405, { allow: "POST" });
+      const answer = await options.crashReports(request);
+      return json(answer.body, answer.status, answer.headers);
     }
 
     if (request.method === "GET" || request.method === "HEAD") {

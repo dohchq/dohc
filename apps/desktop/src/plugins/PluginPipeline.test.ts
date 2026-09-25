@@ -129,10 +129,12 @@ async function fileHashes(
   return hashes;
 }
 
+// Real plugin stops and disposal can take seconds on a loaded gate; this stays
+// inside the 60 s tests that use it.
 async function settleWithin<T>(
   promise: Promise<T>,
   message: string,
-  timeoutMs = 10_000,
+  timeoutMs = 20_000,
 ): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -1453,7 +1455,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     let lateAliasJob: Promise<void> | undefined;
     try {
       surface = await ensureFromSurface(setup.pipeline, "runtime-id");
-      expect(surface.result.ok).toBe(true);
+      expect(
+        surface.result.ok,
+        surface.result.ok
+          ? undefined
+          : `Plugin startup failed at ${surface.result.error.stage}: ${surface.result.error.code}`,
+      ).toBe(true);
       expect(setup.host.currentRecord("runtime-id")).toBeDefined();
       const preflight = await setup.pipeline.uninstallPreflight(
         "original-id",

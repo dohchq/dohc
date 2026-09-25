@@ -29,6 +29,7 @@ import {
   stubEditorGlobals,
   stubScrollSpy,
   findSourceEditor,
+  findEnabledMarkdownEditToggle,
   toggleSourceOnce,
 } from "./FileInspector.editor-fixture";
 import {
@@ -37,6 +38,9 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+import { deferred } from "../testing/deferred";
+import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { loadStoredDrafts } from "./orphanedDraftStorage";
 
 setupFileInspectorTests();
 
@@ -88,23 +92,6 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // surfaces carry it: the source CodeMirror host in FileInspector and the
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
-// The edit toggle is `disabled={readOnly || opening}`, and a click on a
-// disabled button does nothing and does not retry. A click fired the moment the
-// button exists is therefore dropped whenever the open has not answered yet,
-// and the wait for the source surface then times out on a toggle that never
-// happened. Clicking a mode toggle more than once is not a fix — the modes
-// cycle — so the enabled button is the thing to wait for.
-async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
-  return await waitFor(() => {
-    const toggle = screen.getByTestId("markdown-edit-toggle");
-    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
-    }
-    return toggle;
-  });
-}
 
 // The P1 trap: typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to
@@ -112,6 +99,7 @@ async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
 // cleanup must fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
+    platform: "linux" as const,
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text: "# Hello\n",
       truncated: false as const,
@@ -170,6 +158,61 @@ describe("markdown editor unmount flush", () => {
     );
     return { user, view };
   }
+
+  it.each([false, true])("captures the latest local Markdown edit when its exit writer stalls (edit after capture: %s)", async (editAfterCapture) => {
+    const held = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    const latest = deferred<Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>>();
+    bridgeMock.writeWorkspaceText.mockReturnValueOnce(held.promise).mockReturnValueOnce(latest.promise);
+    const user = userEvent.setup();
+    const onSaveStateChange = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />);
+    await screen.findByTestId("view-markdown");
+    const richEditor = await screen.findByTestId("markdown-editor");
+    expect(richEditor.classList.contains("dohc-code-editor")).toBe(false);
+    await typeInMarkdownEditor(user, richEditor, "Draft!");
+    vi.useFakeTimers();
+    try {
+      let drained = false;
+      const drain = settlePendingEditorDrafts().then(result => { drained = result; });
+      await act(async () => { await Promise.resolve(); });
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledOnce();
+      await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Newest!"));
+      expect(drained).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(EDITOR_WRITE_STALL_MS); });
+      await drain;
+      expect(drained).toBe(true);
+      expect(hasPendingEditorDrafts()).toBe(false);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ path: "a.md", text: expect.stringContaining("Newest!") }),
+      ]);
+      const newestText = editAfterCapture ? "Later!" : "Newest!";
+      if (editAfterCapture) {
+        await settleUserEventAction(typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), newestText));
+        expect(hasPendingEditorDrafts()).toBe(true);
+      }
+      await act(async () => { held.resolve({ status: "written", contentHash: "late-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saving");
+      expect(screen.getByTestId("markdown-save-state").dataset.state).not.toBe("saved");
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(newestText);
+      expect(screen.getByTestId("markdown-editor").textContent).toContain(newestText);
+      vi.useRealTimers();
+      fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      await act(async () => { latest.resolve({ status: "written", contentHash: "latest-save" }); });
+      expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
+      expect(codeEditorText(await findSourceEditor())).toContain(newestText);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("Newest!") }),
+      ]);
+    } finally {
+      await act(async () => {
+        held.resolve({ status: "written", contentHash: "late-save" });
+        latest.resolve({ status: "written", contentHash: "latest-save" });
+      });
+      vi.useRealTimers();
+    }
+  });
 
   it("retains the local buffer through StrictMode without a blank committed view", () => {
     const path = "assets/identity.png";
@@ -618,7 +661,6 @@ describe("markdown editor unmount flush", () => {
           text: "New peer",
           expectedContentHash: switchedHash,
         }),
-      { timeout: 2000 },
     );
   });
 
@@ -1136,10 +1178,7 @@ describe("markdown editor unmount flush", () => {
     await user.keyboard(typed);
 
     expect(sourceEditor.value).toBe(`${largeBody}${typed}`);
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
       `${largeBody}${typed}`,
     );
@@ -1159,10 +1198,7 @@ describe("markdown editor unmount flush", () => {
     await user.click(content);
     await user.keyboard("{End} local");
     expect(sourceEditor.value).toBe("# Hello local\n");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     const peerSource = {};
     act(() => {
@@ -1287,7 +1323,7 @@ describe("markdown editor unmount flush", () => {
 
     await screen.findByTestId("view-markdown");
     // Properties render inline under the title now — no toggle to open.
-    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
     view.unmount();
@@ -1326,7 +1362,7 @@ describe("markdown editor unmount flush", () => {
       ),
     );
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Retitled" } });
     fireEvent.blur(title);
@@ -1368,20 +1404,15 @@ describe("markdown editor unmount flush", () => {
     // No pending save yet, so the save-state chip is hidden in read mode.
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     await user.click(title);
     await user.type(title, "!");
 
     // The autosave (800ms debounce) fails; the failure must become visible
     // even though we never left read mode. Await the real write first — the
     // debounce plus load must never race a wall-clock window (its old 3s
-    // bound was measured at 3.1s under a 24-process load) — and bound
-    // it, so a product that never writes fails as this named assertion
-    // rather than as the test deadline. 10s is ~3x the loaded measurement.
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled(),
-      { timeout: 10_000 },
-    );
+    // bound was measured at 3.1s under a 24-process load).
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalled());
     await waitFor(() => {
       const chip = screen.getByTestId("markdown-save-state");
       expect(chip.textContent).toBe("Couldn't save");
@@ -2356,7 +2387,6 @@ describe("markdown editor unmount flush", () => {
           text: "available edit",
           expectedContentHash: TEST_CONTENT_HASH,
         }),
-      { timeout: 5_000 },
     );
   });
 
@@ -2398,10 +2428,7 @@ describe("markdown editor unmount flush", () => {
       ).toBe(true),
     );
 
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     expect(publishDraft).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(screen.getAllByTestId("markdown-editor")[1]!.textContent).toContain(
@@ -2486,10 +2513,7 @@ describe("markdown editor unmount flush", () => {
     const editors = await screen.findAllByTestId("markdown-editor");
     await user.click(editors[0]!);
     await user.type(editors[0]!, "First");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     await user.click(editors[1]!);
     await user.type(editors[1]!, "Zz");
@@ -2504,7 +2528,6 @@ describe("markdown editor unmount flush", () => {
 
     await waitFor(
       () => expect(bridgeMock.writeWorkspaceText, "report the completed write as saved while a lazy peer draft is pending. The peer pane clears its timer and its unsaved flag, no second write ever issues, and closing that pane retires the edit unwritten.").toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
     );
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(
       "Zz",
@@ -2535,10 +2558,7 @@ describe("markdown editor unmount flush", () => {
     const editor = await screen.findByTestId("markdown-editor");
     await user.click(editor);
     await user.type(editor, "First");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     await user.type(editor, "Zz");
     // The re-armed debounce must not have fired yet, or the write below could
@@ -2552,7 +2572,6 @@ describe("markdown editor unmount flush", () => {
 
     await waitFor(
       () => expect(bridgeMock.writeWorkspaceText, "report the completing write as saved while the lazy draft is live. The armed timer is cleared, the chip reads Saved, and the keystroke reaches neither disk nor recovery.").toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
     );
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(
       "Zz",
@@ -2617,7 +2636,6 @@ describe("markdown editor unmount flush", () => {
     });
     const toggles: Array<(() => void) | null> = [null, null];
     const flushes: DraftFlush[] = [];
-    const user = userEvent.setup();
     render(
       <>
         {[0, 1].map((index) => (
@@ -2638,21 +2656,27 @@ describe("markdown editor unmount flush", () => {
     const editors = await screen.findAllByTestId("markdown-editor");
     await waitFor(() => expect(flushes).toHaveLength(2));
     await toggleSourceOnce(() => toggles[1]);
-    const sourceEditor = screen
-      .getAllByTestId("markdown-editor")
-      .find((editor) => editor.classList.contains("dohc-code-editor"));
-    expect(sourceEditor).toBeDefined();
+    const sourceEditor = await waitFor(() => {
+      const source = screen.getAllByTestId("markdown-editor")
+        .find((editor) => editor.classList.contains("dohc-code-editor"));
+      expect(source).toBeDefined();
+      return source!;
+    });
     const sourceContent = await textEditorContent(sourceEditor!);
 
-    await user.click(editors[0]!);
-    await user.type(editors[0]!, "Body A");
+    // Keep the body pending throughout the handoff, even on a busy renderer.
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await settleUserEventAction(user.click(editors[0]!));
+    await settleUserEventAction(user.type(editors[0]!, "Body A"));
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-    await user.click(sourceContent);
+    await settleUserEventAction(user.click(sourceContent));
     codeEditorView(sourceEditor!).dispatch({
       selection: { anchor: codeEditorText(sourceEditor!).length },
     });
-    await user.keyboard("Source B");
+    await settleUserEventAction(user.keyboard("Source B"));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -3199,9 +3223,7 @@ describe("markdown editor unmount flush", () => {
         }
         const surface = markdown
           ? screen.getByTestId("markdown-editor")
-          : (await screen.findByTestId("view-text-editor")).querySelector(
-              ".cm-content",
-            )!;
+          : await findTextEditorContent();
 
         if (markdown) {
           appendCodeEditorText(surface as HTMLElement, " first");
@@ -3369,7 +3391,6 @@ describe("markdown editor unmount flush", () => {
         expect(content).toBeInstanceOf(HTMLElement);
         expect(content!.textContent).toContain("Workspace A");
       },
-      { timeout: 10_000 },
     );
 
     view.rerender(
@@ -3391,7 +3412,6 @@ describe("markdown editor unmount flush", () => {
         expect(next!.textContent).toContain("Workspace B");
         return next as HTMLElement;
       },
-      { timeout: 10_000 },
     );
     await user.click(content);
     await user.keyboard("{End} edit");
@@ -3402,7 +3422,7 @@ describe("markdown editor unmount flush", () => {
       text: "Workspace B edit",
       expectedContentHash: secondHash,
     });
-  }, 30_000);
+  });
 
   it("serializes overlapping plain-text autosaves and writes the newest draft last", async () => {
     useAutoAdvancingFakeTimers();
@@ -3435,10 +3455,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     await user.keyboard("Two");
     await waitFor(() => expect(content.textContent).toContain("OneTwo"));
@@ -3511,10 +3528,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} One");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
@@ -3563,10 +3577,7 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await user.click(content);
     await user.keyboard("{End} Fresh");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
@@ -3626,11 +3637,7 @@ describe("markdown editor unmount flush", () => {
     await user.click(first);
     await user.keyboard("{End} Local");
 
-    await screen.findAllByTestId(
-      "orphaned-draft-notice",
-      {},
-      { timeout: 5_000 },
-    );
+    await screen.findAllByTestId("orphaned-draft-notice");
     await waitFor(() =>
       expect(
         editors.every((editor) => editor.textContent?.includes("External")),
@@ -3716,10 +3723,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Local");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     view.rerender(
       <FileInspector
@@ -3909,10 +3913,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     view.unmount();
 
     await act(async () => {
@@ -3977,10 +3978,7 @@ describe("markdown editor unmount flush", () => {
         const content = await findTextEditorContent();
         await user.click(content);
         await user.keyboard("{End} Draft");
-        await waitFor(
-          () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-          { timeout: 5_000 },
-        );
+        await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
         await waitFor(() => expect(flush).not.toBeNull());
         const operationResult = flush!({ captureOnFailure: true }).then(
           () => "resolved" as const,
@@ -4302,9 +4300,7 @@ describe("markdown editor unmount flush", () => {
     const flushPromise = flush!().then(() => {
       flushSettled = true;
     });
-    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     await user.keyboard("Two");
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
@@ -4389,9 +4385,7 @@ describe("markdown editor unmount flush", () => {
     void secondFlush.then(() => {
       secondSettled = true;
     });
-    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     await user.keyboard("Two");
     await advanceAutosaveDebounce();
@@ -4399,9 +4393,7 @@ describe("markdown editor unmount flush", () => {
       releaseFirst();
       await heldFirst;
     });
-    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
@@ -4413,9 +4405,7 @@ describe("markdown editor unmount flush", () => {
       releaseSecond();
       await heldSecond;
     });
-    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(3), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(3));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
@@ -4476,9 +4466,7 @@ describe("markdown editor unmount flush", () => {
     const firstFlush = flush!();
     const secondFlush = flush!();
     const sharedPromise = firstFlush === secondFlush;
-    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1), {
-      timeout: 5_000,
-    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     await user.keyboard("Two");
     await advanceAutosaveDebounce();
     releaseFirst();
@@ -4638,6 +4626,147 @@ describe("markdown editor unmount flush", () => {
     } finally {
       parse.mockRestore();
       serialize.mockRestore();
+    }
+  });
+
+  // A busy renderer can deliver the first cell edit before the effects of the
+  // render that showed the table. The table must still recognize its own
+  // output (one serialize, no reparse, later edits keep the row offsets), and
+  // the draft must still save against the read it was built on.
+  it("saves an edit that lands before the table's effects, serializing it once", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42\n2026-06-11,43",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const expectedText = delimitedTextCodec.serialize(
+      [["date", "amount"], ["2026-06-10", "420"], ["2026-06-11", "430"]],
+      ",",
+    );
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A MutationObserver callback runs as a microtask right after the commit
+      // that adds the cells, before the task that runs that commit's effects.
+      // The wait is bounded like the suite's other waits, inside the 30 s test.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The table's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = screen.queryByLabelText("Row 1 column 2");
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          parse.mockClear();
+          serialize.mockClear();
+          fireEvent.change(cell, { target: { value: "420" } });
+          fireEvent.change(screen.getByLabelText("Row 2 column 2"), {
+            target: { value: "430" },
+          });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+      await edited;
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+      expect(
+        (screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value,
+      ).toBe("420");
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "data/table.csv",
+        text: expectedText,
+        expectedContentHash: TEST_CONTENT_HASH,
+      });
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
+  // The same early edit in a duplicate pane whose read answered after a newer
+  // one. The shared document refuses the older read, so saving the edit would
+  // put text built on the older read under the newer content hash.
+  it("sets aside an early edit built on a read the document already moved past", async () => {
+    type ReadResult = { text: string; truncated: false; contentHash: string };
+    const newerHash = "2".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<ReadResult>((resolve) => { resolveNewer = resolve; });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    const capture = vi.spyOn(orphanedDraftsModule, "captureOrphanedDraft");
+    const olderCell = () =>
+      (screen.queryAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+        .find((input) => input.value === "1");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const view = render(
+        <>
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+        </>,
+      );
+      await waitFor(() =>
+        expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+      );
+      await act(async () => {
+        resolveNewer({ text: "a\n2", truncated: false, contentHash: newerHash });
+        await newer;
+      });
+      const buffer = getSharedLocalDocument(
+        documentVersionKey("ws-1", "data/table.csv", undefined),
+      );
+      await waitFor(() => expect(buffer.getSnapshot().body).toBe("a\n2"));
+
+      // Edit the older pane the moment its cells appear, before its effects.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The older pane's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = olderCell();
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          fireEvent.change(cell, { target: { value: "10" } });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      // Outside act, so React commits the table and runs its effects in
+      // separate tasks, as it does in the app.
+      resolveOlder({ text: "a\n1", truncated: false, contentHash: "1".repeat(64) });
+      await edited;
+
+      expect(capture).toHaveBeenCalledWith("ws-1", "data/table.csv", "a\n10");
+      expect(buffer.getSnapshot()).toMatchObject({ body: "a\n2", contentHash: newerHash });
+      await waitFor(() =>
+        expect(
+          (screen.getAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+            .map((input) => input.value),
+        ).toEqual(["2", "2"]),
+      );
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      capture.mockRestore();
     }
   });
 
@@ -5219,10 +5348,7 @@ describe("markdown editor unmount flush", () => {
     const firstContent = await findTextEditorContent();
     await user.click(firstContent);
     await user.keyboard("{End} v1");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     view.rerender(
       <FileInspector
@@ -5251,10 +5377,7 @@ describe("markdown editor unmount flush", () => {
       resolveFirst();
       await heldFirst;
     });
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toBe(
       "Version two v2",
     );
@@ -5291,10 +5414,7 @@ describe("markdown editor unmount flush", () => {
     const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     const oldBuffer = getSharedLocalDocument(key);
     view.unmount();
 
@@ -5337,10 +5457,7 @@ describe("markdown editor unmount flush", () => {
     fireEvent.click(await findEnabledMarkdownEditToggle());
     const firstSource = await findSourceEditor();
     replaceCodeEditorText(firstSource, `${firstSource.value}v1`);
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     view.rerender(
       <FileInspector
@@ -5361,10 +5478,7 @@ describe("markdown editor unmount flush", () => {
       resolveFirst();
       await heldFirst;
     });
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toContain(
       "Version two\nv2",
     );
@@ -5496,10 +5610,7 @@ describe("markdown editor unmount flush", () => {
       await heldFirst;
     });
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toBe(
       "Version two v2",
     );
@@ -5676,10 +5787,7 @@ describe("markdown editor unmount flush", () => {
       await heldFirst;
     });
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toBe(
       "# Version two\n\nv2",
     );
@@ -5872,7 +5980,7 @@ describe("markdown editor unmount flush", () => {
 
     await screen.findByTestId("view-markdown");
     // WYSIWYG opens with properties inline under the title — no toggle needed.
-    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await screen.findByTestId("properties-panel");
 
     // Source mode edits the raw markdown (frontmatter included), so the inline
     // property rows step aside.
@@ -5883,7 +5991,7 @@ describe("markdown editor unmount flush", () => {
 
     // Returning to WYSIWYG brings the inline properties back.
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await screen.findByTestId("properties-panel");
   });
 
   it("keeps read-mode properties edits dirty across a refresh before save", async () => {
@@ -5907,7 +6015,7 @@ describe("markdown editor unmount flush", () => {
 
     await screen.findByTestId("view-markdown");
     // Large docs open in read mode; properties still render inline (editable).
-    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
     view.rerender(

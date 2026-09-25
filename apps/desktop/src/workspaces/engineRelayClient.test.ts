@@ -7,6 +7,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  RelayApiVersionError,
   MAX_REPORTED_REFUSALS,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -677,6 +678,73 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("writes a Collection's own files through daemon RPC and reads each write's answer", async () => {
+    const daemon = new MockDaemon((request) =>
+      request.method === "share.direct.push"
+        ? {
+            writes: [
+              { paths: ["docs/packing/collection.yaml"], result: "written" },
+              {
+                paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
+                result: "stale",
+                stalePath: "docs/ideas",
+                currentBlobSha256: null,
+              },
+              { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
+            ],
+            morePending: false,
+          }
+        : undefined,
+    );
+    const { client, sessions } = await harness(daemon);
+
+    await expect(
+      client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
+    ).resolves.toEqual({
+      writes: [
+        { paths: ["docs/packing/collection.yaml"], result: "written" },
+        {
+          paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
+          result: "stale",
+          stalePath: "docs/ideas",
+          currentBlobSha256: null,
+        },
+        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
+      ],
+      morePending: false,
+    });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.direct.push")
+        .map((request) => request.params),
+    ).toEqual([
+      {
+        workspaceId: "workspace-a",
+        shareId: "share-file",
+        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+      },
+    ]);
+    expectStatefulRequestsScoped(daemon.requests);
+    await sessions.closeAll();
+  });
+
+  it("refuses a direct push answer it cannot read", async () => {
+    for (const writes of [
+      [{ paths: [], result: "written" }],
+      [{ paths: ["docs/a/collection.yaml"], result: "maybe" }],
+      [{ paths: ["docs/a/collection.yaml"], result: "stale", currentBlobSha256: null }],
+    ]) {
+      const daemon = new MockDaemon((request) =>
+        request.method === "share.direct.push" ? { writes, morePending: false } : undefined,
+      );
+      const { client, sessions } = await harness(daemon);
+      await expect(
+        client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
+      ).rejects.toThrow("share.direct.push");
+      await sessions.closeAll();
+    }
+  });
+
   it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit"
@@ -815,6 +883,27 @@ describe("EngineRelayClient", () => {
     // The noun, not just the class: the relay answers one code for chat and
     // for changes, so this name is the only thing that carries which one.
     expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
+    await sessions.closeAll();
+  });
+
+  it("says which side must update when the relay does not serve this build's API version", async () => {
+    let message = "relay-api-version-too-old";
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.proposal.submit") return undefined;
+      throw new DaemonRefusalError({ code: "PROTOCOL_VERSION_UNSUPPORTED", message, retry: "no" }, new Error("refused"));
+    });
+    const { client, sessions } = await harness(daemon);
+    const submit = async (submitId: string): Promise<unknown> =>
+      await client.submitShareProposal({ shareId: "share-file", grantedSelector: EDIT_SELECTOR, submitId })
+        .catch((error: unknown) => error);
+
+    const old = await submit("submit-old");
+    expect(old).toBeInstanceOf(RelayApiVersionError);
+    expect((old as RelayApiVersionError).update).toBe("app");
+    message = "relay-api-version-too-new";
+    const newer = await submit("submit-new");
+    expect(newer).toBeInstanceOf(RelayApiVersionError);
+    expect((newer as RelayApiVersionError).update).toBe("server");
     await sessions.closeAll();
   });
 
@@ -1473,6 +1562,31 @@ describe("EngineRelayClient", () => {
           }),
       }),
     ).resolves.toMatchObject({ endedShareIds: ["channel-revoked"] });
+    await sessions.closeAll();
+  });
+
+  it("reports each applied page of a shared-channel pull before a later page fails", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.channel.pull") return undefined;
+      pulls += 1;
+      if (pulls >= 2) {
+        throw new EngineRequestError(request.id, {
+          code: "OVERLOADED",
+          message: "relay unreachable",
+          retry: "no",
+        });
+      }
+      return { fetched: 1, applied: 1, refused: 0, skipped: 0, hasMore: true, nextCursor: pulls };
+    });
+    const { client, sessions } = await harness(daemon);
+    const onApplied = vi.fn();
+
+    await expect(
+      client.pullSharedChannel({ shareId: "share-channel", channelWireId: "wire-channel", onApplied }),
+    ).rejects.toThrow();
+    expect(pulls).toBe(2);
+    expect(onApplied).toHaveBeenCalledTimes(1);
     await sessions.closeAll();
   });
 

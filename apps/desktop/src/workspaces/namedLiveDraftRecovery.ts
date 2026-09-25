@@ -12,7 +12,7 @@ export interface NamedLiveDraft {
 
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. */
 export async function preserveNamedLiveDraft(directory: string, workspaceId: string, draft: NamedLiveDraft): Promise<void> {
-  if (classifyEngineFilePathForRead(draft.path).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
+  if (classifyEngineFilePathForRead(draft.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
   const content = JSON.stringify({ version: 1, workspaceId, path: draft.path, objectId: draft.objectId,
     remoteWorkspaceId: draft.remoteWorkspaceId, updateBase64: Buffer.from(draft.update).toString("base64") });
   const digest = createHash("sha256").update(content).digest("hex");

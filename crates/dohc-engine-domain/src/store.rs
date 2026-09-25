@@ -1285,6 +1285,7 @@ pub(crate) fn write_result_from_moment(
         },
         moment,
         deduped,
+        automation_claims: Vec::new(),
     })
 }
 

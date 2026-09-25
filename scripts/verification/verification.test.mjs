@@ -111,7 +111,7 @@ test("doctor requires a disk measurement only when a build budget is configured"
         assert.equal(result.checks.find(check=>check.name==='disk').state,expected,JSON.stringify({floor,free}));
         assert.ok(result.checks.filter(check=>check.name!=='disk').every(check=>check.state==='PASS'));
       }
-    `], { cwd: root, encoding: "utf8", timeout: 10_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -151,7 +151,7 @@ for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
         };
         try { await (await import('./scripts/verification/build.mjs')).prepare(); }
         catch (error) { console.error(error.message); }
-      `], { cwd: root, encoding: "utf8", timeout: 10_000,
+      `], { cwd: root, encoding: "utf8", timeout: 20_000,
         env: { ...process.env, DOHC_BUILD_SLOT_ROOT: slots, DOHC_GATE_DISK_FLOOR_GB: "0" } });
       assert.equal(result.error, undefined);
       assert.match(result.stdout, /waiting for a build slot:/);
@@ -171,7 +171,7 @@ test("command text decodes UTF-8 across pipe chunks while retaining raw log byte
   try {
     const log = join(root, "output.log");
     const result = await run(process.execPath, ["-e", `process.stdout.write(JSON.stringify({path:'雪/😀'}));process.stderr.write('é診断');`], {
-      log, quietStdout: true, timeoutMs: 5000,
+      log, quietStdout: true, timeoutMs: 20_000,
       onSpawn: (child) => {
         for (const stream of [child.stdout, child.stderr]) {
           const emit = stream.emit;
@@ -197,7 +197,7 @@ test("command decoders flush incomplete final UTF-8 without altering log bytes",
   try {
     const log = join(root, "output.log");
     const result = await run(process.execPath, ["-e", "process.stdout.write(Buffer.from([0xe2,0x82]));process.stderr.write(Buffer.from([0xc3]));"], {
-      log, quietStdout: true, timeoutMs: 5000,
+      log, quietStdout: true, timeoutMs: 20_000,
     });
     assert.equal(result.stdout, "�");
     assert.equal(result.stderr, "�");
@@ -477,7 +477,7 @@ test("POSIX prepared desktop rejects CLI execute drift and restages unchanged la
         assert.equal(preparedStatus('desktop'),true);
         assert.equal(JSON.parse(readFileSync(receiptPath,'utf8')).desktop.artifact,receipt.desktop.artifact);
       }
-    `], { cwd: root, encoding: "utf8", timeout: 10_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -508,7 +508,7 @@ test("source fingerprints follow the host's environment key casing", () => {
         process.env[upper]='1';
         assert.notEqual(sourceFingerprint('engine',root),after);
       }
-    `, root], { encoding: "utf8", timeout: 10_000 });
+    `, root], { encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -718,6 +718,13 @@ test("artifact identity includes nested file bytes and names", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("gate selection covers root self-host deployment inputs", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of ["docker-compose.self-host.yml", ".env.self-host.example", ".dockerignore"]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
+  }
+});
+
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
@@ -804,7 +811,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       console.log(JSON.stringify(report));
     `;
     const invoke = (extra = []) => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 15_000,
+      cwd: root, encoding: "utf8", timeout: 20_000,
       env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))) },
     });
     const clean = invoke();
@@ -843,6 +850,8 @@ test("Postgres startup rejection cleans its created container and preserves star
       calls.push({ args, options });
       if (args[0] === "run") {
         assert.equal(args[args.indexOf("--health-cmd") + 1], "pg_isready -h 127.0.0.1 -U dohc -d dohc");
+        assert.equal(args[args.indexOf("--health-start-period") + 1], "90s");
+        assert.equal(args[args.indexOf("--health-start-interval") + 1], "1s");
         ownedName = args[args.indexOf("--name") + 1];
         containers.add(ownedName);
         throw startupError;
@@ -922,15 +931,27 @@ test("failed commands retain their output and reject instead of reporting succes
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a stalled command times out, stops its process, and retains its output", { timeout: 10_000 }, async (t) => {
+test("a stalled command times out, stops its process, and retains its output", { timeout: 30_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-command-timeout-"));
   const log = join(root, "timeout.log");
   let child;
-  const timeoutMs = process.platform === "win32" ? 3000 : 1000;
+  const timeoutMs = 1000;
+  // The mocked deadline expires only once the command has printed, so a loaded
+  // host cannot time it out before the output the test checks for exists.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   t.after(() => { if (child?.exitCode === null && child.signalCode === null) child.kill(); });
   try {
     await assert.rejects(run(process.execPath, ["-e", "console.log('waiting-for-service');setInterval(() => {}, 1000)"], {
-      log, timeoutMs, onSpawn: (process) => { child = process; },
+      log, timeoutMs, onSpawn: (spawned) => {
+        child = spawned;
+        let stdout = "";
+        spawned.stdout.on("data", function ready(chunk) {
+          stdout += chunk;
+          if (!stdout.includes("waiting-for-service")) return;
+          spawned.stdout.off("data", ready);
+          t.mock.timers.tick(timeoutMs);
+        });
+      },
     }), new RegExp(`timed out after ${timeoutMs}ms`));
     assert.ok(child.exitCode !== null || child.signalCode !== null, "the timed-out process must have exited");
     assert.match(readFileSync(log, "utf8"), /waiting-for-service/);

@@ -2745,7 +2745,7 @@ describe("relay capability reads", () => {
     expect(linkMeta).not.toHaveProperty("participants");
 
     const recipientLog = await json(
-      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")),
+      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100&originId=recipient-replica")),
     );
     const linkLog = await json(
       await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
@@ -2753,7 +2753,10 @@ describe("relay capability reads", () => {
     const linkOps = (recipientLog.ops as Array<Record<string, unknown>>).map(
       ({ originId: _originId, ...op }) => op,
     );
-    expect(linkLog).toEqual({ ...recipientLog, ops: linkOps, epochLogFloor: 0 });
+    const { ownOriginId, ...recipientPage } = recipientLog;
+    expect(ownOriginId).toMatch(/^relay:share-member:[a-f0-9]{64}$/);
+    expect(linkLog).toEqual({ ...recipientPage, ops: linkOps, epochLogFloor: 0 });
+    expect(linkLog).not.toHaveProperty("ownOriginId");
     expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);
     expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
 
@@ -3495,7 +3498,7 @@ describe("relay capability reads", () => {
       hasMore: false,
       epochLogFloor: 0,
     });
-  }, 20_000);
+  });
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();

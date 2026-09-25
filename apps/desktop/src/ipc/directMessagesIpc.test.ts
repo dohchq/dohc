@@ -8,15 +8,18 @@ import { createChatScopeCapability } from "./chatScope";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { createLastKnownDmRequestLanesCache } from "../workspaces/dmRequests";
+import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
 import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { readDeclinedDms } from "../workspaces/dmRequestStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SharedChannelPassOutcome } from "../workspaces/desktopSharedChannelSync";
 import type { JoinedSharedChannel, RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { ChannelThreadSummary, ChatChannelSummary, ChatMessage } from "@dohc/workspace-contracts/engine";
+import type { PullWorkspaceFromRelayResult } from "@dohc/workspace-contracts/relay";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -97,7 +100,7 @@ async function harness() {
   });
   const info = vi.fn(async () => Response.json({
     shareId: "request", granterUserId: "peer", granterEmail: "peer@example.test",
-    selector: { kind: "chat-channel", channelWireId: "channel" }, access: "read-write", createdAtMs: 1,
+    selector: { kind: "chat", channelWireId: "channel" }, access: "read-write", createdAtMs: 1,
   }));
   vi.stubGlobal("fetch", info);
   const writeChannels = vi.fn((_id: string, next: JoinedSharedChannel[]) => {
@@ -108,8 +111,13 @@ async function harness() {
     return { fetched: 1, applied: 1, skipped: 0, nextCursor: 1 };
   });
   const project = vi.fn(async () => { events.push("project"); });
-  const sync = vi.fn(async () => { events.push("sync"); return 0; });
-  const activity = { queueCloudSync: vi.fn(() => { events.push("cloud"); }) };
+  const sync = vi.fn(async (): Promise<SharedChannelPassOutcome> => {
+    events.push("sync"); return { unrefreshed: 0, changed: false, failed: false };
+  });
+  const activity = {
+    queueCloudSync: vi.fn(() => { events.push("cloud"); }),
+    queueCloudPull: vi.fn(() => { events.push("pull"); }),
+  };
   const dispatch = { scanWorkspace: vi.fn(async () => { events.push("dispatch"); }) };
   const kinds = new Map<string, "dm" | "not-dm">([["request", "dm"]]);
   const assertTrustedSender = (event: Event) => { if (!event.trusted) throw new Error("untrusted"); };
@@ -127,6 +135,7 @@ async function harness() {
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
+    sharesChanged: () => undefined,
   });
   const chatScope = createChatScopeCapability({
     workspaceAuthorities: authorities,
@@ -223,7 +232,7 @@ describe("registered direct message boundaries", () => {
     if (reason === "renderer") h.retireRenderer();
     else if (reason === "authority") retired = h.authorities.invalidate("workspace");
     else h.rotateCredentials();
-    response.resolve({ received: [{ shareId: "request", selector: { kind: "chat-channel", channelWireId: "channel" } }] });
+    response.resolve({ received: [{ shareId: "request", selector: { kind: "chat", channelWireId: "channel" } }] });
     await rejected;
     await retired;
     expect(h.state.lastKnownDmRequestLanes.get("workspace")).toBeUndefined();
@@ -245,6 +254,102 @@ describe("registered direct message boundaries", () => {
     await rejected;
     expect(h.relayJson).not.toHaveBeenCalled();
     expect(h.linkedChatStoreFor).not.toHaveBeenCalled();
+  });
+
+  it("neither syncs nor pulls after an idle refresh that no poll asked for", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" })).resolves.toMatchObject({ available: true, dms: [], pending: [], declined: [], failed: false });
+    expect(h.events).toEqual(["list-grants", "sync"]);
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+    expect(h.activity.queueCloudPull).not.toHaveBeenCalled();
+  });
+
+  it("queues one cloud sync after a pass that applied ops and none after the idle refreshes that follow", async () => {
+    const h = await harness();
+    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 0, changed: true, failed: false }; });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true });
+    // A poll asks for its pull too, because only the pull has a deadline that
+    // local writes cannot push back.
+    expect(h.events).toEqual(["list-grants", "sync", "cloud", "pull"]);
+    // The cloud engine's change events refresh Chats without the poll flag.
+    // Those passes apply nothing, so they must not queue again.
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    expect(h.sync).toHaveBeenCalledTimes(3);
+    expect(h.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
+    expect(h.activity.queueCloudPull).toHaveBeenCalledExactlyOnceWith("workspace");
+  });
+
+  it("pulls the owner's log on every poll while joined channels keep changing and local writes keep arriving", async () => {
+    const h = await harness();
+    const workspacePull = vi.fn(async (): Promise<PullWorkspaceFromRelayResult> => ({
+      fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0,
+      sharingDeclined: [], fastForwardedPaths: [], nextCursor: 0,
+    }));
+    const engine = createRelaySyncEngine({
+      rootDir: "/workspace", relay: { baseUrl: credentials.relayUrl!, token: credentials.token },
+      capture: {
+        runRelaySync: async (task: (materialize: () => Promise<void>) => Promise<unknown>) =>
+          await task(async () => undefined),
+      } as unknown as WorkspaceEngineCapture,
+      onChange: () => undefined,
+      operations: {
+        push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
+        pull: workspacePull,
+        recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
+      },
+      debounceMs: 1_500,
+    });
+    h.activity.queueCloudSync.mockImplementation(() => engine.queueSync());
+    h.activity.queueCloudPull.mockImplementation(() => engine.queuePull());
+    h.sync.mockImplementation(async () => ({ unrefreshed: 0, changed: true, failed: false }));
+    vi.useFakeTimers();
+    try {
+      for (let poll = 1; poll <= 3; poll += 1) {
+        await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true });
+        // A local write every second keeps the 1.5 s debounce from firing.
+        for (let second = 0; second < 5; second += 1) {
+          engine.queueSync();
+          await vi.advanceTimersByTimeAsync(1_000);
+        }
+        expect(workspacePull).toHaveBeenCalledTimes(poll);
+      }
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pulls the workspace's own relay log for a poll, which is how an owner DM with no joined channel receives replies", async () => {
+    const h = await harness();
+    h.seedConversation();
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({
+      dms: [{ channelId: "channel", role: "owner", shareId: null }], failed: false,
+    });
+    expect(h.events).toEqual(["list-grants", "sync", "pull"]);
+    // The pull's own change events refresh Chats without the poll flag.
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace" });
+    await h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", openChannelId: "channel", poll: true });
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
+    expect(h.activity.queueCloudPull).toHaveBeenCalledWith("workspace");
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed pass, a failed relay listing, and a thrown sync, and a failed listing or pass still pulls for a poll", async () => {
+    const h = await harness();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.sync.mockImplementationOnce(async () => { h.events.push("sync"); return { unrefreshed: 1, changed: false, failed: true }; });
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
+    h.relayJson.mockRejectedValueOnce(new Error("relay down"));
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true, pending: [], declined: [] });
+    // The owner's relay log does not depend on the listing or the joined
+    // rows, and the engine backs off on its own failures.
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
+    h.sync.mockRejectedValueOnce(new Error("relay down"));
+    await expect(h.invoke(CHANNELS.syncDms, { workspaceId: "workspace", poll: true })).resolves.toMatchObject({ failed: true });
+    expect(h.activity.queueCloudPull).toHaveBeenCalledTimes(2);
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("serves local conversations while signed out without syncing", async () => {
@@ -284,7 +389,7 @@ describe("registered direct message boundaries", () => {
     const rejected = expect(accepted).rejects.toThrow();
     await entered.promise;
     if (reason === "stale") h.rotateCredentials();
-    response.resolve(reason === "revoked" ? new Response(null, { status: 404 }) : Response.json({ selector: { kind: "chat-channel", channelWireId: "channel" }, access: "read-write" }));
+    response.resolve(reason === "revoked" ? new Response(null, { status: 404 }) : Response.json({ selector: { kind: "chat", channelWireId: "channel" }, access: "read-write" }));
     await rejected;
     expect(h.writeChannels).not.toHaveBeenCalled();
     expect(h.pull).not.toHaveBeenCalled();
@@ -328,7 +433,7 @@ describe("registered direct message boundaries", () => {
     h.seedConversation();
     h.relayJson.mockResolvedValueOnce({ granted: [{
       recipientEmail: "PEER@example.test", revokedAtMs: null,
-      selector: { kind: "chat-channel", channelWireId: "channel" },
+      selector: { kind: "chat", channelWireId: "channel" },
     }] });
     await expect(h.invoke(CHANNELS.startDm, startPayload)).resolves.toMatchObject({ dm: { channelId: "channel", threadId: "thread" } });
     expect(h.relayJson).toHaveBeenCalledOnce();

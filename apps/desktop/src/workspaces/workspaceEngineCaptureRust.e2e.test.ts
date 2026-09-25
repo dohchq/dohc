@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,10 +7,9 @@ import { expect, it } from "vitest";
 import * as Y from "yjs";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
-import {
-  EngineDaemonLifecycle,
-  type AttachedEngineWorkspace,
-  type EngineWorkspaceSessions,
+import type {
+  AttachedEngineWorkspace,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   VersionedLiveAdapter,
@@ -26,7 +25,10 @@ import {
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
@@ -103,7 +105,7 @@ it.skipIf(engine.missing)(
   "adopts rich collection Markdown through the shared Y.Doc importer without flattening it",
   async () => {
     const root = await createTestScratch("dohc-capture-rich-adoption-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -170,7 +172,7 @@ it.skipIf(engine.missing)(
   "round-trips every v1 collection field type through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-field-pipeline-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -318,7 +320,7 @@ it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -402,7 +404,7 @@ it.skipIf(engine.missing)(
   "keeps an edit made outside dohc when the open document closes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-drift-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -475,7 +477,7 @@ it.skipIf(engine.missing)(
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
     };
-    const firstLifecycle = new EngineDaemonLifecycle({
+    const firstLifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -523,7 +525,7 @@ it.skipIf(engine.missing)(
       // record a delete, but it cannot recreate the persisted write moment.
       await rm(join(root, "final.md"));
 
-      const secondLifecycle = new EngineDaemonLifecycle({
+      const secondLifecycle = createRealDaemonLifecycle({
         command: engine.require(),
         maxRestarts: 0,
       });
@@ -566,7 +568,7 @@ it.skipIf(engine.missing)(
   "reports refusals from the real daemon under their domain error codes",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-codes-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -602,7 +604,7 @@ it.skipIf(engine.missing)(
   "closes clean, then captures an outside edit deferred by its live lease",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-race-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -730,7 +732,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
   "surfaces a locked save and lands it by itself once the lock releases",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-lock-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -788,8 +790,22 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       // durably pending materialization job through the idempotent settle.
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
+        const contents = await readFile(absolute, "utf8").catch(async (error) => {
+          const diagnostic = {
+            path: absolute,
+            states: [...states],
+            errors: [...errors],
+            directory: await readdir(root).catch(
+              (listingError: NodeJS.ErrnoException) => listingError.code,
+            ),
+          };
+          if (error instanceof Error) {
+            error.message += `\nLocked-save recovery: ${JSON.stringify(diagnostic)}`;
+          }
+          throw error;
+        });
         if (
-          (await readFile(absolute, "utf8")) !== "base\n" &&
+          contents !== "base\n" &&
           states.includes("saved")
         ) {
           break;
@@ -834,7 +850,7 @@ it.skipIf(engine.missing)(
   "keeps the close loud when unsettled edits meet a deferred outside edit",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-loud-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -945,7 +961,7 @@ it.skipIf(engine.missing)(
   "refuses a live session for a path the version does not have, and still opens a new file",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-absent-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });
@@ -1028,7 +1044,7 @@ it.skipIf(engine.missing)(
   "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-815-");
-    const lifecycle = new EngineDaemonLifecycle({
+    const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
     });

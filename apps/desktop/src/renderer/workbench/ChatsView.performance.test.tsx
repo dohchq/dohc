@@ -211,7 +211,9 @@ describe("chat render cost", () => {
     );
 
     expect(await screen.findByText("thread-dm-2")).toBeTruthy();
-    expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledTimes(1);
+    // The sync that opening runs reads the revision again and finds the
+    // painted one, so it does not load the conversation a second time.
+    await waitFor(() => expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledTimes(2));
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
     expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1);
   });

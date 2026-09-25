@@ -432,54 +432,71 @@ describe("ChatsView live activity refresh", () => {
   // sync that never settles would leave the new workspace's DM list empty
   // forever.
   it("never queues the new workspace's DM sync onto the stalled one it left", async () => {
-    type DmPage = { available: boolean; dms: DmRecord[] };
-    const leftBehind = new Promise<DmPage>(() => {
-      // never settles: the drain the switch must not wait on
-    });
-    let oldReads = 0;
-    let newReads = 0;
-    bridgeMock.syncDms.mockImplementation(
-      ({ workspaceId }: { workspaceId: string }) => {
-        if (workspaceId !== "workspace-old") {
-          newReads += 1;
-          return Promise.resolve({
-            available: true,
-            dms: [
-              dm({
-                channelId: "channel-dm-new",
-                peerLabel: "carol@example.com",
-              }),
-            ],
-          });
-        }
-        oldReads += 1;
-        return oldReads === 1
-          ? Promise.resolve({ available: true, dms: [dm()] })
-          : leftBehind;
-      },
-    );
-    const view = render(
-      <ChatsView
-        workspaceId="workspace-old"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
-    );
-    await screen.findByTestId("chats-dm-item");
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(oldReads).toBe(2));
+    // Fake timers, never advanced: the 5s poll cannot fire, so only the
+    // switch can start the new workspace's sync. A 2 s real-time wait made
+    // the same point and could miss on a loaded gate.
+    vi.useFakeTimers();
+    try {
+      type DmPage = { available: boolean; dms: DmRecord[] };
+      const leftBehind = new Promise<DmPage>(() => {
+        // never settles: the drain the switch must not wait on
+      });
+      let oldReads = 0;
+      let newReads = 0;
+      bridgeMock.syncDms.mockImplementation(
+        ({ workspaceId }: { workspaceId: string }) => {
+          if (workspaceId !== "workspace-old") {
+            newReads += 1;
+            return Promise.resolve({
+              available: true,
+              dms: [
+                dm({
+                  channelId: "channel-dm-new",
+                  peerLabel: "carol@example.com",
+                }),
+              ],
+            });
+          }
+          oldReads += 1;
+          return oldReads === 1
+            ? Promise.resolve({ available: true, dms: [dm()] })
+            : leftBehind;
+        },
+      );
+      const view = render(
+        <ChatsView
+          workspaceId="workspace-old"
+          onOpenFileChat={vi.fn()}
+          onError={vi.fn()}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      screen.getByTestId("chats-dm-item");
+      act(() => emitWorkspaceActivity());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(oldReads).toBe(2);
 
-    view.rerender(
-      <ChatsView
-        workspaceId="workspace-new"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
-    );
-    await waitFor(() => expect(newReads, "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync ever starts — not even the poll can get past it.").toBeGreaterThan(0), { timeout: 2_000 });
-    expect((await screen.findByTestId("chats-dm-name")).textContent).toBe(
-      "carol@example.com",
-    );
+      view.rerender(
+        <ChatsView
+          workspaceId="workspace-new"
+          onOpenFileChat={vi.fn()}
+          onError={vi.fn()}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(newReads, "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync starts.").toBeGreaterThan(0);
+      expect(screen.getByTestId("chats-dm-name").textContent).toBe(
+        "carol@example.com",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("drops a slow list refresh from the workspace the user left", async () => {

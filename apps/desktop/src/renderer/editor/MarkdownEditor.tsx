@@ -10,9 +10,9 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { Extension, type Editor } from "@tiptap/core";
+import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -21,7 +21,7 @@ import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -120,6 +120,7 @@ import {
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
+import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
@@ -322,6 +323,70 @@ function BubbleButton(props: {
   );
 }
 
+// The bubble menu's contents. The editor does not re-render React on each
+// transaction, so the toolbar reads the block and marks under the selection
+// from the editor's state; a render-time read showed the previous
+// selection's. selectionFormat keeps that read cheap on every keystroke.
+export function SelectionToolbar(props: {
+  editor: Editor;
+  onOpenLink: (state: LinkMenuState) => void;
+}) {
+  const { editor } = props;
+  const active = useEditorState({
+    editor,
+    selector: ({ editor: current }) => selectionFormat(current.state),
+  });
+  return (
+    <>
+      <TurnIntoMenu editor={editor} activeId={active.block} />
+      <span className="dohc-bubble-menu__divider" aria-hidden="true" />
+      <BubbleButton
+        label="Bold"
+        active={active.bold}
+        onClick={() => editor.chain().focus().toggleBold().run()}
+      >
+        <Bold size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Italic"
+        active={active.italic}
+        onClick={() => editor.chain().focus().toggleItalic().run()}
+      >
+        <Italic size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Underline"
+        active={active.underline}
+        onClick={() => editor.chain().focus().toggleUnderline().run()}
+      >
+        <UnderlineIcon size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Strikethrough"
+        active={active.strike}
+        onClick={() => editor.chain().focus().toggleStrike().run()}
+      >
+        <Strikethrough size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Code"
+        active={active.code}
+        onClick={() => editor.chain().focus().toggleCode().run()}
+      >
+        <Code size={14} aria-hidden />
+      </BubbleButton>
+      <BubbleButton
+        label="Highlight"
+        active={active.highlight}
+        onClick={() => editor.chain().focus().toggleMark("highlight").run()}
+      >
+        <Highlighter size={14} aria-hidden />
+      </BubbleButton>
+      <LinkBubbleButton editor={editor} active={active.link} onOpen={props.onOpenLink} />
+    </>
+  );
+}
+
 /** Reveal the block `target` names, clamped to the last block — the caller's
  *  index comes from Markdown that can have drifted from the live document,
  *  and the nearest block is the honest answer. No cursor move: an external
@@ -368,6 +433,28 @@ function renderInlineText(editor: Editor, source: string): string {
   } catch {
     return source;
   }
+}
+
+/** Tab focus leaves Chromium's caret at the editor root, (view.dom, 0), and
+ *  here the Selection API usually reports no range at all. ProseMirror's
+ *  focus handler finds that equal to its last, empty, selection and writes
+ *  nothing, so typed text has no caret. Write the state selection unless the
+ *  DOM caret is already inside the content. A click places its caret later. */
+function placeCaretOnFocus(view: EditorView): void {
+  const anchor = view.dom.ownerDocument.getSelection()?.anchorNode;
+  if (anchor && anchor !== view.dom && view.dom.contains(anchor)) return;
+  view.focus();
+}
+
+/** ProseMirror reads a caret the browser moved when selectionchange arrives,
+ *  and Chromium can deliver that event after the next key. Enter right after
+ *  a click then split the block at the old selection. Read the DOM selection
+ *  first. ProseMirror's own keydown flushes only pending DOM mutations. */
+function readCaretBeforeKey(view: EditorView, event: KeyboardEvent): false {
+  if (event.keyCode !== 229) {
+    (view as EditorView & { domObserver: { flush(): void } }).domObserver.flush();
+  }
+  return false;
 }
 
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
@@ -724,10 +811,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
+          handleKeyDown: readCaretBeforeKey,
           handleDOMEvents: {
-            focus: () => {
+            focus: (view) => {
               collaborationHistory?.stopCapturing();
               onFocusRef.current?.();
+              placeCaretOnFocus(view);
               return false;
             },
           },
@@ -975,8 +1064,18 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useImperativeHandle(
       ref,
       () => ({
+        // Synchronous on purpose. The page title's Enter handler calls this,
+        // and Tiptap's focus command defers to the next frame, which let the
+        // next character typed land in the title instead of the body.
+        // ProseMirror scrolls only to a caret already inside the editor, so
+        // the scroll request comes after focus.
         focus(position) {
-          editor?.commands.focus(position);
+          if (!editor || editor.isDestroyed) return;
+          const { view } = editor;
+          const selection = resolveFocusPosition(view.state.doc, position);
+          if (selection) view.dispatch(view.state.tr.setSelection(selection));
+          view.focus();
+          view.dispatch(view.state.tr.scrollIntoView());
         },
         getMarkdown() {
           if (!editor) return value;
@@ -1061,56 +1160,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => {
-              const { selection } = instance.state;
-              return selection instanceof TextSelection && !selection.empty;
-            }}
+            shouldShow={({ editor: instance }) =>
+              hasFormattableSelection(instance.state.selection)
+            }
           >
-            <TurnIntoMenu editor={editor} />
-            <span className="dohc-bubble-menu__divider" aria-hidden="true" />
-            <BubbleButton
-              label="Bold"
-              active={editor.isActive("bold")}
-              onClick={() => editor.chain().focus().toggleBold().run()}
-            >
-              <Bold size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Italic"
-              active={editor.isActive("italic")}
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-            >
-              <Italic size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Underline"
-              active={editor.isActive("underline")}
-              onClick={() => editor.chain().focus().toggleUnderline().run()}
-            >
-              <UnderlineIcon size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Strikethrough"
-              active={editor.isActive("strike")}
-              onClick={() => editor.chain().focus().toggleStrike().run()}
-            >
-              <Strikethrough size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Code"
-              active={editor.isActive("code")}
-              onClick={() => editor.chain().focus().toggleCode().run()}
-            >
-              <Code size={14} aria-hidden />
-            </BubbleButton>
-            <BubbleButton
-              label="Highlight"
-              active={editor.isActive("highlight")}
-              onClick={() => editor.chain().focus().toggleMark("highlight").run()}
-            >
-              <Highlighter size={14} aria-hidden />
-            </BubbleButton>
-            <LinkBubbleButton editor={editor} onOpen={setLinkMenuState} />
+            <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
         ) : null}
         {chromeReady ? (

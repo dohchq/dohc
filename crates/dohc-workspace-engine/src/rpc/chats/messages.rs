@@ -22,6 +22,7 @@ use dohc_engine_domain::ChatDecisionState;
 use dohc_engine_domain::ChatFileMention;
 use dohc_engine_domain::ChatMention;
 use dohc_engine_domain::ChatMessage;
+use dohc_engine_domain::ChatMessageAutomation;
 use dohc_engine_domain::ChatReaction;
 use dohc_engine_domain::ChatReactionState;
 use dohc_engine_domain::LocalAttachmentInput;
@@ -55,7 +56,26 @@ struct ChatMessageSendParams {
     options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    automation: Option<ChatMessageAutomationParams>,
     now_ms: Option<i64>,
+}
+
+/// The automation executor names the automation that writes a message.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ChatMessageAutomationParams {
+    automation_id: String,
+    chain_depth: u32,
+}
+
+impl From<ChatMessageAutomationParams> for ChatMessageAutomation {
+    fn from(value: ChatMessageAutomationParams) -> Self {
+        ChatMessageAutomation {
+            automation_id: value.automation_id,
+            chain_depth: value.chain_depth,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -87,6 +107,12 @@ struct ChatReactionSetParams {
     replication_author_id: Option<String>,
     state: String,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatMessageGetParams {
+    message_id: String,
 }
 
 #[derive(Deserialize)]
@@ -129,15 +155,44 @@ struct ChatMentionsListForHandleParams {
     cursor: Option<String>,
 }
 
+/// A message author. The domain accepts an automation only with its automation.
 pub(super) fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     match raw {
         "human" => Ok(ChatActorKind::Human),
         "agent" => Ok(ChatActorKind::Agent),
+        "automation" => Ok(ChatActorKind::Automation),
         _ => Err(WireError::new(
             ErrorCode::InvalidParams,
             "unknown chat actor kind",
         )),
     }
+}
+
+/// A reaction author. Automations do not react.
+fn parse_reactor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
+    match parse_actor_kind(raw)? {
+        ChatActorKind::Automation => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "an automation cannot react",
+        )),
+        kind => Ok(kind),
+    }
+}
+
+pub(super) fn actor_kind_str(kind: ChatActorKind) -> &'static str {
+    match kind {
+        ChatActorKind::Human => "human",
+        ChatActorKind::Agent => "agent",
+        ChatActorKind::Automation => "automation",
+    }
+}
+
+/// Readers open an automation from its Collection; the depth stays in the engine.
+pub(super) fn automation_json(automation: &ChatMessageAutomation) -> Value {
+    json!({
+        "automationId": automation.automation_id,
+        "collectionPath": automation.collection_path(),
+    })
 }
 
 pub(super) fn message_json(message: &ChatMessage) -> Value {
@@ -146,10 +201,7 @@ pub(super) fn message_json(message: &ChatMessage) -> Value {
         "workspaceId": message.workspace_id,
         "threadId": message.thread_id,
         "author": {
-            "kind": match message.author_kind {
-                ChatActorKind::Human => "human",
-                ChatActorKind::Agent => "agent",
-            },
+            "kind": actor_kind_str(message.author_kind),
             "displayName": message.author_display_name,
         },
         "body": message.body,
@@ -169,6 +221,9 @@ pub(super) fn message_json(message: &ChatMessage) -> Value {
     if let Some(origin) = &message.origin {
         object.insert("origin".to_owned(), json!(origin));
     }
+    if let Some(automation) = &message.automation {
+        object.insert("automation".to_owned(), automation_json(automation));
+    }
     value
 }
 
@@ -180,10 +235,7 @@ pub(super) fn reaction_json(reaction: &ChatReaction) -> Value {
         "emoji": reaction.emoji,
         "author": {
             "authorId": reaction.author_id,
-            "kind": match reaction.author_kind {
-                ChatActorKind::Human => "human",
-                ChatActorKind::Agent => "agent",
-            },
+            "kind": actor_kind_str(reaction.author_kind),
             "displayName": reaction.author_display_name,
         },
         "state": match reaction.state {
@@ -269,10 +321,7 @@ fn mention_json(mention: &ChatMention) -> Value {
         "threadId": mention.thread_id,
         "messageId": mention.message_id,
         "handle": mention.handle,
-        "authorKind": match mention.author_kind {
-            ChatActorKind::Human => "human",
-            ChatActorKind::Agent => "agent",
-        },
+        "authorKind": actor_kind_str(mention.author_kind),
         "createdAtMs": mention.created_at_ms,
     })
 }
@@ -508,6 +557,7 @@ impl EngineService {
                         .into_iter()
                         .map(LocalAttachmentInput::from)
                         .collect(),
+                    automation: params.automation.map(ChatMessageAutomation::from),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -516,6 +566,27 @@ impl EngineService {
         )
         .await?;
         Ok(message_json(&message))
+    }
+
+    /// One message by id. A Group automation reads the whole message when
+    /// its claim carried the body truncated.
+    pub(crate) async fn chats_messages_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatMessageGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let message = Self::read_under_ctx(
+            &cancellation,
+            "chats.messages.get",
+            open.actor
+                .chat_message_get(open.workspace_id.clone(), params.message_id),
+        )
+        .await?;
+        Ok(json!({ "message": message_json(&message) }))
     }
 
     pub(crate) async fn chats_decisions_resolve(
@@ -622,7 +693,7 @@ impl EngineService {
                 ));
             }
         };
-        let author_kind = parse_actor_kind(&params.author.kind)?;
+        let author_kind = parse_reactor_kind(&params.author.kind)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let reaction = Self::read_under_ctx(

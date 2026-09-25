@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./automation-schedule": "./src/automationSchedule.ts",
+    "./automations": "./src/automations.ts",
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./chat-mentions": "./src/chatMentions.ts",
@@ -25,6 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "acorn": "^8.18.0",
     "effect": "4.0.0-beta.107",
     "js-yaml": "^5.2.3"
   },

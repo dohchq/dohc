@@ -4,7 +4,7 @@ import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { createNamedLiveBrowserTransport, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
-import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
+import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
 import type { NamedLiveDraft } from "./namedLiveDraftRecovery";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { EngineYDocSessionCapture, EngineYDocSessionProvider } from "./engineYDocSessionIpc";
@@ -16,7 +16,7 @@ export function createNamedDesktopLiveCapture(options: {
 }): EngineYDocSessionCapture {
   const credentials = { ...options.credentials }, origin = new URL(credentials.relayUrl);
   if (origin.protocol !== "https:" || origin.username || origin.password || origin.search || origin.hash) throw new Error("Invalid live relay.");
-  const request = options.fetch ?? fetch;
+  const request = options.fetch ?? relayApiFetch();
   async function admit(path: string, signal: AbortSignal) {
     options.assertCurrent(); signal.throwIfAborted();
     const response = await request(new URL("/sync/live/desktop-open", origin), {
@@ -85,7 +85,7 @@ export function createNamedDesktopLiveCapture(options: {
       let localTransaction = false;
       const update = (bytes: Uint8Array) => { if (!localTransaction && !closed) input.onRemoteUpdate(bytes); };
       session.doc.on("update", update);
-      return {
+      const provider: EngineYDocSessionProvider = {
         doc: session.doc, initialUpdate: Y.encodeStateAsUpdate(session.doc), contentKind: "richdoc", path: input.path,
         objectId: first.selection.objectId, versionId: "main", artifactAssets: [],
         get lineageClaimId() { return session.state().binding?.lineageClaimId; },
@@ -104,6 +104,14 @@ export function createNamedDesktopLiveCapture(options: {
             for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved", accepted);
           }
         },
+        // A shared session applies each edit at once, so the decision and
+        // the edit see the same doc.
+        async applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
+          const bytes = decide(session.doc);
+          if (bytes === null) return false;
+          provider.applyLocalUpdate(bytes, onArmed, applyOptions);
+          return true;
+        },
         async readArtifactAsset() { throw new Error("Shared Markdown has no live artifact assets."); },
         async close() {
           if (session.state().pendingUpdates > 0 || pendingTokens.length > 0) {
@@ -114,6 +122,7 @@ export function createNamedDesktopLiveCapture(options: {
           closed = true; unsubscribe(); credentials.signal.removeEventListener("abort", abort); session.doc.off("update", update); transport.close();
         },
       };
+      return provider;
     },
   };
 }

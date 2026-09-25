@@ -103,7 +103,7 @@ async function harness(shared = false) {
     relayClient: () => { throw new Error("unused relay"); },
     createStores: () => { throw new Error("unused stores"); },
   });
-  const failure = { automationId: "automation-1", error: "Command failed", updatedAtMs: 10, generation: 3 };
+  const failure = { automationId: "automation-1", claimId: "claim-1", chainStopped: false, error: "Command failed", updatedAtMs: 10, generation: 3 };
   const adapter = { listAutomationFailures: vi.fn<VersionedLiveAdapter["listAutomationFailures"]>(async () => ({ failures: [failure] })) };
   const acknowledge = vi.fn(registry.acknowledgeAutomationFailure);
   const notify = vi.fn((_id: string) => undefined);
@@ -142,6 +142,7 @@ async function harness(shared = false) {
     withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter: async (value, work) => { routed.push(value); return missingAdapter ? null : work(adapter); },
     acknowledgeWorkspaceAutomationFailure: acknowledge, notifyAutomationFailuresChanged: notify,
+    automationNameOf: (_workspaceId, automationId) => automationId === "automation-1" ? "Stamp the finish date" : null,
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
     requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
@@ -223,7 +224,7 @@ describe("agent run IPC registrations", () => {
 
   it("clamps acknowledgments, keeps them monotonic, and reveals later failures", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [h.failure] });
+    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [{ ...h.failure, name: "Stamp the finish date" }] });
     await h.invoke(CHANNELS.dismissAutomationFailure, dismissPayload);
     expect(h.acknowledge).toHaveBeenCalledWith("workspace-a", "automation-1", 3);
     expect(h.notify).toHaveBeenCalledWith("workspace-a");
@@ -231,7 +232,7 @@ describe("agent run IPC registrations", () => {
     expect(h.registry.find("workspace-a")?.automationFailureAcks).toEqual({ "automation-1": 3 });
     await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [] });
     h.failure.generation = 4;
-    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [h.failure] });
+    await expect(h.invoke(CHANNELS.listAutomationFailures)).resolves.toEqual({ failures: [{ ...h.failure, name: "Stamp the finish date" }] });
   });
 
   it("returns no notices without an engine but refuses dismissal", async () => {

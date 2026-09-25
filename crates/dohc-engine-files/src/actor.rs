@@ -17,6 +17,7 @@ use crate::bounds::ScanBounds;
 use crate::capture::CaptureApplyResult;
 use crate::diff::ScanManifest;
 use crate::error::FilesError;
+use crate::hash::PoolGauge;
 use crate::reconcile::{ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration};
 use crate::scan::{ScanOutcome, Scanner};
 use std::path::PathBuf;
@@ -121,6 +122,7 @@ pub struct FilesActor {
     /// command, before any dirty-clearing capture acknowledgement runs.
     pending_overflow: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    gauge: Arc<PoolGauge>,
 }
 
 impl FilesActor {
@@ -158,7 +160,7 @@ impl FilesActor {
         let close_permit = tx.clone().try_reserve_owned().ok();
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         let pending_overflow = Arc::new(AtomicBool::new(false));
-        let (startup_tx, startup_rx) = std_sync_channel::<Result<(), FilesError>>(1);
+        let (startup_tx, startup_rx) = std_sync_channel::<Result<Arc<PoolGauge>, FilesError>>(1);
 
         let worker_state = Arc::clone(&state);
         let worker_overflow = Arc::clone(&pending_overflow);
@@ -180,12 +182,13 @@ impl FilesActor {
             })?;
 
         match startup_rx.recv() {
-            Ok(Ok(())) => Ok(FilesActor {
+            Ok(Ok(gauge)) => Ok(FilesActor {
                 tx,
                 close_permit,
                 state,
                 pending_overflow,
                 worker: Some(worker),
+                gauge,
             }),
             Ok(Err(err)) => {
                 let _ = worker.join();
@@ -237,6 +240,12 @@ impl FilesActor {
     /// The current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    /// The hash pool's gauge. Its `hashed` count moves while a scan runs, so a
+    /// caller waiting on a long scan can tell it from a stuck one.
+    pub fn gauge(&self) -> &Arc<PoolGauge> {
+        &self.gauge
     }
 
     /// Orderly close: drain queued work, stop accepting new commands, tear down
@@ -419,7 +428,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     pending_overflow: Arc<AtomicBool>,
-    startup_tx: std::sync::mpsc::SyncSender<Result<(), FilesError>>,
+    startup_tx: std::sync::mpsc::SyncSender<Result<Arc<PoolGauge>, FilesError>>,
 ) {
     // Publish Closed on any exit (declared before the scanner so the scanner —
     // and its hash pool — drops first, then this guard publishes Closed).
@@ -445,7 +454,10 @@ fn worker_main(
     };
 
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
-    if startup_tx.send(Ok(())).is_err() {
+    if startup_tx
+        .send(Ok(Arc::clone(scanner.pool().gauge())))
+        .is_err()
+    {
         return;
     }
     drop(startup_tx);

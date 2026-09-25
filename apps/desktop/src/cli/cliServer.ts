@@ -5,7 +5,7 @@ import {
   parseCliResult,
   type CliActor,
   type CliAuthor,
-  type CliChannel,
+  type CliGroup,
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
@@ -49,7 +49,7 @@ import {
   type GranularChatMessageSearchResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -77,7 +77,13 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import {
+  LiveDocumentEditAppliedError,
+  type LiveDocumentEditOrigin,
+  type LiveDocumentEditOutcome,
+} from "../workspaces/engineYDocSessionIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import type { DocumentEdit } from "@dohc/ydoc-projection";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -87,7 +93,9 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_FTS_CANDIDATES = 50_000;
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
-const REQUEST_DEADLINE_MS = 15_000;
+// A CLI request that has not answered by now loses its socket; work done for
+// it, such as waiting for a created record, ends at the same bound.
+export const CLI_REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
 const RUN_MESSAGE_LINK_ATTEMPTS = 3;
 const RUN_MESSAGE_LINK_RETRY_MS = 25;
@@ -151,7 +159,8 @@ export interface CliRegistryWorkspace {
 // behavior-bearing actor kind; the request never supplies one. Field values
 // are plain JSON: they land in the record's frontmatter Y.Doc map. Both
 // functions throw on refusal (invalid path, engine off, "id" field, a held
-// doc session, adoption timeout).
+// doc session, a taken record name, adoption not done by the request
+// deadline).
 export interface CliCollectionWriteSeam {
   setFields(input: {
     recordPath: string;
@@ -172,6 +181,18 @@ export interface CliCollectionsPort {
   query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
   getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
   writes: CliCollectionWriteSeam;
+}
+
+// Live Markdown documents for the document verbs. Main answers through the
+// editor session that holds a document, so an edit reaches an open editor
+// as the person's own typing would.
+export interface CliDocumentsPort {
+  read(path: string): Promise<{ path: string; markdown: string }>;
+  edit(input: {
+    path: string;
+    edit: DocumentEdit;
+    origin: LiveDocumentEditOrigin;
+  }): Promise<LiveDocumentEditOutcome>;
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
@@ -197,6 +218,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
+  documents?: CliDocumentsPort;
 }
 
 export interface CliRunMessageLink {
@@ -233,6 +255,8 @@ export interface CliServerOptions {
   chatReadSyncBudgetMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  /** How many finished results and forgotten request ids each workspace keeps; tests lower them. */
+  requestIdLimits?: { results: number; ids: number };
   runMessageLinkForegroundBudgetMs?: number;
   runMessageLinkRecoveryRetryMs?: number;
   runMessageLinkRecoveryMaxPending?: number;
@@ -251,7 +275,7 @@ export interface CliServerHandle {
 
 interface LoadedThread {
   thread: ChatThread;
-  channel: CliChannel;
+  group: CliGroup;
   summary?: ChannelThreadSummary;
 }
 
@@ -325,12 +349,25 @@ export function cliMessageId(id: string): string {
   return formatMessageHandle(id);
 }
 
-function channelForCli(channel: ChatChannelSummary): CliChannel {
+// The engine's `channel` kind is a Group everywhere a reader sees it.
+export function cliGroupKind(kind: ChatChannelSummary["kind"]): CliGroup["kind"] {
+  return kind === "channel" ? "group" : kind;
+}
+
+// A thread linked to a file belongs to no engine channel; it lists here.
+export const FILES_GROUP: CliGroup = {
+  id: "files",
+  name: "files",
+  slug: "files",
+  kind: "group",
+};
+
+function groupForCli(channel: ChatChannelSummary): CliGroup {
   return {
     id: cliChannelId(channel.id),
     name: channel.kind === "agent" ? "my-agent" : channel.name,
     slug: channel.slug,
-    kind: channel.kind,
+    kind: cliGroupKind(channel.kind),
     ...(channel.purpose ? { purpose: channel.purpose } : {}),
   };
 }
@@ -342,13 +379,6 @@ async function listCliChannelThreads(context: CliWorkspaceContext, channel: Chat
   })));
   return pages.flat();
 }
-
-const FILES_CHANNEL: CliChannel = {
-  id: "files",
-  name: "files",
-  slug: "files",
-  kind: "channel",
-};
 
 function authorForCli(message: ChatMessage): CliAuthor {
   return {
@@ -493,10 +523,29 @@ function collectionWriteAuthor(
   return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
+// Provenance for a document edit, derived here. A person types in the
+// editor, so every edit through this socket is an agent's on behalf of the
+// local owner, recorded under the name the agent gave itself or under none.
+// Any process holding the socket token could otherwise claim the person's
+// typing.
+function documentEditOrigin(agent: string | undefined): LiveDocumentEditOrigin {
+  return {
+    ...(agent === undefined ? {} : { actorOriginId: agent }),
+    attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+  };
+}
+
+function documentsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "documents are not available in this workspace",
+  };
+}
+
 async function loadChannels(
   context: CliWorkspaceContext,
 ): Promise<{
-  channels: Array<{ engine: ChatChannelSummary; cli: CliChannel }>;
+  channels: Array<{ engine: ChatChannelSummary; cli: CliGroup }>;
   provisioned: boolean;
 }> {
   const before = await context.store.listChannels({
@@ -509,7 +558,7 @@ async function loadChannels(
     workspaceId: context.workspaceId,
   });
   return {
-    channels: channels.map((engine) => ({ engine, cli: channelForCli(engine) })),
+    channels: channels.map((engine) => ({ engine, cli: groupForCli(engine) })),
     provisioned: channels.length !== before.length,
   };
 }
@@ -544,19 +593,19 @@ function resolveIdPrefix<T>(
 
 function resolveChannel(
   input: string,
-  channels: readonly { engine: ChatChannelSummary; cli: CliChannel }[],
-): { engine: ChatChannelSummary; cli: CliChannel } {
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
+): { engine: ChatChannelSummary; cli: CliGroup } {
   const normalized = withoutChannelMarker(input);
   const slugMatches = channels.filter(
     ({ engine, cli }) => cli.slug === normalized || cli.name === normalized || engine.name === normalized,
   );
   if (slugMatches.length === 1) return slugMatches[0]!;
   if (slugMatches.length > 1) {
-    ambiguous("channel", input, slugMatches.map(({ cli }) => cli.id));
+    ambiguous("group", input, slugMatches.map(({ cli }) => cli.id));
   }
   return resolveIdPrefix(
     normalized,
-    "channel",
+    "group",
     channels,
     ({ cli }) => cli.id,
     ({ engine }) => [engine.id],
@@ -565,7 +614,7 @@ function resolveChannel(
 
 async function loadThreads(
   context: CliWorkspaceContext,
-  channels: readonly { engine: ChatChannelSummary; cli: CliChannel }[],
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
 ): Promise<LoadedThread[]> {
   const summaries = await Promise.all(
     channels.map(async ({ engine, cli }) => ({
@@ -574,11 +623,11 @@ async function loadThreads(
     })),
   );
   const byId = new Map<string, LoadedThread>();
-  for (const group of summaries) {
-    for (const summary of group.summaries) {
+  for (const entry of summaries) {
+    for (const summary of entry.summaries) {
       byId.set(summary.thread.id, {
         thread: summary.thread,
-        channel: group.cli,
+        group: entry.cli,
         summary,
       });
     }
@@ -586,7 +635,7 @@ async function loadThreads(
   const all = await context.store.listThreads({ workspaceId: context.workspaceId });
   for (const thread of all) {
     if (!byId.has(thread.id)) {
-      byId.set(thread.id, { thread, channel: FILES_CHANNEL });
+      byId.set(thread.id, { thread, group: FILES_GROUP });
     }
   }
   return [...byId.values()];
@@ -759,7 +808,7 @@ async function buildShowResult(
     thread: {
       id: cliThreadId(loaded.thread.id),
       title: loaded.thread.title,
-      channel: loaded.channel,
+      group: loaded.group,
       ...counts,
     },
     messages,
@@ -1076,7 +1125,7 @@ async function notifyRead(
 // `moment` read workspace-version history, not chat, so they sit outside it.
 function isChatReadVerb(verb: CliRequest["verb"]): boolean {
   return (
-    verb === "channels" ||
+    verb === "groups" ||
     verb === "threads" ||
     verb === "inbox" ||
     verb === "show" ||
@@ -1084,7 +1133,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
     verb === "export" ||
     verb === "fileChats" ||
     verb === "chat" ||
-    verb === "channelsFull"
+    verb === "groupsFull"
   );
 }
 
@@ -1102,7 +1151,7 @@ function chatReadTarget(
     case "show":
       return { threadId: request.args.target };
     case "threads":
-      return { channelId: request.args.channel };
+      return { channelId: request.args.group };
     default:
       return undefined;
   }
@@ -1550,6 +1599,112 @@ async function linkRunMessage(
   return warning;
 }
 
+// The results of requests a caller sent with a request id, per workspace. A
+// caller whose request passed the socket deadline sends it again with the same
+// id and gets the first result instead of the work done twice. Kept in memory
+// while dohc runs.
+//
+// A running request is never dropped; the socket's connection limit bounds how
+// many run at once. A finished one is kept as a digest of its input and its
+// small result. Past the limit the oldest finished result is dropped and only
+// its id is kept, so a resend is refused instead of run again. Past that
+// limit too, the oldest ids go, and only then could a very old id run again.
+// The MCP tool descriptions that take a requestId state these numbers.
+const REQUEST_ID_LIMITS = { results: 1_024, ids: 16_384 };
+
+interface RememberedRequest {
+  input: string;
+  result: Promise<unknown>;
+  finished: boolean;
+}
+
+interface WorkspaceRequests {
+  requests: Map<string, RememberedRequest>;
+  forgotten: Set<string>;
+}
+
+const requestMemory = new WeakMap<CliServerOptions, Map<string, WorkspaceRequests>>();
+
+function workspaceRequests(options: CliServerOptions, workspaceId: string): WorkspaceRequests {
+  let workspaces = requestMemory.get(options);
+  if (!workspaces) {
+    workspaces = new Map();
+    requestMemory.set(options, workspaces);
+  }
+  let memory = workspaces.get(workspaceId);
+  if (!memory) {
+    memory = { requests: new Map(), forgotten: new Set() };
+    workspaces.set(workspaceId, memory);
+  }
+  return memory;
+}
+
+function forgetOldestResults(memory: WorkspaceRequests, limits: { results: number; ids: number }): void {
+  let finished = 0;
+  for (const request of memory.requests.values()) if (request.finished) finished += 1;
+  for (const [requestId, request] of memory.requests) {
+    if (finished <= limits.results) break;
+    if (!request.finished) continue;
+    memory.requests.delete(requestId);
+    memory.forgotten.add(requestId);
+    finished -= 1;
+  }
+  for (const requestId of memory.forgotten) {
+    if (memory.forgotten.size <= limits.ids) break;
+    memory.forgotten.delete(requestId);
+  }
+}
+
+async function onceForRequestId(
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  requestId: string,
+  input: unknown,
+  run: () => Promise<{ done: boolean; result: unknown }>,
+): Promise<unknown> {
+  const memory = workspaceRequests(options, context.workspaceId);
+  // A digest, so a remembered edit does not keep its text in memory.
+  const inputKey = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+  const remembered = memory.requests.get(requestId);
+  if (remembered) {
+    if (remembered.input !== inputKey) {
+      return { ok: false as const, reason: `request id ${requestId} was already used for a different request` };
+    }
+    return await remembered.result;
+  }
+  if (memory.forgotten.has(requestId)) {
+    return {
+      ok: false as const,
+      reason: `dohc no longer holds the result of request id ${requestId}, so it did not run it again. Read the document or the chat to see whether it happened, and send any new request with a new id.`,
+    };
+  }
+  const started = run();
+  const result = started.then((outcome) => outcome.result);
+  // A retry may never come to await it.
+  result.catch(() => undefined);
+  const entry: RememberedRequest = { input: inputKey, result, finished: false };
+  memory.requests.set(requestId, entry);
+  const limits = options.requestIdLimits ?? REQUEST_ID_LIMITS;
+  try {
+    const outcome = await started;
+    if (outcome.done) {
+      // Finished results leave in the order they finished.
+      entry.finished = true;
+      if (memory.requests.get(requestId) === entry) {
+        memory.requests.delete(requestId);
+        memory.requests.set(requestId, entry);
+      }
+      forgetOldestResults(memory, limits);
+    } else {
+      memory.requests.delete(requestId);
+    }
+    return outcome.result;
+  } catch (error) {
+    memory.requests.delete(requestId);
+    throw error;
+  }
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -1621,7 +1776,7 @@ async function dispatch(
     }
 
     case "fileChats": {
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) {
         return {
           ok: false as const,
@@ -1692,7 +1847,7 @@ async function dispatch(
       }
     }
 
-    case "channelsFull": {
+    case "groupsFull": {
       try {
         const before = await context.store.listChannels({
           workspaceId: context.workspaceId,
@@ -1715,7 +1870,7 @@ async function dispatch(
             id: channel.id,
             name: channel.name,
             slug: channel.slug,
-            kind: channel.kind,
+            kind: cliGroupKind(channel.kind),
             threadCount: threads.length,
             ...(channel.purpose ? { purpose: channel.purpose } : {}),
             threads: threads.map((entry) => ({
@@ -1727,16 +1882,16 @@ async function dispatch(
             })),
           });
         }
-        return { ok: true as const, channels: withThreads };
+        return { ok: true as const, groups: withThreads };
       } catch (error) {
-        return mcpFailure(error, "failed to list channels");
+        return mcpFailure(error, "failed to list groups");
       }
     }
 
     case "collectionQuery": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -1790,7 +1945,7 @@ async function dispatch(
     case "collectionRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -1862,6 +2017,7 @@ async function dispatch(
       if (!collections) return collectionsUnavailable();
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
+        { platform: process.platform },
       );
       if (!collectionValidated.ok) {
         return cliPathRejected(
@@ -1873,6 +2029,7 @@ async function dispatch(
       // pass the stricter materialization rules before the seam sees it.
       const recordValidated = validateUserMaterializePath(
         `${collectionValidated.normalized}/${request.args.name}.md`,
+        { platform: process.platform },
       );
       if (!recordValidated.ok) {
         return cliPathRejected(
@@ -1899,6 +2056,53 @@ async function dispatch(
         );
       }
     }
+
+    case "documentRead": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      try {
+        return { ok: true as const, ...(await documents.read(validated.normalized)) };
+      } catch (error) {
+        return mcpFailure(error, `failed to read document: ${request.args.path}`);
+      }
+    }
+
+    case "documentEdit": {
+      const documents = context.documents;
+      if (!documents) return documentsUnavailable();
+      const { actor, agent, find, replacement } = request.args;
+      if (actor !== "agent") {
+        return {
+          ok: false as const,
+          reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"",
+        };
+      }
+      const validated = validateUserWritePath(request.args.path);
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+      const path = validated.normalized;
+      const edit = async (): Promise<{ done: boolean; result: unknown }> => {
+        try {
+          const outcome = await documents.edit({
+            path,
+            edit: { find, replacement },
+            origin: documentEditOrigin(agent),
+          });
+          return { done: true, result: { ok: true as const, ...outcome } };
+        } catch (error) {
+          return {
+            // An edit that reached the document is remembered with its
+            // failure, so a retry does not apply it again.
+            done: error instanceof LiveDocumentEditAppliedError,
+            result: mcpFailure(error, `failed to edit document: ${request.args.path}`),
+          };
+        }
+      };
+      const requestId = request.args.requestId;
+      if (requestId === undefined) return (await edit()).result;
+      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit);
+    }
   }
 
   const loadedChannels = request.verb === "reply"
@@ -1909,11 +2113,11 @@ async function dispatch(
   const nowMs = options.nowMs ?? Date.now;
 
   switch (request.verb) {
-    case "channels":
-      return { channels: channels.map(({ cli }) => cli) };
+    case "groups":
+      return { groups: channels.map(({ cli }) => cli) };
 
     case "threads": {
-      const channel = resolveChannel(request.args.channel, channels);
+      const channel = resolveChannel(request.args.group, channels);
       const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
@@ -1923,7 +2127,7 @@ async function dispatch(
           )
         : null;
       return {
-        channel: channel.cli,
+        group: channel.cli,
         threads: summaries.map((summary) => ({
           id: cliThreadId(summary.thread.id),
           ...(channel.engine.type === "both" ? { lane: summary.thread.lane } : {}),
@@ -1956,7 +2160,7 @@ async function dispatch(
               openDecisionCount: summary.openDecisionCount,
               unread: true as const,
               updatedAtMs: summary.thread.updatedAtMs,
-              channel: channel.cli,
+              group: channel.cli,
             })),
         );
         const unreadFileIds = await humanUnreadFileThreadIds(context);
@@ -1973,7 +2177,7 @@ async function dispatch(
           ),
           unread: true,
           updatedAtMs: thread.thread.updatedAtMs,
-          channel: thread.channel,
+          group: thread.group,
         })));
         const threads = [...channelThreads, ...unreadFileThreads];
         threads.sort((left, right) =>
@@ -2009,7 +2213,7 @@ async function dispatch(
               ...counts,
               unread: true,
               updatedAtMs: thread.thread.updatedAtMs,
-              channel: thread.channel,
+              group: thread.group,
             };
           }),
       );
@@ -2038,7 +2242,7 @@ async function dispatch(
         mentions.push({
           threadId: cliThreadId(thread.thread.id),
           messageId: cliMessageId(message.id),
-          channel: thread.channel,
+          group: thread.group,
           author: authorForCli(message),
           createdAtMs: message.createdAtMs,
           text: normalizeMatchedText(message.body),
@@ -2079,7 +2283,7 @@ async function dispatch(
     }
 
     case "post": {
-      const channel = resolveChannel(request.args.channel, channels);
+      const channel = resolveChannel(request.args.group, channels);
       if (channel.engine.kind === "dm") {
         throw new CliCommandError(
           "DMs are streams — use 'dohc chat reply <thread>'",
@@ -2103,7 +2307,7 @@ async function dispatch(
       }, options);
       await notifyWrite(options, context);
       return {
-        channel: channel.cli,
+        group: channel.cli,
         threadId: cliThreadId(started.thread.id),
         messageId: cliMessageId(started.message.id),
         title: started.thread.title,
@@ -2233,14 +2437,14 @@ async function dispatch(
 
     case "grep": {
       const threads = await loadThreads(context, channels);
-      const scopedChannel = request.args.channel
-        ? resolveChannel(request.args.channel, channels).cli
+      const scopedChannel = request.args.group
+        ? resolveChannel(request.args.group, channels).cli
         : null;
       const scopedThread = request.args.thread
         ? resolveThread(request.args.thread, threads)
         : null;
       const selected = threads.filter((thread) =>
-        (!scopedChannel || thread.channel.id === scopedChannel.id) &&
+        (!scopedChannel || thread.group.id === scopedChannel.id) &&
         (!scopedThread || thread.thread.id === scopedThread.thread.id),
       );
       // Substring grep asks FTS for candidate thread/message ids before any
@@ -2297,7 +2501,7 @@ async function dispatch(
           const start = Math.max(0, index - request.args.context);
           const end = Math.min(messages.length, index + request.args.context + 1);
           matches.push({
-            channel: thread.channel,
+            group: thread.group,
             threadId: cliThreadId(thread.thread.id),
             messageId: cliMessageId(message.id),
             author: authorForCli(message),
@@ -2325,9 +2529,9 @@ async function dispatch(
       let selected: LoadedThread[];
       if (request.args.scope.kind === "thread") {
         selected = [resolveThread(request.args.scope.thread, threads)];
-      } else if (request.args.scope.kind === "channel") {
-        const channel = resolveChannel(request.args.scope.channel, channels);
-        selected = threads.filter((thread) => thread.channel.id === channel.cli.id);
+      } else if (request.args.scope.kind === "group") {
+        const channel = resolveChannel(request.args.scope.group, channels);
+        selected = threads.filter((thread) => thread.group.id === channel.cli.id);
       } else {
         selected = threads;
       }
@@ -2344,7 +2548,7 @@ async function dispatch(
           threadId: thread.thread.id,
         });
         const result = await buildShowResult(context, thread, messages);
-        const channelDir = join(outputRoot, safePathSegment(thread.channel.slug));
+        const channelDir = join(outputRoot, safePathSegment(thread.group.slug));
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
         const path = join(channelDir, `${safePathSegment(publicThreadId)}.md`);
@@ -2366,8 +2570,10 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
+  const documentWriteRequest = request.verb === "documentEdit";
   const writeRequest =
     collectionWriteRequest ||
+    documentWriteRequest ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2377,7 +2583,9 @@ async function workspaceContextForRequest(
     throw new CliCommandError(
       collectionWriteRequest
         ? "collection writes are not available in a read-only shared view"
-        : "chats are not available in a read-only shared view",
+        : documentWriteRequest
+          ? "document edits are not available in a read-only shared view"
+          : "chats are not available in a read-only shared view",
     );
   }
   const context = await options.openWorkspace(workspace);
@@ -2463,7 +2671,7 @@ function attachSocketHandler(
   socket.setEncoding("utf8");
   let buffer = "";
   let handled = false;
-  const deadline = setTimeout(() => socket.destroy(), REQUEST_DEADLINE_MS);
+  const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
   const failOversized = () => {
     handled = true;

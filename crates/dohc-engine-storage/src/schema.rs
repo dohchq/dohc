@@ -26,6 +26,32 @@ use crate::migration::{
 };
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// SQLite VM steps per count of open work. A single long statement, such as a
+/// migration or the integrity check on a large store, still moves the count
+/// many times, and one atomic add per thousand steps costs nothing measurable.
+pub(crate) const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
+
+/// Count the SQLite work of this open into `work` until [`stop_counting`].
+fn count_open_work(conn: &Connection, work: Option<Arc<AtomicU64>>) -> Result<(), StorageError> {
+    let Some(work) = work else { return Ok(()) };
+    conn.progress_handler(
+        OPEN_WORK_STEP_OPS,
+        Some(move || {
+            work.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    )
+    .map_err(StorageError::corrupt)
+}
+
+/// The open is done: later statements on this connection count nothing.
+fn stop_counting(conn: &Connection) -> Result<(), StorageError> {
+    conn.progress_handler(0, None::<fn() -> bool>)
+        .map_err(StorageError::corrupt)
+}
 
 /// `synchronous = NORMAL`: the SQLite-recommended WAL setting and the TS
 /// engine's effective posture. Durable
@@ -57,6 +83,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_owner_bindings",
     "owner_pending_settlements",
     "owner_pending_settlement_blobs",
+    "relay_deferred_ops",
+    "relay_deferred_blobs",
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
@@ -158,9 +186,17 @@ const REQUIRED_TABLES: &[&str] = &[
     "share_view_cursors",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
+    // Item 12: the direct lane's position and per-file decisions.
+    "share_direct_write_state",
+    "share_direct_write_marks",
+    "share_direct_write_plan",
     "chat_conversation_revisions",
     "automation_subscriptions",
     "automation_claims",
+    "merged_moments",
+    "automation_presses",
+    "automation_schedule_marks",
+    "remote_changes",
 ];
 
 /// How an existing file was classified by the fingerprint fence.
@@ -180,7 +216,21 @@ pub(crate) struct OpenedEngineDb {
     pub freshly_created: bool,
 }
 
-pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb, StorageError> {
+/// `work`, when given, counts the SQLite work of the open as it runs.
+pub(crate) fn open_engine_db(
+    path: &Path,
+    now_ms: i64,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_with_root_token(path, now_ms, None, work)
+}
+
+pub(crate) fn open_engine_db_with_root_token(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
@@ -189,6 +239,7 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
+    count_open_work(&conn, work)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
@@ -202,7 +253,12 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
     // (the migration fault points are exercised by `migration.rs`'s tests).
-    let ctx = MigrationContext::current(now_ms);
+    let mut ctx = MigrationContext::current(now_ms);
+    // Initial ownership and the schema commit together. Existing stores never
+    // acquire a new binding merely because the caller supplies a token.
+    if disposition == Disposition::Fresh {
+        ctx.initial_root_token = root_token.map(str::to_owned);
+    }
     let no_faults = NoFaults;
     match run_migrations(
         &mut conn,
@@ -216,6 +272,7 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
+    stop_counting(&conn)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: disposition == Disposition::Fresh,
@@ -225,16 +282,21 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb,
 /// Open an existing, fully migrated v2 store without creating files, changing
 /// persistent pragmas, or applying migrations. This is the reader primitive
 /// for daemon requests that run while another engine owns workspace writes.
-pub(crate) fn open_engine_db_read_only(path: &Path) -> Result<OpenedEngineDb, StorageError> {
+pub(crate) fn open_engine_db_read_only(
+    path: &Path,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(StorageError::corrupt)?;
+    count_open_work(&conn, work)?;
     apply_session_pragmas(&conn)?;
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
         return Err(StorageError::StateCorrupt { source: None });
     }
     validate_v2(&conn)?;
     integrity_check(&conn)?;
+    stop_counting(&conn)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
@@ -407,6 +469,40 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::REQUIRED_TABLES;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn a_counted_open_counts_its_work_and_nothing_after() {
+        let directory = dohc_test_scratch::ScratchDir::new_named("open-work").unwrap();
+        let path = directory.path().join("store.sqlite");
+        let fresh = Arc::new(AtomicU64::new(0));
+        let store = crate::EngineStore::open_counting(&path, 0, Some(Arc::clone(&fresh))).unwrap();
+        let counted = fresh.load(Ordering::Relaxed);
+        assert!(counted > 0, "a fresh open migrates, and its work counts");
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            fresh.load(Ordering::Relaxed),
+            counted,
+            "the open is over; later reads count nothing"
+        );
+        drop(store);
+
+        let reopen = Arc::new(AtomicU64::new(0));
+        drop(
+            crate::EngineStore::open_read_only_counting(&path, Some(Arc::clone(&reopen))).unwrap(),
+        );
+        assert!(
+            reopen.load(Ordering::Relaxed) > 0,
+            "the integrity check of an existing store counts"
+        );
+    }
 
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {

@@ -81,6 +81,8 @@ export function registerSharedChannelsIpcHandlers<
   mountShareFolder(input: {
     workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
   }): Promise<unknown>;
+  // The owner shared one of this workspace's Groups or chats.
+  sharesChanged(workspaceId: string): void;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -89,11 +91,11 @@ export function registerSharedChannelsIpcHandlers<
     relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer, mountShareFolder, unmountShareFolder,
+    notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged,
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
-  // A chat-channel grant shares a whole channel (threads/messages/reactions)
+  // A chat grant shares a whole channel (threads/messages/reactions)
   // with another account, read-write by default. The relay owns every
   // security decision (membership, authorship, channel scoping, revocation);
   // these handlers only address grants and move the member-side sync.
@@ -124,13 +126,13 @@ export function registerSharedChannelsIpcHandlers<
           channelId: input.channelId,
         });
         operation.assertCurrent();
-        if (!wireId) throw new Error("This channel can't be shared yet.");
+        if (!wireId) throw new Error("This group can't be shared yet.");
         // "general" is every workspace's personal default channel — the same wire
         // id everywhere by design, so sharing it would merge strangers' personal
         // chats. Refuse with a way forward.
         if (wireId === GENERAL_CHANNEL_WIRE_ID) {
           throw new Error(
-            "The general channel is personal to each workspace. Create a channel to share it.",
+            "The general group is personal to each workspace. Create a group to share.",
           );
         }
         if (
@@ -139,7 +141,7 @@ export function registerSharedChannelsIpcHandlers<
           )
         ) {
           throw new Error(
-            "This channel was shared with you — ask the person who shared it to add more people.",
+            "This group was shared with you. Ask the person who shared it to add more people.",
           );
         }
         const { credentials, credentialGeneration } =
@@ -171,9 +173,9 @@ export function registerSharedChannelsIpcHandlers<
         const created = await awaitCredentialGeneration({
           capturedGeneration: credentialGeneration,
           currentGeneration: () => currentCredentialGeneration(),
-          run: () => {
+          run: async () => {
             operation.assertCurrent();
-            return relayShareJsonWithCredentials<{ shareId: string }>(
+            const share = await relayShareJsonWithCredentials<{ shareId: string }>(
               credentials,
               `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
@@ -188,6 +190,9 @@ export function registerSharedChannelsIpcHandlers<
                 }),
               },
             );
+            // The share exists even if this window has moved on.
+            sharesChanged(workspace.workspaceId);
+            return share;
           },
         });
         operation.assertCurrent();
@@ -303,7 +308,7 @@ export function registerSharedChannelsIpcHandlers<
       },
       writeSharedChannels: (workspaceId, channels) => {
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error("Shared channel write targeted a different workspace.");
+          throw new Error("This write targeted a different workspace.");
         }
         assertCurrent();
         setWorkspaceSharedChannels(workspaceId, channels);
@@ -321,7 +326,7 @@ export function registerSharedChannelsIpcHandlers<
           workspaceId !== workspace.workspaceId ||
           rootPath !== workspace.rootPath
         ) {
-          throw new Error("Shared channel pull targeted a different workspace.");
+          throw new Error("This pull targeted a different workspace.");
         }
         const result = await relayClientForWorkspace({
           workspaceId: workspace.workspaceId,
@@ -337,7 +342,7 @@ export function registerSharedChannelsIpcHandlers<
       },
       serialize: (workspaceId, run) => {
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error("Shared channel work targeted a different workspace.");
+          throw new Error("This sync targeted a different workspace.");
         }
         return runInWorkspaceAuthorityLane(
           { state: input.operation.state, assertCurrent },
@@ -347,7 +352,7 @@ export function registerSharedChannelsIpcHandlers<
       },
       afterPull: async (workspaceId) => {
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error("Shared channel pull targeted a different workspace.");
+          throw new Error("This pull targeted a different workspace.");
         }
         assertCurrent();
         await projectPendingChatBookmarksAfterPull(workspaceId);
@@ -401,7 +406,7 @@ export function registerSharedChannelsIpcHandlers<
                   const selector = row.selector as
                     | { kind?: unknown }
                     | undefined;
-                  return selector?.kind === "chat-channel" &&
+                  return selector?.kind === "chat" &&
                     typeof row.shareId === "string"
                     ? [row.shareId]
                     : [];
@@ -489,7 +494,7 @@ export function registerSharedChannelsIpcHandlers<
         operation.assertCurrent();
         if (shareViewIsPresent(workspace.shareView)) {
           throw new Error(
-            "Shared views are read-only — join channels from a workspace you own.",
+            "Shared views are read-only. Join groups from a workspace you own.",
           );
         }
         await warmCredentialCache();
@@ -541,7 +546,7 @@ export function registerSharedChannelsIpcHandlers<
         } catch (error) {
           assertCurrentJoinSession();
           if (error instanceof ShareUnavailableError) {
-            throw new Error("That shared channel isn't available anymore.");
+            throw new Error("That shared group isn't available anymore.");
           }
           throw error;
         }

@@ -20,6 +20,7 @@ import type { AgentPermissionRequest } from "./workbench/useAgentNotifications";
 // so anything painted in its rectangle looks clickable and is not.
 
 const bridgeMock = {
+  platform: "linux" as const,
   startPluginWebApp: vi.fn(async (): Promise<StartPluginWebAppResult> => ({
     status: "ok",
     title: "T3 Code",
