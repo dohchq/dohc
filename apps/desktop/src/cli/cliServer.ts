@@ -1600,6 +1600,7 @@ async function linkRunMessage(
 // small result. Past the limit the oldest finished result is dropped and only
 // its id is kept, so a resend is refused instead of run again. Past that
 // limit too, the oldest ids go, and only then could a very old id run again.
+// The MCP tool descriptions that take a requestId state these numbers.
 const REQUEST_ID_LIMITS = { results: 1_024, ids: 16_384 };
 
 interface RememberedRequest {
