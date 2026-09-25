@@ -866,18 +866,32 @@ enum DomainIngest {
     /// The head belongs to another writer and this observation was not a
     /// disk transition capture witnessed, so nothing was written.
     ForeignHead,
-    /// A live session holds a file the store has no head for; the session's
-    /// settle records it.
+    /// A live session holds a file the store has no head for. See
+    /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
 }
 
+/// A live session holds a file the store has no head for yet. Capture defers
+/// it only while the file is still empty, as a new file is when an editor
+/// opens it: the session's first settle writes the head and the file together.
+/// Any bytes on disk before then came from outside the session, and its settle
+/// would refuse them as a stale target, so nothing would ever record them.
+/// That stays a failed ingest, so capture stays unsettled and keeps the
+/// writer's author until the lease is released and capture records it.
+fn held_new_file_outcome(size: u64) -> Result<IngestOutcome, CaptureError> {
+    if size == 0 {
+        Ok(IngestOutcome::Deferred)
+    } else {
+        Err(INGEST_FAILED)
+    }
+}
+
 /// The store refuses to capture a path whose document a live session holds.
-/// For a file the store has no head for, that is not a failure: the session
-/// owns the content and its settle creates the head, so capture waits for the
-/// lease instead of degrading the layer while someone has the new file open.
-/// That holds whether capture sees the file for the first time or saw an
-/// earlier file at the path whose head was since deleted. Every other refusal
-/// stays a failure, so disk text nothing records keeps the layer unsettled.
+/// For a file the store has no head for, the session owns the content and its
+/// settle creates the head, whether capture sees the file for the first time
+/// or saw an earlier file at the path whose head was since deleted; see
+/// [`held_new_file_outcome`]. Every other refusal stays a failure, so disk
+/// text nothing records keeps the layer unsettled.
 fn held_as_new_file(error: &RuntimeError) -> bool {
     matches!(
         error,
@@ -1132,7 +1146,7 @@ impl StoreCaptureSink {
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                             Ok(IngestOutcome::NotOwned)
                         }
-                        Err(error) if held_as_new_file(&error) => Ok(IngestOutcome::Deferred),
+                        Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1312,7 +1326,7 @@ impl CaptureSink for StoreCaptureSink {
                     // Foreign head left intact: track the disk identity so the
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
-                    DomainIngest::HeldAsNewFile => Ok(IngestOutcome::Deferred),
+                    DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                 }
             }
             CurrentContent::Absent => {
@@ -1374,7 +1388,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
-                    DomainIngest::HeldAsNewFile => Ok(IngestOutcome::Deferred),
+                    DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
                 }
             }
         }

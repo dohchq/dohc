@@ -186,6 +186,7 @@ struct Harness {
     leases: LeaseRegistry,
     status: Arc<DriverStatus>,
     self_writes: SelfWriteSuppression,
+    author_json: Option<String>,
 }
 
 impl Harness {
@@ -207,6 +208,7 @@ impl Harness {
             leases: LeaseRegistry::new(),
             status: Arc::new(DriverStatus::default()),
             self_writes: SelfWriteSuppression::default(),
+            author_json: None,
         }
     }
 
@@ -218,19 +220,15 @@ impl Harness {
         let run = reconcile_if_dirty_bound(&self.root, files, CancellationToken::new())
             .await
             .expect("reconcile");
-        apply_bound_run_with_handle(
-            apply_context(
-                &self.root,
-                &self.actor,
-                &self.leases,
-                &self.status,
-                &self.self_writes,
-            ),
-            files,
-            run,
-            &CancellationToken::new(),
-        )
-        .await
+        let mut context = apply_context(
+            &self.root,
+            &self.actor,
+            &self.leases,
+            &self.status,
+            &self.self_writes,
+        );
+        context.author_json = self.author_json.clone();
+        apply_bound_run_with_handle(context, files, run, &CancellationToken::new()).await
     }
 
     fn close(self) {
@@ -406,7 +404,7 @@ async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
         .await
         .expect("the head is deleted");
     assert_eq!(head_count(&harness.db, NEW_FILE), 0);
-    std::fs::write(harness.root.join(NEW_FILE), "Second file.\n").expect("second file");
+    std::fs::write(harness.root.join(NEW_FILE), "").expect("second file, new and empty");
     let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
     let lease = harness
         .leases
@@ -435,6 +433,64 @@ async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
         1,
         "captured once released"
     );
+
+    files.close().await;
+    harness.close();
+}
+
+// A person creates a file and opens it, and capture defers it. Before the
+// editor's first settle, an agent writes text to the file. The session would
+// refuse those bytes when it settles, so nothing would record them: capture
+// stays unsettled, and records them with the agent as author once the editor
+// lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recorded() {
+    let mut harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), "").expect("new file");
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("the editor holds the new file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the empty new file is deferred"
+    );
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
+
+    let author = r#"{"kind":"agent","agentId":"e2e-agent","onBehalfOf":"local"}"#;
+    harness.author_json = Some(author.to_owned());
+    std::fs::write(harness.root.join(NEW_FILE), "Written by the agent.\n").expect("outside write");
+    files.handle().request_rescan();
+    assert!(
+        !harness.capture(&files.handle()).await,
+        "the write is not recorded yet"
+    );
+    assert!(harness.status.degraded());
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+
+    drop(lease);
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "captured once the editor lets go"
+    );
+    let recorded: (String, Option<String>) = rusqlite::Connection::open(&harness.db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT s.path, m.author_json FROM snapshots s \
+             JOIN moments m ON m.moment_id = s.latest_moment_id \
+             WHERE s.workspace_id = ?1 AND s.path = ?2",
+            [WORKSPACE_ID, NEW_FILE],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the write's head and moment");
+    assert_eq!(recorded, (NEW_FILE.to_owned(), Some(author.to_owned())));
 
     files.close().await;
     harness.close();
