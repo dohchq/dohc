@@ -17,7 +17,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   identity_required: 409,
   internal_error: 500,
   invalid_access: 400,
-  invalid_channel: 400,
+  invalid_chat: 400,
   invalid_path: 400,
   invalid_version: 400,
   key_envelope_not_found: 404,
@@ -61,7 +61,7 @@ export const RELAY_ERRORS = Object.freeze(
 // deliberately says no more than its code: which op failed, which selector
 // kind, or which bound tripped would let a probing caller map the share.
 export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Object.freeze({
-  ambiguous_selector: "a chat-channel share must not also carry paths or versionId",
+  ambiguous_selector: "a chat share must not also carry paths or versionId",
   authorship_mismatch: "chat op author does not match the authenticated actor",
   bad_request: "bad request",
   blob_missing: "log append references a blob not stored on the relay",
@@ -78,7 +78,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   identity_required: "this workspace requires replication identity",
   internal_error: "internal error",
   invalid_access: "access is invalid",
-  invalid_channel: "channel is not shareable",
+  invalid_chat: "chat is not shareable",
   invalid_path: "path is invalid",
   invalid_version: "versionId is invalid",
   key_envelope_not_found: "key envelope not found",

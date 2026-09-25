@@ -15,7 +15,7 @@ export interface SharedChannelInfo {
   channelWireId: string;
   access: ChatShareAccess;
   // A group grant carries the channel's folder too; joining one mounts it.
-  kind: "chat-channel" | "group";
+  kind: "chat" | "group";
   createdAtMs: number;
 }
 
@@ -54,7 +54,7 @@ export async function fetchSharedChannelInfo(input: {
       ? (body.selector as Record<string, unknown>)
       : {};
   if (
-    (selector.kind !== "chat-channel" && selector.kind !== "group") ||
+    (selector.kind !== "chat" && selector.kind !== "group") ||
     typeof selector.channelWireId !== "string" ||
     selector.channelWireId.length === 0 ||
     !isChatShareAccessValue(body.access)

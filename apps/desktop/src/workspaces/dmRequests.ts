@@ -174,7 +174,7 @@ export async function classifyDmRequests(input: {
     const shareId = typeof row.shareId === "string" ? row.shareId : null;
     if (
       !shareId ||
-      row.selector?.kind !== "chat-channel" ||
+      row.selector?.kind !== "chat" ||
       typeof row.selector.channelWireId !== "string" ||
       row.selector.channelWireId.length === 0
     ) {

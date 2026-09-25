@@ -14,7 +14,7 @@
   { "code": "identity_required", "status": 409 },
   { "code": "internal_error", "status": 500 },
   { "code": "invalid_access", "status": 400 },
-  { "code": "invalid_channel", "status": 400 },
+  { "code": "invalid_chat", "status": 400 },
   { "code": "invalid_path", "status": 400 },
   { "code": "invalid_version", "status": 400 },
   { "code": "key_envelope_not_found", "status": 404 },

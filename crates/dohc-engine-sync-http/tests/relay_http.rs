@@ -1104,7 +1104,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "identity_not_recognized" => RelayError::IdentityNotRecognized,
         "identity_required" => RelayError::IdentityRequired,
         "internal_error" => RelayError::ServerInternal,
-        "invalid_channel" => RelayError::InvalidChannel,
+        "invalid_chat" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
         "link_discussion_blocked" | "link_discussion_paused" | "notice_refused" => {
             RelayError::Forbidden

@@ -1034,7 +1034,7 @@ define_server_error_codes! {
     "identity_required" => |_| RelayError::IdentityRequired,
     "internal_error" => |_| RelayError::ServerInternal,
     "invalid_access" => |_| RelayError::BadRequest,
-    "invalid_channel" => |_| RelayError::InvalidChannel,
+    "invalid_chat" => |_| RelayError::InvalidChannel,
     "invalid_path" => |_| RelayError::BadRequest,
     "invalid_version" => |_| RelayError::BadRequest,
     "key_envelope_not_found" => |_| RelayError::KeyEnvelopeMissing,

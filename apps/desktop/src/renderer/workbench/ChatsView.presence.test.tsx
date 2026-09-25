@@ -647,7 +647,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
   });
 });
 
-// A DM is a kind:"dm" chat channel backed by a chat-channel grant, so its
+// A DM is a kind:"dm" chat channel backed by a chat grant, so its
 // presence folds into the same scope/topic derivation: the TOPIC is the DM
 // channel's cross-machine wireId; the SCOPE is the grant's share scope for the
 // PARTICIPANT (shared to) and the plain workspace scope for the OWNER — the
