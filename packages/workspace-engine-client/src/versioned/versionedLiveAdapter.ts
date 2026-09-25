@@ -15,12 +15,17 @@ import {
   encodeCollectionQueryParams,
   type AutomationClaimNextParams,
   type AutomationClaimNextResult,
+  type AutomationClaimScheduleParams,
+  type AutomationClaimScheduleResult,
   type AutomationClaimSummary,
   type AutomationFailuresResult,
   type AutomationListClaimsParams,
   type AutomationListClaimsResult,
+  type AutomationPressParams,
+  type AutomationPressResult,
   type AutomationReleaseParams,
   type AutomationRetryParams,
+  type AutomationScheduleMarksResult,
   type AutomationSettleParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
@@ -1198,6 +1203,30 @@ export class VersionedLiveAdapter {
     input: AutomationReleaseParams,
   ): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsRelease, input);
+  }
+
+  /**
+   * Records a Button field press and answers the claim that runs it, or
+   * busy while the button runs on the record for someone else. The engine
+   * announces a new claim with `automation.claimed`.
+   */
+  async pressAutomation(input: AutomationPressParams): Promise<AutomationPressResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsPress, input);
+  }
+
+  /**
+   * Claims a schedule's due times and moves its mark, in one transaction.
+   * The engine announces each new claim with `automation.claimed`.
+   */
+  async claimAutomationSchedule(
+    input: AutomationClaimScheduleParams,
+  ): Promise<AutomationClaimScheduleResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimSchedule, input);
+  }
+
+  /** Every schedule's mark, for the scheduler's start. */
+  async listAutomationScheduleMarks(): Promise<AutomationScheduleMarksResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsScheduleMarks, {});
   }
 
   /** One automation's run history: its newest claims, newest first. */
