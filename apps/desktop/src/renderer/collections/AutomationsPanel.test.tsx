@@ -32,7 +32,7 @@ function summary(automation: Automation, overrides: Partial<ValidAutomationSumma
     automationId: `collection:Tasks#${automation.id}`,
     automation,
     definitionHash: "0123456789abcdef",
-    unsupported: null,
+    cannotRun: null,
     reach: { kind: "checked", steps: automation.do.map(() => ({ verdict: "allowed" as const })) },
     lastRun: null,
     ...overrides,
@@ -257,6 +257,14 @@ describe("the ⚡ panel", () => {
     await user.click(within(line).getByRole("button", { name: "Reset holds" }));
     expect(bridge.resetAutomationHolds).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     await waitFor(() => expect(screen.queryByTestId("automation-holds-unreadable")).toBeNull());
+  });
+
+  it("says plainly when an automation names a field its Collection lacks", async () => {
+    makeBridge(read([summary(stamp, { cannotRun: "Finished on is not a field in Tasks." })]));
+    render(<Panel />);
+    const row = await screen.findByTestId("automation-stamp");
+    expect(row.textContent).toContain("Finished on is not a field in Tasks.");
+    expect(within(row).getByLabelText("Does not run")).toBeTruthy();
   });
 
   it("says an automation waits to check who can edit, and lets a person allow a held step", async () => {
