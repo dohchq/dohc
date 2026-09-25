@@ -141,19 +141,24 @@ export type CollectionAutomationStepReach =
   | { verdict: "allowed" }
   | { verdict: "stopped"; reason: string }
   // Allowed now, but stopped before under the same definition: it waits
-  // for a current editor to confirm it with `seq`.
-  | { verdict: "held"; stoppedFor: string | null; seq: number };
+  // for a current editor to confirm it with `seq`. `target` is the
+  // Collection the step reaches.
+  | { verdict: "held"; stoppedFor: string | null; seq: number; target: string; action: "change" | "find" };
 
 /** One automation as the ⚡ panel reads it. */
 export type CollectionAutomationSummary =
   | {
       valid: true;
+      /** The engine automation id, for its runs and Try again. */
+      automationId: string;
       automation: Automation;
       definitionHash: string;
       /** Why dohc cannot run it yet, or null. */
       unsupported: string | null;
       /** Each step's reach in step order, or why dohc cannot check who can edit yet. */
       reach: { kind: "checked"; steps: CollectionAutomationStepReach[] } | { kind: "waiting"; reason: string };
+      /** Its newest run on this computer, or null when it has not run here. */
+      lastRun: { state: AutomationClaimSummary["state"]; atMs: number } | null;
     }
   | { valid: false; id: string | null; name: string | null; diagnostics: AutomationDiagnostic[] };
 
@@ -489,6 +494,8 @@ export class CollectionAutomations {
   /** The automations in one Collection's file, with why each can or cannot run. */
   async automationsIn(collectionPath: string): Promise<CollectionAutomationsFile> {
     await this.ready();
+    // A file change the watcher or a panel write already queued lands first.
+    await this.chain;
     const indexed = this.files.get(collectionPath);
     if (!indexed) return { status: "missing" };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
@@ -503,6 +510,14 @@ export class CollectionAutomations {
       ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
       : [];
     if (roster.kind !== "unknown") await this.recordVerdicts(roster, runnable);
+    // One engine read per automation, together; the newest claim comes first.
+    const lastRuns = new Map(await Promise.all(indexed.file.entries.flatMap((entry) => entry.status === "valid"
+      ? [collectionAutomationId(collectionPath, entry.automation.id)]
+      : []).map(async (automationId) => {
+      const listed = await this.withLiveEngine((engine) => engine.listAutomationClaims({ automationId }));
+      const [newest] = listed?.claims ?? [];
+      return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
+    })));
     const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
       if (entry.status === "invalid") {
         return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
@@ -510,18 +525,26 @@ export class CollectionAutomations {
       const { automation } = entry;
       const automationId = collectionAutomationId(collectionPath, automation.id);
       const hash = definitionHash(automation);
-      const summary = { valid: true as const, automation, definitionHash: hash, unsupported: unsupportedReason(automation) };
+      const summary = {
+        valid: true as const, automationId, automation, definitionHash: hash, unsupported: unsupportedReason(automation),
+        lastRun: lastRuns.get(automationId) ?? null,
+      };
       if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
       if (roster.kind === "unknown") {
         return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
       }
+      const reachSteps = reachStepsOf(automation, collection, collectionNamed);
       const steps = checkAutomationReach(roster, {
-        id: automation.id, collection, codeFiles: [], steps: reachStepsOf(automation, collection, collectionNamed),
+        id: automation.id, collection, codeFiles: [], steps: reachSteps,
       }).map((reach, step): CollectionAutomationStepReach => {
         if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
         const stored = this.verdicts.get(reachVerdictKey(automationId, hash, step));
-        return stored?.verdict === "held"
-          ? { verdict: "held", stoppedFor: stored.stoppedFor, seq: stored.seq }
+        const reached = reachSteps[step];
+        return stored?.verdict === "held" && reached && "collection" in reached
+          ? {
+              verdict: "held", stoppedFor: stored.stoppedFor, seq: stored.seq,
+              target: reached.collection.name, action: reached.kind === "find-records" ? "find" : "change",
+            }
           : { verdict: "allowed" };
       });
       return { ...summary, reach: { kind: "checked", steps } };

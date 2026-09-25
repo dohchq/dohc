@@ -574,6 +574,7 @@ describe("notice center", () => {
       details: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
       atMs: 1_000,
       canRetry: true,
+      canUndo: false,
       seen: false,
     };
     const barProps = (seen: boolean) => ({
@@ -1435,6 +1436,7 @@ describe("notice center", () => {
       details: "Error: dohc could not check this connection.",
       atMs: 1_700_000_000_000,
       canRetry: false,
+      canUndo: false,
       seen: false,
     };
 
