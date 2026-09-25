@@ -7,10 +7,14 @@
 //! requeues or terminally fails claims a dead process left running.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::chats::base32_lowercase_no_padding;
-use crate::collections::CollectionRecordApplyFacts;
+use crate::collections::{
+    ChangeActorKind, CollectionFieldChangeFact, CollectionRecordApplyFacts, field_fact_value,
+};
 use crate::error::DomainError;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, StorageError, TxnOutcome,
@@ -35,6 +39,136 @@ pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
 
 /// Bound on the error text a failed settle records.
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
+
+/// The namespaces an automation id lives in, one per executor: plugin
+/// automations are `plugin:<plugin name>/<automation id>`, Collection
+/// automations `collection:<collection path>#<automation id>`. Each executor
+/// drains its own namespace, so a subscription outside them would claim
+/// work nothing ever runs.
+pub const AUTOMATION_ID_NAMESPACES: [&str; 2] = ["plugin:", "collection:"];
+
+/// The most field names one subscription may list. An automation that
+/// watches more fields subscribes to every field.
+pub const MAX_AUTOMATION_SUBSCRIPTION_FIELDS: usize = 64;
+
+/// All of one claim's field facts together stay under this many bytes of
+/// JSON, so a served claim always fits one response. Past the budget a value
+/// travels truncated, and a field that does not fit even with truncated
+/// values is counted in [`AutomationFieldFacts::omitted`].
+pub const MAX_AUTOMATION_FIELD_FACTS_BYTES: usize = 64 * 1024;
+
+/// How many of an automation's newest claims `automations.listClaims`
+/// returns. A settle prunes the automation's done claims older than these.
+/// A claim that ever failed stays: it is the evidence ADR 0008 keeps, and
+/// the failure generation counts it.
+pub const AUTOMATION_CLAIM_HISTORY_LIMIT: i64 = 100;
+
+/// A kind of record change. A subscription names the kinds it wants; a
+/// claim names the kind it runs for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutomationChangeKind {
+    /// The apply that wrote the record's first fields
+    /// ([`CollectionRecordApplyFacts::created`]).
+    Added,
+    /// Any later apply that changed the record's fields.
+    Changed,
+    /// The record left its Collection.
+    Removed,
+}
+
+impl AutomationChangeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutomationChangeKind::Added => "added",
+            AutomationChangeKind::Changed => "changed",
+            AutomationChangeKind::Removed => "removed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, DomainError> {
+        match value {
+            "added" => Ok(AutomationChangeKind::Added),
+            "changed" => Ok(AutomationChangeKind::Changed),
+            "removed" => Ok(AutomationChangeKind::Removed),
+            _ => Err(DomainError::StateCorrupt {
+                reason: "automation change kind is not a known kind",
+            }),
+        }
+    }
+
+    /// The `automation_subscriptions` column that says whether a
+    /// subscription wants this kind.
+    fn subscription_column(self) -> &'static str {
+        match self {
+            AutomationChangeKind::Added => "on_added",
+            AutomationChangeKind::Changed => "on_changed",
+            AutomationChangeKind::Removed => "on_removed",
+        }
+    }
+}
+
+/// One automation's interest in the record changes under a collection path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationSubscription {
+    pub automation_id: String,
+    /// A collection path prefix; `"."` is the whole workspace.
+    pub prefix: String,
+    /// The change kinds that claim. Never empty.
+    pub kinds: Vec<AutomationChangeKind>,
+    /// A changed record claims only when one of these fields changed;
+    /// `None` claims on any field. Added and removed records ignore it.
+    pub fields: Option<Vec<String>>,
+}
+
+/// The change a claim runs for and who made it, named as record history
+/// names them: the author origin, and the declared actor kind and the
+/// principal it acted for. Each is `None` when the write did not declare it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationChange {
+    pub kind: AutomationChangeKind,
+    pub author_origin_id: Option<String>,
+    pub actor_kind: Option<ChangeActorKind>,
+    pub on_behalf_of: Option<String>,
+}
+
+/// One side of a changed field on a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationFactValue {
+    Whole {
+        value: Value,
+    },
+    /// The value is larger or deeper than a claim carries, or the claim's
+    /// budget was spent. `bytes` is its size as stored JSON; the whole value
+    /// is in the field history row the fact names.
+    Truncated {
+        truncated: bool,
+        bytes: usize,
+    },
+}
+
+/// One changed field on a claim: the history row that recorded it and the
+/// value before and after, `None` where the field was absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationFieldFact {
+    #[serde(rename = "field")]
+    pub field_name: String,
+    pub history_id: i64,
+    pub previous: Option<AutomationFactValue>,
+    pub next: Option<AutomationFactValue>,
+}
+
+/// A claim's field facts, in field-name order, within
+/// [`MAX_AUTOMATION_FIELD_FACTS_BYTES`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutomationFieldFacts {
+    pub fields: Vec<AutomationFieldFact>,
+    /// Changed fields left out because even their truncated facts did not
+    /// fit. The executor reads the record's history for them.
+    pub omitted: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationClaimState {
@@ -87,11 +221,27 @@ pub struct AutomationClaim {
     /// The triggering change's chain depth (0 for an unattributed or
     /// human-authored trigger). The handler's own writes declare depth + 1.
     pub depth: u32,
+    pub change: AutomationChange,
     pub state: AutomationClaimState,
+    /// How many times `claimNext` served the claim, across every run. The
+    /// reaper's attempt bound counts these, so a retried claim that crashes
+    /// fails with [`AUTOMATION_RECLAIM_EXHAUSTED`] instead of being requeued.
     pub attempts: i64,
+    /// Which run of the claim this is: 1, plus one per `automations.retry`.
+    /// A crash requeue keeps the run. Executors key their writes on
+    /// `<claim id>/<run>/<write ordinal>`, so a requeued run repeats its
+    /// writes under the same keys and a retried run writes under new ones.
+    pub run: i64,
     pub error: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+impl AutomationClaim {
+    /// A claim the chain depth cap stopped: inserted failed and never served.
+    pub fn chain_stopped(&self) -> bool {
+        self.state == AutomationClaimState::Failed && self.attempts == 0
+    }
 }
 
 /// One running attempt observed before a workspace handle is published.
@@ -177,7 +327,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 
 const CLAIM_COLUMNS: &str = "claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
      trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
-     created_at_ms, updated_at_ms";
+     created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, on_behalf_of, run";
 
 fn claim_from_row(
     row: &rusqlite::Row<'_>,
@@ -195,7 +345,19 @@ fn claim_from_row(
     let error: Option<String> = row.get(10)?;
     let created_at_ms: i64 = row.get(11)?;
     let updated_at_ms: i64 = row.get(12)?;
+    let change_kind: String = row.get(13)?;
+    let author_origin_id: Option<String> = row.get(14)?;
+    let actor_kind: Option<String> = row.get(15)?;
+    let on_behalf_of: Option<String> = row.get(16)?;
+    let run: i64 = row.get(17)?;
     let claim = (|| {
+        let actor_kind = actor_kind
+            .map(|kind| {
+                ChangeActorKind::parse(&kind).ok_or(DomainError::StateCorrupt {
+                    reason: "automation claim actor kind is not a known kind",
+                })
+            })
+            .transpose()?;
         let trigger = match (trigger_origin_id, trigger_origin_seq, trigger_history_id) {
             (Some(origin_id), Some(origin_seq), None) => AutomationTrigger::Coordinate {
                 origin_id,
@@ -217,8 +379,15 @@ fn claim_from_row(
             depth: u32::try_from(depth).map_err(|_| DomainError::StateCorrupt {
                 reason: "automation claim depth is negative",
             })?,
+            change: AutomationChange {
+                kind: AutomationChangeKind::parse(&change_kind)?,
+                author_origin_id,
+                actor_kind,
+                on_behalf_of,
+            },
             state: AutomationClaimState::parse(&state)?,
             attempts,
+            run,
             error,
             created_at_ms,
             updated_at_ms,
@@ -245,29 +414,87 @@ fn claim_by_id(
     .transpose()
 }
 
-/// Register one `(automation, collection-path prefix)` interest. Idempotent;
-/// returns whether a new row was inserted.
+/// The field names a subscription stores: sorted, deduplicated, and each an
+/// exact frontmatter key, so nothing is trimmed.
+fn subscription_field_names_json(fields: Option<&[String]>) -> Result<Option<String>, DomainError> {
+    let Some(fields) = fields else {
+        return Ok(None);
+    };
+    if fields.is_empty() || fields.len() > MAX_AUTOMATION_SUBSCRIPTION_FIELDS {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation subscription fields must be a non-empty, bounded list.",
+        });
+    }
+    if fields
+        .iter()
+        .any(|field| field.is_empty() || field.len() > MAX_IDENTIFIER_BYTES || field.contains('\0'))
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation subscription field name is invalid.",
+        });
+    }
+    let mut fields = fields.to_vec();
+    fields.sort_unstable();
+    fields.dedup();
+    serde_json::to_string(&fields)
+        .map(Some)
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))
+}
+
+/// Register one `(automation, collection-path prefix)` interest with the
+/// change kinds and fields it wants. A second call for the same pair
+/// replaces its filter. Returns whether the stored subscription changed.
 pub fn subscribe_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
-    automation_id: &str,
-    prefix: &str,
+    subscription: &AutomationSubscription,
     now_ms: i64,
 ) -> Result<bool, DomainError> {
     let automation_id =
-        normalize_automation_identifier(automation_id, "Automation id is invalid.")?;
-    let prefix =
-        normalize_automation_identifier(prefix, "Automation subscription path is invalid.")?;
-    let inserted = conn
+        normalize_automation_identifier(&subscription.automation_id, "Automation id is invalid.")?;
+    if !AUTOMATION_ID_NAMESPACES.iter().any(|namespace| {
+        automation_id.len() > namespace.len() && automation_id.starts_with(namespace)
+    }) {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation id must start with plugin: or collection:.",
+        });
+    }
+    let prefix = normalize_automation_identifier(
+        &subscription.prefix,
+        "Automation subscription path is invalid.",
+    )?;
+    if subscription.kinds.is_empty() {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation subscription must name at least one change kind.",
+        });
+    }
+    let wants = |kind| subscription.kinds.contains(&kind);
+    let field_names_json = subscription_field_names_json(subscription.fields.as_deref())?;
+    let changed = conn
         .execute(
             "INSERT INTO automation_subscriptions \
-             (workspace_id, automation_id, prefix, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(workspace_id, automation_id, prefix) DO NOTHING",
-            params![workspace_id, automation_id, prefix, now_ms],
+             (workspace_id, automation_id, prefix, on_added, on_changed, on_removed, \
+              field_names_json, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(workspace_id, automation_id, prefix) DO UPDATE SET \
+               on_added = excluded.on_added, on_changed = excluded.on_changed, \
+               on_removed = excluded.on_removed, field_names_json = excluded.field_names_json \
+             WHERE on_added IS NOT excluded.on_added OR on_changed IS NOT excluded.on_changed \
+               OR on_removed IS NOT excluded.on_removed \
+               OR field_names_json IS NOT excluded.field_names_json",
+            params![
+                workspace_id,
+                automation_id,
+                prefix,
+                wants(AutomationChangeKind::Added),
+                wants(AutomationChangeKind::Changed),
+                wants(AutomationChangeKind::Removed),
+                field_names_json,
+                now_ms,
+            ],
         )
         .map_err(DomainError::sql_persist)?;
-    Ok(inserted == 1)
+    Ok(changed == 1)
 }
 
 /// Remove one registered interest. Returns whether a row existed.
@@ -291,13 +518,95 @@ pub(crate) fn unsubscribe_automation_in_tx(
     Ok(removed == 1)
 }
 
+/// One side of a changed field as a claim carries it: whole when `whole` is
+/// allowed and the value is within the `record.*` event bounds, otherwise
+/// its truncated size.
+fn fact_value(json: Option<&str>, whole: bool) -> Option<AutomationFactValue> {
+    let json = json?;
+    Some(match whole.then(|| field_fact_value(json)).flatten() {
+        Some(value) => AutomationFactValue::Whole { value },
+        None => AutomationFactValue::Truncated {
+            truncated: true,
+            bytes: json.len(),
+        },
+    })
+}
+
+fn field_fact(change: &CollectionFieldChangeFact, whole: bool) -> AutomationFieldFact {
+    AutomationFieldFact {
+        field_name: change.field_name.clone(),
+        history_id: change.history_id,
+        previous: fact_value(change.previous_json.as_deref(), whole),
+        next: fact_value(change.next_json.as_deref(), whole),
+    }
+}
+
+/// A fact's share of the budget: its JSON plus the separating comma.
+fn fact_bytes(fact: &AutomationFieldFact) -> usize {
+    serde_json::to_vec(fact).map_or(usize::MAX, |json| json.len() + 1)
+}
+
+/// Bound one apply's field changes for a claim within
+/// [`MAX_AUTOMATION_FIELD_FACTS_BYTES`]. Every field is named first, with
+/// its values truncated; a field whose name alone does not fit is counted
+/// in `omitted`. Then, in field order, values travel whole while the rest
+/// of the budget allows.
+fn bounded_field_facts(changes: &[CollectionFieldChangeFact]) -> AutomationFieldFacts {
+    let mut facts = AutomationFieldFacts::default();
+    let mut budget = MAX_AUTOMATION_FIELD_FACTS_BYTES;
+    let mut named = Vec::with_capacity(changes.len());
+    for change in changes {
+        let fact = field_fact(change, false);
+        let bytes = fact_bytes(&fact);
+        if bytes <= budget {
+            budget -= bytes;
+            named.push((change, fact, bytes));
+        } else {
+            facts.omitted += 1;
+        }
+    }
+    for (change, truncated, truncated_bytes) in named {
+        let whole = field_fact(change, true);
+        let extra = fact_bytes(&whole).saturating_sub(truncated_bytes);
+        if extra <= budget {
+            budget -= extra;
+            facts.fields.push(whole);
+        } else {
+            facts.fields.push(truncated);
+        }
+    }
+    facts
+}
+
+/// Whether a changed-record subscription wants this apply: every field
+/// when it names none, otherwise one of the fields it names.
+fn wants_changed_fields(
+    field_names_json: Option<&str>,
+    changes: &[CollectionFieldChangeFact],
+) -> Result<bool, DomainError> {
+    let Some(field_names_json) = field_names_json else {
+        return Ok(true);
+    };
+    let field_names: Vec<String> =
+        serde_json::from_str(field_names_json).map_err(|_| DomainError::StateCorrupt {
+            reason: "automation subscription fields are not a list of names",
+        })?;
+    Ok(changes
+        .iter()
+        .any(|change| field_names.contains(&change.field_name)))
+}
+
 /// Turn one committed local apply into pending claims, in the apply's own
-/// transaction. For each subscription whose prefix contains the facts'
-/// collection path, except the writing automation's own subscription (an
-/// automation never re-triggers itself), insert one pending claim keyed by
-/// the change's trigger key. Idempotent: a re-run over the same facts hits
-/// the partial unique indexes and inserts nothing. Returns only the claims
-/// this call inserted.
+/// transaction. An apply that wrote the record's first fields is an added
+/// record; any other is a changed one. For each subscription that wants that
+/// kind and whose prefix contains the facts' collection path, except the
+/// writing automation's own subscription (an automation never re-triggers
+/// itself), insert one pending claim keyed by the change's trigger key. A
+/// changed-record subscription that names fields claims only when one of
+/// them changed. Each claim carries the change's kind, actor, and bounded
+/// field facts. Idempotent: a re-run over the same facts hits the partial
+/// unique indexes and inserts nothing. Returns only the claims this call
+/// inserted.
 ///
 /// A change already at the chain depth cap runs nothing: instead of a
 /// pending claim, each would-have-triggered automation records a failed
@@ -323,63 +632,96 @@ pub fn claim_automation_triggers_in_tx(
             origin_seq: *origin_seq,
         },
         None => {
-            // The never-synced fallback key is the history row id. An apply
-            // that wrote no field history (a bare record creation) has no
-            // durable per-change key, so it cannot be claimed exactly-once.
+            // The never-synced fallback key is the history row id. Facts
+            // always carry at least one field; one without has no key.
             let Some(history_id) = facts.fields.iter().map(|field| field.history_id).min() else {
                 return Ok(Vec::new());
             };
             AutomationTrigger::History { history_id }
         }
     };
+    let change = AutomationChange {
+        kind: if facts.created {
+            AutomationChangeKind::Added
+        } else {
+            AutomationChangeKind::Changed
+        },
+        author_origin_id: facts.author_origin_id.clone(),
+        actor_kind: facts
+            .attribution
+            .as_ref()
+            .map(|attribution| attribution.actor_kind),
+        on_behalf_of: facts
+            .attribution
+            .as_ref()
+            .and_then(|attribution| attribution.on_behalf_of.clone()),
+    };
     let mut statement = conn
-        .prepare(
-            "SELECT automation_id, prefix FROM automation_subscriptions \
-             WHERE workspace_id = ?1 ORDER BY automation_id, prefix",
-        )
+        .prepare(&format!(
+            "SELECT automation_id, prefix, field_names_json FROM automation_subscriptions \
+             WHERE workspace_id = ?1 AND {} = 1 ORDER BY automation_id, prefix",
+            change.kind.subscription_column()
+        ))
         .map_err(DomainError::sql_corrupt)?;
-    let subscriptions: Vec<(String, String)> = statement
+    let subscriptions: Vec<(String, String, Option<String>)> = statement
         .query_map(params![workspace_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .map_err(DomainError::sql_corrupt)?
         .collect::<Result<_, _>>()
         .map_err(DomainError::sql_corrupt)?;
+    let mut claiming: Vec<&str> = Vec::new();
+    for (automation_id, prefix, field_names_json) in &subscriptions {
+        // One claim per automation even when several of its subscriptions
+        // match (the list is ordered by automation_id).
+        if claiming.last() == Some(&automation_id.as_str())
+            || !prefix_contains(prefix, &facts.collection_path)
+            || facts.author_origin_id.as_deref() == Some(automation_id.as_str())
+        {
+            continue;
+        }
+        if change.kind == AutomationChangeKind::Changed
+            && !wants_changed_fields(field_names_json.as_deref(), &facts.fields)?
+        {
+            continue;
+        }
+        claiming.push(automation_id);
+    }
+    if claiming.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A stopped chain never runs, so its claim keeps no facts.
+    let field_facts = if chain_stopped {
+        AutomationFieldFacts::default()
+    } else {
+        bounded_field_facts(&facts.fields)
+    };
+    let field_facts_json = serde_json::to_string(&field_facts.fields)
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    let (origin_id, origin_seq, history_id) = match &trigger {
+        AutomationTrigger::Coordinate {
+            origin_id,
+            origin_seq,
+        } => (Some(origin_id.as_str()), Some(*origin_seq), None),
+        AutomationTrigger::History { history_id } => (None, None, Some(*history_id)),
+    };
+    let (state, error) = if chain_stopped {
+        (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
+    } else {
+        (AutomationClaimState::Pending, None)
+    };
     let mut inserted = Vec::new();
-    let mut claimed_for: Option<&str> = None;
-    for (automation_id, prefix) in &subscriptions {
-        if !prefix_contains(prefix, &facts.collection_path) {
-            continue;
-        }
-        if facts.author_origin_id.as_deref() == Some(automation_id.as_str()) {
-            continue;
-        }
-        // One claim per automation even when several of its prefixes match
-        // (the list is ordered by automation_id).
-        if claimed_for == Some(automation_id.as_str()) {
-            continue;
-        }
-        claimed_for = Some(automation_id.as_str());
+    for automation_id in claiming {
         let claim_id = mint_claim_id()?;
-        let (origin_id, origin_seq, history_id) = match &trigger {
-            AutomationTrigger::Coordinate {
-                origin_id,
-                origin_seq,
-            } => (Some(origin_id.as_str()), Some(*origin_seq), None),
-            AutomationTrigger::History { history_id } => (None, None, Some(*history_id)),
-        };
-        let (state, error) = if chain_stopped {
-            (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
-        } else {
-            (AutomationClaimState::Pending, None)
-        };
         let rows = conn
             .execute(
                 "INSERT OR IGNORE INTO automation_claims \
                  (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
                   trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
-                  created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?12)",
+                  created_at_ms, updated_at_ms, change_kind, author_origin_id, actor_kind, \
+                  on_behalf_of, change_fields_json, change_fields_omitted) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?12, ?13, ?14, \
+                         ?15, ?16, ?17, ?18)",
                 params![
                     workspace_id,
                     claim_id,
@@ -393,19 +735,27 @@ pub fn claim_automation_triggers_in_tx(
                     state.as_str(),
                     error,
                     now_ms,
+                    change.kind.as_str(),
+                    change.author_origin_id,
+                    change.actor_kind.map(ChangeActorKind::as_str),
+                    change.on_behalf_of,
+                    field_facts_json,
+                    field_facts.omitted,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
         if rows == 1 {
             inserted.push(AutomationClaim {
                 claim_id,
-                automation_id: automation_id.clone(),
+                automation_id: automation_id.to_owned(),
                 trigger: trigger.clone(),
                 record_id: facts.record_id.clone(),
                 collection_path: facts.collection_path.clone(),
                 depth,
+                change: change.clone(),
                 state,
                 attempts: 0,
+                run: 1,
                 error: error.map(str::to_owned),
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
@@ -416,14 +766,22 @@ pub fn claim_automation_triggers_in_tx(
 }
 
 /// One failed-claim summary per automation, for the owner-visible failure
-/// surface: the newest error and its time, plus a generation. The
-/// generation IS the automation's failed-claim count — failed rows are
-/// never deleted (a dismiss acknowledges, it does not destroy evidence), so
-/// the count only grows, and an acknowledgment at generation N hides the
-/// notice exactly until a newer failure raises it past N.
+/// surface: the newest failed claim, its error and time, plus a generation.
+/// The generation counts every time one of the automation's claims failed:
+/// each earlier run of a claim failed once (a retry follows a failure), and
+/// a failed claim's current run once more. A claim that ever failed is never
+/// pruned (a dismiss acknowledges, it does not destroy evidence), so the
+/// generation only grows, even across a retry, and an acknowledgment at
+/// generation N hides the notice exactly until a newer failure raises it
+/// past N.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationFailure {
     pub automation_id: String,
+    /// The newest failed claim, so the owner's Try again can name it.
+    pub claim_id: String,
+    /// Whether the newest failed claim is a chain stop, which no retry can
+    /// run ([`AutomationClaim::chain_stopped`]).
+    pub chain_stopped: bool,
     pub error: String,
     pub updated_at_ms: i64,
     pub generation: i64,
@@ -437,29 +795,36 @@ pub(crate) fn list_automation_failures_in_tx(
 ) -> Result<Vec<AutomationFailure>, DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT automation_id, error, updated_at_ms, generation FROM ( \
-                 SELECT automation_id, error, updated_at_ms, \
-                        COUNT(*) OVER (PARTITION BY automation_id) AS generation, \
+            "SELECT newest.automation_id, newest.claim_id, newest.attempts = 0, newest.error, \
+                    newest.updated_at_ms, \
+                    (SELECT SUM(every.run - 1 + (every.state = 'failed')) \
+                     FROM automation_claims every \
+                     WHERE every.workspace_id = ?1 \
+                       AND every.automation_id = newest.automation_id) \
+             FROM ( \
+                 SELECT automation_id, claim_id, attempts, error, updated_at_ms, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY automation_id \
                             ORDER BY updated_at_ms DESC, claim_id DESC \
-                        ) AS newest \
+                        ) AS rank \
                  FROM automation_claims \
                  WHERE workspace_id = ?1 AND state = 'failed' \
-             ) WHERE newest = 1 ORDER BY automation_id",
+             ) newest WHERE newest.rank = 1 ORDER BY newest.automation_id",
         )
         .map_err(DomainError::sql_corrupt)?;
     let failures = statement
         .query_map(params![workspace_id], |row| {
-            let error: Option<String> = row.get(1)?;
+            let error: Option<String> = row.get(3)?;
             Ok(AutomationFailure {
                 automation_id: row.get(0)?,
+                claim_id: row.get(1)?,
+                chain_stopped: row.get(2)?,
                 // A failed claim always records why; a NULL here would be
                 // corruption, surfaced as an empty reason rather than a
                 // refused listing.
                 error: error.unwrap_or_default(),
-                updated_at_ms: row.get(2)?,
-                generation: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+                generation: row.get(5)?,
             })
         })
         .map_err(DomainError::sql_corrupt)?
@@ -468,19 +833,52 @@ pub(crate) fn list_automation_failures_in_tx(
     Ok(failures)
 }
 
-/// Flip the oldest pending claim to running with `attempts + 1` and return
-/// it; `None` when nothing is pending.
+fn claim_field_facts(
+    conn: &Connection,
+    workspace_id: &str,
+    claim_id: &str,
+) -> Result<AutomationFieldFacts, DomainError> {
+    let (fields_json, omitted): (String, u32) = conn
+        .query_row(
+            "SELECT change_fields_json, change_fields_omitted FROM automation_claims \
+             WHERE workspace_id = ?1 AND claim_id = ?2",
+            params![workspace_id, claim_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let fields = serde_json::from_str(&fields_json).map_err(|_| DomainError::StateCorrupt {
+        reason: "automation claim field facts are not valid facts",
+    })?;
+    Ok(AutomationFieldFacts { fields, omitted })
+}
+
+/// Flip the oldest pending claim whose automation id starts with the prefix
+/// to running with `attempts + 1`, and return it with its field facts;
+/// `None` when nothing is pending. Each executor drains its own namespace:
+/// the plugin executor `"plugin:"` (ids `plugin:<plugin name>/<automation
+/// id>`), the Collection executor `"collection:"` (ids
+/// `collection:<collection path>#<automation id>`).
 pub(crate) fn claim_next_pending_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
+    automation_id_prefix: &str,
     now_ms: i64,
-) -> Result<Option<AutomationClaim>, DomainError> {
+) -> Result<Option<(AutomationClaim, AutomationFieldFacts)>, DomainError> {
+    if automation_id_prefix.is_empty()
+        || automation_id_prefix.len() > MAX_IDENTIFIER_BYTES
+        || automation_id_prefix.contains('\0')
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "Automation id prefix is invalid.",
+        });
+    }
     let claim_id: Option<String> = conn
         .query_row(
             "SELECT claim_id FROM automation_claims \
              WHERE workspace_id = ?1 AND state = 'pending' \
+               AND substr(automation_id, 1, length(?2)) = ?2 \
              ORDER BY created_at_ms, claim_id LIMIT 1",
-            params![workspace_id],
+            params![workspace_id, automation_id_prefix],
             |row| row.get(0),
         )
         .optional()
@@ -501,16 +899,105 @@ pub(crate) fn claim_next_pending_automation_in_tx(
             reason: "automation claim vanished mid-claim under the single writer",
         });
     }
+    let claim = claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "claimed automation row not found after update",
+    })?;
+    let facts = claim_field_facts(conn, workspace_id, &claim_id)?;
+    Ok(Some((claim, facts)))
+}
+
+/// An automation's newest claims in every state, newest first, at most
+/// [`AUTOMATION_CLAIM_HISTORY_LIMIT`]: its run history.
+pub(crate) fn list_automation_claims_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    automation_id: &str,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    let automation_id =
+        normalize_automation_identifier(automation_id, "Automation id is invalid.")?;
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM automation_claims \
+             WHERE workspace_id = ?1 AND automation_id = ?2 \
+             ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3"
+        ))
+        .map_err(DomainError::sql_corrupt)?;
+    statement
+        .query_map(
+            params![workspace_id, automation_id, AUTOMATION_CLAIM_HISTORY_LIMIT],
+            claim_from_row,
+        )
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DomainError::sql_corrupt)?
+        .into_iter()
+        .collect()
+}
+
+/// What `automations.retry` did to a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationRetry {
+    /// The failed claim is pending again as its next run.
+    Requeued(AutomationClaim),
+    /// The claim was already pending or running; nothing changed.
+    Unchanged(AutomationClaim),
+}
+
+/// Queue a failed claim to run again with the facts it already holds, as its
+/// next run. A claim already pending or running is returned unchanged. A
+/// done claim, and a claim the chain depth cap stopped, cannot run again.
+pub(crate) fn retry_automation_claim_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    claim_id: &str,
+    now_ms: i64,
+) -> Result<AutomationRetry, DomainError> {
+    let claim_id = normalize_automation_identifier(claim_id, "Automation claim id is invalid.")?;
+    let existing =
+        claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::InvalidInput {
+            reason: "Automation claim not found.",
+        })?;
+    if existing.chain_stopped() {
+        return Err(DomainError::InvalidInput {
+            reason: "A claim the chain depth cap stopped cannot run.",
+        });
+    }
+    match existing.state {
+        AutomationClaimState::Pending | AutomationClaimState::Running => {
+            return Ok(AutomationRetry::Unchanged(existing));
+        }
+        AutomationClaimState::Done => {
+            return Err(DomainError::InvalidInput {
+                reason: "Automation claim is done.",
+            });
+        }
+        AutomationClaimState::Failed => {}
+    }
+    let rows = conn
+        .execute(
+            "UPDATE automation_claims \
+             SET state = 'pending', error = NULL, run = run + 1, updated_at_ms = ?3 \
+             WHERE workspace_id = ?1 AND claim_id = ?2 AND state = 'failed'",
+            params![workspace_id, claim_id, now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    if rows != 1 {
+        return Err(DomainError::StateCorrupt {
+            reason: "automation claim vanished mid-retry under the single writer",
+        });
+    }
     claim_by_id(conn, workspace_id, &claim_id)?
         .ok_or(DomainError::StateCorrupt {
-            reason: "claimed automation row not found after update",
+            reason: "retried automation claim not found after update",
         })
-        .map(Some)
+        .map(AutomationRetry::Requeued)
 }
 
 /// Close a running claim: done, or failed with the handler's error text.
 /// Refuses a claim that is not running — a settle is not idempotent, matching
-/// the chat ledger's exactly-one-transition rule.
+/// the chat ledger's exactly-one-transition rule. Then prunes the
+/// automation's done claims past its newest
+/// [`AUTOMATION_CLAIM_HISTORY_LIMIT`]; a claim that ever failed stays.
 pub(crate) fn settle_automation_claim_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -553,9 +1040,24 @@ pub(crate) fn settle_automation_claim_in_tx(
             reason: "automation claim vanished mid-settle under the single writer",
         });
     }
-    claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
+    let settled = claim_by_id(conn, workspace_id, &claim_id)?.ok_or(DomainError::StateCorrupt {
         reason: "settled automation claim not found after update",
-    })
+    })?;
+    conn.execute(
+        "DELETE FROM automation_claims \
+         WHERE workspace_id = ?1 AND automation_id = ?2 AND state = 'done' AND run = 1 \
+           AND claim_id NOT IN ( \
+               SELECT claim_id FROM automation_claims \
+               WHERE workspace_id = ?1 AND automation_id = ?2 \
+               ORDER BY created_at_ms DESC, claim_id DESC LIMIT ?3)",
+        params![
+            workspace_id,
+            settled.automation_id,
+            AUTOMATION_CLAIM_HISTORY_LIMIT
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(settled)
 }
 
 /// The startup reaper. A running claim whose process died — running, and not
@@ -644,13 +1146,12 @@ pub(crate) fn reclaim_running_automations_in_tx(
 pub fn subscribe_automation(
     store: &mut EngineStore,
     workspace_id: &str,
-    automation_id: &str,
-    prefix: &str,
+    subscription: &AutomationSubscription,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<bool, DomainError> {
     committed(store.write_with(faults, |tx| {
-        subscribe_automation_in_tx(tx, workspace_id, automation_id, prefix, now_ms)
+        subscribe_automation_in_tx(tx, workspace_id, subscription, now_ms)
     })?)
 }
 
@@ -669,12 +1170,33 @@ pub fn unsubscribe_automation(
 pub fn claim_next_pending_automation(
     store: &mut EngineStore,
     workspace_id: &str,
+    automation_id_prefix: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
-) -> Result<Option<AutomationClaim>, DomainError> {
+) -> Result<Option<(AutomationClaim, AutomationFieldFacts)>, DomainError> {
     committed(store.write_with(faults, |tx| {
-        claim_next_pending_automation_in_tx(tx, workspace_id, now_ms)
+        claim_next_pending_automation_in_tx(tx, workspace_id, automation_id_prefix, now_ms)
     })?)
+}
+
+pub fn retry_automation_claim(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    claim_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<AutomationRetry, DomainError> {
+    committed(store.write_with(faults, |tx| {
+        retry_automation_claim_in_tx(tx, workspace_id, claim_id, now_ms)
+    })?)
+}
+
+pub fn list_automation_claims(
+    store: &EngineStore,
+    workspace_id: &str,
+    automation_id: &str,
+) -> Result<Vec<AutomationClaim>, DomainError> {
+    store.read_with(|conn| list_automation_claims_in_tx(conn, workspace_id, automation_id))
 }
 
 pub fn settle_automation_claim(

@@ -6,7 +6,7 @@ import type {
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
 
-type ChannelsResult = CliResultByVerb["channels"];
+type GroupsResult = CliResultByVerb["groups"];
 type ThreadsResult = CliResultByVerb["threads"];
 type InboxResult = CliResultByVerb["inbox"];
 export type ShowResult = CliResultByVerb["show"];
@@ -39,17 +39,17 @@ export function renderShowMarkdown(result: ShowResult): string {
   return renderThreadMarkdown(result);
 }
 
-export function renderChannels(result: ChannelsResult): string {
-  return result.channels
-    .map((channel) => {
-      const name = channel.kind === "agent" ? "my-agent" : lineSafe(channel.name);
-      return `${name} · #${channel.slug} · ${channel.kind} · ${channel.id}`;
+export function renderGroups(result: GroupsResult): string {
+  return result.groups
+    .map((group) => {
+      const name = group.kind === "agent" ? "my-agent" : lineSafe(group.name);
+      return `${name} · #${group.slug} · ${group.kind} · ${group.id}`;
     })
     .join("\n");
 }
 
 export function renderThreads(result: ThreadsResult): string {
-  const lines = [`#${result.channel.slug} · ${result.channel.id}`];
+  const lines = [`#${result.group.slug} · ${result.group.id}`];
   for (const thread of result.threads) {
     lines.push(
       `${thread.unread ? "[unread] · " : ""}${thread.id} · ${lineSafe(thread.title)} · ${countLabel(thread.commentCount, "comment")} · open decisions: ${decisionCount(thread.openDecisionCount)}`,
@@ -62,19 +62,19 @@ export function renderInbox(result: InboxResult): string {
   const lines: string[] = [];
   for (const thread of result.threads) {
     lines.push(
-      `[unread] · ${thread.id} · #${thread.channel.slug} · ${lineSafe(thread.title)} · ${countLabel(thread.commentCount, "comment")} · open decisions: ${decisionCount(thread.openDecisionCount)}`,
+      `[unread] · ${thread.id} · #${thread.group.slug} · ${lineSafe(thread.title)} · ${countLabel(thread.commentCount, "comment")} · open decisions: ${decisionCount(thread.openDecisionCount)}`,
     );
   }
   for (const mention of result.mentions) {
     lines.push(
-      `@mention · #${mention.channel.slug} · ${mention.threadId} · ${mention.messageId} · ${lineSafe(renderAuthorDisplayName(mention.author))} · ${dateOnly(mention.createdAtMs)}  ${lineSafe(mention.text)}`,
+      `@mention · #${mention.group.slug} · ${mention.threadId} · ${mention.messageId} · ${lineSafe(renderAuthorDisplayName(mention.author))} · ${dateOnly(mention.createdAtMs)}  ${lineSafe(mention.text)}`,
     );
   }
   return lines.join("\n");
 }
 
 function renderPost(result: PostResult): string {
-  const posted = `posted ${result.threadId} ${result.messageId} in #${result.channel.slug}`;
+  const posted = `posted ${result.threadId} ${result.messageId} in #${result.group.slug}`;
   return result.warning ? `${posted}\nwarning: ${result.warning}` : posted;
 }
 
@@ -91,12 +91,12 @@ function renderReact(result: ReactResult): string {
 }
 
 function renderGrepLine(
-  match: Pick<CliGrepMatch, "channel" | "threadId">,
+  match: Pick<CliGrepMatch, "group" | "threadId">,
   message: CliGrepContextMessage | Pick<CliGrepMatch, "messageId" | "author" | "createdAtMs" | "text">,
   context: boolean,
 ): string {
   const contextMarker = context ? "- " : "";
-  return `#${match.channel.slug} ${match.threadId} ${message.messageId} ${lineSafe(renderAuthorDisplayName(message.author))} ${dateOnly(message.createdAtMs)}  ${contextMarker}${lineSafe(message.text)}`;
+  return `#${match.group.slug} ${match.threadId} ${message.messageId} ${lineSafe(renderAuthorDisplayName(message.author))} ${dateOnly(message.createdAtMs)}  ${contextMarker}${lineSafe(message.text)}`;
 }
 
 export function renderGrep(
@@ -128,8 +128,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number } = {},
 ): string {
   switch (verb) {
-    case "channels":
-      return renderChannels(result as CliResultByVerb["channels"]);
+    case "groups":
+      return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
     case "inbox":

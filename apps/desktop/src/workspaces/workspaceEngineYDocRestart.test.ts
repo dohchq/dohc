@@ -1942,7 +1942,7 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   // and carry both outage keystrokes into the replacement generation.
   state.daemonAlive = true;
   typeInto(rendererDoc, session, "AFTER_RESTART");
-  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await expect.poll(() => state.generation).toBe(2);
 
   const settled = await session.settleNow();
   expect(settled.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
@@ -2001,7 +2001,7 @@ it("a failure sink that throws cannot turn a daemon death into an unhandled reje
     // And the session still heals once the daemon is back.
     state.daemonAlive = true;
     typeInto(rendererDoc, session, "AFTER_RESTART");
-    await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+    await expect.poll(() => state.generation).toBe(2);
     expect((await session.settleNow()).content).toBe(
       "PRE_KILL DURING_OUTAGE AFTER_RESTART",
     );
@@ -2229,7 +2229,7 @@ it("a recovered generation does not lift a failed teardown's guard", async () =>
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
   state.daemonAlive = true;
   typeInto(rendererDoc, session, " AFTER");
-  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await expect.poll(() => state.generation).toBe(2);
 
   // A version op must still skip the settle for a guarded entry and go straight
   // to release — lifting the guard would settle over an indeterminate teardown.
@@ -2271,7 +2271,7 @@ it("a recovered session does not leave a stale release obligation behind", async
   // Recovery into generation 2 discharges it.
   state.daemonAlive = true;
   typeInto(rendererDoc, session, "AFTER ");
-  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await expect.poll(() => state.generation).toBe(2);
 
   // Death 2 on a live daemon: generation 2 refuses the write and its release,
   // so IT is the lease that teardown still owes.
@@ -2710,7 +2710,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
   );
 
   await expect
-    .poll(() => armedSettle.fire, { timeout: 5_000 })
+    .poll(() => armedSettle.fire)
     .not.toBeNull();
   // The recovery generation holds the edit, and its replay armed the settle
   // that lands it.
@@ -2824,7 +2824,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
   });
 
   // Both arm points have run once the recovery generation took the replay.
-  await expect.poll(() => replayed, { timeout: 5_000 }).toBeGreaterThan(0);
+  await expect.poll(() => replayed).toBeGreaterThan(0);
   expect(announcements, "the edit was announced more than once").toBe(1);
 
   await session.close({ settle: false }).catch(() => undefined);
@@ -3210,7 +3210,7 @@ it("absorbs a busy journal refusal instead of rebinding the generation", async (
     expect(settled).toContain(text);
   }
   await capture.stop();
-}, 20_000);
+});
 
 it("still rebinds when a journal write fails for a cause nobody is retrying", async () => {
   // The narrowness guard, and the reason this classifies instead of absorbing
@@ -3224,10 +3224,10 @@ it("still rebinds when a journal write fails for a cause nobody is retrying", as
 
   state.recordFailure = new Error("persist-failed");
   typeInto(mirror, session, "stranded ");
-  await expect.poll(() => state.generation, { timeout: 10_000 }).toBe(2);
+  await expect.poll(() => state.generation).toBe(2);
 
   await capture.stop();
-}, 20_000);
+});
 
 it("re-arms a pending locked settle on the generation that replaces a dead one", async () => {
   // The locked retry ladder lives in the generation and dies
@@ -3261,8 +3261,8 @@ it("re-arms a pending locked settle on the generation that replaces a dead one",
 
   // The replacement generation settles BY ITSELF, and the settle carries the
   // journaled edit the lock blocked.
-  await expect.poll(() => state.settleCalls, { timeout: 5_000 }).toEqual([1, 2]);
-  await expect.poll(() => state.settledContents, { timeout: 5_000 }).toEqual([
+  await expect.poll(() => state.settleCalls).toEqual([1, 2]);
+  await expect.poll(() => state.settledContents).toEqual([
     "locked edit",
   ]);
 
@@ -3295,7 +3295,7 @@ it("a rebind with no pending locked settle settles nothing on its own", async ()
   state.generationOptions[0]!.onSessionError?.(
     Object.assign(new Error("daemon exited"), { code: "transport-error" }),
   );
-  await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
+  await expect.poll(() => state.generation).toBe(2);
   // Give the adoption a beat: nothing may settle.
   await new Promise((resolve) => setTimeout(resolve, 50));
   expect(state.settleCalls).toEqual([1, 1]);
@@ -3323,7 +3323,7 @@ it("pays a locked close debt by itself once the lock releases", async () => {
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["closing edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a close that fails for a non-lock cause is not retried by the capture layer", async () => {
   // The inverse guard: only the lock is worth polling. A terminal teardown
@@ -3350,7 +3350,7 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   expect(state.settleCalls).toHaveLength(settlesAtFailure);
   expect(state.generation).toBe(1);
   await capture.stop();
-}, 10_000);
+});
 
 it("retries a close the engine refused because its own store was busy", async () => {
   // #658, the close half of the same answer. A busy engine database clears by
@@ -3376,7 +3376,7 @@ it("retries a close the engine refused because its own store was busy", async ()
     .poll(() => state.closeCalls.length, { timeout: 15_000 })
     .toBeGreaterThan(closesAtFailure);
   await capture.stop();
-}, 20_000);
+});
 
 it("pays a busy close debt too, which is what lets the chip say settling", async () => {
   // The premise the close-state test rests on. `settling` is only honest at a
@@ -3405,7 +3405,7 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["busy replicated edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // A replicated lineage compacts on release without the
@@ -3429,7 +3429,7 @@ it("pays a locked close debt even when a replicated release succeeds", async () 
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["replicated edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a replicated release with a non-lock settle failure arms no detached retry", async () => {
   // The inverse guard: only the lock is worth reopening for. A terminal
@@ -3452,7 +3452,7 @@ it("a replicated release with a non-lock settle failure arms no detached retry",
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 10_000);
+});
 
 it("the version fence drops a detached locked retry after a switch", async () => {
   // The debt was armed for the version the document lived
@@ -3512,7 +3512,7 @@ it("the version fence drops a detached locked retry after a switch", async () =>
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a rename after a version-switch stand-down refuses instead of saving stale content", async () => {
   // #681, active-version-branch door: `standDownFromWrite` used to delete
@@ -3584,7 +3584,7 @@ it("a rename after a version-switch stand-down refuses instead of saving stale c
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 25_000);
+});
 
 it("a reopen before the timer fires receives the locked debt, not silence", async () => {
   // Opening a document settles nothing by itself, so a
@@ -3617,7 +3617,7 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
   await capture.stop();
-}, 20_000);
+});
 
 it("a rename drains the detached locked debt before touching disk", async () => {
   // With the session gone and the timer sleeping, a rename
@@ -3646,7 +3646,7 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   expect(state.generation).toBe(2);
   await finish(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a destructive delete cancels the detached locked debt instead of recreating the file", async () => {
   // The user deleted the file. A delayed payment reopening the
@@ -3672,14 +3672,13 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   await expect
     .poll(
       () => state.errors.filter((context) => context.includes("close retry")),
-      { timeout: 5_000 },
     )
     .toHaveLength(1);
   await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 15_000);
+});
 
 it("an external delete observed before a debt registers cancels it at the door instead of arming a resurrecting ladder", async () => {
   // #681 round 7, codex P1 (real): a debt used to register unconditionally
@@ -3733,7 +3732,7 @@ it("an external delete observed before a debt registers cancels it at the door i
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 15_000);
+});
 
 it("a recreated path's own session arms its debt normally instead of being cancelled by an earlier delete", async () => {
   // #681 round 8, codex P1 (real, corrected mid-round): the round-7
@@ -3783,7 +3782,7 @@ it("a recreated path's own session arms its debt normally instead of being cance
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["a real pending edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a stale session's late debt still cancels at the door despite a later recreation of its path", async () => {
   // #681 round 8, codex P1 pin (b) — the corruption guard. An old session
@@ -3833,7 +3832,7 @@ it("a stale session's late debt still cancels at the door despite a later recrea
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a late-registering debt's cancellation trace names dohc's own removal, not a fabricated external delete", async () => {
   // #681 round 8, certifier's cosmetic finding (folded): the no-debt
@@ -3876,7 +3875,7 @@ it("a late-registering debt's cancellation trace names dohc's own removal, not a
   ).toBe(true);
   state.locked = false;
   await capture.stop();
-}, 15_000);
+});
 
 it("expires an expected removal and honors its cancellation", async () => {
   // The delete-side registry outlives the JS capture path: the detached-debt
@@ -3908,7 +3907,7 @@ it("expires an expected removal and honors its cancellation", async () => {
   ).toBe(true);
   state.locked = false;
   await capture.stop();
-}, 15_000);
+});
 
 it("a cancelled expected removal reads as an external delete again", async () => {
   const { capture, state } = await lockedRebindCapture(
@@ -3934,7 +3933,7 @@ it("a cancelled expected removal reads as an external delete again", async () =>
   ).toBe(true);
   state.locked = false;
   await capture.stop();
-}, 15_000);
+});
 
 it("a materialized settle retires a session's deletion fence, so post-recovery edits arm normally", async () => {
   // #681 round 9, codex P1 (real): a session is classified once, at open,
@@ -3992,7 +3991,7 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["first edit", "first edit second edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a retry whose own opts already carry settle:false still consults the tombstone before an escalated write", async () => {
   // Codex P1-A on #746. `EngineYdocProviderSession.close` treats `settle:
@@ -4046,7 +4045,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
     ),
   ).toBe(true);
   await capture.stop();
-}, 10_000);
+});
 
 it("a suppressed retry's dirty-session refusal discharges through evict instead of wedging the lease", async () => {
   // Codex P1-B on #746. Forcing `settleOnRefusal: false` on a suppressed
@@ -4096,7 +4095,7 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
   expect(reopened).toBeTruthy();
   await reopened.close({ settle: false });
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete delivered while the capture chain is busy still suppresses a retry that fires before the chain drains", async () => {
   // Codex P1-C on #746. `captureBatch` Queues `cleanupDetachedDebtForEvent`
@@ -4159,7 +4158,6 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
         state.errorMessages.some((message) =>
           message.includes("an external delete of note.md removed the path"),
         ),
-      { timeout: 5_000 },
     )
     .toBe(true);
   expect(state.settledContents).toEqual([]);
@@ -4167,7 +4165,7 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   releaseOpen();
   await (await parked).close({ settle: false });
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete landing past the tombstone's own TTL still suppresses an active retry ladder directly", async () => {
   // Certification follow-up on #746 (TTL boundary): the no-debt
@@ -4225,7 +4223,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
     ),
   ).toBe(true);
   await capture.stop();
-}, 10_000);
+});
 
 it("a delete landing after a settle's write but before its late onSettled callback still suppresses the retry", async () => {
   // Codex P1 on 847ef7d9: the synchronous tombstone recording above (the
@@ -4312,7 +4310,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
     ),
   ).toBe(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a recreated path's fresh close-retry ladder still settles normally despite an earlier delete", async () => {
   // #746 non-regression, the inverse of the pin above: this session opens
@@ -4341,7 +4339,7 @@ it("a recreated path's fresh close-retry ladder still settles normally despite a
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["a real pending edit"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a suppressed close-retry ladder stands down once, honestly, instead of resurrecting or repeating", async () => {
   // `scheduleDetachedLockedSettle` (above) is the debt-REGISTRATION
@@ -4390,7 +4388,7 @@ it("a suppressed close-retry ladder stands down once, honestly, instead of resur
     ),
   ).toHaveLength(1);
   await capture.stop();
-}, 15_000);
+});
 
 it("a suppressed retry's own transient release failure still stands down on the following retry", async () => {
   // Certification follow-up on #746: `suppressSettleForRemoval`'s
@@ -4460,7 +4458,7 @@ it("a suppressed retry's own transient release failure still stands down on the 
   });
   await reopened.close({ settle: false });
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete refuses the open that could register a debt while disk work is in flight", async () => {
   // #696 rescanned for debts registered after its suspension snapshot. #697
@@ -4509,7 +4507,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
     state.errors.filter((context) => context.includes("close retry")),
   ).toHaveLength(1);
   await capture.stop();
-}, 20_000);
+});
 
 it("a moved-away directory cancels detached locked debts under its prefix", async () => {
   // Same rule, prefix shape: moving or deleting `dir` must not let a debt
@@ -4538,14 +4536,13 @@ it("a moved-away directory cancels detached locked debts under its prefix", asyn
   await expect
     .poll(
       () => state.errors.filter((context) => context.includes("close retry")),
-      { timeout: 5_000 },
     )
     .toHaveLength(1);
   await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 15_000);
+});
 
 it("a failed delete restores the detached locked debt instead of cancelling it", async () => {
   // The same no-delete-share handle that blocks the write can
@@ -4572,7 +4569,7 @@ it("a failed delete restores the detached locked debt instead of cancelling it",
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["survives a failed delete"]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete's watcher event landing during a suspended debt's window still suppresses the restored payment", async () => {
   // Certification follow-up on #746, the three-way race the sibling pin
@@ -4629,7 +4626,7 @@ it("a delete's watcher event landing during a suspended debt's window still supp
     .toBe(true);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a rename refuses while its debt payment is still locked", async () => {
   // The payment resolves when it merely re-armed against a
@@ -4663,7 +4660,7 @@ it("a rename refuses while its debt payment is still locked", async () => {
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["must not be lost"]);
   await capture.stop();
-}, 25_000);
+});
 
 it("a failed release keeps the debt instead of dropping it", async () => {
   // A replicated update arriving between the retry's settle
@@ -4709,7 +4706,7 @@ it("a failed release keeps the debt instead of dropping it", async () => {
     .poll(() => state.settledContents.length, { timeout: 15_000 })
     .toBeGreaterThan(0);
   await capture.stop();
-}, 25_000);
+});
 
 
 it("a directory move drains a detached debt under its prefix", async () => {
@@ -4745,7 +4742,7 @@ it("a directory move drains a detached debt under its prefix", async () => {
   expect(state.settledContents).toEqual(["moved edit"]);
   await finish(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a move refuses the open that could register a debt while disk work is in flight", async () => {
   // #697 closes the late-debt entrance #696 had to rescan: a new live open
@@ -4775,7 +4772,7 @@ it("a move refuses the open that could register a debt while disk work is in fli
   expect(state.generation).toBe(generationAtMove);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("a folder move settles and closes a live child session before opening its window", async () => {
   // The move seam used to vacate only its exact fromPath/toPath, so a
@@ -4840,7 +4837,7 @@ it("a folder move settles and closes a live child session before opening its win
 
   await finishMove(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a failed folder move's vacated child session needs no debt to keep its edit", async () => {
   // Follow-up: because the vacate above settles the child
@@ -4866,7 +4863,7 @@ it("a failed folder move's vacated child session needs no debt to keep its edit"
   await capture.flush();
   expect(state.settledContents).toHaveLength(settledAtWindow);
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete window refuses a debt's payment while the disk delete is unfinished", async () => {
   const { capture, state } = await lockedRebindCapture(
@@ -4890,7 +4887,7 @@ it("a delete window refuses a debt's payment while the disk delete is unfinished
   expect(state.settledContents).toHaveLength(settlesAtWindow);
   finishDelete(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete window that closes hands the debt back instead of stranding it", async () => {
   const { capture, state } = await lockedRebindCapture(
@@ -4911,7 +4908,7 @@ it("a delete window that closes hands the debt back instead of stranding it", as
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toContain("survives the window");
   await capture.stop();
-}, 20_000);
+});
 
 it("a debt's ladder settles nothing while its path's delete is in flight", async () => {
   // The delete seam suspends the existing debt for the whole disk interval.
@@ -4937,7 +4934,7 @@ it("a debt's ladder settles nothing while its path's delete is in flight", async
 
   finishDelete(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a move window refuses a live open before it reaches the daemon", async () => {
   // #696 stopped detached-debt payment inside this interval. #697 closes the
@@ -4963,7 +4960,7 @@ it("a move window refuses a live open before it reaches the daemon", async () =>
 
   await finishMove(true);
   await capture.stop();
-}, 25_000);
+});
 
 it("a delete window refuses a live open while the disk delete is unfinished", async () => {
   // The disk delete runs off the capture chain. A live open can therefore be
@@ -4990,7 +4987,7 @@ it("a delete window refuses a live open while the disk delete is unfinished", as
 
   finishDelete(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a failed delete closes its window before a later debt is paid", async () => {
   // The fence is an interval, not a verdict. A failed delete leaves the path
@@ -5024,7 +5021,7 @@ it("a failed delete closes its window before a later debt is paid", async () => 
   expect(state.settledContents).toEqual(["survives the window"]);
   await finish(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a failed move holds its window across the rollback, not just up to it", async () => {
   // #696 keeps the interval open until engine rollback completes. #697 makes
@@ -5080,7 +5077,7 @@ it("a failed move holds its window across the rollback, not just up to it", asyn
   await reopened.close({ settle: false });
   await (await parked).close({ settle: false });
   await capture.stop();
-}, 20_000);
+});
 
 it("a failed no-op move closes its window before a later debt is paid", async () => {
   // The other finisher. `beginFileRename` returns a no-op for everything the
@@ -5119,7 +5116,7 @@ it("a failed no-op move closes its window before a later debt is paid", async ()
   expect(state.settledContents).toEqual(["survives a failed folder move"]);
   await finish(true);
   await capture.stop();
-}, 20_000);
+});
 
 it("a delete-window open creates no session, debt, or settle", async () => {
   // The full absence proof: after the refused open and a drained capture
@@ -5142,7 +5139,7 @@ it("a delete-window open creates no session, debt, or settle", async () => {
   finishDelete(true);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 25_000);
+});
 
 it("a folder move fences late live opens on the no-op finisher path", async () => {
   // `beginFileRename` returns a NO-OP finisher for everything the engine
@@ -5173,7 +5170,7 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
   expect(state.generation).toBe(generationAtMove);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("refused renames never stack more than one retry ladder", async () => {
   // A refused rename reaches the debt's arming path while its
@@ -5630,7 +5627,7 @@ it("a rename after a terminal settle refusal refuses instead of saving stale con
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 25_000);
+});
 
 it("a settle that committed but wrote nothing stops the ladder and names the symlink", async () => {
   // A settle resolving is the adjacent operation, not the write: the
@@ -5732,7 +5729,7 @@ it("a rename after a symlink stand-down refuses instead of saving stale content"
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   expect(state.settledContents).toHaveLength(0);
   await capture.stop();
-}, 25_000);
+});
 
 it("reopening a stood-down path without a real settle leaves the marker refusing", async () => {
   // An open alone used to clear the marker, but
@@ -5782,7 +5779,7 @@ it("reopening a stood-down path without a real settle leaves the marker refusing
   ).rejects.toThrow(/dohc gave up on writing note\.md earlier/);
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
   await capture.stop();
-}, 25_000);
+});
 
 it("onSettled clearing a stood-down flag does not strand a debt still awaiting its own release", async () => {
   // #681 round 4, O3 (certifier, required): round 3's onSettled fix
@@ -5959,7 +5956,7 @@ it("a recovered debt with no retained release does not linger for a later delete
     ),
   ).toBe(false);
   await capture.stop();
-}, 25_000);
+});
 
 it("a materialized settle after reopening a stood-down path clears the marker and re-enables the rename", async () => {
   // #681 round 2's honest lifecycle end: only PROOF clears the marker — a
@@ -6012,7 +6009,7 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   await finish(true);
   await reopened.close({ settle: false });
   await capture.stop();
-}, 25_000);
+});
 
 it("a rename's own vacate settle clears a stood-down marker for a session still mid-recovery", async () => {
   // #681 round 2, P1 follow-up: `beginFileRename` now vacates live sessions
@@ -6064,7 +6061,7 @@ it("a rename's own vacate settle clears a stood-down marker for a session still 
     state.settledContents.some((text) => text.includes("recovered mid-rename")),
   ).toBe(true);
   await capture.stop();
-}, 25_000);
+});
 
 it("a cancelled debt's registry entry does not survive its own release landing", async () => {
   // #681 round 2, P2 (codex, verified): `discardDetachedLockedDebt`
@@ -6181,7 +6178,7 @@ it("a watcher-captured external delete cancels a stood-down debt instead of leav
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
-}, 20_000);
+});
 
 it("an engine-materialized delete of a stood-down path also cancels its debt", async () => {
   // #681 round 4, codex P2 (real): a version switch whose target omits the
@@ -6258,7 +6255,7 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   expect(typeof finish).toBe("function");
   await capture.stop();
-}, 20_000);
+});
 
 it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {
   // #681 round 3, P1 (codex, real — the round-2 destination cancel rested
@@ -6312,7 +6309,7 @@ it("a stood-down debt on the rename's destination survives a move that fails bec
     "dohc could not rename target.md. dohc gave up on writing target.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open target.md to write them again. Then rename target.md again.",
   );
   await capture.stop();
-}, 25_000);
+});
 
 it("a write-classified event over an already-absent stood-down path also cancels its debt", async () => {
   // #681 round 3 (cert N4b): the "absent" branch — a write-classified
@@ -6362,7 +6359,7 @@ it("a write-classified event over an already-absent stood-down path also cancels
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   expect(typeof finish).toBe("function");
   await capture.stop();
-}, 20_000);
+});
 
 it("a watcher-captured external delete of a policy-excluded path still cancels its stood-down debt", async () => {
   // #681 round 3, P2 (codex, real): the cleanup ran after
@@ -6419,7 +6416,7 @@ it("a watcher-captured external delete of a policy-excluded path still cancels i
   );
   expect(typeof finish).toBe("function");
   await capture.stop();
-}, 20_000);
+});
 
 it("a write-classified event over an already-absent, policy-excluded stood-down path also cancels its debt", async () => {
   // #681 round 4, O4 (certifier, required): round 3's hoist moved the
@@ -6478,7 +6475,7 @@ it("a write-classified event over an already-absent, policy-excluded stood-down 
   );
   expect(typeof finish).toBe("function");
   await capture.stop();
-}, 20_000);
+});
 
 it("a settle refused because peers outran it keeps the write ladder alive", async () => {
   // `ydoc-remote-updates-pending` reports a race — remote edits drained

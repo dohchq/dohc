@@ -13,7 +13,6 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHos
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
 
-vi.setConfig({ testTimeout: 20_000 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const digest = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js",

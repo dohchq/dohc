@@ -13,13 +13,17 @@ import {
   decodeCollectionBlobResult,
   decodeWorkspaceResult,
   encodeCollectionQueryParams,
-  type AutomationClaim,
   type AutomationClaimNextParams,
   type AutomationClaimNextResult,
+  type AutomationClaimSummary,
   type AutomationFailuresResult,
+  type AutomationListClaimsParams,
+  type AutomationListClaimsResult,
+  type AutomationRetryParams,
   type AutomationSettleParams,
+  type AutomationSubscribeParams,
   type AutomationSubscribeResult,
-  type AutomationSubscriptionParams,
+  type AutomationUnsubscribeParams,
   type AutomationUnsubscribeResult,
   type CaptureFlushResult,
   type CollectionGetParams,
@@ -1139,16 +1143,19 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsGetRecord, input);
   }
 
-  /** Registers one (automationId, collection path) pair; idempotent. */
+  /**
+   * Registers one (automationId, collection path) pair with the change
+   * kinds and fields it wants; a new filter replaces the pair's old one.
+   */
   async subscribeAutomation(
-    input: AutomationSubscriptionParams,
+    input: AutomationSubscribeParams,
   ): Promise<AutomationSubscribeResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSubscribe, input);
   }
 
   /** Removes one exact (automationId, collection path) pair. */
   async unsubscribeAutomation(
-    input: AutomationSubscriptionParams,
+    input: AutomationUnsubscribeParams,
   ): Promise<AutomationUnsubscribeResult> {
     return this.workspaceRequest(
       WORKSPACE_METHOD.automationsUnsubscribe,
@@ -1156,9 +1163,12 @@ export class VersionedLiveAdapter {
     );
   }
 
-  /** Takes the oldest pending claim (pending -> running), or null. */
+  /**
+   * Takes the oldest pending claim in the executor's namespace (pending ->
+   * running) with its field facts, or null.
+   */
   async claimNextAutomation(
-    input: AutomationClaimNextParams = {},
+    input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
   }
@@ -1166,8 +1176,29 @@ export class VersionedLiveAdapter {
   /** Settles a running claim as done, or failed with its error text. */
   async settleAutomationClaim(
     input: AutomationSettleParams,
-  ): Promise<AutomationClaim> {
+  ): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSettle, input);
+  }
+
+  /**
+   * Queues a failed claim as its next run, with its facts. A pending or
+   * running claim comes back unchanged; a done or chain-stopped claim is
+   * refused. The engine announces a requeued claim with
+   * `automation.claimed`, but that event can drop under backpressure and a
+   * repeated retry announces nothing, so after this resolves the caller
+   * wakes its executor's drain and re-reads `automations.failures` itself.
+   */
+  async retryAutomationClaim(
+    input: AutomationRetryParams,
+  ): Promise<AutomationClaimSummary> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsRetry, input);
+  }
+
+  /** One automation's run history: its newest claims, newest first. */
+  async listAutomationClaims(
+    input: AutomationListClaimsParams,
+  ): Promise<AutomationListClaimsResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsListClaims, input);
   }
 
   /**

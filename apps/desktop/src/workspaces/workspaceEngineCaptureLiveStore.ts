@@ -233,6 +233,9 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
     );
   }
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
+  if (author.kind === "named") {
+    return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+  }
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -519,7 +522,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 }
 
 function adapterAuthor(author: MomentAuthor): AgentAuthor {
-  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public authorship can only arrive through relay replication.");
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public and named authorship can only arrive through relay replication.");
   return {
     kind: "agent",
     agentId: author.agentId,

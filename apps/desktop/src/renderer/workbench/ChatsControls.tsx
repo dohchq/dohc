@@ -84,7 +84,7 @@ function overLimitSentences(failure: {
 }): string[] {
   return failure.lanes.map(({ lane, rows }) =>
     lane === "granted"
-      ? `You have ${rows} shares of your channels; the limit is ${failure.limit}.`
+      ? `You have ${rows} shares of your groups; the limit is ${failure.limit}.`
       : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
   );
 }

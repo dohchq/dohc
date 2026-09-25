@@ -1,10 +1,6 @@
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  isAppImageBoot,
-  pluginHostEnvFor,
-  resolveDohcMcpCommand,
-} from "./dohcMcpCommand";
+import { isAppImageBoot, resolveDohcMcpCommand } from "./dohcMcpCommand";
 
 describe("resolveDohcMcpCommand", () => {
   it("recognizes only a non-empty APPIMAGE path", () => {
@@ -92,25 +88,5 @@ describe("resolveDohcMcpCommand", () => {
         env: { DOHC_MCP_COMMAND: " /custom/dohc-mcp " },
       }),
     ).toBe("/custom/dohc-mcp");
-  });
-});
-
-describe("pluginHostEnvFor", () => {
-  it("carries the unavailable marker, never a stale command, when the resolver returns null", () => {
-    const env = pluginHostEnvFor(null, {
-      DOHC_MCP_COMMAND: "stale-value",
-      PATH: "/usr/bin",
-    });
-    expect(env.DOHC_MCP_COMMAND_UNAVAILABLE).toBe("1");
-    expect(env.DOHC_MCP_COMMAND).toBeUndefined();
-    expect(env.PATH).toBe("/usr/bin");
-  });
-
-  it("carries the resolved command, never the unavailable marker, when the resolver returns one", () => {
-    const env = pluginHostEnvFor("/opt/dohc/cli-bin/dohc-mcp", {
-      DOHC_MCP_COMMAND_UNAVAILABLE: "1",
-    });
-    expect(env.DOHC_MCP_COMMAND).toBe("/opt/dohc/cli-bin/dohc-mcp");
-    expect(env.DOHC_MCP_COMMAND_UNAVAILABLE).toBeUndefined();
   });
 });

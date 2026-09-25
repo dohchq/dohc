@@ -1,7 +1,0 @@
-{
-  "name": "dohc-plugin-agent-chat",
-  "license": "MIT",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module"
-}

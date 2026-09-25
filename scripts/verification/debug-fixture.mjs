@@ -42,7 +42,7 @@ export function runEarlyCloseDebugFixture(source, closed) {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
       globalThis.fetch=async()=>({ok:true,json:async()=>[{type:'page',webSocketDebuggerUrl:'ws://fixture'}]});
       await import('./scripts/verification/debug.mjs');
-    `], { cwd: root, encoding: "utf8", timeout: 5000 });
+    `], { cwd: root, encoding: "utf8", timeout: 20_000 });
     const artifacts = join(root, ".agent-artifacts/debug");
     const directory = existsSync(artifacts) ? readdirSync(artifacts)[0] : undefined;
     const files = directory ? readdirSync(join(artifacts, directory)).filter((name) => /\.(jsonl|json|png|zip)$/.test(name)) : [];

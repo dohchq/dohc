@@ -7,10 +7,15 @@ import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 const MAX_OP_KIND_CHARS = 128;
 
 export const COLLECTION_CREATE_ORIGIN_PREFIX = "relay:collection-create:";
+export const COLLECTION_FILE_ORIGIN_PREFIX = "relay:collection-file:";
 
+// Only the relay mints public and named authors, under these origins.
 export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
   if (originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection creates");
+  }
+  if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for relay collection file writes");
   }
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
@@ -18,7 +23,7 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
     const author = payload?.author as Record<string, unknown> | null;
-    if (author?.kind === "public") throw relayError("authorship_mismatch");
+    if (author?.kind === "public" || author?.kind === "named") throw relayError("authorship_mismatch");
   }
 }
 

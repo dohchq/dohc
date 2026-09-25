@@ -606,9 +606,15 @@ const PublicAuthorSchema = mutableStruct({
   principalId: Schema.String,
   grantId: Schema.String,
 });
+const NamedAuthorSchema = mutableStruct({
+  kind: Schema.Literal("named"),
+  userId: Schema.String,
+  grantId: Schema.String,
+  grantGeneration: Schema.Int,
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([AgentAuthorSchema, PublicAuthorSchema, CorruptAuthorSchema]),
+  Schema.Union([AgentAuthorSchema, PublicAuthorSchema, NamedAuthorSchema, CorruptAuthorSchema]),
 );
 
 const MomentRecordSchema = mutableStruct({

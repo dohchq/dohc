@@ -85,8 +85,6 @@ export const PLUGIN_PIPELINE_ERROR_STAGES = [
   "uninstall",
 ] as const;
 
-export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = ["agent-chat"] as const;
-
 // How many unrecoverable paths the uninstall preflight sends to the renderer.
 // The dialog lists this sample and says how many more there are; a plugin
 // tree can hold thousands, and the whole inventory stays in main.
@@ -203,8 +201,6 @@ export const CHANNELS = {
   stopPluginWebApp: "desktop:stop-plugin-web-app",
   pluginWebAppFailed: "desktop:plugin-web-app-failed",
   listPlugins: "desktop:list-plugins",
-  listOfferedPlugins: "desktop:list-offered-plugins",
-  addOfferedPlugin: "desktop:add-offered-plugin",
   installPlugin: "desktop:install-plugin",
   disablePlugin: "desktop:disable-plugin",
   enablePlugin: "desktop:enable-plugin",
@@ -278,6 +274,7 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
+  noticesChanged: "desktop:notices-changed",
   // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
@@ -344,6 +341,10 @@ export const CHANNELS = {
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",
+  reloadUserSettings: "desktop:reload-user-settings",
+  getUserSettingsFilePath: "desktop:get-user-settings-file-path",
+  openUserSettingsFile: "desktop:open-user-settings-file",
+  openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",
   getWorkspaceSettings: "desktop:get-workspace-settings",
   setWorkspaceSettings: "desktop:set-workspace-settings",
   resetWorkspaceSettings: "desktop:reset-workspace-settings",
