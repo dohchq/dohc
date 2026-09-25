@@ -4709,6 +4709,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
     acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
+    automationNameOf: (workspaceId, automationId) => collectionAutomationsOf(workspaceId)?.nameOf(automationId) ?? null,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     get cachedAgentSessions() { return cachedAgentSessions; },
@@ -4724,6 +4725,7 @@ function registerIpcHandlers(): void {
     createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
     showItemInFolder: (path) => shell.showItemInFolder(path),
+    deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),
   });
 
   shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({

@@ -72,6 +72,7 @@ import {
 import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
+import { useAutomationRetry } from "./collections/useAutomationRetry";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -165,7 +166,7 @@ import {
 import { usePluginCatalog } from "./workbench/pluginCatalog";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
-import { NoticeCenter } from "./workbench/NoticeCenter";
+import { collectionAutomationOf, NoticeCenter } from "./workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -2415,6 +2416,14 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
+  // Open automation, from a notice: the automation's Collection opens.
+  const openAutomation = useCallback(
+    (automationId: string) => {
+      const target = collectionAutomationOf(automationId);
+      if (target) openCollectionTab(target.collection);
+    },
+    [openCollectionTab],
+  );
   const openDataCollection = useCallback(
     (datasetId: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
@@ -3983,11 +3992,27 @@ export function DesktopWorkspaceShell(props: {
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
-  const { automationFailures, dismissAutomationFailure } = useAutomationFailures(
+  const {
+    automationFailures,
+    dismissAutomationFailure,
+    reloadAutomationFailures,
+    automationFailureToast,
+    hideAutomationFailureToast,
+  } = useAutomationFailures(
     workspaceId,
     workspaceIsReady,
     reportShellError,
   );
+  // A notice's Try again. Main wakes the drain; the notices read again here
+  // too, because a repeated retry sends no failure event.
+  const rereadAutomationFailures = useCallback(() => {
+    void reloadAutomationFailures().catch(() => undefined);
+  }, [reloadAutomationFailures]);
+  const automationFailureRetry = useAutomationRetry({
+    workspaceId,
+    onError: reportShellError,
+    onQueued: rereadAutomationFailures,
+  });
   const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
@@ -4936,6 +4961,10 @@ export function DesktopWorkspaceShell(props: {
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
               onDismissAutomationFailure={dismissAutomationFailure}
+              onRetryAutomationFailure={automationFailureRetry.retry}
+              onOpenAutomation={openAutomation}
+              automationFailureToast={automationFailureToast}
+              onHideAutomationFailureToast={hideAutomationFailureToast}
               automationHolds={automationHolds}
               onAllowAutomationHold={allowAutomationHold}
               automationHoldsUnreadable={automationHoldsUnreadable}
@@ -5901,6 +5930,8 @@ export function DesktopWorkspaceShell(props: {
           </div>
         </Overlay>
       ) : null}
+
+      {automationFailureRetry.dialog}
 
       {engineRebuild ? (
         <Overlay
