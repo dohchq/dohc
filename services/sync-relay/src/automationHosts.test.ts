@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_COMPUTERS_PER_WORKSPACE,
+  AUTOMATION_HOST_MAX_BODY_BYTES,
   type RelayAutomationHostState,
 } from "@dohc/workspace-contracts/relay";
+import { isAutomationHostPath } from "./automationHostRoutes";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -18,6 +21,7 @@ import {
   storagePath,
   testHandler,
   testStorage,
+  type HandlerOverrides,
 } from "./testing";
 
 afterEach(closeTestStorages);
@@ -27,10 +31,12 @@ const BASE = `/sync/${WORKSPACE}/automation-host`;
 
 let clock = 10_000;
 
-async function relay(): Promise<{ h: SyncRelayHandler; storage: SyncRelayStorage }> {
+async function relay(
+  overrides: HandlerOverrides = {},
+): Promise<{ h: SyncRelayHandler; storage: SyncRelayStorage }> {
   clock = 10_000;
   const storage = await testStorage();
-  const h = testHandler(storage, { nowMs: () => clock });
+  const h = testHandler(storage, { nowMs: () => clock, ...overrides });
   await claimWorkspace(h, "owner", WORKSPACE);
   return { h, storage };
 }
@@ -69,7 +75,6 @@ describe("automation hosts", () => {
     clock = 12_000;
     const claimed = await checkIn(h, "desktop", true, "Ice's desktop");
     expect(claimed.host).toEqual({
-      kind: "computer",
       installId: "desktop",
       generation: 1,
       handoverFrom: null,
@@ -115,7 +120,6 @@ describe("automation hosts", () => {
 
     const chosen = await state(await send(h, "choose", { installId: "laptop", generation: 1 }));
     expect(chosen.host).toEqual({
-      kind: "computer",
       installId: "laptop",
       generation: 2,
       handoverFrom: "desktop",
@@ -135,7 +139,6 @@ describe("automation hosts", () => {
       await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000 }),
     );
     expect(released.host).toEqual({
-      kind: "computer",
       installId: "laptop",
       generation: 3,
       handoverFrom: null,
@@ -164,6 +167,39 @@ describe("automation hosts", () => {
     ).toBe(400);
   });
 
+  it("keeps the latest progress when a computer missed an earlier release", async () => {
+    const { h } = await relay();
+    await checkIn(h, "desktop", true);
+    await checkIn(h, "laptop");
+    await checkIn(h, "studio");
+    await send(h, "choose", { installId: "laptop", generation: 1 });
+    await send(h, "release", { installId: "desktop", generation: 2, releasedThroughMs: 9_000 });
+
+    // The laptop has not read the desktop's release when the owner chooses
+    // the studio, so it reports its own older checkpoint.
+    const chosen = await state(await send(h, "choose", { installId: "studio", generation: 3 }));
+    expect(chosen.host).toEqual({
+      installId: "studio",
+      generation: 4,
+      handoverFrom: "laptop",
+      releasedThroughMs: 9_000,
+    });
+    const released = await state(
+      await send(h, "release", { installId: "laptop", generation: 4, releasedThroughMs: 5_000 }),
+    );
+    expect(released.host).toEqual({
+      installId: "studio",
+      generation: 5,
+      handoverFrom: null,
+      releasedThroughMs: 9_000,
+    });
+
+    // Neither a take-over nor choosing back loses it.
+    await send(h, "choose", { installId: "desktop", generation: 5 });
+    const taken = await state(await send(h, "take-over", { generation: 6 }));
+    expect(taken.host?.releasedThroughMs).toBe(9_000);
+  });
+
   it("lets the owner take over without a release", async () => {
     const { h } = await relay();
     await checkIn(h, "desktop", true);
@@ -171,7 +207,6 @@ describe("automation hosts", () => {
     await send(h, "choose", { installId: "laptop", generation: 1 });
     const taken = await state(await send(h, "take-over", { generation: 2 }));
     expect(taken.host).toEqual({
-      kind: "computer",
       installId: "laptop",
       generation: 3,
       handoverFrom: null,
@@ -204,6 +239,33 @@ describe("automation hosts", () => {
     expect(kept).toHaveLength(AUTOMATION_COMPUTERS_PER_WORKSPACE);
     expect(kept).toEqual(expect.arrayContaining(["newcomer", "computer-0", "computer-1"]));
     expect(kept).not.toContain("computer-2");
+  });
+
+  it("limits each owner's changes and refuses a large body", async () => {
+    const { h } = await relay({ automationHostRateLimiter: new TokenBucketLimiter(2, 0.001, 10) });
+    await checkIn(h, "desktop");
+    await checkIn(h, "laptop");
+    const limited = await send(h, "check-in", { installId: "studio", label: "Studio", claim: false });
+    expect(limited.status).toBe(429);
+    expect(await read(h), "a read is not a change").toMatchObject({ host: null });
+
+    const { h: fresh } = await relay();
+    const large = await send(fresh, "check-in", {
+      installId: "desktop",
+      label: "Desktop",
+      claim: false,
+      padding: "x".repeat(AUTOMATION_HOST_MAX_BODY_BYTES),
+    });
+    expect(large.status).toBe(413);
+  });
+
+  it("names the paths that take the small body limit", () => {
+    for (const path of [BASE, `${BASE}/check-in`, "/sync/workspace%20trip/automation-host/release"]) {
+      expect(isAutomationHostPath(path), path).toBe(true);
+    }
+    for (const path of [`${BASE}/check-in/extra`, `${BASE}x`, "/sync/automation-host", `/sync/${WORKSPACE}/live-host`]) {
+      expect(isAutomationHostPath(path), path).toBe(false);
+    }
   });
 
   it("refuses malformed requests and unknown actions", async () => {

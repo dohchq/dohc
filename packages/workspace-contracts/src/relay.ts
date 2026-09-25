@@ -522,7 +522,8 @@ export interface RelayNoticePage {
 export type NoticeMark = "read" | "dismissed";
 
 // The computer that runs a workspace's schedules and Group-message
-// automations (ADR 0012). The relay records one host per workspace. Only the
+// automations (ADR 0012). Request bodies are at most
+// AUTOMATION_HOST_MAX_BODY_BYTES, and each owner's changes are rate limited. The relay records one host per workspace. Only the
 // owner's computers read or change it, so a collaborator's computer never
 // runs these automations. A computer runs them while the last state it read
 // names it as `host.installId` and `host.handoverFrom` is null.
@@ -535,21 +536,19 @@ export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
 // Past this, a new computer's check-in forgets the owner's computer seen
 // longest ago, unless it is the host or handing over.
 export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
+export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 
 export interface RelayAutomationHost {
-  // `server` is reserved for the owner's self-hosted server, which does not
-  // run automations yet. Every host this relay records is a `computer`.
-  kind: "computer" | "server";
-  // Null only for a server.
-  installId: string | null;
+  installId: string;
   // Rises on every change. A request that changes the host names the
   // generation it read, and a stale one is refused with `conflict`.
   generation: number;
   // The computer that ran these automations before the owner chose another.
   // It stops and releases them; the new host starts after it does.
   handoverFrom: string | null;
-  // Set when the computer handing over released: every due time at or
-  // before it ran there. Null after any other change.
+  // The latest time a computer that handed over reported when it stopped:
+  // every due time at or before it ran on an earlier host. It stays through
+  // later handovers and never goes back. Null until a first release.
   releasedThroughMs: number | null;
 }
 
@@ -586,7 +585,8 @@ export interface AutomationHostChooseRequest {
 }
 
 // POST .../automation-host/release. The computer handing over has stopped,
-// and every due time at or before `releasedThroughMs` ran there.
+// and every due time at or before `releasedThroughMs` ran there or on an
+// earlier host. A release older than the recorded progress leaves it.
 export interface AutomationHostReleaseRequest {
   installId: string;
   generation: number;

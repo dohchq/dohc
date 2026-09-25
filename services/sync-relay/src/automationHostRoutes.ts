@@ -1,12 +1,24 @@
-import { jsonResponse } from "@dohc/service-http";
+import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import {
   AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
+  AUTOMATION_HOST_MAX_BODY_BYTES,
   AUTOMATION_INSTALL_ID_MAX_CHARS,
   isNoticeLine,
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "./errors";
-import { readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
+
+// Changes to the host, per owner: a burst of 60, then one a second. An
+// owner's computers check in when they open, on reconnect, and about once a
+// minute before a run.
+export const AUTOMATION_HOST_BUCKET_CAPACITY = 60;
+export const AUTOMATION_HOST_REFILL_PER_SECOND = 1;
+export const AUTOMATION_HOST_MAX_OWNERS = 10_000;
+
+// The relay's own body limit for these routes, beside the live-host tier.
+export function isAutomationHostPath(pathname: string): boolean {
+  return /^\/sync\/[^/]+\/automation-host(?:\/[^/]+)?$/u.test(pathname);
+}
 
 const AUTOMATION_HOST_ACTIONS = ["check-in", "choose", "release", "take-over"] as const;
 
@@ -36,6 +48,7 @@ export function createAutomationHostRoutes(
     | "takeOverAutomationHost"
   >,
   nowMs: () => number,
+  changeRateLimiter: TokenBucketLimiter,
 ) {
   return async function respondToAutomationHost(
     request: Request,
@@ -49,7 +62,8 @@ export function createAutomationHostRoutes(
       return jsonResponse({ ok: true, ...storage.readAutomationHost(scope) }, 200);
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");
-    const body = await readJsonObject(request);
+    if (!changeRateLimiter.allow(ownerUserId, nowMs())) throw relayError("automation_host_rate_limited");
+    const body = await readBody(request);
     const state = (() => {
       switch (route.action) {
         case "check-in":
@@ -80,6 +94,20 @@ export function createAutomationHostRoutes(
     })();
     return jsonResponse({ ok: true, ...state }, 200);
   };
+}
+
+async function readBody(request: Request): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = await readBoundedJson(request, AUTOMATION_HOST_MAX_BODY_BYTES, request.signal);
+  } catch (error) {
+    if (error instanceof RangeError) throw relayError("payload_too_large");
+    throw badRequest("request body must be valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("request body must be a JSON object");
+  }
+  return value as Record<string, unknown>;
 }
 
 function installId(value: unknown): string {

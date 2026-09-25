@@ -29,6 +29,9 @@ import {
   type NoticeRoute,
 } from "./noticeRoutes";
 import {
+  AUTOMATION_HOST_BUCKET_CAPACITY,
+  AUTOMATION_HOST_MAX_OWNERS,
+  AUTOMATION_HOST_REFILL_PER_SECOND,
   createAutomationHostRoutes,
   parseAutomationHostAction,
   type AutomationHostRoute,
@@ -144,6 +147,8 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   // Posts of notices to other people, keyed by sender.
   noticePostRateLimiter?: TokenBucketLimiter;
+  // Changes to a workspace's automation host, keyed by owner.
+  automationHostRateLimiter?: TokenBucketLimiter;
   linkFreshnessPageSize?: number;
   linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
@@ -235,6 +240,11 @@ export function createSyncRelayHandler({
     NOTICE_POST_BUCKET_CAPACITY,
     NOTICE_POST_REFILL_PER_SECOND,
     NOTICE_POST_MAX_SENDERS,
+  ),
+  automationHostRateLimiter = new TokenBucketLimiter(
+    AUTOMATION_HOST_BUCKET_CAPACITY,
+    AUTOMATION_HOST_REFILL_PER_SECOND,
+    AUTOMATION_HOST_MAX_OWNERS,
   ),
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
@@ -379,7 +389,7 @@ export function createSyncRelayHandler({
     claimPendingShares,
     noticePostRateLimiter,
   );
-  const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs);
+  const respondToAutomationHost = createAutomationHostRoutes(storage, nowMs, automationHostRateLimiter);
 
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,

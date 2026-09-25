@@ -1021,6 +1021,7 @@ macro_rules! define_server_error_codes {
 define_server_error_codes! {
     "ambiguous_selector" => |_| RelayError::AmbiguousSelector,
     "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
+    "automation_host_rate_limited" => |_| RelayError::HttpStatus(429),
     "bad_request" => |_| RelayError::BadRequest,
     "blob_missing" => |_| RelayError::BlobReferenceMissing,
     "blob_not_found" => |_| RelayError::BlobMissing,

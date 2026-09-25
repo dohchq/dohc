@@ -4,6 +4,7 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
   authorship_mismatch: 403,
+  automation_host_rate_limited: 429,
   bad_request: 400,
   blob_missing: 422,
   blob_not_found: 404,
@@ -63,6 +64,7 @@ export const RELAY_ERRORS = Object.freeze(
 export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Object.freeze({
   ambiguous_selector: "a chat-channel share must not also carry paths or versionId",
   authorship_mismatch: "chat op author does not match the authenticated actor",
+  automation_host_rate_limited: "too many automation host changes",
   bad_request: "bad request",
   blob_missing: "log append references a blob not stored on the relay",
   blob_not_found: "blob not found",

@@ -7,9 +7,9 @@ const MARKER = "automation-hosts-v1";
 // One host per workspace: the computer that runs its schedules and
 // Group-message automations. `generation` rises on every change.
 // `handover_from` names the computer still running them after the owner
-// chose another; `released_through_ms` is what it reported when it stopped.
-// The `server` kind is reserved for the self-hosted server, so allowing it
-// later needs no rebuild of this table.
+// chose another. `released_through_ms` is the latest time any computer
+// that handed over reported when it stopped; it stays through later
+// handovers and never goes back.
 //
 // The owner's computers, as each last checked in. The relay keeps a bounded
 // list per workspace and forgets the computer seen longest ago.
@@ -17,15 +17,12 @@ const AUTOMATION_HOST_SCHEMA = {
   [AUTOMATION_HOSTS]: `CREATE TABLE sync_relay_automation_hosts (
   workspace_id TEXT NOT NULL PRIMARY KEY
     REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('computer', 'server')),
-  install_id TEXT CHECK (install_id IS NULL OR length(install_id) BETWEEN 1 AND 256),
+  install_id TEXT NOT NULL CHECK (length(install_id) BETWEEN 1 AND 256),
   generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 9007199254740991),
   handover_from TEXT CHECK (handover_from IS NULL OR length(handover_from) BETWEEN 1 AND 256),
   released_through_ms INTEGER
     CHECK (released_through_ms IS NULL OR released_through_ms BETWEEN 0 AND 9007199254740991),
-  CHECK ((kind = 'computer') = (install_id IS NOT NULL)),
-  CHECK (handover_from IS NULL OR handover_from IS NOT install_id),
-  CHECK (handover_from IS NULL OR released_through_ms IS NULL)
+  CHECK (handover_from IS NULL OR handover_from <> install_id)
 ) STRICT`,
   [AUTOMATION_COMPUTERS]: `CREATE TABLE sync_relay_automation_computers (
   workspace_id TEXT NOT NULL

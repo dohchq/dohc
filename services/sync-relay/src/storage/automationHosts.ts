@@ -43,13 +43,12 @@ function requireOwner(storage: StorageContext, scope: OwnerScope): void {
 
 function readHost(storage: StorageContext, workspaceId: string): RelayAutomationHost | null {
   const row = storage.db.prepare(
-    `SELECT kind, install_id, generation, handover_from, released_through_ms
+    `SELECT install_id, generation, handover_from, released_through_ms
      FROM sync_relay_automation_hosts WHERE workspace_id = ?`,
   ).get(workspaceId);
   if (!row) return null;
   return {
-    kind: row.kind === "server" ? "server" : "computer",
-    installId: row.install_id === null ? null : String(row.install_id),
+    installId: String(row.install_id),
     generation: Number(row.generation),
     handoverFrom: row.handover_from === null ? null : String(row.handover_from),
     releasedThroughMs: row.released_through_ms === null ? null : Number(row.released_through_ms),
@@ -76,17 +75,23 @@ function requireGeneration(host: RelayAutomationHost | null, generation: number)
 function writeHost(
   storage: StorageContext,
   workspaceId: string,
-  next: Omit<RelayAutomationHost, "kind" | "generation">,
+  next: Omit<RelayAutomationHost, "generation">,
   previous: RelayAutomationHost | null,
 ): void {
   storage.db.prepare(
     `INSERT INTO sync_relay_automation_hosts
-       (workspace_id, kind, install_id, generation, handover_from, released_through_ms)
-     VALUES (?, 'computer', ?, ?, ?, ?)
+       (workspace_id, install_id, generation, handover_from, released_through_ms)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET
-       kind = excluded.kind, install_id = excluded.install_id, generation = excluded.generation,
+       install_id = excluded.install_id, generation = excluded.generation,
        handover_from = excluded.handover_from, released_through_ms = excluded.released_through_ms`,
   ).run(workspaceId, next.installId, (previous?.generation ?? 0) + 1, next.handoverFrom, next.releasedThroughMs);
+}
+
+// The latest progress any computer that handed over reported. A later
+// release can only move it forward.
+function laterProgress(previous: number | null, reported: number): number {
+  return previous === null ? reported : Math.max(previous, reported);
 }
 
 export function readAutomationHost(storage: StorageContext, scope: OwnerScope): RelayAutomationHostState {
@@ -139,7 +144,8 @@ export function checkInAutomationComputer(
 
 // The owner picks another checked-in computer. The computer running now
 // hands over to it; while a handover waits, the computer still running keeps
-// handing over, and choosing it back cancels the handover.
+// handing over, and choosing it back cancels the handover. The progress
+// earlier handovers reported stays.
 export function chooseAutomationHost(
   storage: StorageContext,
   input: AutomationHostChooseInput,
@@ -159,13 +165,15 @@ export function chooseAutomationHost(
     writeHost(storage, workspaceId, {
       installId,
       handoverFrom: running === installId ? null : running,
-      releasedThroughMs: null,
+      releasedThroughMs: host?.releasedThroughMs ?? null,
     }, host);
     return readState(storage, workspaceId);
   });
 }
 
-// The computer handing over has stopped. The host starts after it.
+// The computer handing over has stopped. The host starts after the latest
+// progress any computer that handed over reported, so a computer that
+// missed an earlier release cannot move it back.
 export function releaseAutomationHost(
   storage: StorageContext,
   input: AutomationHostReleaseInput,
@@ -178,13 +186,14 @@ export function releaseAutomationHost(
     writeHost(storage, input.workspaceId, {
       installId: host.installId,
       handoverFrom: null,
-      releasedThroughMs: input.releasedThroughMs,
+      releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
     }, host);
     return readState(storage, input.workspaceId);
   });
 }
 
-// The owner ends a handover without the old computer's release.
+// The owner ends a handover without the old computer's release. The
+// progress earlier handovers reported stays.
 export function takeOverAutomationHost(
   storage: StorageContext,
   input: AutomationHostTakeOverInput,
@@ -197,7 +206,7 @@ export function takeOverAutomationHost(
     writeHost(storage, input.workspaceId, {
       installId: host.installId,
       handoverFrom: null,
-      releasedThroughMs: null,
+      releasedThroughMs: host.releasedThroughMs,
     }, host);
     return readState(storage, input.workspaceId);
   });
