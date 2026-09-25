@@ -42,6 +42,9 @@ export const WORKSPACE_METHOD = {
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
+  automationsPress: "automations.press",
+  automationsClaimSchedule: "automations.claimSchedule",
+  automationsScheduleMarks: "automations.scheduleMarks",
 } as const;
 
 /**
@@ -157,6 +160,12 @@ export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
+/**
+ * What a claim runs for: a record change, a message in a Group, a Button
+ * field press, or a schedule's due time.
+ */
+export type AutomationClaimKind = AutomationChangeKind | "message" | "button" | "schedule";
+
 /** Mirrors AutomationSubscribeParams in crates/dohc-workspace-engine. */
 export type AutomationSubscribeParams = WorkspaceJsonObject & {
   automationId: string;
@@ -211,6 +220,34 @@ export type AutomationListClaimsParams = WorkspaceJsonObject & {
   automationId: string;
 };
 
+/** Mirrors AutomationPressParams in crates/dohc-workspace-engine. */
+export type AutomationPressParams = WorkspaceJsonObject & {
+  /** The pressing window's id for the press. Send the same id again after a lost reply. */
+  pressId: string;
+  /** The Collection automation the button runs: "collection:<path>#<id>". */
+  automationId: string;
+  recordId: string;
+  /**
+   * The person who pressed. The run acts for them, so the caller must take
+   * it from its own checked identity, never from a renderer.
+   */
+  pressedBy: string;
+  nowMs?: number;
+};
+
+/** Mirrors AutomationClaimScheduleParams in crates/dohc-workspace-engine. */
+export type AutomationClaimScheduleParams = WorkspaceJsonObject & {
+  /** The Collection automation the schedule runs: "collection:<path>#<id>". */
+  automationId: string;
+  /** The scheduler's hash of the schedule. A new hash starts a new mark. */
+  scheduleHash: string;
+  /** Due times to run, each after the stored mark and at or before throughMs; at most 100. */
+  run: number[];
+  /** The mark's new position. A due time after the stored mark that is not in run is skipped. */
+  throughMs: number;
+  nowMs?: number;
+};
+
 /** A claim `automations.claimNext` serves, with its change's field facts. */
 export type AutomationClaim = typeof AutomationClaimSchema.Type;
 
@@ -233,6 +270,28 @@ export type AutomationFailuresResult =
 /** One automation's newest claims in every state, newest first (at most 100). */
 export type AutomationListClaimsResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsListClaims];
+
+/**
+ * The claim that runs a press: new, or the same person's earlier press of
+ * the button on the record. `busy` is true, with no claim, while the button
+ * runs on the record for someone else.
+ */
+export type AutomationPressResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsPress];
+
+/** How far one schedule has been claimed or skipped. */
+export type AutomationScheduleMark = typeof AutomationScheduleMarkSchema.Type;
+
+/**
+ * The claims a schedule step inserted and the mark after it. A step with no
+ * due times and a mark behind the stored one changes nothing and answers
+ * the stored mark.
+ */
+export type AutomationClaimScheduleResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsClaimSchedule];
+
+export type AutomationScheduleMarksResult =
+  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsScheduleMarks];
 
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
@@ -270,6 +329,9 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
+  [WORKSPACE_METHOD.automationsPress]: AutomationPressParams;
+  [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
+  [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
 };
 
 type CollectionMethodResultMap = {
@@ -816,15 +878,18 @@ const automationClaimFields = {
    * The change that inserted the claim. A field change keys on its
    * replication coordinate or, on a never-synced lineage, on the
    * device-local history row id. An added or removed record keys on the
-   * moment that moved its file into or out of the Collection. Exactly one
-   * of the three shapes.
+   * moment that moved its file into or out of the Collection. A message, a
+   * press, and a due time key on text: "message:<message id>",
+   * "press:<press id>", "schedule:<due ms>". Exactly one of the four shapes.
    */
   trigger: Schema.Union([
     mutableStruct({ originId: Schema.NonEmptyString, originSeq: Schema.Int }),
     mutableStruct({ historyId: Schema.Int }),
     mutableStruct({ momentOrder: Schema.Int }),
+    mutableStruct({ key: Schema.NonEmptyString }),
   ]),
-  recordId: Schema.NonEmptyString,
+  /** The record the claim runs on; null for a message or a schedule. */
+  recordId: Schema.NullOr(Schema.NonEmptyString),
   collectionPath: Schema.NonEmptyString,
   depth: Schema.Int,
   state: Schema.Literals(["pending", "running", "done", "failed"]),
@@ -849,7 +914,7 @@ const automationClaimFields = {
  * names them. Each author field is null when the write did not declare it.
  */
 const automationChangeFields = {
-  kind: Schema.Literals(["added", "changed", "removed"]),
+  kind: Schema.Literals(["added", "changed", "removed", "message", "button", "schedule"]),
   authorOriginId: NullableString,
   actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
   onBehalfOf: NullableString,
@@ -897,7 +962,19 @@ const AutomationClaimSchema = mutableStruct({
     ),
     /** Changed fields whose names alone did not fit; read the history. */
     fieldsOmitted: Schema.Int,
+    /**
+     * A message claim's message, its body whole or as { truncated: true,
+     * bytes } to read through chats.messages.get. Other claims have none.
+     */
+    message: Schema.optionalKey(JsonObjectSchema),
   }),
+});
+
+const AutomationScheduleMarkSchema = mutableStruct({
+  automationId: Schema.NonEmptyString,
+  scheduleHash: Schema.NonEmptyString,
+  /** Every due time at or before this was claimed or skipped. */
+  throughMs: Schema.Int,
 });
 
 const WorkspaceResultSchemas = {
@@ -981,6 +1058,17 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,
+  [WORKSPACE_METHOD.automationsPress]: Schema.Union([
+    mutableStruct({ busy: Schema.Literal(false), claim: AutomationClaimSummarySchema }),
+    mutableStruct({ busy: Schema.Literal(true), claim: Schema.Null }),
+  ]),
+  [WORKSPACE_METHOD.automationsClaimSchedule]: mutableStruct({
+    claims: Schema.mutable(Schema.Array(AutomationClaimSummarySchema)),
+    mark: AutomationScheduleMarkSchema,
+  }),
+  [WORKSPACE_METHOD.automationsScheduleMarks]: mutableStruct({
+    marks: Schema.mutable(Schema.Array(AutomationScheduleMarkSchema)),
+  }),
 } as const;
 
 function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(

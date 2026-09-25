@@ -694,6 +694,69 @@ describe("automations wire schemas", () => {
     ).toThrow(ProtocolShapeError);
   });
 
+  it("decodes keyed claims for a message, a press, and a due time", () => {
+    const keyed = (key: string, kind: string, recordId: string | null) => ({
+      ...claim,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key },
+      recordId,
+      change: { ...claim.change, kind, fields: [], fieldsOmitted: 0 },
+    });
+    const pressed = keyed("press:press-1", "button", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const due = keyed("schedule:1790000000000", "schedule", null);
+    const message = {
+      ...keyed("message:m1", "message", null),
+      change: {
+        ...keyed("message:m1", "message", null).change,
+        message: { id: "m1", body: { truncated: true, bytes: 70_000 } },
+      },
+    };
+    for (const served of [pressed, due, message]) {
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, served)).toEqual(served);
+    }
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, { ...due, trigger: { key: "" } }),
+    ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes a press answer: its claim, or busy with none", () => {
+    const pressed = {
+      ...summary,
+      automationId: "collection:Invoices#mark-paid",
+      trigger: { key: "press:press-1" },
+      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada" },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
+    ).toEqual({ busy: false, claim: pressed });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: true, claim: null }),
+    ).toEqual({ busy: true, claim: null });
+    for (const malformed of [{ busy: true, claim: pressed }, { busy: false, claim: null }, { claim: pressed }]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, malformed)).toThrow(ProtocolShapeError);
+    }
+  });
+
+  it("decodes a schedule step and the schedule marks", () => {
+    const mark = { automationId: "collection:Invoices#weekday-report", scheduleHash: "h1", throughMs: 3_000 };
+    const due = {
+      ...summary,
+      automationId: mark.automationId,
+      trigger: { key: "schedule:2000" },
+      recordId: null,
+      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),
+    ).toEqual({ claims: [due], mark });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsScheduleMarks, { marks: [mark] }),
+    ).toEqual({ marks: [mark] });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
+    ).toThrow(ProtocolShapeError);
+  });
+
   it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
     for (const malformed of [
       { ...claim, state: "paused" },
