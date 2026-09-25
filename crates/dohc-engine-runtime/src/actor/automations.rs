@@ -136,6 +136,31 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn automation_release(
+        &self,
+        workspace_id: String,
+        claim_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AutomationClaim, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_domain::release_automation_claim(
+                    store,
+                    &workspace_id,
+                    &claim_id,
+                    now_ms,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn automation_reclaim_running(
         &self,

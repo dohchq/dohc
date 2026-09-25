@@ -73,6 +73,13 @@ struct AutomationRetryParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationReleaseParams {
+    claim_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationListClaimsParams {
     automation_id: String,
 }
@@ -97,6 +104,7 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
             origin_seq,
         } => json!({ "originId": origin_id, "originSeq": origin_seq }),
         AutomationTrigger::History { history_id } => json!({ "historyId": history_id }),
+        AutomationTrigger::Moment { moment_order } => json!({ "momentOrder": moment_order }),
     };
     let mut value = json!({
         "claimId": claim.claim_id,
@@ -303,6 +311,34 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.claim_id,
                 settle,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(automation_claim_json(&claim))
+    }
+
+    /// An executor hands back a running claim it cannot run yet. The claim
+    /// is pending again without an attempt counted. It announces nothing:
+    /// the executor released it on purpose and drains again once what held
+    /// it clears, so a wake here would only serve it straight back.
+    pub(super) async fn automations_release(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationReleaseParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.release",
+            open.actor.automation_release(
+                open.workspace_id.clone(),
+                params.claim_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 Arc::new(NoFaults),
                 cancellation.token(),

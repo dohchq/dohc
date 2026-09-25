@@ -318,7 +318,7 @@ impl EngineService {
                         )
                         .await;
                     if observed.load(std::sync::atomic::Ordering::SeqCst) {
-                        let paths = host
+                        let reconciliation = host
                             .open
                             .actor
                             .reconcile_collections(
@@ -336,6 +336,12 @@ impl EngineService {
                                 host.open.request_collection_reconcile();
                                 map_runtime(error)
                             })?;
+                        crate::events::emit_automation_claimed(
+                            &reconcile_events,
+                            &host.open.workspace_id,
+                            &reconciliation.automation_claims,
+                        );
+                        let paths = reconciliation.changed_paths;
                         if !paths.is_empty() {
                             reconcile_events.emit(crate::CAPTURE_MOMENT_RECORDED_EVENT, json!({
                                 "workspaceId":host.open.workspace_id,"appliedCount":paths.len(),"notOwnedCount":0,

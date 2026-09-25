@@ -41,6 +41,7 @@ mod ydoc;
 pub use capture::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
+pub use collections::CollectionReconciliation;
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};

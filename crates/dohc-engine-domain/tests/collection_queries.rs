@@ -8,9 +8,10 @@ use dohc_engine_domain::{
     MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults,
     RenameTextFile, TxnOutcome, VersionedTextStore, ViewSortDirection, WriteText,
     collection_record_markdown_with_id, get_collection, get_collection_record,
-    index_collection_frontmatter_apply_in_tx, list_collections, list_pending_collection_adoptions,
-    parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
-    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
+    index_collection_frontmatter_apply_in_tx, index_collection_record_text_in_tx, list_collections,
+    list_pending_collection_adoptions, parse_collection_schema, query_collection_records,
+    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -2327,6 +2328,69 @@ estimate: \".nan\"
         }),
         "the quoted rewrite replaces the non-finite reason even though the value is unchanged"
     );
+}
+
+/// A file written with no Y.Doc lineage indexes against the stored index,
+/// where both `.nan` spellings are the same ".nan". The write changes no
+/// value, yet each spelling still replaces the other's flag reason.
+#[test]
+fn a_file_write_of_the_same_value_refreshes_the_flag_reason() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:\n  estimate:\n    type: number\n",
+        2,
+    )
+    .expect("measurement schema");
+    let unquoted = format!("---\nid: {FIRST_TASK_ID}\nestimate: .nan\n---\n");
+    let quoted = format!("---\nid: {FIRST_TASK_ID}\nestimate: \".nan\"\n---\n");
+    write_text(&mut store, "measurements/one.md", &unquoted, 3).expect("seed");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let reason = |store: &EngineStore| -> String {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT json_extract(validation_reason_json, '$.code') \
+                     FROM collection_record_fields \
+                     WHERE workspace_id = ?1 AND record_id = ?2 AND field_name = 'estimate'",
+                    params![WORKSPACE_ID, FIRST_TASK_ID],
+                    |row| row.get(0),
+                )
+            })
+            .expect("estimate reason")
+    };
+    assert_eq!(reason(&store), "number-not-finite");
+    for (text, expected, now) in [
+        (&quoted, "expected-number", 5),
+        (&unquoted, "number-not-finite", 6),
+    ] {
+        let facts = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_record_text_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    "object-3",
+                    "measurements/one.md",
+                    text,
+                    None,
+                    None,
+                    now,
+                )
+            })
+            .expect("index the file");
+        assert!(
+            matches!(facts, TxnOutcome::Committed(None)),
+            "the value did not change"
+        );
+        assert_eq!(reason(&store), expected);
+    }
 }
 
 #[test]

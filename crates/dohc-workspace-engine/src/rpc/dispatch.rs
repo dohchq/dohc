@@ -838,6 +838,10 @@ impl EngineService {
                 self.automations_retry(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.release" => {
+                self.automations_release(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.dispatch.requeueFailedTrigger" => {
                 self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
                     .await?
@@ -1122,6 +1126,7 @@ mod tests {
             "automations.claimNext",
             "automations.failures",
             "automations.listClaims",
+            "automations.release",
             "automations.retry",
             "automations.settle",
             "automations.subscribe",
