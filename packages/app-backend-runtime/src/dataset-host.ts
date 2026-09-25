@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { datasetRevisionsPreserveAccess, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetRevisionsPreserveAccess, describeApprovedDataset, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
@@ -255,16 +255,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields };
   }
   function describePermission(permission: Permission): DatasetDescription {
-    const { revision: approved, operations } = permission;
-    const fields = new Set(operations.flatMap(operation => operation.fieldIds));
-    const tables = new Set(operations.map(operation => operation.tableId));
-    return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision, revisionSha256: approved.revisionSha256,
-      tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
-        fields: table.fields.filter(field => fields.has(field.fieldId)).map(field => {
-          const { sqlColumn: _sqlColumn, ...description } = field;
-          if (description.relation && !fields.has(description.relation.fieldId)) delete description.relation;
-          return description;
-        }) })), operations };
+    return describeApprovedDataset(permission.revision, permission.operations);
   }
   const host = {
     deletionStatus(context: Context, raw: DatasetScope) {

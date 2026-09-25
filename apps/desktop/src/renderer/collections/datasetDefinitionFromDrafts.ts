@@ -1,9 +1,9 @@
-import type { DatasetDefinition, DatasetField, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
+import type { DatasetColumnField, DatasetColumnFieldType, DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 
 export interface TransactionalFieldDraft {
   name: string;
-  type: Exclude<DatasetField["type"], "relation">;
+  type: Exclude<DatasetColumnFieldType, "relation">;
   required: boolean;
   unique: boolean;
   options?: string[];
@@ -22,13 +22,13 @@ export function datasetDefinitionFromDrafts(input: {
   const datasetId = input.datasetId ?? crypto.randomUUID();
   const tableId = input.tableId ?? crypto.randomUUID();
   const primaryFieldId = crypto.randomUUID();
-  const primary: DatasetField = {
+  const primary: DatasetColumnField = {
     fieldId: primaryFieldId, name: "Record ID", sqlColumn: "id", type: "text", required: true, unique: true,
   };
-  const fields: DatasetField[] = [primary, ...input.fields.map(draft => {
+  const fields: DatasetColumnField[] = [primary, ...input.fields.map(draft => {
     const fieldId = crypto.randomUUID();
     const sqlColumn = `f_${fieldId.replaceAll("-", "")}`;
-    const field: DatasetField = {
+    const field: DatasetColumnField = {
       fieldId, name: draft.name.trim(), sqlColumn, type: draft.type,
       required: draft.required, unique: draft.unique,
       ...(draft.default === undefined ? {} : { default: draft.default }),
