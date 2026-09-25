@@ -57,6 +57,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_owner_bindings",
     "owner_pending_settlements",
     "owner_pending_settlement_blobs",
+    "relay_deferred_ops",
+    "relay_deferred_blobs",
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
