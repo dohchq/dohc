@@ -6,6 +6,7 @@ import {
   isNoticeLine,
 } from "@dohc/workspace-contracts/relay";
 import { badRequest, notFound, relayError } from "./errors";
+import { relayPathSegments } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 
 // Changes to the host, per owner: a burst of 60, then one a second. An
@@ -15,9 +16,19 @@ export const AUTOMATION_HOST_BUCKET_CAPACITY = 60;
 export const AUTOMATION_HOST_REFILL_PER_SECOND = 1;
 export const AUTOMATION_HOST_MAX_OWNERS = 10_000;
 
-// The relay's own body limit for these routes, beside the live-host tier.
-export function isAutomationHostPath(pathname: string): boolean {
-  return /^\/sync\/[^/]+\/automation-host(?:\/[^/]+)?$/u.test(pathname);
+// Whether a path is one of these routes, read the way the router reads it,
+// so the relay's small body limit covers every spelling the router accepts.
+// The router takes a workspace id here unless the second segment names the
+// share or notice namespace.
+export function isAutomationHostPath(path: string | readonly string[]): boolean {
+  let parts: readonly string[];
+  try {
+    parts = typeof path === "string" ? relayPathSegments(path) : path;
+  } catch {
+    return false;
+  }
+  return parts.length >= 3 && parts.length <= 4 && parts[0] === "sync" &&
+    parts[1] !== "shares" && parts[1] !== "notices" && parts[2] === "automation-host";
 }
 
 const AUTOMATION_HOST_ACTIONS = ["check-in", "choose", "release", "take-over"] as const;

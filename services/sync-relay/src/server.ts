@@ -33,6 +33,7 @@ import {
   AUTOMATION_HOST_MAX_OWNERS,
   AUTOMATION_HOST_REFILL_PER_SECOND,
   createAutomationHostRoutes,
+  isAutomationHostPath,
   parseAutomationHostAction,
   type AutomationHostRoute,
 } from "./automationHostRoutes";
@@ -76,7 +77,7 @@ import {
   type ShareProposalRoute,
   type WorkspaceProposalRoute,
 } from "./proposalRoutes";
-import { parseShareId, parseString, parseWorkspaceId } from "./requestInputs";
+import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import type { ShareSelector } from "./shareFilter";
 import { type SyncRelayStorage } from "./storage";
 import {
@@ -868,7 +869,7 @@ export function createSyncRelayHandler({
 }
 
 function parseRoute(request: Request): SyncRelayRoute {
-  const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  const parts = relayPathSegments(new URL(request.url).pathname);
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "link-app-publication"};
     const publicationId = parts[3];
@@ -1018,7 +1019,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();
   }
-  if (parts[2] === "automation-host" && parts.length <= 4) {
+  if (isAutomationHostPath(parts)) {
     const action = parseAutomationHostAction(parts[3]);
     if (!action) throw notFound();
     return { route: "automation-host", workspaceId, action };

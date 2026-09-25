@@ -259,12 +259,32 @@ describe("automation hosts", () => {
     expect(large.status).toBe(413);
   });
 
-  it("names the paths that take the small body limit", () => {
-    for (const path of [BASE, `${BASE}/check-in`, "/sync/workspace%20trip/automation-host/release"]) {
-      expect(isAutomationHostPath(path), path).toBe(true);
-    }
-    for (const path of [`${BASE}/check-in/extra`, `${BASE}x`, "/sync/automation-host", `/sync/${WORKSPACE}/live-host`]) {
+  it("gives the small body limit to every spelling the router accepts", async () => {
+    const spellings = [
+      BASE,
+      `${BASE}/check-in`,
+      `${BASE}/check-in/`,
+      `/sync/${WORKSPACE}/%61utomation-host/check-in`,
+      `/sync//${WORKSPACE}//automation-host//check-in`,
+      "/sync/workspace%2Dtrip/automation-host/check-in",
+    ];
+    for (const path of spellings) expect(isAutomationHostPath(path), path).toBe(true);
+    for (const path of [
+      `${BASE}/check-in/extra`,
+      `${BASE}x`,
+      "/sync/automation-host",
+      "/sync/shares/automation-host",
+      `/sync/${WORKSPACE}/live-host`,
+      `/sync/${WORKSPACE}/%E0%A4%A/check-in`,
+    ]) {
       expect(isAutomationHostPath(path), path).toBe(false);
+    }
+
+    // The router reaches the check-in for each spelling that names it.
+    const { h } = await relay();
+    for (const path of spellings.slice(1)) {
+      const response = await h(request("owner", path, jsonBody({ installId: "desktop", label: "Desktop", claim: false })));
+      expect(response.status, path).toBe(200);
     }
   });
 
