@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -13,7 +13,6 @@ import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
 
-vi.setConfig({ testTimeout: 20_000 });
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "data/schema.sql", operationsPath: "data/operations.js",

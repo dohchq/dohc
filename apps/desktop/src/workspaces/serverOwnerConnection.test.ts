@@ -79,6 +79,31 @@ it.each(["credentials", "workspace", "signal"] as const)("does not publish a lat
   expect(f.changed).not.toHaveBeenCalled();
 });
 
+it("pins the registry spelling of the root and shares refusal state across connects of that row", async () => {
+  const f = fixture(); let now = 1;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    f.setWorkspaces([{...f.workspace, rootPath: "C:/Users/Ice/Workspace"}]);
+    const native = (await f.connection.connect({...f.workspace, rootPath: "C:\\Users\\Ice\\Workspace"}, new AbortController().signal))!;
+    const linked = (await f.connection.connect({...f.workspace, rootPath: "D:\\target"}, new AbortController().signal))!;
+    expect(() => native.assertCurrent()).not.toThrow();
+    expect(() => linked.assertCurrent()).not.toThrow();
+    f.fetch.mockResolvedValueOnce(refusalPage([refusal], "page-two"));
+    await native.refusals(new AbortController().signal);
+    expect(f.connection.hasRefusals("workspace")).toBe(true);
+    now += 10_000; f.fetch.mockResolvedValueOnce(refusalPage([]));
+    await linked.refusals(new AbortController().signal);
+    expect(f.fetch.mock.lastCall).toEqual(["https://relay.test/sync/workspace/live-host?refusals=1&after=page-two", expect.objectContaining({headers: {authorization: "Bearer secret"}})]);
+    f.setWorkspaces([{...f.workspace, rootPath: "c:/users/ice/workspace"}]);
+    expect(() => native.assertCurrent()).toThrow("changed");
+    f.setWorkspaces([{...f.workspace, rootPath: "C:/Users/Ice/Workspace2"}]);
+    expect(() => linked.assertCurrent()).toThrow("changed");
+    expect(f.connection.hasRefusals("workspace")).toBeUndefined();
+    f.setWorkspaces([]);
+    expect(await f.connection.connect({...f.workspace, rootPath: "C:\\Users\\Ice\\Workspace"}, new AbortController().signal)).toBeNull();
+  } finally {clock.mockRestore();}
+});
+
 it("drops credential-scoped refusal state and starts the new session at its first page", async () => {
   const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
   f.fetch.mockResolvedValueOnce(refusalPage([refusal], "old-page"));

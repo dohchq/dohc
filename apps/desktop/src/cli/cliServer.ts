@@ -5,7 +5,7 @@ import {
   parseCliResult,
   type CliActor,
   type CliAuthor,
-  type CliChannel,
+  type CliGroup,
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
@@ -94,7 +94,9 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_FTS_CANDIDATES = 50_000;
 const LIST_MOMENTS_HARD_LIMIT = 500;
 const MAX_SOCKET_CONNECTIONS = 64;
-const REQUEST_DEADLINE_MS = 15_000;
+// A CLI request that has not answered by now loses its socket; work done for
+// it, such as waiting for a created record, ends at the same bound.
+export const CLI_REQUEST_DEADLINE_MS = 15_000;
 const REGEX_SCAN_TIMEOUT_MS = 5_000;
 const RUN_MESSAGE_LINK_ATTEMPTS = 3;
 const RUN_MESSAGE_LINK_RETRY_MS = 25;
@@ -158,7 +160,8 @@ export interface CliRegistryWorkspace {
 // behavior-bearing actor kind; the request never supplies one. Field values
 // are plain JSON: they land in the record's frontmatter Y.Doc map. Both
 // functions throw on refusal (invalid path, engine off, "id" field, a held
-// doc session, adoption timeout).
+// doc session, a taken record name, adoption not done by the request
+// deadline).
 export interface CliCollectionWriteSeam {
   setFields(input: {
     recordPath: string;
@@ -280,7 +283,7 @@ export interface CliServerHandle {
 
 interface LoadedThread {
   thread: ChatThread;
-  channel: CliChannel;
+  group: CliGroup;
   summary?: ChannelThreadSummary;
 }
 
@@ -354,12 +357,25 @@ export function cliMessageId(id: string): string {
   return formatMessageHandle(id);
 }
 
-function channelForCli(channel: ChatChannelSummary): CliChannel {
+// The engine's `channel` kind is a Group everywhere a reader sees it.
+export function cliGroupKind(kind: ChatChannelSummary["kind"]): CliGroup["kind"] {
+  return kind === "channel" ? "group" : kind;
+}
+
+// A thread linked to a file belongs to no engine channel; it lists here.
+export const FILES_GROUP: CliGroup = {
+  id: "files",
+  name: "files",
+  slug: "files",
+  kind: "group",
+};
+
+function groupForCli(channel: ChatChannelSummary): CliGroup {
   return {
     id: cliChannelId(channel.id),
     name: channel.kind === "agent" ? "my-agent" : channel.name,
     slug: channel.slug,
-    kind: channel.kind,
+    kind: cliGroupKind(channel.kind),
     ...(channel.purpose ? { purpose: channel.purpose } : {}),
   };
 }
@@ -371,13 +387,6 @@ async function listCliChannelThreads(context: CliWorkspaceContext, channel: Chat
   })));
   return pages.flat();
 }
-
-const FILES_CHANNEL: CliChannel = {
-  id: "files",
-  name: "files",
-  slug: "files",
-  kind: "channel",
-};
 
 function authorForCli(message: ChatMessage): CliAuthor {
   return {
@@ -544,7 +553,7 @@ function documentsUnavailable() {
 async function loadChannels(
   context: CliWorkspaceContext,
 ): Promise<{
-  channels: Array<{ engine: ChatChannelSummary; cli: CliChannel }>;
+  channels: Array<{ engine: ChatChannelSummary; cli: CliGroup }>;
   provisioned: boolean;
 }> {
   const before = await context.store.listChannels({
@@ -557,7 +566,7 @@ async function loadChannels(
     workspaceId: context.workspaceId,
   });
   return {
-    channels: channels.map((engine) => ({ engine, cli: channelForCli(engine) })),
+    channels: channels.map((engine) => ({ engine, cli: groupForCli(engine) })),
     provisioned: channels.length !== before.length,
   };
 }
@@ -592,19 +601,19 @@ function resolveIdPrefix<T>(
 
 function resolveChannel(
   input: string,
-  channels: readonly { engine: ChatChannelSummary; cli: CliChannel }[],
-): { engine: ChatChannelSummary; cli: CliChannel } {
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
+): { engine: ChatChannelSummary; cli: CliGroup } {
   const normalized = withoutChannelMarker(input);
   const slugMatches = channels.filter(
     ({ engine, cli }) => cli.slug === normalized || cli.name === normalized || engine.name === normalized,
   );
   if (slugMatches.length === 1) return slugMatches[0]!;
   if (slugMatches.length > 1) {
-    ambiguous("channel", input, slugMatches.map(({ cli }) => cli.id));
+    ambiguous("group", input, slugMatches.map(({ cli }) => cli.id));
   }
   return resolveIdPrefix(
     normalized,
-    "channel",
+    "group",
     channels,
     ({ cli }) => cli.id,
     ({ engine }) => [engine.id],
@@ -613,7 +622,7 @@ function resolveChannel(
 
 async function loadThreads(
   context: CliWorkspaceContext,
-  channels: readonly { engine: ChatChannelSummary; cli: CliChannel }[],
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
 ): Promise<LoadedThread[]> {
   const summaries = await Promise.all(
     channels.map(async ({ engine, cli }) => ({
@@ -622,11 +631,11 @@ async function loadThreads(
     })),
   );
   const byId = new Map<string, LoadedThread>();
-  for (const group of summaries) {
-    for (const summary of group.summaries) {
+  for (const entry of summaries) {
+    for (const summary of entry.summaries) {
       byId.set(summary.thread.id, {
         thread: summary.thread,
-        channel: group.cli,
+        group: entry.cli,
         summary,
       });
     }
@@ -634,7 +643,7 @@ async function loadThreads(
   const all = await context.store.listThreads({ workspaceId: context.workspaceId });
   for (const thread of all) {
     if (!byId.has(thread.id)) {
-      byId.set(thread.id, { thread, channel: FILES_CHANNEL });
+      byId.set(thread.id, { thread, group: FILES_GROUP });
     }
   }
   return [...byId.values()];
@@ -807,7 +816,7 @@ async function buildShowResult(
     thread: {
       id: cliThreadId(loaded.thread.id),
       title: loaded.thread.title,
-      channel: loaded.channel,
+      group: loaded.group,
       ...counts,
     },
     messages,
@@ -1124,7 +1133,7 @@ async function notifyRead(
 // `moment` read workspace-version history, not chat, so they sit outside it.
 function isChatReadVerb(verb: CliRequest["verb"]): boolean {
   return (
-    verb === "channels" ||
+    verb === "groups" ||
     verb === "threads" ||
     verb === "inbox" ||
     verb === "show" ||
@@ -1132,7 +1141,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
     verb === "export" ||
     verb === "fileChats" ||
     verb === "chat" ||
-    verb === "channelsFull"
+    verb === "groupsFull"
   );
 }
 
@@ -1150,7 +1159,7 @@ function chatReadTarget(
     case "show":
       return { threadId: request.args.target };
     case "threads":
-      return { channelId: request.args.channel };
+      return { channelId: request.args.group };
     default:
       return undefined;
   }
@@ -1847,7 +1856,7 @@ async function dispatch(
     }
 
     case "fileChats": {
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) {
         return {
           ok: false as const,
@@ -1918,7 +1927,7 @@ async function dispatch(
       }
     }
 
-    case "channelsFull": {
+    case "groupsFull": {
       try {
         const before = await context.store.listChannels({
           workspaceId: context.workspaceId,
@@ -1941,7 +1950,7 @@ async function dispatch(
             id: channel.id,
             name: channel.name,
             slug: channel.slug,
-            kind: channel.kind,
+            kind: cliGroupKind(channel.kind),
             threadCount: threads.length,
             ...(channel.purpose ? { purpose: channel.purpose } : {}),
             threads: threads.map((entry) => ({
@@ -1953,16 +1962,16 @@ async function dispatch(
             })),
           });
         }
-        return { ok: true as const, channels: withThreads };
+        return { ok: true as const, groups: withThreads };
       } catch (error) {
-        return mcpFailure(error, "failed to list channels");
+        return mcpFailure(error, "failed to list groups");
       }
     }
 
     case "collectionQuery": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -2016,7 +2025,7 @@ async function dispatch(
     case "collectionRecord": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
-      const validated = validateUserReadPath(request.args.collectionPath);
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.collectionPath);
       }
@@ -2088,6 +2097,7 @@ async function dispatch(
       if (!collections) return collectionsUnavailable();
       const collectionValidated = validateUserReadPath(
         request.args.collectionPath,
+        { platform: process.platform },
       );
       if (!collectionValidated.ok) {
         return cliPathRejected(
@@ -2099,6 +2109,7 @@ async function dispatch(
       // pass the stricter materialization rules before the seam sees it.
       const recordValidated = validateUserMaterializePath(
         `${collectionValidated.normalized}/${request.args.name}.md`,
+        { platform: process.platform },
       );
       if (!recordValidated.ok) {
         return cliPathRejected(
@@ -2129,7 +2140,7 @@ async function dispatch(
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       try {
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
@@ -2244,11 +2255,11 @@ async function dispatch(
   const nowMs = options.nowMs ?? Date.now;
 
   switch (request.verb) {
-    case "channels":
-      return { channels: channels.map(({ cli }) => cli) };
+    case "groups":
+      return { groups: channels.map(({ cli }) => cli) };
 
     case "threads": {
-      const channel = resolveChannel(request.args.channel, channels);
+      const channel = resolveChannel(request.args.group, channels);
       const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
@@ -2258,7 +2269,7 @@ async function dispatch(
           )
         : null;
       return {
-        channel: channel.cli,
+        group: channel.cli,
         threads: summaries.map((summary) => ({
           id: cliThreadId(summary.thread.id),
           ...(channel.engine.type === "both" ? { lane: summary.thread.lane } : {}),
@@ -2291,7 +2302,7 @@ async function dispatch(
               openDecisionCount: summary.openDecisionCount,
               unread: true as const,
               updatedAtMs: summary.thread.updatedAtMs,
-              channel: channel.cli,
+              group: channel.cli,
             })),
         );
         const unreadFileIds = await humanUnreadFileThreadIds(context);
@@ -2308,7 +2319,7 @@ async function dispatch(
           ),
           unread: true,
           updatedAtMs: thread.thread.updatedAtMs,
-          channel: thread.channel,
+          group: thread.group,
         })));
         const threads = [...channelThreads, ...unreadFileThreads];
         threads.sort((left, right) =>
@@ -2344,7 +2355,7 @@ async function dispatch(
               ...counts,
               unread: true,
               updatedAtMs: thread.thread.updatedAtMs,
-              channel: thread.channel,
+              group: thread.group,
             };
           }),
       );
@@ -2373,7 +2384,7 @@ async function dispatch(
         mentions.push({
           threadId: cliThreadId(thread.thread.id),
           messageId: cliMessageId(message.id),
-          channel: thread.channel,
+          group: thread.group,
           author: authorForCli(message),
           createdAtMs: message.createdAtMs,
           text: normalizeMatchedText(message.body),
@@ -2414,7 +2425,7 @@ async function dispatch(
     }
 
     case "post": {
-      const channel = resolveChannel(request.args.channel, channels);
+      const channel = resolveChannel(request.args.group, channels);
       if (channel.engine.kind === "dm") {
         throw new CliCommandError(
           "DMs are streams — use 'dohc chat reply <thread>'",
@@ -2438,7 +2449,7 @@ async function dispatch(
       }, options);
       await notifyWrite(options, context);
       return {
-        channel: channel.cli,
+        group: channel.cli,
         threadId: cliThreadId(started.thread.id),
         messageId: cliMessageId(started.message.id),
         title: started.thread.title,
@@ -2568,14 +2579,14 @@ async function dispatch(
 
     case "grep": {
       const threads = await loadThreads(context, channels);
-      const scopedChannel = request.args.channel
-        ? resolveChannel(request.args.channel, channels).cli
+      const scopedChannel = request.args.group
+        ? resolveChannel(request.args.group, channels).cli
         : null;
       const scopedThread = request.args.thread
         ? resolveThread(request.args.thread, threads)
         : null;
       const selected = threads.filter((thread) =>
-        (!scopedChannel || thread.channel.id === scopedChannel.id) &&
+        (!scopedChannel || thread.group.id === scopedChannel.id) &&
         (!scopedThread || thread.thread.id === scopedThread.thread.id),
       );
       // Substring grep asks FTS for candidate thread/message ids before any
@@ -2632,7 +2643,7 @@ async function dispatch(
           const start = Math.max(0, index - request.args.context);
           const end = Math.min(messages.length, index + request.args.context + 1);
           matches.push({
-            channel: thread.channel,
+            group: thread.group,
             threadId: cliThreadId(thread.thread.id),
             messageId: cliMessageId(message.id),
             author: authorForCli(message),
@@ -2660,9 +2671,9 @@ async function dispatch(
       let selected: LoadedThread[];
       if (request.args.scope.kind === "thread") {
         selected = [resolveThread(request.args.scope.thread, threads)];
-      } else if (request.args.scope.kind === "channel") {
-        const channel = resolveChannel(request.args.scope.channel, channels);
-        selected = threads.filter((thread) => thread.channel.id === channel.cli.id);
+      } else if (request.args.scope.kind === "group") {
+        const channel = resolveChannel(request.args.scope.group, channels);
+        selected = threads.filter((thread) => thread.group.id === channel.cli.id);
       } else {
         selected = threads;
       }
@@ -2679,7 +2690,7 @@ async function dispatch(
           threadId: thread.thread.id,
         });
         const result = await buildShowResult(context, thread, messages);
-        const channelDir = join(outputRoot, safePathSegment(thread.channel.slug));
+        const channelDir = join(outputRoot, safePathSegment(thread.group.slug));
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
         const path = join(channelDir, `${safePathSegment(publicThreadId)}.md`);
@@ -2804,7 +2815,7 @@ function attachSocketHandler(
   socket.setEncoding("utf8");
   let buffer = "";
   let handled = false;
-  const deadline = setTimeout(() => socket.destroy(), REQUEST_DEADLINE_MS);
+  const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
   const failOversized = () => {
     handled = true;

@@ -571,6 +571,9 @@ export interface SyncRelayStorage {
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  postNotice(input: import("./notices").PostNoticeInput): void;
+  readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
+  markNotices(input: import("./notices").MarkNoticesInput): void;
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
   acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;

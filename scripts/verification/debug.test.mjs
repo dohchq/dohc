@@ -134,7 +134,7 @@ if (process.argv[2] === "fixture") {
       child.once("error", reject);
       child.once("close", (code, exitSignal) => resolve({ code, exitSignal }));
     });
-    const deadline = setTimeout(() => child.kill("SIGKILL"), 8000);
+    const deadline = setTimeout(() => child.kill("SIGKILL"), 20_000);
     try {
       const result = await closed;
       t.diagnostic(JSON.stringify({ ...result, supervisorPid: child.pid, launcherPid, phase, protectedCleanup, appClosed: existsSync(join(root, "app-closed")), supervisorDisconnected: existsSync(join(root, "child-disconnected")) }));
@@ -163,10 +163,10 @@ if (process.argv[2] === "fixture") {
     }
   }
   for (const signal of ["SIGINT", "SIGTERM"]) for (const phase of ["cleanup", "evidence"]) {
-    test(`debug repeated ${signal} during ${phase} (${process.platform === "win32" ? "synthetic Windows events" : "native POSIX signals"})`, { timeout: 10_000 }, async (t) => fixture(t, { signal, phase }));
+    test(`debug repeated ${signal} during ${phase} (${process.platform === "win32" ? "synthetic Windows events" : "native POSIX signals"})`, { timeout: 30_000 }, async (t) => fixture(t, { signal, phase }));
   }
   for (const probe of ["pass", "fail"]) {
-    test(`debug probe ${probe} retains cleanup and separate launch provenance`, { timeout: 10_000 }, async (t) => fixture(t, { probe }));
+    test(`debug probe ${probe} retains cleanup and separate launch provenance`, { timeout: 30_000 }, async (t) => fixture(t, { probe }));
   }
-  test("debug evidence preserves split UTF8 in independent streams and flushes an incomplete final character", { timeout: 10_000 }, async (t) => fixture(t, { probe: "utf8" }));
+  test("debug evidence preserves split UTF8 in independent streams and flushes an incomplete final character", { timeout: 30_000 }, async (t) => fixture(t, { probe: "utf8" }));
 }

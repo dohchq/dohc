@@ -35,11 +35,6 @@ const OVER_CAP_SHA256 = createHash("sha256")
   .update(OVER_CAP_BYTES)
   .digest("hex");
 
-// These real over-cap UTF-8 hydrations take less than one second alone but
-// exceeded 5 seconds under the eight-worker desktop suite on 2026-08-13.
-// Keep the contention budget local to tests that process the large bodies.
-const BLOB_HYDRATION_TEST_TIMEOUT_MS = 15_000;
-
 function createCaptureLiveStores(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
@@ -962,7 +957,6 @@ describe("createCaptureLiveStores", () => {
           .map((request) => (request.params as { sha256: string }).sha256),
       ).toEqual(blobDigests);
     },
-    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("mutation proof: preserves a rename moment's source path", async () => {
@@ -1444,7 +1438,6 @@ describe("createCaptureLiveStores", () => {
         ),
       ).toHaveLength(surface.blobReads);
     },
-    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
@@ -1499,6 +1492,35 @@ describe("createCaptureLiveStores", () => {
             })
           : store.listMoments({ workspaceId: WORKSPACE_ID });
       await expect(read).rejects.toMatchObject({ code: "state-corrupt" });
+    },
+  );
+
+  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
+    "keeps a named recipient's authorship returned by %s",
+    async (method) => {
+      const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const;
+      const namedMoment = { ...moment, author };
+      const client = clientFor(async (request) => ({
+        id: request.id,
+        result:
+          method === VERSIONED_METHOD.momentsGet
+            ? namedMoment
+            : {
+                moments: [namedMoment],
+                nextBeforeMomentOrder: null,
+                latestMomentOrder: 1,
+              },
+      }));
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+        sessionsFor(client),
+      );
+
+      const read =
+        method === VERSIONED_METHOD.momentsGet
+          ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
+          : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
+      expect(read?.author).toEqual(author);
     },
   );
 

@@ -23,10 +23,13 @@ export function classifyEngineFilePath(path: string): EngineFilePathClassificati
   return { kind: "tracked" };
 }
 
+// The platform is the host whose disk the read reaches. The renderer has no
+// `process`, so each caller names its own.
 export function classifyEngineFilePathForRead(
   path: string,
+  platform: NodeJS.Platform,
 ): EngineFilePathClassification {
-  const read = validateUserReadPath(path);
+  const read = validateUserReadPath(path, { platform });
   if (!read.ok || hasIgnoredSegment(path)) return { kind: "ignored" };
   const candidate = read.normalized;
   if (isSharedWithMePath(candidate)) {

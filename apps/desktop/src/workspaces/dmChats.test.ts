@@ -1054,7 +1054,7 @@ describe("requireShareableChatChannel", () => {
 
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "dm-1", store }),
-    ).rejects.toThrow(/Direct messages can't be shared as channels/u);
+    ).rejects.toThrow(/can't be shared as a group/u);
 
     await seed({
       method: CHATS_METHOD.channelCreate,
@@ -1070,7 +1070,7 @@ describe("requireShareableChatChannel", () => {
     });
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "agent-1", store }),
-    ).rejects.toThrow(/Only ordinary channels can be shared/u);
+    ).rejects.toThrow(/Only groups can be shared/u);
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "missing-channel", store }),
     ).rejects.toThrow(/no longer exists/u);

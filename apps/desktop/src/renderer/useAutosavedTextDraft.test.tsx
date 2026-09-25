@@ -60,8 +60,9 @@ describe("useAutosavedTextDraft", () => {
       .mockImplementationOnce(() => heldWrite.promise)
       .mockResolvedValue({ status: "written", contentHash: "new-saved-hash" });
     vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
       writeWorkspaceText,
-    } satisfies Pick<DohcDesktopBridge, "writeWorkspaceText">);
+    } satisfies Pick<DohcDesktopBridge, "platform" | "writeWorkspaceText">);
     const oldDocument = documentProps("old-workspace", "old.txt", "old disk");
     const newDocument = documentProps("new-workspace", "new.txt", "new disk");
     const recovery = renderHook(() => ({
@@ -139,8 +140,9 @@ describe("useAutosavedTextDraft", () => {
       .fn<DohcDesktopBridge["writeWorkspaceText"]>()
       .mockImplementation(() => heldWrite.promise);
     vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
       writeWorkspaceText,
-    } satisfies Pick<DohcDesktopBridge, "writeWorkspaceText">);
+    } satisfies Pick<DohcDesktopBridge, "platform" | "writeWorkspaceText">);
     const document = documentProps("workspace", "notes.txt", "disk text");
     const recovery = renderHook(() => useOrphanedDrafts("workspace", "notes.txt"));
     const editor = renderHook(useAutosavedTextDraft, { initialProps: document });

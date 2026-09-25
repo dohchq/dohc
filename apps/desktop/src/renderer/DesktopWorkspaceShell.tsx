@@ -71,6 +71,7 @@ import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
+import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useShellError } from "./shell/useShellError";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -611,8 +612,15 @@ export function DesktopWorkspaceShell(props: {
     kind: "file" | "folder";
     id: number;
   } | null>(null);
-  const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
+  const [wb, setWbState] = useState<WorkbenchState>(defaultWorkbenchState);
+  // wbRef holds the newest workbench, set with each write rather than after
+  // commit. Handlers read it to choose what to act on, and a keydown can
+  // arrive between a commit and React's passive effects.
   const wbRef = useRef(wb);
+  const writeWb = useCallback((next: WorkbenchState) => {
+    wbRef.current = next;
+    setWbState(next);
+  }, []);
 
   const openSettings = useCallback(
     (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
@@ -783,10 +791,19 @@ export function DesktopWorkspaceShell(props: {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSettingsFileNotice,
     showSuccessNotice,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   } = useShellError(workspaceId);
+  const onWorkspaceSettingsRead = useSettingsFileNotices({
+    workspaceId,
+    workspaceIsReady,
+    userSettings: props.userSettings,
+    show: showSettingsFileNotice,
+    reportError: showShellError,
+  });
 
   // A connection failure from any panel that embeds CloudLogin. The notice
   // outlives the panel, so its Try again reopens the connection dialog with
@@ -1038,17 +1055,15 @@ export function DesktopWorkspaceShell(props: {
 
   // The one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
-  // the update. Loading stored state is the only setWb that bypasses this.
+  // the update. Loading stored state and restored-tab pruning are the only
+  // other writers.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
       // to every workbench write. Most writes here are not one: a panel resize
       // commits its final size, and the share-mount poll reaches this seam with
       // no user involved at all — cancelling on those would silently discard a
-      // DM the user had just clicked. The transition is
-      // computed from wbRef outside the functional updater, the idiom openFile
-      // and closeFileTab already use for their marks (updaters are
-      // side-effect-free by contract, so probing one is safe).
+      // DM the user had just clicked.
       const current = wbRef.current;
       const next = updater(current);
       if (next === current) return;
@@ -1059,9 +1074,9 @@ export function DesktopWorkspaceShell(props: {
         invalidateDmNavigation(dmNavigationRequest);
       }
       userTouchedWb.current = true;
-      setWb(updater);
+      writeWb(next);
     },
-    [],
+    [writeWb],
   );
 
   // A details tab that followed a rename only tracks that rename in
@@ -1173,11 +1188,10 @@ export function DesktopWorkspaceShell(props: {
               path: restoredGroup.activeTab,
             };
           }
-          // Order matters: wbRef first, THEN setWb, THEN enable flushes — a
+          // Order matters: writeWb (which sets wbRef), THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
           // must flush the restored state, never the stale default.
-          wbRef.current = parsed;
-          setWb(parsed);
+          writeWb(parsed);
           setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
         }
         restoredActiveFileSurface.current = restoredFileSurface;
@@ -1236,7 +1250,6 @@ export function DesktopWorkspaceShell(props: {
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
-    wbRef.current = wb;
     if (!uiStateLoaded.current) return;
     const timer = setTimeout(() => {
       void bridge()
@@ -1309,7 +1322,7 @@ export function DesktopWorkspaceShell(props: {
     for (const groupId of groupsOpeningFiles) {
       rendererMarks.mark(fileOpenStartMark(groupId));
     }
-    setWb(prune);
+    writeWb(next);
   }, [
     prepareRestoredTabPruning,
     listingsSettled,
@@ -2102,9 +2115,8 @@ export function DesktopWorkspaceShell(props: {
   // actually changes something (activeTab moves or a tab is added): a no-op
   // click on the already-active row/tab/overflow item triggers no remount, so
   // marking would leave a stale file-open-start that corrupts the next
-  // measure. The transition is computed from wbRef (synced post-commit) and
-  // the mark fires once, outside the functional updater — updaters must stay
-  // side-effect-free (StrictMode/concurrent replays would re-fire them).
+  // measure. The transition is computed from wbRef, and the mark fires once,
+  // outside the updater.
   const openFile = useCallback(
     (
       path: string,
@@ -2153,20 +2165,7 @@ export function DesktopWorkspaceShell(props: {
         }
         clearTabLimitError();
         // Every open also records recency (quick-open ranking, Phase E5.0).
-        mutateWb((state) => {
-          const opened = state === current ? next : openTab(state, path, targetGroupId);
-          const rebasedTargetAlreadyOwnsPath = state.editorGroups
-            .find((group) => group.id === targetGroupId)
-            ?.tabs.some((tab) => tab.path === path);
-          if (
-            opened === state &&
-            !rebasedTargetAlreadyOwnsPath &&
-            allTabs(state).length >= MAX_OPEN_TABS
-          ) {
-            return state;
-          }
-          return recordRecentFile(opened, path);
-        });
+        mutateWb(() => recordRecentFile(next, path));
       };
 
       const targetGroup = wbRef.current.editorGroups.find(
@@ -2236,9 +2235,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       clearTabLimitError();
-      mutateWb((state) =>
-        state === current ? next : openTab(state, path, targetGroupId),
-      );
+      mutateWb(() => next);
     },
     [
       clearTabLimitError,
@@ -3050,8 +3047,8 @@ export function DesktopWorkspaceShell(props: {
       const requestSequencesAtIssue = new Map(
         fileOpenRequests.current.sequenceByGroup,
       );
-      // Mint outside mutateWb: that seam probes the updater before React calls
-      // it, so generating inside would produce two IDs for one command.
+      // Mint outside moveState: commitMove calls it to plan the move and again
+      // through mutateWb, so minting inside would produce two IDs for one command.
       const newGroupId = crypto.randomUUID();
       const commitMove = () => {
         const current = wbRef.current;
@@ -4267,8 +4264,8 @@ export function DesktopWorkspaceShell(props: {
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
   const saveUserSettingsFromChats = useCallback(
-    async (settings: DesktopUserSettings) => {
-      await bridge().setUserSettings({ settings });
+    async (settings: DesktopUserSettings, base: DesktopUserSettings) => {
+      await bridge().setUserSettings({ settings, base });
     },
     [],
   );
@@ -4382,6 +4379,7 @@ export function DesktopWorkspaceShell(props: {
         details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
+        ...(error.action ? { actionLabel: error.action.label } : {}),
         seen: error.seen,
       })),
     [shellErrors, reportFacts],
@@ -4744,6 +4742,7 @@ export function DesktopWorkspaceShell(props: {
               onRestartToUpdate={openRestartPrompt}
               workspaceErrors={workspaceErrors}
               onRetryWorkspaceError={retryShellError}
+              onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
               onDismissWorkspaceError={dismissShellError}
               onRetryLiveDelivery={retryLiveDelivery}
@@ -5937,6 +5936,7 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
             onError={showShellError}
+            onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

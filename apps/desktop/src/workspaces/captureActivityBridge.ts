@@ -107,3 +107,23 @@ export function bridgeCaptureEventsToRenderer(
     pendingGlobal = false;
   };
 }
+
+/**
+ * Calls `listener` for each capture announcement that can concern one
+ * workspace: that workspace's announcements with their paths, or null when an
+ * announcement did not list every path or could not name its workspace.
+ * Returns the unsubscribe. A caller waiting for one path it wrote wakes here
+ * instead of polling.
+ */
+export function onWorkspaceCaptureSettled(
+  daemon: { onEvent(handler: (event: Event) => void): () => void },
+  workspaceId: string,
+  listener: (paths: readonly string[] | null) => void,
+): () => void {
+  return daemon.onEvent((event) => {
+    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT) return;
+    const scope = scopeOf(event.payload);
+    if (!scope) listener(null);
+    else if (scope.workspaceId === workspaceId) listener(scope.paths);
+  });
+}

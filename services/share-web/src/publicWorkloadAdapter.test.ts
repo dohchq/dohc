@@ -81,7 +81,8 @@ it("executes the documented Node and tsx command with the existing JSX configura
   const result = JSON.parse(readFileSync(join(output, "result.json"), "utf8"));
   expect(readPublicWorkload(result.wirePin, 2).rounds).toHaveLength(2);
   expect(readPublicTransitionWorkload(result.transitionPin, 2).cases.restore.continuation).toBeDefined();
-}), 30000);
+  // The run took 15 s beside 32 CPU burners, so the test bound sits above its 30 s child bound.
+}), 45_000);
 it("rejects absent selection, changed source pins and a baseline over explicit bounds", () => fixture(f => {
   f.selection.caseIds = []; expect(() => preparePublicWorkload(f.seal(), join(f.root, "missing"), renderPublicFixture)).toThrow("case IDs");
   f.selection.caseIds = ["tiny-registration"]; f.selection.admission.bounds.maxCheckpointBytes = 1;

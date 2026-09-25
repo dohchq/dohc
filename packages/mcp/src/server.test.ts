@@ -26,7 +26,7 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_create_document",
 ];
 
-const CHAT_WRITE_TOOLS = ["dohc_start_channel_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
+const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
 
 const READ_TOOLS = [
   "dohc_list_files",
@@ -105,7 +105,7 @@ describe("share-level tool profiles", () => {
   });
 
   // #646 PR2 registers NO write tool at any level, chat included. The two
-  // chat tools are CHANNEL tools, and a shared view refuses every channel
+  // chat tools are GROUP tools, and a shared view refuses every group
   // write before the level is read; `comment` grants per-FILE chat, which no
   // MCP tool writes yet. A tool the workspace always refuses is worse than an
   // absent one — the agent spends a turn discovering the refusal.
@@ -201,13 +201,13 @@ describe("MCP tool results", () => {
   it("reports authorization refusals as tool errors", async () => {
     const { client } = await connectedToolNames({
       root: "/workspace", home: "/home",
-      request: async () => { throw new DohcCliError("This channel is read-only."); },
+      request: async () => { throw new DohcCliError("This group is read-only."); },
     });
     const result = await client.callTool({
-      name: "dohc_start_channel_chat", arguments: { channel: "general", body: "Hello" },
+      name: "dohc_start_group_chat", arguments: { group: "general", body: "Hello" },
     });
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, reason: "This channel is read-only." });
+    expect(result.structuredContent).toEqual({ ok: false, reason: "This group is read-only." });
   });
 
   it("reads a document through the desktop", async () => {
@@ -289,12 +289,12 @@ describe("MCP tool results", () => {
       root: "/workspace", home: "/home",
       request: async (request) => {
         expect(request.args).toMatchObject({ needsDecision: true, options: ["Yes", "No"] });
-        return { channel: { id: "ch_1", name: "general", slug: "general", kind: "channel" },
+        return { group: { id: "ch_1", name: "general", slug: "general", kind: "group" },
           threadId: "th_1", messageId: "msg_1", title: "" };
       },
     });
     const result = await client.callTool({
-      name: "dohc_start_channel_chat", arguments: { channel: "general", body: "Ready?", options: ["Yes", "No"] },
+      name: "dohc_start_group_chat", arguments: { group: "general", body: "Ready?", options: ["Yes", "No"] },
     });
     expect(result.isError).not.toBe(true);
   });

@@ -256,6 +256,9 @@ export function PageIdentity(props: PageIdentityProps) {
             writeField("title", next.length === 0 ? undefined : next);
           }}
           onKeyDown={(event) => {
+            // During IME composition, Enter and ArrowDown pick a candidate.
+            // Some browsers mark that key only with keyCode 229.
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
             if (event.key === "Enter" || event.key === "ArrowDown") {
               event.preventDefault();
               props.onEnterBody?.();
