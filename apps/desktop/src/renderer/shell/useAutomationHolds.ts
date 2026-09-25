@@ -3,35 +3,36 @@ import type { ListAutomationHoldsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 export type AutomationHoldNotice = ListAutomationHoldsResult["holds"][number];
+export type AutomationStopNotice = ListAutomationHoldsResult["stops"][number];
+
+const NO_HOLDS: ListAutomationHoldsResult = { holds: [], stops: [], unreadable: false };
 
 /**
- * Automation steps that wait for someone who can edit the Collection to
- * allow them, as main lists them. Read once the workspace is ready and again
- * on every hold poke. Leaving the workspace retires its token, so an answer
- * for one workspace never repaints another, and only the newest read in a
- * workspace sets the list.
+ * Automation steps whose reach changed, as main lists them: steps that wait
+ * for someone who can edit the Collection to allow them, and steps a
+ * narrower share stopped. Read once the workspace is ready and again on
+ * every poke. Leaving the workspace retires its token, so an answer for one
+ * workspace never repaints another, and only the newest read in a workspace
+ * sets the lists.
  */
 export function useAutomationHolds(
   workspaceId: string,
   workspaceIsReady: boolean,
   reportShellError: (fallback: string, error: unknown) => void,
 ) {
-  const [automationHolds, setAutomationHolds] = useState<AutomationHoldNotice[]>([]);
-  const [automationHoldsUnreadable, setAutomationHoldsUnreadable] = useState(false);
+  const [lists, setLists] = useState<ListAutomationHoldsResult>(NO_HOLDS);
   const token = useRef(0);
   const reads = useRef(0);
   const reload = useCallback(async (asked: number) => {
     const read = ++reads.current;
     const result = await bridge().listAutomationHolds({ workspaceId });
     if (asked !== token.current || read !== reads.current) return;
-    setAutomationHolds(result.holds);
-    setAutomationHoldsUnreadable(result.unreadable);
+    setLists(result);
   }, [workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady) return;
     const asked = ++token.current;
-    setAutomationHolds([]);
-    setAutomationHoldsUnreadable(false);
+    setLists(NO_HOLDS);
     void reload(asked).catch(() => undefined);
     const unsubscribe = bridge().onAutomationHoldsChanged((event) => {
       if (event.workspaceId !== workspaceId || asked !== token.current) return;
@@ -42,25 +43,20 @@ export function useAutomationHolds(
       unsubscribe();
     };
   }, [workspaceId, workspaceIsReady, reload]);
-  const allowAutomationHold = useCallback(
-    (hold: AutomationHoldNotice) => {
+  // Runs a change to the reach notices, then reads them again, unless the
+  // window moved to another workspace meanwhile.
+  const change = useCallback(
+    (work: () => Promise<unknown>, fallback: string) => {
       const asked = token.current;
-      void bridge()
-        .confirmCollectionAutomationStep({
-          workspaceId,
-          automationId: hold.automationId,
-          definitionHash: hold.definitionHash,
-          step: hold.step,
-          seq: hold.seq,
-        })
+      void work()
         .then(async () => {
           if (asked === token.current) await reload(asked);
         })
         .catch((error: unknown) => {
-          if (asked === token.current) reportShellError("Couldn't allow that automation step.", error);
+          if (asked === token.current) reportShellError(fallback, error);
         });
     },
-    [workspaceId, reload, reportShellError],
+    [reload, reportShellError],
   );
   const resetAutomationHolds = useCallback(() => {
     const asked = token.current;
@@ -83,5 +79,36 @@ export function useAutomationHolds(
       .revealAutomationHolds({ workspaceId })
       .catch((error: unknown) => reportShellError("Couldn't open the automations folder.", error));
   }, [workspaceId, reportShellError]);
-  return { automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds };
+  const allowAutomationHold = useCallback(
+    (hold: AutomationHoldNotice) => change(
+      () => bridge().confirmCollectionAutomationStep({
+        workspaceId,
+        automationId: hold.automationId,
+        definitionHash: hold.definitionHash,
+        step: hold.step,
+        seq: hold.seq,
+      }),
+      "Couldn't allow that automation step.",
+    ),
+    [workspaceId, change],
+  );
+  const dismissAutomationStops = useCallback(
+    (stops: readonly AutomationStopNotice[]) => change(
+      () => bridge().dismissAutomationStops({
+        workspaceId,
+        stops: stops.map(({ automationId, definitionHash, step, seq }) => ({ automationId, definitionHash, step, seq })),
+      }),
+      "Couldn't dismiss the stopped automations notice.",
+    ),
+    [workspaceId, change],
+  );
+  return {
+    automationHolds: lists.holds,
+    automationHoldsUnreadable: lists.unreadable,
+    allowAutomationHold,
+    resetAutomationHolds,
+    revealAutomationHolds,
+    automationStops: lists.stops,
+    dismissAutomationStops,
+  };
 }
