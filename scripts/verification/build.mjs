@@ -17,6 +17,7 @@ const configFiles = {
     ".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs",
     // electron-vite builds all three targets in production mode from the desktop package.
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `apps/desktop/${name}`),
+    ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `services/share-web/viewer/${name}`),
   ],
 };
 const inputPaths = {
@@ -110,7 +111,7 @@ export function directoryFingerprint(path) {
 function artifactFingerprint(kind) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
-    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist",
+    "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/plugin-tools", "apps/desktop/resources/app-backend-runtime", "packages/sdk/dist", "services/share-web/viewer/dist",
   ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
 }
 
@@ -198,6 +199,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
       repairOwnedEngineExecutable(enginePath);
     } else {
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
+      await run(...pnpm(["--filter", "@dohc/share-web", "build"]), { log: join(output, "share-web-build.log") });
     }
     if (sourceFingerprint(kind) !== source) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
     receipt[kind] = { source, artifact: artifactFingerprint(kind), commit: git(["rev-parse", "HEAD"]), builtAt: new Date().toISOString() };

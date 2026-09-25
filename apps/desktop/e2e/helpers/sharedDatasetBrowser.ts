@@ -1,6 +1,7 @@
 import https from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
@@ -10,6 +11,10 @@ export const sharedDatasetViewerOrigin = "https://viewer.example.com";
 
 /** Real HTTPS with a test-only certificate and browser-local DNS; no host settings change. */
 export async function startSharedDatasetBrowser(input: { relayUrl: string; exchangeKey: string }) {
+  const viewerAssetsDir = join(desktopRoot, "../../services/share-web/viewer/dist");
+  if (!existsSync(join(viewerAssetsDir, "index.html"))) {
+    throw new Error(`Missing share-web viewer build at ${viewerAssetsDir}. Run pnpm --filter @dohc/share-web build (or pnpm qa:prepare) before desktop e2e tests.`);
+  }
   const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
 $req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-dataset-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
@@ -25,7 +30,7 @@ $cert.Dispose();$rsa.Dispose()`;
   const failures: string[] = [];
   const application = createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
     relayExchangeKey: input.exchangeKey, publicHosts: new Set(["viewer.example.com"]),
-    viewerAssetsDir: join(desktopRoot, "../../services/share-web/viewer/dist"),
+    viewerAssetsDir,
     appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" } });
   const server = https.createServer({ pfx: Buffer.from(pfxText!, "base64"), passphrase: "" }, async (request, response) => {
     try {

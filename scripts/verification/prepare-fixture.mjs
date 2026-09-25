@@ -9,7 +9,7 @@ export function createPrepareFixture(root, buildSource) {
     writeFileSync(join(root, path), contents);
   };
   put("package.json", '{"type":"module"}\n');
-  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\npackages/sdk/dist/\n");
+  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\npackages/sdk/dist/\nservices/share-web/viewer/dist/\n");
   put("pnpm-lock.yaml", "new-lock");
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
@@ -41,6 +41,12 @@ export function createPrepareFixture(root, buildSource) {
         const executable=join(repoRoot,'target/debug/dohc-workspace-engine'+(process.platform==='win32'?'.exe':''));
         put(executable,'engine'); chmodSync(executable,0o755);
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-workspace-engine'},executable})};
+      }
+      if(command==='pnpm' && args[1]==='@dohc/share-web') {
+        assert.deepEqual(args,['--filter','@dohc/share-web','build']);
+        put(join(repoRoot,'services/share-web/viewer/dist/index.html'),'viewer');
+        put(join(repoRoot,'services/share-web/viewer/dist/assets/viewer.js'),'viewer script');
+        return {};
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
       for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/plugin-tools','apps/desktop/resources/app-backend-runtime','packages/sdk/dist'])
