@@ -233,6 +233,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       accountCreation(context, allocation) { charge(allocation.datasetId,allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       accountMetadata(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },
+      accountAutomations(allocation) { charge(allocation.datasetId,allocation.bytes); },
       accountMigration(context, allocation) { charge(allocation.datasetId,allocation.bytes); return resources?.accountMigration?.(context, allocation); },
       accountCheckpointStage(context, allocation) { charge(allocation.scope.datasetId,allocation.bytes); return resources?.accountCheckpointStage?.(context, allocation); },
       deleteResources(_context, key) {

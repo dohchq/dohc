@@ -4,6 +4,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import { describe, expect, it, vi } from "vitest";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc, type DocumentEdit } from "@dohc/ydoc-projection";
 
 import {
   YDocPathNotInVersionError,
@@ -13,10 +14,12 @@ import {
 } from "./workspaceEngineCapture";
 import {
   createEngineYDocSessionIpc,
+  DOCUMENT_EDIT_SHARED_WARNING,
+  LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
-import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
@@ -76,6 +79,7 @@ function providerSession(
       throw new Error("settleNow is not used by this IPC adapter fixture");
     }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
+    applyDecidedLocalUpdate: vi.fn(async () => false),
     readArtifactAsset: vi.fn(async (descriptor) => ({
       descriptor,
       bytes: new Uint8Array([1, 2, 3]),
@@ -1253,6 +1257,327 @@ describe("engine Y.Doc IPC adapter", () => {
         seq: 1,
       }),
     ).toEqual({ accepted: false, reason: "session-unavailable" });
+  });
+
+  describe("main-side document edits", () => {
+    const agentOrigin = {
+      actorOriginId: "claude-code",
+      attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 },
+    };
+    type SettleResult = Awaited<ReturnType<WorkspaceEngineYDocProviderSession["settleNow"]>>;
+
+    // A session over a real document: an applied update lands in its doc, the
+    // way the capture's canonical doc takes a journaled update.
+    function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
+      const doc = markdownToYDoc(markdown);
+      return providerSession({
+        doc,
+        applyLocalUpdate: vi.fn((update: Uint8Array, onArmed?: () => void) => {
+          trace.push("apply");
+          Y.applyUpdate(doc, update);
+          onArmed?.();
+        }),
+        settleNow: vi.fn(async () => {
+          trace.push("settle");
+          return { materialized: true } as SettleResult;
+        }),
+        close: vi.fn(async () => {
+          trace.push("close");
+        }),
+      });
+    }
+
+    const keepBlocksSeen: boolean[] = [];
+    const edit = (documentEdit: DocumentEdit) => ({
+      workspaceId: "workspace-1",
+      path: "notes/a.md",
+      origin: agentOrigin,
+      change: async (state: Uint8Array, { keepBlocks }: { keepBlocks: boolean }) => {
+        keepBlocksSeen.push(keepBlocks);
+        return documentEditUpdate(state, documentEdit, { keepBlocks });
+      },
+    });
+    const append = edit({ replacement: "After." });
+
+    it("applies the edit through the editor that holds the document and shows it there", async () => {
+      const sender = new FakeSender(7);
+      const session = editableSession();
+      const h = harness(session);
+      const opened = await h.ipc.open(sender, openPayload);
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, opened.initialUpdate!);
+      keepBlocksSeen.length = 0;
+
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+
+      expect(keepBlocksSeen).toEqual([true]);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      expect(session.applyLocalUpdate).toHaveBeenCalledWith(
+        expect.any(Uint8Array),
+        expect.any(Function),
+        agentOrigin,
+      );
+      expect(session.settleNow).toHaveBeenCalledOnce();
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      const shown = sender.sent.filter(({ channel }) => channel === CHANNELS.engineYDocRemoteUpdate);
+      expect(shown).toHaveLength(1);
+      const payload = shown[0]!.payload as { sessionId: string; update: Uint8Array; lineageGeneration: number };
+      expect(payload).toMatchObject({ sessionId: openPayload.sessionId, lineageGeneration: 1 });
+      Y.applyUpdate(editor, payload.update);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe("# Plan\n\nBefore.\n\nAfter.");
+      await h.ipc.shutdown();
+    });
+
+    // The person turns the paragraph into a heading while the agent's text
+    // goes into it. The merge keeps the heading, and the agent's text goes
+    // with the paragraph it was typed into, so the agent must not hear the
+    // edit landed.
+    it("tells the agent when a person's change to the block took the edit's text", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const heading = documentEditUpdate(
+        Y.encodeStateAsUpdate(session.doc),
+        { find: "Before.", replacement: "## Before." },
+        { keepBlocks: false },
+      )!;
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        Y.applyUpdate(session.doc, heading);
+        return { materialized: true } as SettleResult;
+      });
+
+      const lost = h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." }));
+      await expect(lost).rejects.toThrow("some or all of its text is not in notes/a.md");
+      // The edit reached the document, so a resent request must not apply it again.
+      await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.");
+
+      // Typing elsewhere at the same moment leaves the edit's text in place.
+      const typed = new Y.Doc();
+      Y.applyUpdate(typed, Y.encodeStateAsUpdate(session.doc));
+      const otherBlock = documentEditUpdate(
+        Y.encodeStateAsUpdate(typed),
+        { find: "# Plan", replacement: "# Plan for May" },
+        { keepBlocks: true },
+      )!;
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        Y.applyUpdate(session.doc, otherBlock);
+        return { materialized: true } as SettleResult;
+      });
+      await expect(h.ipc.editDocument(edit({ find: "## Before.", replacement: "## Before noon." })))
+        .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan for May\n\n## Before noon.");
+      await h.ipc.shutdown();
+    });
+
+    // The person backspaces over part of the agent's text as it lands. The
+    // edit landed and was then edited, so the agent hears it landed; being
+    // told to redo it would add the text a second time.
+    it("reports an edit the person then edited as landed", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      vi.mocked(session.settleNow).mockImplementationOnce(async () => {
+        const backspace = documentEditUpdate(
+          Y.encodeStateAsUpdate(session.doc),
+          { find: "Before and after.", replacement: "Before and afte." },
+          { keepBlocks: true },
+        )!;
+        Y.applyUpdate(session.doc, backspace);
+        return { materialized: true } as SettleResult;
+      });
+
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "Before and after." })))
+        .resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore and afte.");
+      await h.ipc.shutdown();
+    });
+
+    it("refuses an edit that would remove a block the person may be typing in", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." })))
+        .rejects.toThrow("this edit would remove a block");
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
+    it("applies nothing when the editor's session changes while the edit is computed", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const computing = deferred<void>();
+      const release = deferred<void>();
+      const editing = h.ipc.editDocument({
+        ...append,
+        change: async (state, options) => {
+          computing.resolve();
+          await release.promise;
+          return documentEditUpdate(state, { replacement: "After." }, options);
+        },
+      });
+      await computing.promise;
+      h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+      release.resolve();
+      await expect(editing).rejects.toThrow("changed hands while dohc prepared the edit, and nothing changed");
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
+    it("opens a session for the edit alone when no editor holds the document", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      const h = harness(session);
+      keepBlocksSeen.length = 0;
+
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." }))).resolves.toEqual({
+        path: "notes/a.md",
+        changed: true,
+      });
+
+      // Nobody can type in it, so a block may change kind.
+      expect(keepBlocksSeen).toEqual([false]);
+      expect(trace).toEqual(["apply", "settle", "close"]);
+      expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n# Before.");
+    });
+
+    it("keeps blocks in a synced document no editor here holds, since another device may be typing", async () => {
+      const session = Object.assign(editableSession(), { lineageClaimId: "claim-1" });
+      const h = harness(session);
+      keepBlocksSeen.length = 0;
+      await expect(h.ipc.editDocument(edit({ find: "Before.", replacement: "# Before." })))
+        .rejects.toThrow("this edit would remove a block");
+      expect(keepBlocksSeen).toEqual([true]);
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("runs two edits to one document in turn, so the second reads the first one's result", async () => {
+      const session = editableSession([], "Budget: 400 dollars");
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const first = h.ipc.editDocument(edit({ find: "400", replacement: "450" }));
+      const second = h.ipc.editDocument(edit({ find: "400", replacement: "500" }));
+      await expect(first).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+      await expect(second).rejects.toThrow("not in the document");
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("Budget: 450 dollars");
+      await h.ipc.shutdown();
+    });
+
+    it("reports a saved edit as done when only the session's release fails", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      vi.mocked(session.close).mockRejectedValueOnce(new Error("release refused"));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(trace).toEqual(["apply", "settle"]);
+      expect(h.onError).toHaveBeenCalledWith(
+        expect.stringContaining("close after an edit failed for notes/a.md"),
+        expect.objectContaining({ message: "release refused" }),
+      );
+    });
+
+    it("keeps an editor that opens during the edit waiting until the edit's session closes", async () => {
+      const trace: string[] = [];
+      const editSession = editableSession(trace);
+      const released = deferred<void>();
+      const resolveDocumentPath = vi.fn(async (_workspace: unknown, path: string) => path);
+      const h = harness(editSession, { resolveDocumentPath });
+      vi.mocked(editSession.settleNow).mockImplementationOnce(async () => {
+        trace.push("settle");
+        await released.promise;
+        return { materialized: true } as SettleResult;
+      });
+      vi.mocked(h.capture.openYDocSession)
+        .mockImplementationOnce(async () => editSession)
+        .mockImplementationOnce(async () => {
+          trace.push("editor-open");
+          return providerSession();
+        });
+      const editing = h.ipc.editDocument(append);
+      await vi.waitFor(() => expect(trace).toContain("settle"));
+
+      const opening = h.ipc.open(new FakeSender(7), openPayload);
+      // The open resolves its path, then reaches the reservation. Drain the
+      // queue so an open that did not wait would already be in the capture.
+      await vi.waitFor(() => expect(resolveDocumentPath).toHaveBeenCalledTimes(2));
+      await new Promise((drained) => setImmediate(drained));
+      expect(trace).toEqual(["apply", "settle"]);
+
+      released.resolve();
+      await editing;
+      await expect(opening).resolves.toMatchObject({ available: true });
+      expect(trace).toEqual(["apply", "settle", "close", "editor-open"]);
+      await h.ipc.shutdown();
+    });
+
+    it("refuses with a retryable reason when an editor opens as the edit begins", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      // The editor's open holds the document's reservation when the edit asks
+      // for it.
+      const opening = deferred<WorkspaceEngineYDocProviderSession>();
+      vi.mocked(h.capture.openYDocSession).mockImplementationOnce(async () => await opening.promise);
+      const opened = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(h.capture.openYDocSession).toHaveBeenCalledOnce());
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        "notes/a.md opened in an editor as dohc began the edit, and nothing changed. Try again.",
+      );
+      opening.resolve(session);
+      await opened;
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
+    it("tells the caller an edit is in the document when only its save failed", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(new Error("disk full"));
+      const h = harness(session);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(
+        "The edit is in notes/a.md, but dohc has not saved it to the file yet (disk full). Read the document before you retry.",
+      );
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("reports no change without applying or settling", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await expect(
+        h.ipc.editDocument({ ...append, change: async () => null }),
+      ).resolves.toEqual({ path: "notes/a.md", changed: false });
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.settleNow).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+    });
+
+    it("refuses shared views, scenes, and missing documents before opening a session", async () => {
+      const h = harness(editableSession(), {
+        resolveDocumentPath: async (_workspace, path) => (path === "gone.md" ? null : path),
+      });
+      await expect(h.ipc.editDocument({ ...append, path: "board.excalidraw" }))
+        .rejects.toThrow("not a Markdown document");
+      await expect(h.ipc.editDocument({ ...append, path: "gone.md" }))
+        .rejects.toThrow("No document at gone.md");
+      h.setReadOnly(true);
+      await expect(h.ipc.editDocument(append))
+        .rejects.toThrow("shared view");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("reads the held document's state, or nothing when no editor holds it", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" }))
+        .resolves.toEqual({ path: "notes/a.md", state: null });
+
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const read = await h.ipc.readDocument({ workspaceId: "workspace-1", path: "notes/a.md" });
+      expect(documentMarkdown(read.state!)).toBe("# Plan\n\nBefore.");
+      await h.ipc.shutdown();
+    });
   });
 
   it("releases pending work on sender retirement and uses shuttingDown only for quit", async () => {

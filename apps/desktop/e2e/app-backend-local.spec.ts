@@ -36,7 +36,7 @@ test("@app-backend-local fundraiser compiles and persists through the real deskt
     const dataSelection = { workspaceId, datasetId: revision.datasetId, revision: revision.revision, revisionSha256: revision.revisionSha256 };
     const operationId = (name: string) => revision.definition.operations.find(operation => operation.name === name)!.operationId;
     const fields = revision.definition.tables.find(table => table.sqlName === "registrations")!.fields;
-    const nameField = fields.find(field => field.sqlColumn === "full_name")!.fieldId;
+    const nameField = fields.find(field => field.type !== "button" && field.sqlColumn === "full_name")!.fieldId;
     const prepared = await publish(desktop.page, { action: "prepareLocal", workspaceId, appRoot: "fundraiser" });
     expect(prepared.kind).toBe("prepared");
     if (prepared.kind !== "prepared") throw new Error("Expected a local approval candidate.");

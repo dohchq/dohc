@@ -10,7 +10,8 @@ export type CollectionFieldType =
   | "multi-select"
   | "person"
   | "relation"
-  | "url";
+  | "url"
+  | "button";
 
 interface ScalarFieldDefinition {
   name: string;
@@ -30,10 +31,17 @@ export interface RelationFieldDefinition {
   many: boolean;
 }
 
+/** Shows a button on each record. It stores no value. */
+interface ButtonFieldDefinition {
+  name: string;
+  type: "button";
+}
+
 export type FieldDefinition =
   | ScalarFieldDefinition
   | SelectFieldDefinition
-  | RelationFieldDefinition;
+  | RelationFieldDefinition
+  | ButtonFieldDefinition;
 
 export type ViewKind = "table" | "board" | "calendar";
 type ViewSortDirection = "asc" | "desc";
@@ -80,6 +88,7 @@ export const COLLECTION_SCHEMA_REASON_CODES = [
   "unknown-field-reference",
   "schema-collection-limit-exceeded",
   "record-too-large-for-adoption",
+  "unsupported-field-reference",
 ] as const;
 
 type CollectionSchemaReasonCode =
@@ -110,6 +119,7 @@ export const FIELD_VALUE_REASON_CODES = [
   "empty-person-id",
   "invalid-record-id",
   "invalid-url",
+  "expected-empty",
 ] as const;
 
 export type FieldValueReasonCode = (typeof FIELD_VALUE_REASON_CODES)[number];

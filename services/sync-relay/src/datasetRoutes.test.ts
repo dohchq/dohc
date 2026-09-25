@@ -7,16 +7,58 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { fixture, limits } from "./datasetTestFixture";
-import { createSyncRelayHandler } from "./server";
+import { createSyncRelayHandler, isDatasetRecoveryUpload } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
+import { serveFetchHandler } from "@dohc/service-http";
+import { guardRelayResponses } from "./relayResponseStanding";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+it("transfers a recovery archive over 21 MiB through the production HTTP adapter", async () => {
+  const source = await httpFixture(), target = await httpFixture();
+  expect((await source.activate()).status).toBe(200);
+  const owner = { kind: "named" as const, workspaceId: "w", userId: "owner" };
+  const scope = { workspaceId: "w", datasetId: id(1) };
+  for (let index = 0; index < 6; index++) {
+    const bytes = Buffer.alloc(4 * 1024 * 1024, 0x61 + index); bytes.write("%PDF-");
+    const uploaded = source.host.ownerUpload(owner, { ...scope, revision: 1, revisionSha256: revision.revisionSha256,
+      idempotencyKey: `large-file-${index}`, name: "receipt.pdf", contentType: "application/pdf", bytesBase64: bytes.toString("base64") });
+    await source.host.invoke(owner, { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5),
+      input: { name: `Large ${index}`, fileId: uploaded.file.fileId }, idempotencyKey: `large-record-${index}` });
+  }
+  const journal = createDatasetJournal({ db: source.storage.db, transaction: run => source.storage.tx(run) });
+  const cursor = journal.head(scope, () => {}).cursor;
+  journal.fence({ expected: cursor, authorize() {} });
+  const archive = await source.host.exportRecovery(owner, scope);
+  const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 21 * 1024 * 1024,
+    streamBody: isDatasetRecoveryUpload,
+    oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address(); if (!address || typeof address === "string") throw Error("Missing server address");
+    const iterator = archive.stream()[Symbol.asyncIterator](); let transferred = 0;
+    const body = new ReadableStream<Uint8Array>({ async pull(controller) {
+      const next = await iterator.next(); if (next.done) controller.close(); else { transferred += next.value.byteLength; controller.enqueue(next.value); }
+    }, async cancel() { await iterator.return?.(undefined); } });
+    const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, { maxTotalBytes: source.storage.options.workspaceQuotaBytes })).digest("hex");
+    const init: RequestInit & { duplex: "half" } = { method: "POST", duplex: "half", body, headers: {
+      authorization: "Bearer owner", "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": manifestSha256,
+      "x-dohc-dataset-source-cursor": JSON.stringify(cursor) } };
+    const response = await fetch(`http://127.0.0.1:${address.port}/sync/w/datasets/${id(1)}/imports/large-transfer`, init);
+    expect(transferred).toBeGreaterThan(21 * 1024 * 1024);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sourceCursor: cursor, targetCursor: { revision: cursor.revision + 1 } });
+    expect(await (await target.invoke()).json()).toMatchObject({ result: expect.arrayContaining([expect.objectContaining({ name: "Large 0", receipt: expect.any(String) })]) });
+  } finally {
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await archive.dispose();
+  }
+}, 60_000);
 const definition: DatasetDefinition = {formatVersion: 1, datasetId: id(1), name: "Requests", schemaPath: "data/schema.sql", operationsPath: "data/operations.js",
   tables: [{tableId: id(2), name: "Requests", sqlName: "requests", primaryKey: "id", fields: [
     {fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true},

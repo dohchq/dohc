@@ -186,6 +186,8 @@ where
         let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if marker.head_update_seq != 0 || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest) { return Err(E::from(ApplicationError::Corrupt)); }
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
+        // The baseline is a document from elsewhere. A replay returns above.
+        dohc_engine_storage::count_remote_change_in_tx(tx, &binding.workspace_id).map_err(E::from)?;
         accepted_history::initialize(tx, &held, &bytes).map_err(E::from)?;
         follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
@@ -557,7 +559,7 @@ mod tests {
                         |_, _, _, _| Ok(())
                     )
                     .unwrap(),
-                    ApplicationResult::Applied(_)
+                    ApplicationResult::Applied(..)
                 ));
             }
             assert!(matches!(
@@ -1155,7 +1157,28 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
+        let remote_changes = |store: &EngineStore| {
+            store
+                .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "workspace"))
+                .unwrap()
+        };
+        assert_eq!(
+            remote_changes(&store),
+            0,
+            "a rolled-back bootstrap counts nothing"
+        );
         assert!(run(&mut store, &mut cache, &handle, &vector, &NoFaults).is_ok());
+        assert_eq!(
+            remote_changes(&store),
+            1,
+            "the baseline is a document from elsewhere"
+        );
+        assert!(run(&mut store, &mut cache, &handle, &vector, &NoFaults).is_ok());
+        assert_eq!(
+            remote_changes(&store),
+            1,
+            "a replayed bootstrap counts nothing"
+        );
     }
     #[test]
     fn unresolved_dependencies_and_nonpublic_roots_do_not_create_domain_state() {

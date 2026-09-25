@@ -7,6 +7,7 @@ use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_collab::DocKey;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -153,6 +154,16 @@ struct ShareProposalSubmitParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDirectPushParams {
+    workspace_id: String,
+    share_id: String,
+    /// Required, for the same reason the submit requires it: the grant scopes
+    /// what this replica may write, and its level decides whether it may.
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -162,6 +173,29 @@ struct GrantedSelectorParams {
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
     access: String,
+}
+
+fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
+    match &write.result {
+        dohc_engine_sync::DirectWriteResult::Written => json!({
+            "paths": write.paths,
+            "result": "written",
+        }),
+        dohc_engine_sync::DirectWriteResult::Stale {
+            path,
+            current_blob_sha256,
+        } => json!({
+            "paths": write.paths,
+            "result": "stale",
+            "stalePath": path,
+            "currentBlobSha256": current_blob_sha256,
+        }),
+        dohc_engine_sync::DirectWriteResult::Refused { reason } => json!({
+            "paths": write.paths,
+            "result": "refused",
+            "reason": reason,
+        }),
+    }
 }
 
 fn relay_cursor_json(cursor: &RelayCursor) -> Value {
@@ -342,6 +376,13 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             // more to offer; the engine did not count what is left.
             "morePending": outcome.more_pending,
         }),
+        // Each direct write and how it ended. A stale or refused write is an
+        // answer, not a failure: the recipient shows it and can send the
+        // change as a proposal.
+        RelayOperationOutcome::DirectWritesPushed(outcome) => json!({
+            "writes": outcome.writes.iter().map(direct_write_json).collect::<Vec<_>>(),
+            "morePending": outcome.more_pending,
+        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
@@ -518,7 +559,9 @@ impl EngineService {
     ) -> Result<RelayOperationOutcome, WireError> {
         let reservation = if matches!(
             operation,
-            RelayOperation::Push { .. } | RelayOperation::SubmitShareProposal { .. }
+            RelayOperation::Push { .. }
+                | RelayOperation::SubmitShareProposal { .. }
+                | RelayOperation::PushDirectWrites { .. }
         ) {
             self.relay_sync_admission()
                 .map(|(_, admission)| admission.reserve())
@@ -614,6 +657,18 @@ impl EngineService {
                 emit_record_events(&self.events, &open.workspace_id, facts);
             }
         }
+        // Every terminal page asks, whether or not it applied anything: an
+        // earlier request may have been dropped, and the parked updates are the
+        // debt, which only the editor's resync clears.
+        if matches!(
+            &outcome,
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                has_more: false,
+                ..
+            })
+        ) {
+            self.notify_editors_behind(ctx, &open).await;
+        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -645,6 +700,54 @@ impl EngineService {
             result["pendingCursor"] = issued;
         }
         Ok(result)
+    }
+
+    /// A pull parks every Y.Doc update for a document an editor holds open,
+    /// and only that editor's resync, settle, or close drains it. Ask each open
+    /// editor of this workspace with parked updates it can take to resync, so
+    /// an idle editor shows another device's edits. The request is advisory
+    /// like every event, and the event queue drops it when full. The parked
+    /// updates stay durable until the resync drains them, so the next pull asks
+    /// again, including a pull that applies nothing. A failed check therefore
+    /// does not fail the committed pull.
+    async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        let (session_ids, sessions): (Vec<String>, Vec<(DocKey, String)>) = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| {
+                handles.contains(&session.workspace)
+                    && session.owner_draft.is_none()
+                    && session.restore_generation.is_none()
+            })
+            .filter_map(|(session_id, session)| {
+                let lineage_claim_id = session.lineage_claim_id.clone()?;
+                Some((session_id.clone(), (session.key.clone(), lineage_claim_id)))
+            })
+            .unzip();
+        if sessions.is_empty() {
+            return;
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        match open
+            .actor
+            .ydoc_sessions_behind(sessions, cancellation.token())
+            .await
+        {
+            Ok(behind) => {
+                for (session_id, _) in session_ids.iter().zip(behind).filter(|(_, is)| *is) {
+                    self.events.emit(
+                        "ydoc.remoteUpdate",
+                        json!({ "sessionId": session_id, "resyncRequired": true }),
+                    );
+                }
+            }
+            Err(dohc_engine_runtime::RuntimeError::Cancelled) => {}
+            Err(error) => eprintln!("engine: open editor resync check failed: {error}"),
+        }
     }
 
     pub(super) async fn sync_materialize_pending_cursor(
@@ -754,6 +857,28 @@ impl EngineService {
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
         relay_outcome_json(outcome)
+    }
+
+    /// `sync.remoteChanges`: how many changes that did not originate on
+    /// this computer the engine has applied to the workspace. A caller
+    /// records the count with a decision and compares it for equality later:
+    /// an unchanged count proves no one else's change arrived in between.
+    /// Restoring a backup can lower it, so it is never compared for order.
+    /// It needs no relay configuration and no finished initial capture.
+    pub(super) async fn sync_remote_changes(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let applied = Self::read_under_ctx(
+            &cancellation,
+            "sync.remoteChanges",
+            open.actor.remote_changes_applied(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({ "applied": applied }))
     }
 
     pub(super) async fn sync_probe(
@@ -999,7 +1124,7 @@ impl EngineService {
     /// the same reason `sync.claim` mints its own: the durable row is the
     /// record, so a refresh cannot re-mint an origin and split this replica's
     /// log in two. The origin is a REPLICA id — the relay namespaces this
-    /// recipient's ops as `share:<shareId>:<originId>` — so it must never be
+    /// recipient's ops by share, authenticated member, and replica — so it must never be
     /// a user id, which two devices would share.
     pub(super) async fn share_view_record_identity(
         &self,
@@ -1064,6 +1189,38 @@ impl EngineService {
                         .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "share.proposal.submit",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    /// Write this replica's changes to a Collection's own files directly into
+    /// the granter's workspace (ADR 0013). Takes the same pinned selector the
+    /// submit takes; the client writes nothing below `edit` or on a version
+    /// share.
+    pub(super) async fn share_direct_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareDirectPushParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushDirectWrites {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted,
+                    max_read_bytes: self
+                        .relay_sync_admission()
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
+                },
+                "share.direct.push",
             )
             .await?;
         relay_outcome_json(outcome)
@@ -1212,6 +1369,55 @@ mod tests {
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
+    }
+
+    #[test]
+    fn direct_push_outcome_json_states_each_write_and_how_it_ended() {
+        let value = relay_outcome_json(RelayOperationOutcome::DirectWritesPushed(
+            dohc_engine_sync::DirectWritePushOutcome {
+                writes: vec![
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/packing/collection.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Written,
+                    },
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/ideas/collection.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Stale {
+                            path: "trip/ideas".to_owned(),
+                            current_blob_sha256: None,
+                        },
+                    },
+                    dohc_engine_sync::DirectWriteReport {
+                        paths: vec!["trip/packing/automations.yaml".to_owned()],
+                        result: dohc_engine_sync::DirectWriteResult::Refused {
+                            reason: "changes an automation with a personal step".to_owned(),
+                        },
+                    },
+                ],
+                more_pending: true,
+            },
+        ))
+        .expect("serialize direct push outcome");
+        assert_eq!(
+            value,
+            json!({
+                "writes": [
+                    {"paths": ["trip/packing/collection.yaml"], "result": "written"},
+                    {
+                        "paths": ["trip/ideas/collection.yaml"],
+                        "result": "stale",
+                        "stalePath": "trip/ideas",
+                        "currentBlobSha256": null,
+                    },
+                    {
+                        "paths": ["trip/packing/automations.yaml"],
+                        "result": "refused",
+                        "reason": "changes an automation with a personal step",
+                    },
+                ],
+                "morePending": true,
+            }),
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { namedShareOrigin } from "./relayLogInputs";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
@@ -672,8 +673,13 @@ describe("shared channels (MU-C4)", () => {
     // share-namespaced origin (a member can never extend an owner origin).
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
     const ownerOps = ownerLog.ops as Array<{ originId: string; payload: Record<string, unknown> }>;
-    const fromA = ownerOps.filter((op) => op.originId === `share:${shareA}:origin-member-a`);
+    const fromA = ownerOps.filter((op) => op.originId === namedShareOrigin(shareA, MEMBER_A, "origin-member-a"));
     expect(fromA).toHaveLength(3);
+    const ownPage = await json(await h(request(MEMBER_A,
+      `/sync/shares/${shareA}/log?channelWireId=${SHARED_WIRE}&originId=origin-member-a&userId=attacker`,
+    )));
+    expect(ownPage.ownOriginId).toBe(fromA[0]!.originId);
+
     expect(JSON.stringify(ownerLog)).toContain("hello from member A");
 
     // Member B converges on the same ops through their own share.
@@ -1218,13 +1224,13 @@ describe("shared channels (MU-C4)", () => {
         }),
       ),
     );
-    // Accepted — but under `share:<shareId>:origin-owner`, not the owner's
+    // Accepted under the authenticated member's namespace, not the owner's
     // real origin, whose sequence space stays untouched.
     expect(hijack.status).toBe(200);
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
     const ops = ownerLog.ops as Array<{ originId: string; originSeq: number }>;
     const ownerOps = ops.filter((op) => op.originId === "origin-owner");
-    const hijacked = ops.filter((op) => op.originId === `share:${shareId}:origin-owner`);
+    const hijacked = ops.filter((op) => op.originId === namedShareOrigin(shareId, MEMBER_A, "origin-owner"));
     expect(hijacked).toHaveLength(1);
     // The owner's own origin still appends contiguously where it left off.
     const nextSeq = Math.max(...ownerOps.map((op) => op.originSeq)) + 1;

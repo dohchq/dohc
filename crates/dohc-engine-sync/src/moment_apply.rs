@@ -110,6 +110,14 @@ enum MomentAuthor {
         #[serde(rename = "grantGeneration")]
         grant_generation: i64,
     },
+    #[serde(rename = "automation")]
+    Automation {
+        #[serde(rename = "automationId")]
+        automation_id: String,
+        #[serde(rename = "onBehalfOf")]
+        on_behalf_of: String,
+        depth: u32,
+    },
 }
 
 /// The relay-owned origin for a named recipient's direct writes. It carries
@@ -1147,6 +1155,15 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
                     .iter()
                     .any(|v| v.is_empty() || v.len() > 500)
                     || *grant_generation < 1
+            }
+            MomentAuthor::Automation {
+                automation_id,
+                on_behalf_of,
+                depth,
+            } => {
+                automation_id.is_empty()
+                    || on_behalf_of.is_empty()
+                    || *depth > dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH
             }
         })
     {

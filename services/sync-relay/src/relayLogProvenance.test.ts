@@ -1,16 +1,25 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
+import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
 
-const RELAY_ORIGIN_PREFIXES = [COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX];
+const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX];
 const RELAY_AUTHORS = [
   {kind: "public", principalId: "forged", grantId: "grant"},
   {kind: "named", userId: "forged", grantId: "grant", grantGeneration: 1},
 ];
 
 describe("client log provenance", () => {
+  it("keeps member origin tuple boundaries unambiguous", () => {
+    const origins = [
+      namedShareOrigin("share:a", "b", "c"),
+      namedShareOrigin("share", "a:b", "c"),
+      namedShareOrigin("share", "a", "b:c"),
+    ];
+    expect(new Set(origins).size).toBe(3);
+    expect(origins.every(origin => /^relay:share-member:[a-f0-9]{64}$/.test(origin))).toBe(true);
+  });
   it("reserves the relay origins even for an empty batch", () => {
     for (const prefix of RELAY_ORIGIN_PREFIXES) {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
