@@ -12,6 +12,7 @@ import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { serveFetchHandler } from "@dohc/service-http";
+import { guardRelayResponses } from "./relayResponseStanding";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
@@ -33,7 +34,7 @@ it("transfers a recovery archive over 21 MiB through the production HTTP adapter
   const cursor = journal.head(scope, () => {}).cursor;
   journal.fence({ expected: cursor, authorize() {} });
   const archive = await source.host.exportRecovery(owner, scope);
-  const server = serveFetchHandler({ handler: target.handler, maxBodyBytes: () => 21 * 1024 * 1024,
+  const server = serveFetchHandler({ handler: guardRelayResponses(target.storage, target.handler), maxBodyBytes: () => 21 * 1024 * 1024,
     streamBody: isDatasetRecoveryUpload,
     oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

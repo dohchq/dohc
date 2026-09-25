@@ -6,7 +6,7 @@ export interface ServeFetchHandlerOptions {
   handler: (request: Request) => Promise<Response>;
   /** The most request-body bytes buffered for this URL before the upload is refused. */
   maxBodyBytes: (url: URL) => number;
-  /** Dispatch without buffering. These handlers must authenticate before reading and bound body consumption. */
+  /** Dispatch without buffering. These handlers must authenticate before reading and bound body size and receipt time. */
   streamBody?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
@@ -22,7 +22,9 @@ export interface ServeFetchHandlerOptions {
  * untouched in both directions. A client disconnect aborts the request signal.
  */
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
-  return createServer((incoming, outgoing) => {
+  // Streaming handlers own their receive deadline. Ordinary bodies retain a
+  // five-minute bound after headers; headers themselves remain bounded to 60s.
+  return createServer(options.streamBody ? { requestTimeout: 0, headersTimeout: 60_000 } : {}, (incoming, outgoing) => {
     let url: URL;
     try {
       url = new URL(incoming.url ?? "/", `http://${incoming.headers.host ?? "localhost"}`);
@@ -61,11 +63,24 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         });
       return;
     }
+    const bodyTimer = options.streamBody ? setTimeout(() => {
+      if (rejected) return;
+      rejected = true;
+      chunks.length = 0;
+      disconnect.abort(new DOMException("Request body timed out", "TimeoutError"));
+      void writeResponse(new Response(null, { status: 408 }), outgoing, incoming);
+    }, 300_000) : undefined;
+    bodyTimer?.unref();
+    const clearBodyTimer = () => clearTimeout(bodyTimer);
+    incoming.once("end", clearBodyTimer);
+    incoming.once("close", clearBodyTimer);
+    outgoing.once("close", clearBodyTimer);
     incoming.on("data", (chunk: Buffer) => {
       if (rejected) return;
       received += chunk.length;
       if (received > maxBodyBytes) {
         rejected = true;
+        clearBodyTimer();
         chunks.length = 0;
         void writeResponse(options.oversized(url), outgoing, incoming);
         return;
