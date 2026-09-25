@@ -1377,7 +1377,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
-            &ordered,
+            &queued,
             &completed,
             &mut settlements.report_id,
             faults,
