@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// SQLite VM steps per count of open work. A single long statement, such as a
 /// migration or the integrity check on a large store, still moves the count
 /// many times, and one atomic add per thousand steps costs nothing measurable.
-const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
+pub(crate) const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
 
 /// Count the SQLite work of this open into `work` until [`stop_counting`].
 fn count_open_work(conn: &Connection, work: Option<Arc<AtomicU64>>) -> Result<(), StorageError> {

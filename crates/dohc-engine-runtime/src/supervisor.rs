@@ -494,12 +494,25 @@ mod tests {
             .expect("counted open");
         let after_open = work.load(Ordering::Relaxed);
         assert!(after_open > 0, "the store open's migrations count");
+        assert_eq!(
+            Arc::strong_count(&work),
+            1,
+            "the actor holds the counter weakly, so it ends with its owner"
+        );
         opened
             .actor
             .ydoc_cache_stats_for_test()
             .await
             .expect("one command");
-        assert_eq!(work.load(Ordering::Relaxed), after_open + 1);
+        assert!(work.load(Ordering::Relaxed) > after_open);
+        let released = Arc::downgrade(&work);
+        drop(work);
+        opened
+            .actor
+            .ydoc_cache_stats_for_test()
+            .await
+            .expect("a command after the owner is gone");
+        assert!(released.upgrade().is_none());
         supervisor.close(&db).expect("close");
     }
 

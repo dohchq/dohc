@@ -442,6 +442,16 @@ fn worker_main(
         }
     };
     let store_freshly_created = store.was_freshly_created();
+    // The open that asked for counting owns the counter. The actor keeps only
+    // a weak reference, so counting ends with that open, whether it succeeds,
+    // fails, or is cancelled. Until then the connection counts its SQLite work
+    // too, which covers one long startup command. Counting is best effort: a
+    // failure to install the handler costs progress, not the open.
+    // Consumed, not shadowed: a shadowed strong reference would live on.
+    let mut work_count = work_count.map(|work| Arc::downgrade(&work));
+    if let Some(work) = &work_count {
+        let _ = store.count_work(Some(work.clone()));
+    }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the
     // store's authoritative freshness disposition; no caller infers it from
@@ -466,8 +476,16 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         // Counted as each command starts, so its caller sees the count by the
         // time its reply arrives.
-        if let Some(work_count) = &work_count {
-            work_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(work) = &work_count {
+            match work.upgrade() {
+                Some(work) => {
+                    work.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {
+                    let _ = store.count_work(None);
+                    work_count = None;
+                }
+            }
         }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),

@@ -324,9 +324,12 @@ pub(super) fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Res
 const OPEN_PROGRESS_POLL: Duration = Duration::from_millis(500);
 
 /// What an open has done so far, from counters its work already keeps: the
-/// store's SQLite work while it opens and migrates, then each command its
-/// actor serves (the capture baseline's batches among them); the files the
-/// capture scan has hashed; and the open's own steps between them.
+/// store's SQLite work while it opens and migrates and then while this open
+/// runs, each command its actor serves (the capture baseline's batches among
+/// them), and each job the startup replay takes on; the files the capture
+/// scan has hashed; and the open's own steps between them. The actor holds
+/// the store counter weakly, so dropping this ends its counting on every
+/// path out of the open.
 struct OpenWork {
     /// Present only when the open reports progress, so an open that does not
     /// ask pays for no counting in the store or its actor.
@@ -794,7 +797,12 @@ impl EngineService {
             // land on disk while nothing is watching (no suppression window),
             // and the baseline reconcile below then scans the POST-replay disk.
             actor
-                .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
+                .materialize_replay_pending_counting(
+                    root.clone(),
+                    params.workspace_id.clone(),
+                    now_ms,
+                    work.store.clone(),
+                )
                 .await
                 .map_err(map_runtime)?;
             // The files layer spawns only here, after the root binding

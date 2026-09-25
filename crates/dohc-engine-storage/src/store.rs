@@ -5,12 +5,12 @@
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::materialize::MaterializationJob;
-use crate::schema::{open_engine_db, open_engine_db_read_only};
+use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
 /// non-empty). Used to guard the one place a table name is interpolated rather
@@ -104,6 +104,26 @@ impl EngineStore {
             freshly_created: false,
             database_path: path.to_path_buf(),
         })
+    }
+
+    /// Count this connection's SQLite work into `work` for as long as someone
+    /// else holds it; `None` stops counting. The weak reference means the
+    /// counter never outlives its owner, and a dead one costs one failed
+    /// upgrade per step until the caller stops counting.
+    pub fn count_work(&self, work: Option<Weak<AtomicU64>>) -> Result<(), StorageError> {
+        match work {
+            Some(work) => self.conn.progress_handler(
+                OPEN_WORK_STEP_OPS,
+                Some(move || {
+                    if let Some(work) = work.upgrade() {
+                        work.fetch_add(1, Ordering::Relaxed);
+                    }
+                    false
+                }),
+            ),
+            None => self.conn.progress_handler(0, None::<fn() -> bool>),
+        }
+        .map_err(StorageError::corrupt)
     }
 
     /// Whether this open initialized a fresh database rather than reopening an
