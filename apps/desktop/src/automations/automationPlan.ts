@@ -114,6 +114,20 @@ function isFormula(value: AutomationValue): value is Extract<AutomationValue, { 
   return value.kind === "formula";
 }
 
+/**
+ * Why `source` is not exactly one JavaScript expression, or null when it
+ * is. It only parses, so a formula that would loop costs nothing here.
+ */
+export function expressionProblem(source: string): string | null {
+  try {
+    const { end } = parseExpressionAt(source, 0, { ecmaVersion: "latest", preserveParens: true });
+    const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
+    return next.type === tokTypes.eof ? null : `Unexpected text at character ${end + next.start + 1}.`;
+  } catch (error) {
+    return error instanceof SyntaxError ? error.message.replace(/\s*\(\d+:\d+\)$/u, ".") : "This is not a formula.";
+  }
+}
+
 /** True when `source` is exactly one JavaScript expression, so it can sit inside another. */
 function isOneExpression(source: string): boolean {
   try {
