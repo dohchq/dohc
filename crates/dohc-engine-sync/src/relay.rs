@@ -1244,7 +1244,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        crate::deferred::check_redelivery(store, &ops)?;
+        if !queued.is_empty() {
+            crate::deferred::check_redelivery(store, &ops)?;
+        }
         let fetched_coordinates: BTreeSet<_> = ops
             .iter()
             .map(|op| (op.origin_id.clone(), op.origin_seq))
