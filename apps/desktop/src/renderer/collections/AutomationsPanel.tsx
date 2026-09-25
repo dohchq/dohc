@@ -132,8 +132,8 @@ function ReachStatus(props: {
   onAllow: (step: number, seq: number) => void;
 }) {
   const { summary } = props;
-  if (summary.unsupported !== null) {
-    return <StatusLine tone="muted" icon={Info} label="Cannot run yet">{summary.unsupported}</StatusLine>;
+  if (summary.cannotRun !== null) {
+    return <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{summary.cannotRun}</StatusLine>;
   }
   if (summary.reach.kind === "waiting") {
     return (
