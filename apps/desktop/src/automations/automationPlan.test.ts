@@ -16,6 +16,8 @@ import {
   type RunInputs,
 } from "./automationPlan";
 
+type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
+
 function automation(yaml: string): Automation {
   const [first, ...rest] = yaml.split("\n");
   const item = [`  - ${first}`, ...rest.map((line) => `    ${line}`)].join("\n");
@@ -26,7 +28,7 @@ function automation(yaml: string): Automation {
   return parsed.entries[0].automation;
 }
 
-function claim(change: Partial<AutomationClaim["change"]> = {}): AutomationClaim {
+function claim(change: Partial<RecordChange> = {}): AutomationClaim {
   return {
     claimId: "atc_one",
     automationId: "collection:Tasks#stamp",

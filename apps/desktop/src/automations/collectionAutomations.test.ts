@@ -17,6 +17,8 @@ import { createAutomationRunStore, type AutomationRunStore } from "./automationR
 import { CollectionAutomations, TIMEOUTS_BEFORE_SWITCH_OFF, UNREADABLE_REACH, type CollectionAutomationEngine } from "./collectionAutomations";
 import { DEADLINE_ERROR, DEFINITION_CHANGED_ERROR, UNREADABLE_RUN_ERROR } from "./collectionAutomationRun";
 
+type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
+
 // The executor against an in-memory engine and record store: claims, record
 // documents with the engine's idempotency rule, and files adopted as records.
 // Formulas run in the real evaluator.
@@ -303,7 +305,7 @@ async function world(options: {
   const executor = makeExecutor();
 
   let claimCount = 0;
-  const claim = (automationId: string, record: FakeRecord, change: Partial<AutomationClaim["change"]> = {}) => {
+  const claim = (automationId: string, record: FakeRecord, change: Partial<RecordChange> = {}) => {
     claimCount += 1;
     const created: AutomationClaim = {
       claimId: `atc_claim${claimCount}`, automationId, trigger: { historyId: claimCount },
