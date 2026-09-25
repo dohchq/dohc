@@ -199,6 +199,40 @@ export function createWorkspaceActivity(
     return baseStatus;
   }
 
+  // Transition-only: the first failure raises the notice, the first success
+  // after a failure clears it, and repeated failures (a persistently broken
+  // store retries every batch) never re-notify. The refusal classification
+  // transitions the same way: a persistently refused store re-reports the
+  // same code on every pass.
+  function recordCaptureOutcome(
+    entry: WatchedWorkspace,
+    failure: "other" | EngineStoreRefusal | null,
+    detail: string | null,
+  ): void {
+    if (
+      entry.historyCaptureFailure === failure &&
+      entry.historyCaptureDetail === detail
+    ) {
+      return;
+    }
+    entry.historyCaptureFailure = failure;
+    entry.historyCaptureDetail = detail;
+    notify({ workspaceId: entry.workspace.workspaceId });
+  }
+
+  // A shared view has no recorder, so its refresh is what reaches the store.
+  // It reports the store's refusal here, or null once the store answered, so
+  // the same status stops the workspace.
+  function recordShareViewStoreRefusal(
+    state: WorkspaceActivityState,
+    refusal: EngineStoreRefusal | null,
+    detail: string | null,
+  ): void {
+    const entry = state.entry;
+    if (!entry?.historyShareView) return;
+    recordCaptureOutcome(entry, refusal, refusal === null ? null : detail);
+  }
+
   async function open(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
@@ -232,23 +266,8 @@ export function createWorkspaceActivity(
         try {
           const decision =
             await options.captureFor(workspace, {
-              onCaptureOutcome: (failure, detail = null) => {
-                // Transition-only: the first failure raises the notice, the
-                // first success after a failure clears it, and repeated
-                // failures (a persistently broken store retries every batch)
-                // never re-notify. The refusal classification transitions the
-                // same way: a persistently refused store re-reports
-                // the same code on every pass.
-                if (
-                  entry.historyCaptureFailure === failure &&
-                  entry.historyCaptureDetail === detail
-                ) {
-                  return;
-                }
-                entry.historyCaptureFailure = failure;
-                entry.historyCaptureDetail = detail;
-                notify({ workspaceId: workspace.workspaceId });
-              },
+              onCaptureOutcome: (failure, detail = null) =>
+                recordCaptureOutcome(entry, failure, detail),
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
@@ -591,6 +610,7 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngine,
     getStatus,
+    recordShareViewStoreRefusal,
     isOpen,
     queueCloudSync,
     queueCloudPull,

@@ -3887,6 +3887,17 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
     } catch (error) {
+      // A store only a newer dohc opens stops the whole workspace, and the
+      // stop state already says so. A toast would repeat it.
+      const status = await bridge()
+        .getSyncStatus({ workspaceId })
+        .catch(() => null);
+      if (
+        status?.engineStoreRefused != null &&
+        engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
+      ) {
+        return;
+      }
       reportShellError("Couldn't refresh the shared view.", error);
     } finally {
       // After the listing and after a FAILURE, deliberately. Refusals are

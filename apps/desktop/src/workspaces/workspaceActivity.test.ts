@@ -598,6 +598,37 @@ describe("workspaceActivity cloud sync nudge", () => {
     );
   });
 
+  // A shared view has no recorder, so its refresh reports the store's
+  // refusal. The status carries it like a capture's, and only a shared view
+  // takes it: a workspace with a recorder hears its store through capture.
+  it("puts a shared view's store refusal on its status", async () => {
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({ shareView: true, capture: null }),
+    });
+    await activity.open(workspace());
+    notify.mockClear();
+    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    const refused = activity.getStatus("activity-test");
+    expect(refused.historyShareView).toBe(true);
+    expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
+    expect(refused.engineStoreRefusedDetail).toBe("a newer build ran migration 5 (next)");
+    expect(notify).toHaveBeenCalledOnce();
+    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    expect(notify).toHaveBeenCalledOnce();
+    activity.recordShareViewStoreRefusal("activity-test", null, null);
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    await activity.stopAll();
+
+    const owned = createWorkspaceActivity(vi.fn(), {
+      captureFor: () => ({ shareView: false, capture: null }),
+    });
+    await owned.open(workspace());
+    owned.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", null);
+    expect(owned.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    await owned.stopAll();
+  });
+
   // The engine's own words for a refusal ride along, so a report can carry
   // them without the log, and leave with the refusal.
   it("carries the refusal detail on the status", async () => {

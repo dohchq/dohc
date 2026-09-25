@@ -4980,6 +4980,44 @@ describe("ui-state merge-on-load", () => {
     expect(readCallsWhenReported).toBeGreaterThan(readCallsBeforeFailure);
   });
 
+  // A shared view has no recorder, so its refresh is what meets a store a
+  // newer dohc migrated. Main records the refusal; the workspace stops with
+  // the update actions, and the refresh adds no toast of its own.
+  it("stops a shared view whose store a newer build migrated", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const refused = {
+      ...SYNC_STATUS,
+      historyShareView: true,
+      historyCaptureFailed: true as const,
+      engineStoreRefused: "migrated-by-newer-build" as const,
+      engineStoreRefusedDetail:
+        "a newer build ran migration 5 (from-a-newer-build), which this build does not define",
+    };
+    bridge.refreshSharedView = vi.fn(async () => {
+      bridge.getSyncStatus = vi.fn(async () => refused);
+      throw new Error("migrated-by-newer-build: a newer build ran migration 5");
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    act(() => {
+      bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId });
+    });
+    const blocked = await screen.findByTestId("workspace-update-required");
+    expect(blocked.textContent).toContain(
+      "A newer version of dohc updated this workspace's data store.",
+    );
+    expect(within(blocked).getByRole("button", { name: "Check for updates" })).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("does not repaint a failed share pull when no paths changed", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),

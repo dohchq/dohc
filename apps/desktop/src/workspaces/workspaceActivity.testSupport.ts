@@ -1,3 +1,4 @@
+import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { ActiveAgentRun } from "./workspaceWatcher";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -113,6 +114,16 @@ export function createInMemoryWorkspaceActivity(
       const authority = requireAuthority(workspaceId);
       return service.getStatus(authority.workspace, authority.state);
     },
+    recordShareViewStoreRefusal: (
+      workspaceId: string,
+      refusal: EngineStoreRefusal | null,
+      detail: string | null,
+    ) =>
+      service.recordShareViewStoreRefusal(
+        requireAuthority(workspaceId).state,
+        refusal,
+        detail,
+      ),
     listOpenWorkspaceIds: () =>
       [...authorities.entries()]
         .filter(([, authority]) => service.isOpen(authority.state))

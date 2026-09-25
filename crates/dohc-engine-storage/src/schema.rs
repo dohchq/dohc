@@ -319,14 +319,22 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StorageError::corrupt)?;
 
+    // A store a newer build migrated needs that build, whatever `user_version`
+    // it stamped. This build cannot know what the newer migration changed, so
+    // it must not run here, and a rebuild would move the store aside. A file
+    // with no ledger, such as a fresh one, answers `None`.
+    match newer_build_refusal(conn, BASELINE_MIGRATIONS) {
+        Ok(Some(refused)) => return Err(refused),
+        Ok(None) => {}
+        // Our own store must have a readable ledger.
+        Err(err) if version == ENGINE_SCHEMA_VERSION => return Err(StorageError::corrupt(err)),
+        // Any other fingerprint is judged below; an unreadable ledger proves
+        // nothing about it.
+        Err(_) => {}
+    }
+
     match version {
-        // A store a newer build migrated needs that build. This build cannot
-        // know what the newer migration changed, so it must not run here.
-        ENGINE_SCHEMA_VERSION => match newer_build_refusal(conn, BASELINE_MIGRATIONS) {
-            Ok(None) => Ok(Disposition::ExistingV2),
-            Ok(Some(refused)) => Err(refused),
-            Err(err) => Err(StorageError::corrupt(err)),
-        },
+        ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
         0 => {
             // Either a brand-new empty file or a non-empty foreign database that
             // never stamped a version. Refuse to init over the latter — any user
@@ -346,20 +354,14 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
             // Distinguish by a read-only integrity probe: a store that fails
             // `quick_check` is classified corrupt regardless of the version it
             // claims. (A genuine foreign db passes the probe.)
-            if !probe_integrity_ok(conn) {
-                return Err(StorageError::StateCorrupt { source: None });
+            if probe_integrity_ok(conn) {
+                Err(StorageError::UnsupportedFingerprint {
+                    found: other,
+                    expected: ENGINE_SCHEMA_VERSION,
+                })
+            } else {
+                Err(StorageError::StateCorrupt { source: None })
             }
-            // A newer build that stamps another version is still a newer
-            // build: its store needs an update, not the rebuild an unsupported
-            // fingerprint offers. A ledger this build cannot read proves
-            // nothing, so it leaves the fingerprint refusal as it was.
-            if let Ok(Some(refused)) = newer_build_refusal(conn, BASELINE_MIGRATIONS) {
-                return Err(refused);
-            }
-            Err(StorageError::UnsupportedFingerprint {
-                found: other,
-                expected: ENGINE_SCHEMA_VERSION,
-            })
         }
     }
 }

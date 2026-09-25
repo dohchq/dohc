@@ -439,35 +439,41 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     );
 }
 
-/// A newer build that also stamps another schema version is still a newer
-/// build. Its store needs an update, never the rebuild that an unsupported
-/// fingerprint offers.
+/// A newer build that also stamps another schema version, zero included, is
+/// still a newer build. Its store needs an update, never the rebuild that an
+/// unsupported fingerprint or a foreign database offers.
 #[test]
 fn a_newer_build_that_restamps_the_schema_version_is_named_as_newer() {
-    let scratch = Scratch::new("newer-build-version");
-    let db = scratch.db_path();
-    drop(EngineStore::open(&db, 1).expect("open"));
-    {
-        let conn = Connection::open(&db).expect("raw");
-        conn.execute_batch(NEWER_BUILD_MIGRATION)
-            .expect("a newer build migrates");
-        conn.pragma_update(None, "user_version", 3)
-            .expect("and stamps its own version");
-        conn.close().expect("close");
-    }
-    let before = std::fs::read(&db).expect("read before");
+    for version in [3, 0] {
+        let scratch = Scratch::new(&format!("newer-build-version-{version}"));
+        let db = scratch.db_path();
+        drop(EngineStore::open(&db, 1).expect("open"));
+        {
+            let conn = Connection::open(&db).expect("raw");
+            conn.execute_batch(NEWER_BUILD_MIGRATION)
+                .expect("a newer build migrates");
+            conn.pragma_update(None, "user_version", version)
+                .expect("and stamps its own version");
+            conn.close().expect("close");
+        }
+        let before = std::fs::read(&db).expect("read before");
 
-    for refused in [
-        EngineStore::open(&db, 2).unwrap_err(),
-        EngineStore::open_read_only(&db).unwrap_err(),
-    ] {
-        assert_eq!(refused.code(), "migrated-by-newer-build");
+        for refused in [
+            EngineStore::open(&db, 2).unwrap_err(),
+            EngineStore::open_read_only(&db).unwrap_err(),
+        ] {
+            assert_eq!(
+                refused.code(),
+                "migrated-by-newer-build",
+                "user_version {version}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&db).expect("read after"),
+            before,
+            "refused store left byte-identical at user_version {version}"
+        );
     }
-    assert_eq!(
-        std::fs::read(&db).expect("read after"),
-        before,
-        "refused store left byte-identical"
-    );
 }
 
 /// A newer build that crashed leaves its last commit in the WAL. Refusing
