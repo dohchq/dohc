@@ -9,6 +9,36 @@ import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSup
 
 afterEach(cleanup);
 
+it.each(["relation", "multi-select"] as const)("keeps a later %s write intact when an earlier write is discarded", async (kind) => {
+  let nextId = 0;
+  let discard!: (writeId: number) => void;
+  const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
+  const selectionField: FieldDefinition = kind === "relation"
+    ? { name: "links", type: "relation", collection: "tasks", many: true }
+    : field("tags");
+  const names = kind === "relation" ? ["a", "b", "c"] : ["alpha", "beta", "gamma"];
+  const executor = vi.fn(async () => makeQueryResult(names.map(id => makeRecord(id, [indexedValue("title", id)]))));
+  const editor = (value: string[], acknowledgedWriteId = 0) => <CellEditor
+    field={selectionField} indexed={indexedValue(selectionField.name, value)} acknowledgedWriteId={acknowledgedWriteId}
+    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
+    emit={emit} close={() => {}} relationExecutor={executor} />;
+  const view = render(editor([]));
+  fireEvent.click(await screen.findByRole("checkbox", { name: names[0] }));
+  fireEvent.click(screen.getByRole("checkbox", { name: names[1] }));
+  expect(emit.mock.calls[1]?.[0]).toEqual(names.slice(0, 2));
+  // The queue retains failed write 1 while the full value of write 2 waits.
+  act(() => discard(1));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[0] }).checked).toBe(true);
+  // An external selection must still survive replay of the remaining write.
+  view.rerender(editor([names[2]!]));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[2] }).checked).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: names[2] }));
+  expect(emit.mock.calls.at(-1)?.[0]).toEqual(names.slice(0, 2));
+  view.rerender(editor(names.slice(0, 2), 2));
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[0] }).checked).toBe(true);
+  expect(screen.getByRole<HTMLInputElement>("checkbox", { name: names[1] }).checked).toBe(true);
+});
+
 it("keeps later relation choices across partial acknowledgments", async () => {
   let nextId = 0;
   const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
