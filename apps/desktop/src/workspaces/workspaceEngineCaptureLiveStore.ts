@@ -248,6 +248,14 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
   if (author.kind === "named") {
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
   }
+  if (author.kind === "automation") {
+    return {
+      kind: "automation",
+      automationId: author.automationId,
+      onBehalfOf: author.onBehalfOf,
+      depth: author.depth,
+    };
+  }
   return {
     kind: "agent",
     agentId: author.agentId,

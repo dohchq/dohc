@@ -275,6 +275,32 @@ pub struct CollectionPendingAdoptionPage {
 pub struct CollectionReconcileResult {
     pub adoptions: Vec<CollectionAdoptionCandidate>,
     pub relation_cleanups: Vec<CollectionRelationCleanupCandidate>,
+    /// Records this reconciliation bound into a Collection or unbound from
+    /// one. Which of them count as added or removed is the automation
+    /// claim's decision.
+    pub lifecycle: Vec<CollectionRecordLifecycle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionRecordLifecycleKind {
+    /// The record id is bound in this Collection now and was not before.
+    Added,
+    /// The record id was bound in this Collection and is not now.
+    Removed,
+}
+
+/// One record a reconciliation bound into or unbound from a Collection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionRecordLifecycle {
+    pub kind: CollectionRecordLifecycleKind,
+    pub record_id: String,
+    pub collection_path: String,
+    pub object_id: String,
+    /// A removed record's last indexed values, `(field name, value JSON)`
+    /// in field-name order, read before the index drops them and only when
+    /// an automation wants removed records. An added record's values stay
+    /// in the index, so this is empty.
+    pub removed_fields: Vec<(String, String)>,
 }
 
 /// One dangling relation that needs an engine-authored frontmatter update.
@@ -1193,7 +1219,7 @@ fn degraded_document(code: CollectionSchemaReasonCode) -> CollectionSchemaParseR
     }
 }
 
-fn parent_path(path: &str) -> &str {
+pub(crate) fn parent_path(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
@@ -2341,6 +2367,78 @@ pub struct ChangeAttribution {
 /// limit.
 pub const MAX_CHANGE_ATTRIBUTION_DEPTH: u32 = 64;
 
+/// The actor and attribution a moment's recorded author declares. An agent
+/// (`{kind: "agent", agentId, onBehalfOf}`) writes as itself at depth 0; an
+/// automation (`{kind: "automation", automationId, onBehalfOf, depth}`)
+/// writes as itself at its depth. Any other author, or none, declares
+/// neither, as a person's write does.
+pub fn moment_author_attribution(
+    author_json: Option<&str>,
+) -> (Option<String>, Option<ChangeAttribution>) {
+    let Some(author) = author_json.and_then(|json| serde_json::from_str::<Value>(json).ok()) else {
+        return (None, None);
+    };
+    let text = |key: &str| {
+        author
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (actor, actor_kind, depth) = match author.get("kind").and_then(Value::as_str) {
+        Some("agent") => (text("agentId"), ChangeActorKind::Agent, 0),
+        Some("automation") => (
+            text("automationId"),
+            ChangeActorKind::Automation,
+            author
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map_or(0, |depth| {
+                    u32::try_from(depth)
+                        .unwrap_or(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                        .min(MAX_CHANGE_ATTRIBUTION_DEPTH)
+                }),
+        ),
+        _ => return (None, None),
+    };
+    let Some(actor) = actor else {
+        return (None, None);
+    };
+    let attribution = ChangeAttribution {
+        actor_kind,
+        on_behalf_of: text("onBehalfOf"),
+        depth,
+    };
+    (Some(actor), Some(attribution))
+}
+
+/// The author a moment records for a write made by `actor` with
+/// `attribution`, the inverse of [`moment_author_attribution`]. A person's
+/// write, with no declared agent or automation, records none.
+pub fn moment_author_json(
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Option<String> {
+    let actor = actor_origin_id?;
+    let attribution = attribution?;
+    let on_behalf_of = attribution.on_behalf_of.as_deref()?;
+    let author = match attribution.actor_kind {
+        ChangeActorKind::Agent => serde_json::json!({
+            "kind": "agent",
+            "agentId": actor,
+            "onBehalfOf": on_behalf_of,
+        }),
+        ChangeActorKind::Automation => serde_json::json!({
+            "kind": "automation",
+            "automationId": actor,
+            "onBehalfOf": on_behalf_of,
+            "depth": attribution.depth,
+        }),
+        ChangeActorKind::Human => return None,
+    };
+    Some(author.to_string())
+}
+
 impl ChangeAttribution {
     /// Bounds every declared field. Both wire entry points (the engine's
     /// `ydoc.recordUpdate` params and the replicated `ydoc.update` payload)
@@ -2617,6 +2715,88 @@ pub fn index_collection_frontmatter_apply_in_tx(
         recorded_at_ms,
         fields: field_facts,
     }))
+}
+
+/// Index a bound record's frontmatter from a file written on this computer,
+/// for a record whose Y.Doc lineage holds no content to fold the write into:
+/// the file is then the only record of the write. The record's current
+/// index is the before side, so the diff also carries any earlier write the
+/// index missed. Writes field history, replaces the index, and returns the
+/// facts, exactly as a Y.Doc apply does. A body-only write reads the index
+/// and changes nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn index_collection_record_text_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+    author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    recorded_at_ms: i64,
+) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
+    if !is_collection_markdown_path(path) {
+        return Ok(None);
+    }
+    let Some((record_id, _, _)) = bound_record(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    // Frontmatter that does not parse leaves the record to reconcile.
+    let Some((after, provenance)) = markdown_frontmatter_json_with_provenance(text) else {
+        return Ok(None);
+    };
+    let mut before = serde_json::Map::new();
+    for (field_name, value_json) in
+        indexed_record_fields(conn, workspace_id, version_id, &record_id)?
+    {
+        let value = serde_json::from_str(&value_json)
+            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
+        before.insert(field_name, value);
+    }
+    let after_fields = after.as_object().map(|values| {
+        values
+            .iter()
+            .filter(|(field_name, _)| *field_name != RECORD_ID_FRONTMATTER_KEY)
+            .map(|(field_name, value)| (field_name.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>()
+    });
+    if collection_mappings_equal(Some(&before), after_fields.as_ref()) {
+        // Equal values can still validate differently (`estimate: .nan`
+        // against `estimate: ".nan"`). Reindex, without a change, when the
+        // file or the index flags a value.
+        let flagged_before: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM collection_record_fields \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                   AND validation_status='flagged')",
+                params![workspace_id, version_id, record_id],
+                |row| row.get(0),
+            )
+            .map_err(crate::DomainError::sql_corrupt)?;
+        if !flagged_before
+            && provenance.non_finite_fields.is_empty()
+            && provenance.unsupported_tag_fields.is_empty()
+        {
+            return Ok(None);
+        }
+    }
+    let before = Value::Object(before);
+    index_collection_frontmatter_apply_in_tx(
+        conn,
+        workspace_id,
+        version_id,
+        object_id,
+        &before,
+        &after,
+        &before,
+        &after,
+        Some(&provenance),
+        author_origin_id,
+        attribution,
+        None,
+        recorded_at_ms,
+    )
 }
 
 fn revalidate_collection_index_in_tx(
@@ -3549,6 +3729,46 @@ pub fn reconcile_collections_in_tx(
         });
     }
 
+    // Record ids bound per Collection before and after this pass. A record
+    // that leaves one Collection for another is removed from the first and
+    // added to the second. Removed values are read now, while the index
+    // still holds them.
+    let bound_before: HashSet<(&str, &str)> = existing
+        .iter()
+        .filter_map(|binding| {
+            let record_id = binding.record_id.as_deref()?;
+            Some((record_id, parent_path(&binding.file_path)))
+        })
+        .collect();
+    let bound_after: HashSet<(&str, &str)> = desired
+        .iter()
+        .filter_map(|binding| {
+            let record_id = binding.record_id.as_deref()?;
+            Some((record_id, binding.collection_path.as_str()))
+        })
+        .collect();
+    let mut lifecycle = Vec::new();
+    let removed_values_wanted = crate::automations::removed_records_wanted_in_tx(tx, workspace_id)?;
+    for binding in &existing {
+        let Some(record_id) = binding.record_id.as_deref() else {
+            continue;
+        };
+        let collection_path = parent_path(&binding.file_path);
+        if !bound_after.contains(&(record_id, collection_path)) {
+            lifecycle.push(CollectionRecordLifecycle {
+                kind: CollectionRecordLifecycleKind::Removed,
+                record_id: record_id.to_owned(),
+                collection_path: collection_path.to_owned(),
+                object_id: binding.object_id.clone(),
+                removed_fields: if removed_values_wanted {
+                    indexed_record_fields(tx, workspace_id, version_id, record_id)?
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+    }
+
     for binding in &desired {
         let Some(existing_binding) = existing_by_object_id.get(binding.object_id.as_str()) else {
             continue;
@@ -3679,12 +3899,50 @@ pub fn reconcile_collections_in_tx(
     )
     .map_err(crate::DomainError::sql_persist)?;
     revalidate_collection_index_in_tx(tx, workspace_id, version_id, &collection_schemas)?;
+    for binding in &desired {
+        let Some(record_id) = binding.record_id.as_deref() else {
+            continue;
+        };
+        if !bound_before.contains(&(record_id, binding.collection_path.as_str())) {
+            lifecycle.push(CollectionRecordLifecycle {
+                kind: CollectionRecordLifecycleKind::Added,
+                record_id: record_id.to_owned(),
+                collection_path: binding.collection_path.clone(),
+                object_id: binding.object_id.clone(),
+                removed_fields: Vec::new(),
+            });
+        }
+    }
     let relation_cleanups =
         dangling_relation_cleanups(tx, workspace_id, version_id, &present_malformed_record_ids)?;
     Ok(CollectionReconcileResult {
         adoptions,
         relation_cleanups,
+        lifecycle,
     })
+}
+
+/// One record's indexed field values, `(field name, value JSON)` in
+/// field-name order.
+pub(crate) fn indexed_record_fields(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+) -> Result<Vec<(String, String)>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT field_name, value_json FROM collection_record_fields \
+             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 ORDER BY field_name",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id, record_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
 }
 
 pub fn set_collection_adoption_state_in_tx(

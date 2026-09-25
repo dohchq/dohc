@@ -131,7 +131,23 @@ interface NamedMomentAuthor {
   grantGeneration: number;
 }
 
-export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor | NamedMomentAuthor;
+/**
+ * An automation writing a file. The depth is its trigger's chain depth plus
+ * one, so the claims its write causes carry the chain onward and stop at the
+ * cap.
+ */
+interface AutomationMomentAuthor {
+  kind: "automation";
+  automationId: string;
+  onBehalfOf: string;
+  depth: number;
+}
+
+export type MomentAuthor =
+  | AgentMomentAuthor
+  | PublicMomentAuthor
+  | NamedMomentAuthor
+  | AutomationMomentAuthor;
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
