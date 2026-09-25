@@ -115,8 +115,10 @@ pub(crate) fn retain(
             if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO relay_deferred_ops
-                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,
+                    COALESCE((SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),
+                             (SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
                 params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,json.len() as i64])
                 .map_err(SyncError::persist)?;
             if inserted == 0 { continue; }
