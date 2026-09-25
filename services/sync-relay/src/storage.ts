@@ -97,6 +97,7 @@ import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
+import * as automationHostStorage from "./storage/automationHosts";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
@@ -537,6 +538,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   pendingShareNotices(recipientUserId: string) {
     return noticeStorage.pendingShareNotices(this, recipientUserId);
+  }
+
+  readAutomationHost(input: {workspaceId: string; ownerUserId: string}) {
+    return automationHostStorage.readAutomationHost(this, input);
+  }
+
+  checkInAutomationComputer(input: automationHostStorage.AutomationHostCheckInInput) {
+    return automationHostStorage.checkInAutomationComputer(this, input);
+  }
+
+  chooseAutomationHost(input: automationHostStorage.AutomationHostChooseInput) {
+    return automationHostStorage.chooseAutomationHost(this, input);
+  }
+
+  releaseAutomationHost(input: automationHostStorage.AutomationHostReleaseInput) {
+    return automationHostStorage.releaseAutomationHost(this, input);
+  }
+
+  takeOverAutomationHost(input: automationHostStorage.AutomationHostTakeOverInput) {
+    return automationHostStorage.takeOverAutomationHost(this, input);
   }
 
   publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
