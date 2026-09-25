@@ -1,10 +1,12 @@
 import {
+  RelayApiVersionError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type PullSharedChannelResult,
   type PushSharedChannelResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
@@ -26,8 +28,26 @@ export function relayFetchWithTimeout(
   timeoutMs: number,
   baseFetch: typeof fetch = fetch,
 ): typeof fetch {
+  const request = relayApiFetch(baseFetch);
   return (input, init) =>
-    baseFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
+    request(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
+}
+
+// Every desktop request to the relay names the relay API version this build
+// speaks. A relay that does not serve it answers with a code, which becomes
+// one error that says whether dohc or the server needs the update.
+export function relayApiFetch(baseFetch: typeof fetch = fetch): typeof fetch {
+  return async (input, init) => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    headers.set(RELAY_API_VERSION_HEADER, String(RELAY_API_VERSION));
+    const response = await baseFetch(input, { ...init, headers });
+    if (response.status !== 400) return response;
+    const body: unknown = await response.clone().json().catch(() => null);
+    const code = typeof body === "object" && body !== null && "code" in body ? body.code : undefined;
+    if (code === "api_version_too_old") throw new RelayApiVersionError("app");
+    if (code === "api_version_too_new") throw new RelayApiVersionError("server");
+    return response;
+  };
 }
 
 // The joined lane, answered for the channels a caller is SHOWING.

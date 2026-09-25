@@ -26,6 +26,7 @@ pub fn request(
         workspace,
         deadline_ms: None,
         idempotency_key: None,
+        progress: false,
         params,
     }
 }

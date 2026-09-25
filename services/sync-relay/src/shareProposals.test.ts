@@ -311,7 +311,7 @@ describe("the proposal route's level gate", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
   });
 
-  it("refuses a chat-channel grant's submit with the same bytes", async () => {
+  it("refuses a chat grant's submit with the same bytes", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);

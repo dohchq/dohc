@@ -486,7 +486,7 @@ async function createMountDirectory(
 }
 
 // A mount needs file content to follow. A null selector is a different grant
-// kind (a chat-channel share, which carries no file selector at all) and must
+// kind (a chat share, which carries no file selector at all) and must
 // be joined from Chats, not mounted as an (empty) folder. An unreadable
 // selector never reaches here — `fetchShareViewInfo` refuses it outright,
 // because softening one into "grants everything" is exactly the widening this

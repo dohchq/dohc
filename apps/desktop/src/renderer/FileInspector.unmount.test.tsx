@@ -29,6 +29,7 @@ import {
   stubEditorGlobals,
   stubScrollSpy,
   findSourceEditor,
+  findEnabledMarkdownEditToggle,
   toggleSourceOnce,
 } from "./FileInspector.editor-fixture";
 import {
@@ -88,23 +89,6 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // surfaces carry it: the source CodeMirror host in FileInspector and the
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
-// The edit toggle is `disabled={readOnly || opening}`, and a click on a
-// disabled button does nothing and does not retry. A click fired the moment the
-// button exists is therefore dropped whenever the open has not answered yet,
-// and the wait for the source surface then times out on a toggle that never
-// happened. Clicking a mode toggle more than once is not a fix — the modes
-// cycle — so the enabled button is the thing to wait for.
-async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
-  return await waitFor(() => {
-    const toggle = screen.getByTestId("markdown-edit-toggle");
-    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
-    }
-    return toggle;
-  });
-}
 
 // The P1 trap: typing arms an 800ms autosave, and unmounting
 // (tab close, tab switch — the inspector is keyed by the active tab) used to
@@ -1320,7 +1304,7 @@ describe("markdown editor unmount flush", () => {
       ),
     );
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     fireEvent.focus(title);
     fireEvent.change(title, { target: { value: "Retitled" } });
     fireEvent.blur(title);
@@ -1362,7 +1346,7 @@ describe("markdown editor unmount flush", () => {
     // No pending save yet, so the save-state chip is hidden in read mode.
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
 
-    const title = screen.getByTestId("page-title") as HTMLInputElement;
+    const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
     await user.click(title);
     await user.type(title, "!");
 
@@ -4581,6 +4565,147 @@ describe("markdown editor unmount flush", () => {
     } finally {
       parse.mockRestore();
       serialize.mockRestore();
+    }
+  });
+
+  // A busy renderer can deliver the first cell edit before the effects of the
+  // render that showed the table. The table must still recognize its own
+  // output (one serialize, no reparse, later edits keep the row offsets), and
+  // the draft must still save against the read it was built on.
+  it("saves an edit that lands before the table's effects, serializing it once", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42\n2026-06-11,43",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const expectedText = delimitedTextCodec.serialize(
+      [["date", "amount"], ["2026-06-10", "420"], ["2026-06-11", "430"]],
+      ",",
+    );
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A MutationObserver callback runs as a microtask right after the commit
+      // that adds the cells, before the task that runs that commit's effects.
+      // The wait is bounded like the suite's other waits, inside the 30 s test.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The table's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = screen.queryByLabelText("Row 1 column 2");
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          parse.mockClear();
+          serialize.mockClear();
+          fireEvent.change(cell, { target: { value: "420" } });
+          fireEvent.change(screen.getByLabelText("Row 2 column 2"), {
+            target: { value: "430" },
+          });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+      await edited;
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+      expect(
+        (screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value,
+      ).toBe("420");
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "data/table.csv",
+        text: expectedText,
+        expectedContentHash: TEST_CONTENT_HASH,
+      });
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
+  // The same early edit in a duplicate pane whose read answered after a newer
+  // one. The shared document refuses the older read, so saving the edit would
+  // put text built on the older read under the newer content hash.
+  it("sets aside an early edit built on a read the document already moved past", async () => {
+    type ReadResult = { text: string; truncated: false; contentHash: string };
+    const newerHash = "2".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<ReadResult>((resolve) => { resolveNewer = resolve; });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    const capture = vi.spyOn(orphanedDraftsModule, "captureOrphanedDraft");
+    const olderCell = () =>
+      (screen.queryAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+        .find((input) => input.value === "1");
+    let observer: MutationObserver | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const view = render(
+        <>
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+          <FileInspector workspaceId="ws-1" path="data/table.csv" />
+        </>,
+      );
+      await waitFor(() =>
+        expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+      );
+      await act(async () => {
+        resolveNewer({ text: "a\n2", truncated: false, contentHash: newerHash });
+        await newer;
+      });
+      const buffer = getSharedLocalDocument(
+        documentVersionKey("ws-1", "data/table.csv", undefined),
+      );
+      await waitFor(() => expect(buffer.getSnapshot().body).toBe("a\n2"));
+
+      // Edit the older pane the moment its cells appear, before its effects.
+      const edited = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The older pane's cells did not appear within 10 s.")),
+          10_000,
+        );
+        observer = new MutationObserver(() => {
+          const cell = olderCell();
+          if (!cell) return;
+          clearTimeout(timer);
+          observer?.disconnect();
+          fireEvent.change(cell, { target: { value: "10" } });
+          resolve();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+      // Outside act, so React commits the table and runs its effects in
+      // separate tasks, as it does in the app.
+      resolveOlder({ text: "a\n1", truncated: false, contentHash: "1".repeat(64) });
+      await edited;
+
+      expect(capture).toHaveBeenCalledWith("ws-1", "data/table.csv", "a\n10");
+      expect(buffer.getSnapshot()).toMatchObject({ body: "a\n2", contentHash: newerHash });
+      await waitFor(() =>
+        expect(
+          (screen.getAllByLabelText("Row 1 column 1") as HTMLInputElement[])
+            .map((input) => input.value),
+        ).toEqual(["2", "2"]),
+      );
+      view.unmount();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      observer?.disconnect();
+      capture.mockRestore();
     }
   });
 

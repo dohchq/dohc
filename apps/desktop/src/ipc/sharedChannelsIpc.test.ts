@@ -159,7 +159,7 @@ describe("registered shared-channel handlers", () => {
     if (reason === "credentials") h.rotateCredentials();
     else if (reason === "renderer") h.retireRenderer();
     else drained = h.authorities.invalidate("workspace");
-    held.resolve({ received: [{ shareId: "late", selector: { kind: "chat-channel", channelWireId: "late-wire" } }] });
+    held.resolve({ received: [{ shareId: "late", selector: { kind: "chat", channelWireId: "late-wire" } }] });
     await expect(result).rejects.toThrow();
     await drained;
     expect(h.peek).not.toHaveBeenCalled();
@@ -204,7 +204,7 @@ describe("registered shared-channel handlers", () => {
   it("does not cache an invitation kind returned after the account changes", async () => {
     const h = await harness();
     h.relayListing.mockResolvedValue({ received: [{
-      shareId: "late", selector: { kind: "chat-channel", channelWireId: "late-wire" },
+      shareId: "late", selector: { kind: "chat", channelWireId: "late-wire" },
     }] });
     const started = deferred();
     const held = deferred<"not-dm">();
@@ -281,7 +281,7 @@ describe("registered shared-channel handlers", () => {
       shareId: "share-g", relayUrl: "https://relay.test", labelHint: "Launch team", assertCurrent: expect.any(Function),
     });
     // A plain channel has no folder to mount.
-    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({ ...info, shareId: "share-c", channelWireId: "wire-c", kind: "chat-channel" });
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({ ...info, shareId: "share-c", channelWireId: "wire-c", kind: "chat" });
     await h.invoke(CHANNELS.joinSharedChannel, { workspaceId: "workspace", shareId: "share-c" });
     expect(h.mount).toHaveBeenCalledOnce();
     // The folder failing leaves the channel joined and names the failure.

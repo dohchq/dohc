@@ -68,6 +68,7 @@ fn resolve_request_encoded_bytes(
             workspace: handle.cloned(),
             deadline_ms,
             idempotency_key: idempotency_key.map(str::to_owned),
+            progress: false,
             params: json!({}),
         });
     let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
