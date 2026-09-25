@@ -31,12 +31,14 @@ export function useTooltip() {
   };
   useEffect(() => {
     if (!open) return;
-    // The pointer may have opened the words while focus is elsewhere.
+    // The pointer may have opened the words while focus is elsewhere. The
+    // capture phase runs before any control stops the key, so one Escape
+    // closes every open set of words.
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") close();
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [open]);
   return {
     hoverProps: {

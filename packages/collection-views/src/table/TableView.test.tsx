@@ -190,4 +190,27 @@ describe("field marks", () => {
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(words.hidden).toBe(true);
   });
+
+  it("closes every open mark's words with one Escape, even when the focused mark stops the key", () => {
+    const schema = makeSchema([{ name: "title", type: "text" }, { name: "done", type: "checkbox" }]);
+    const marks = new Map([
+      ["title", { icon: <svg />, label: '"Name" sets this field' }],
+      ["done", { icon: <svg />, label: '"Stamp" sets this field' }],
+    ]);
+    render(<TableView schema={schema} records={makeRecords(1)} fieldMarks={marks} />);
+    const title = screen.getByRole("button", { name: "title" });
+    const words = (button: HTMLElement) => document.getElementById(button.getAttribute("aria-describedby") ?? "")!;
+    const done = screen.getByRole("button", { name: "done" });
+    act(() => title.focus());
+    fireEvent.mouseEnter(screen.getByRole("columnheader", { name: /done/ }));
+    expect([words(title).hidden, words(done).hidden]).toEqual([false, false]);
+
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    fireEvent.keyDown(title, { key: "Escape" });
+    document.removeEventListener("keydown", outer);
+    expect([words(title).hidden, words(done).hidden]).toEqual([true, true]);
+    // The focused mark still keeps the key from the surface around it.
+    expect(outer).not.toHaveBeenCalled();
+  });
 });
