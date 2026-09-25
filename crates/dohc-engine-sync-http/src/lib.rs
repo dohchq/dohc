@@ -1047,6 +1047,7 @@ define_server_error_codes! {
     "api_version_too_new" => |_| RelayError::ApiVersionTooNew,
     "api_version_too_old" => |_| RelayError::ApiVersionTooOld,
     "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
+    "automation_host_rate_limited" => |_| RelayError::HttpStatus(429),
     "bad_request" => |_| RelayError::BadRequest,
     "blob_missing" => |_| RelayError::BlobReferenceMissing,
     "blob_not_found" => |_| RelayError::BlobMissing,
