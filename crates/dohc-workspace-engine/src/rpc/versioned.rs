@@ -970,6 +970,7 @@ mod tests {
             workspace: Some(handle.clone()),
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({
                 "versionId": "main",
                 "path": "scoped.bin",

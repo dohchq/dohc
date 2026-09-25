@@ -117,6 +117,56 @@ describe("Titlebar", () => {
     );
   });
 
+  it("closes the workspace switcher on Escape and returns focus to it", () => {
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+    );
+    const trigger = screen.getByTestId("workspace-switcher");
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole("listbox", { name: "Workspaces" })).toBeTruthy();
+    const option = screen.getByTestId("workspace-switcher-option").querySelector("button")!;
+    option.focus();
+    fireEvent.keyDown(option, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes the workspace switcher on a press outside it, not inside it", () => {
+    render(
+      <div>
+        <button type="button">Elsewhere</button>
+        <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />
+      </div>,
+    );
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    fireEvent.pointerDown(screen.getByTestId("workspace-switcher-option"));
+    expect(screen.getByRole("listbox", { name: "Workspaces" })).toBeTruthy();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Elsewhere" }));
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+  });
+
+  // A drag region takes presses before the page sees them. styles.css turns
+  // drag regions off while the root says a menu is open.
+  it("marks a menu open while the switcher is open, so a press on the titlebar closes it", () => {
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+    );
+    const titlebar = screen.getByTestId("titlebar");
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    expect(document.documentElement.dataset.menuOpen).toBe("");
+    fireEvent.pointerDown(titlebar);
+
+    expect(screen.queryByRole("listbox", { name: "Workspaces" })).toBeNull();
+    expect(document.documentElement.dataset.menuOpen).toBeUndefined();
+  });
+
   it("omits the chats layout control when the workspace has no chats sidebar", () => {
     render(
       <Titlebar

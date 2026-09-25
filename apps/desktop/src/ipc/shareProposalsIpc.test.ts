@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { CHANNELS } from "./channels";
 import { registerShareProposalsIpcHandlers } from "./shareProposalsIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -157,7 +158,9 @@ describe("registered share proposal handlers", () => {
     const payload = { workspaceId: "workspace", proposalId: "proposal", opIndex: 0 };
     await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: "current", incomingText: "incoming" });
     expect(h.readText).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: h.attachmentId }), "current.md");
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/sync/workspace/blobs/"), expect.objectContaining({ headers: { authorization: "Bearer token" } }));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/sync/workspace/blobs/"), expect.anything());
+    const sent = new Headers(fetch.mock.calls[0]?.[1]?.headers);
+    expect([sent.get("authorization"), sent.get(RELAY_API_VERSION_HEADER)]).toEqual(["Bearer token", String(RELAY_API_VERSION)]);
     h.readText.mockResolvedValue({ text: "prefix", truncated: true, contentHash: null });
     fetch.mockResolvedValue(new Response(new Uint8Array(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)));
     await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: null, incomingText: null });

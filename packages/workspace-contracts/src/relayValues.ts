@@ -30,3 +30,11 @@ export function relayUrlsMatch(left: string, right: string): boolean {
   const normalizedRight = canonicalRelayUrl(right);
   return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
+
+// The relay HTTP API version this build speaks. Every first-party relay
+// client sends it in this header, and the relay refuses a version it does not
+// serve with `api_version_too_old` or `api_version_too_new`. Raise it when a
+// relay route, body, or code changes meaning, and keep the Rust relay client's
+// copy in `crates/dohc-engine-sync-http` equal.
+export const RELAY_API_VERSION_HEADER = "x-dohc-api-version";
+export const RELAY_API_VERSION = 1;

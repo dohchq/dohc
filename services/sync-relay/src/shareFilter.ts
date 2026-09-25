@@ -56,14 +56,14 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
-// MU-C4 shared channels: a bidirectional chat-channel grant. Unlike the
-// read-only path/version selector above, a chat-channel share scopes a whole
+// MU-C4 shared channels: a bidirectional chat grant. Unlike the
+// read-only path/version selector above, a chat share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
 // access is "read-write" — lets the member append channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:
 // the member replays the channel but every inbound append is refused.
 export interface StoredChatChannelShareSelector {
-  kind: "chat-channel";
+  kind: "chat";
   // The channel's cross-machine wire identity (chat_channel_wire_ids in the
   // engine; `wireId` on chat.channel.create). Never a local channel id or
   // slug — those differ per machine.
@@ -75,7 +75,7 @@ export interface ChatChannelShareSelector extends StoredChatChannelShareSelector
 }
 
 // One share for a group: its chat channel and its folder together. The
-// chat half scopes like a chat-channel grant; the file half scopes like a
+// chat half scopes like a chat grant; the file half scopes like a
 // path grant on the folder. Access is the chat vocabulary; the file side
 // reads read-write as edit and read-only as view.
 export interface StoredGroupShareSelector {
@@ -122,7 +122,7 @@ export function groupChannelIsOrdinary(
 
 // The chat half of a group grant, for the code paths that scope chat ops.
 export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareSelector {
-  return { kind: "chat-channel", channelWireId: selector.channelWireId, access: selector.access };
+  return { kind: "chat", channelWireId: selector.channelWireId, access: selector.access };
 }
 
 // The file half of a group grant. read-write edits the folder; read-only
@@ -141,7 +141,7 @@ export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   return isChatChannelSelector(selector) ? null : selector;
 }
 
-// A selector with a chat-channel side: a chat-channel grant, or a group's
+// A selector with a chat side: a chat grant, or a group's
 // channel.
 export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector | null {
   if (isGroupSelector(selector)) return chatHalfOfGroup(selector);
@@ -192,7 +192,7 @@ export interface ChatShareThreadResolver extends ShareFileChatResolver {
 export function isChatChannelSelector(
   selector: AnyShareSelector,
 ): selector is ChatChannelShareSelector {
-  return "kind" in selector && (selector as { kind?: unknown }).kind === "chat-channel";
+  return "kind" in selector && (selector as { kind?: unknown }).kind === "chat";
 }
 
 export function isLiveEditShareSelector(
@@ -209,7 +209,7 @@ export type GroupSelectorValidation =
   | {
       ok: false;
       code:
-        | typeof RELAY_ERRORS.invalid_channel.code
+        | typeof RELAY_ERRORS.invalid_chat.code
         | typeof RELAY_ERRORS.invalid_path.code
         | typeof RELAY_ERRORS.secret_path.code
         | typeof RELAY_ERRORS.too_many_paths.code
@@ -238,14 +238,14 @@ export function validateGroupShareSelector(
     if (kind === undefined) {
       return {
         ok: false,
-        code: RELAY_ERRORS.invalid_channel.code,
-        message: "The relay has not received this channel yet. Try again after it syncs.",
+        code: RELAY_ERRORS.invalid_chat.code,
+        message: "The relay has not received this group yet. Try again after it syncs.",
       };
     }
     if (kind !== "channel") {
       return {
         ok: false,
-        code: RELAY_ERRORS.invalid_channel.code,
+        code: RELAY_ERRORS.invalid_chat.code,
         message: "A direct message has no folder to share.",
       };
     }
@@ -264,7 +264,7 @@ export function validateGroupShareSelector(
     return {
       ok: false,
       code: RELAY_ERRORS.invalid_path.code,
-      message: "a group shares exactly its channel folder",
+      message: "a group shares exactly its folder",
     };
   }
   return {
@@ -282,7 +282,7 @@ export type ChatChannelSelectorValidation =
   | { ok: true; selector: StoredChatChannelShareSelector }
   | {
       ok: false;
-      code: typeof RELAY_ERRORS.invalid_channel.code;
+      code: typeof RELAY_ERRORS.invalid_chat.code;
       message: string;
     };
 
@@ -320,7 +320,7 @@ export function validateChatChannelShareSelector(
   ) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
+      code: RELAY_ERRORS.invalid_chat.code,
       message: "channelWireId must be a non-empty trimmed string",
     };
   }
@@ -334,26 +334,26 @@ export function validateChatChannelShareSelector(
   if (wireId === GENERAL_CHANNEL_WIRE_ID) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "the general channel is personal to each workspace",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "the general group is personal to each workspace",
     };
   }
   const resolvedKind = chat?.channelKind(wireId);
   if (resolvedKind === "agent") {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "agent channels cannot be shared",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "agent chats cannot be shared",
     };
   }
   if (resolvedKind === null) {
     return {
       ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "channel is not shareable",
+      code: RELAY_ERRORS.invalid_chat.code,
+      message: "chat is not shareable",
     };
   }
-  return { ok: true, selector: { kind: "chat-channel", channelWireId: wireId } };
+  return { ok: true, selector: { kind: "chat", channelWireId: wireId } };
 }
 
 export type ShareSelectorValidation =
@@ -521,7 +521,7 @@ export function parseStoredAnyShareSelectorJson(
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    if ((parsed as { kind?: unknown }).kind === "chat-channel") {
+    if ((parsed as { kind?: unknown }).kind === "chat") {
       if ((parsed as { access?: unknown }).access !== undefined) return null;
       const validation = validateChatChannelShareSelector(
         parsed as { channelWireId?: unknown },
@@ -609,7 +609,7 @@ export function parseChatThreadTopic(topic: string): string | null {
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
 // workspace-relative path (doc co-presence on a shared file). For a MU-C4
-// chat-channel selector two topic shapes are allowed, both scoped to exactly
+// chat selector two topic shapes are allowed, both scoped to exactly
 // the granted channel:
 //   - the bare granted channel wire id (channel-level co-presence), and
 //   - `chat:thread:<threadId>` for a thread that binds to the granted channel,
@@ -619,7 +619,7 @@ export function parseChatThreadTopic(topic: string): string | null {
 //     malformed `chat:thread:` topic is refused. Without a resolver a thread
 //     topic can never be authorized (fail closed).
 // Everything the share does not positively expose is refused — a recipient of
-// `a.md` cannot subscribe to presence for `b.md`, and a chat-channel member
+// `a.md` cannot subscribe to presence for `b.md`, and a chat member
 // cannot subscribe to any other channel's or thread's presence.
 export function presenceTopicAllowedForShare(
   selector: AnyShareSelector,
@@ -1206,7 +1206,7 @@ export function filterOpForShare(
 // moment lands in the GRANTER's log and the granter's engine replays it
 // (#646 PR3-0).
 //
-// Only chat crosses in this direction today. A chat-channel grant at
+// Only chat crosses in this direction today. A chat grant at
 // `read-write` appends what the channel branch admits. A file share appends
 // only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
@@ -1327,7 +1327,7 @@ export function filterProposedChangeForShare(
   raw: unknown,
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): ProposedChangeDecision {
-  // A chat-channel grant shares no files, so it can propose no change to one.
+  // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };

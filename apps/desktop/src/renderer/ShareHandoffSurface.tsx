@@ -2,11 +2,11 @@ import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { RelayShareReceivedRow, ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { ShareAccess, ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { OpenSharedView } from "./OpenSharedView";
+import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
@@ -18,13 +18,6 @@ const BUSY_COPY =
   "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
-
-// An edit share of the main version opens for live editing, which a
-// read-only shared-with-me folder cannot give.
-export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
-  return share.access === "edit" && share.selector !== null &&
-    (share.selector.versionId === null || share.selector.versionId === "main");
-}
 
 type ReceivedShareState =
   | { kind: "idle" }
@@ -64,7 +57,7 @@ export function ShareHandoffSurface(props: {
   onOpened: () => void;
   mountInto?: {
     workspaceId: string;
-    onMounted: (label: string) => void;
+    onMounted: (label: string, access: ShareAccess | null) => void;
   };
 } & ConnectionNoticeHost) {
   const shareId = props.status.status === "done" ? props.status.shareId : null;

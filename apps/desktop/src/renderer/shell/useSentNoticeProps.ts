@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { opensForLiveEditing } from "../ShareHandoffSurface";
+import { opensForLiveEditing } from "../OpenSharedView";
 import { workspaceName } from "../Titlebar";
 import type { SentNotice } from "../workbench/NoticeCenter";
 import { sentNoticeFolder, sentNoticePlace } from "./sentNoticePlace";

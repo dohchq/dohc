@@ -79,7 +79,7 @@ describe("roster from the relay's listings", () => {
         row({ grantId: "g-4", principalKind: "email", recipientUserId: null, recipientEmail: "cai@dohc.test", access: "view" }),
         row({ grantId: "g-3", selector: group, access: "read-write" }),
         row({ grantId: "g-2", selector: group, access: "read-only" }),
-        row({ grantId: "g-1", selector: { kind: "chat-channel", channelWireId: "wire-family" }, access: "read-write" }),
+        row({ grantId: "g-1", selector: { kind: "chat", channelWireId: "wire-family" }, access: "read-write" }),
         row({ grantId: "g-6", selector: { paths: [], versionId: "v-1" }, access: "edit" }),
       ],
       received: [row({ grantId: "g-received", workspaceId: undefined })],

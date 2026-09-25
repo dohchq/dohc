@@ -1747,4 +1747,52 @@ describe("createCaptureLiveStores", () => {
       limit: 200,
     });
   });
+
+  it("keeps a live settle's origin on history moments and nowhere else", async () => {
+    const client = clientFor(async (request) => {
+      if (request.method === VERSIONED_METHOD.historyPage) {
+        return {
+          id: request.id,
+          result: {
+            activeVersion: {
+              id: "main",
+              workspaceId: WORKSPACE_ID,
+              kind: "main",
+              name: "Main",
+              createdAtMs: 0,
+            },
+            textMomentPage: {
+              moments: [
+                { ...moment, metadataOrigin: "ydoc" },
+                { ...moment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
+              ],
+              nextBeforeMomentOrder: null,
+              latestMomentOrder: 1,
+            },
+            protectedMoments: [],
+            protectedTruncated: false,
+          },
+        };
+      }
+      expect(request.method).toBe(VERSIONED_METHOD.textRead);
+      return { id: request.id, result: { ...snapshot, metadataOrigin: "ydoc" } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
+    expect(
+      page.textMomentPage.moments.map((entry) => entry.metadata.origin),
+    ).toEqual(["ydoc", "local-file"]);
+    // A snapshot's metadata shares the write type, so no write can carry the
+    // live origin forward.
+    const read = await store.readTextFile({
+      workspaceId: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+    });
+    expect(read?.metadata.origin).toBe("unknown");
+  });
 });

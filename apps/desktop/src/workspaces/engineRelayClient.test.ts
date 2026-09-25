@@ -7,6 +7,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
+  RelayApiVersionError,
   MAX_REPORTED_REFUSALS,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -882,6 +883,27 @@ describe("EngineRelayClient", () => {
     // The noun, not just the class: the relay answers one code for chat and
     // for changes, so this name is the only thing that carries which one.
     expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
+    await sessions.closeAll();
+  });
+
+  it("says which side must update when the relay does not serve this build's API version", async () => {
+    let message = "relay-api-version-too-old";
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.proposal.submit") return undefined;
+      throw new DaemonRefusalError({ code: "PROTOCOL_VERSION_UNSUPPORTED", message, retry: "no" }, new Error("refused"));
+    });
+    const { client, sessions } = await harness(daemon);
+    const submit = async (submitId: string): Promise<unknown> =>
+      await client.submitShareProposal({ shareId: "share-file", grantedSelector: EDIT_SELECTOR, submitId })
+        .catch((error: unknown) => error);
+
+    const old = await submit("submit-old");
+    expect(old).toBeInstanceOf(RelayApiVersionError);
+    expect((old as RelayApiVersionError).update).toBe("app");
+    message = "relay-api-version-too-new";
+    const newer = await submit("submit-new");
+    expect(newer).toBeInstanceOf(RelayApiVersionError);
+    expect((newer as RelayApiVersionError).update).toBe("server");
     await sessions.closeAll();
   });
 

@@ -70,12 +70,6 @@ function RailButton(props: {
   }`;
   const content = (
     <>
-      {props.active ? (
-        <span
-          aria-hidden
-          className="absolute -left-1.5 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-ink"
-        />
-      ) : null}
       {props.icon}
       {props.badge ? (
         <span
@@ -99,30 +93,42 @@ function RailButton(props: {
       ) : null}
     </>
   );
-  return props.onClick ? (
-    <button
-      type="button"
-      data-testid={props.testId}
-      title={props.label}
-      aria-label={props.label}
-      aria-current={props.active ? "page" : undefined}
-      onClick={props.onClick}
-      onContextMenu={
-        props.onContextMenu
-          ? (event) => {
-              event.preventDefault();
-              props.onContextMenu?.();
-            }
-          : undefined
-      }
-      className={className}
-    >
-      {content}
-    </button>
-  ) : (
-    <span data-testid={props.testId} aria-hidden="true" className={className}>
-      {content}
-    </span>
+  // The active bar sits on the rail's left edge, outside the tile, so it
+  // belongs to a full-width row rather than to the tile.
+  return (
+    <div className="relative flex w-full justify-center">
+      {props.active ? (
+        <span
+          aria-hidden
+          className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-ink"
+        />
+      ) : null}
+      {props.onClick ? (
+        <button
+          type="button"
+          data-testid={props.testId}
+          title={props.label}
+          aria-label={props.label}
+          aria-current={props.active ? "page" : undefined}
+          onClick={props.onClick}
+          onContextMenu={
+            props.onContextMenu
+              ? (event) => {
+                  event.preventDefault();
+                  props.onContextMenu?.();
+                }
+              : undefined
+          }
+          className={className}
+        >
+          {content}
+        </button>
+      ) : (
+        <span data-testid={props.testId} aria-hidden="true" className={className}>
+          {content}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -151,11 +157,13 @@ export function ActivityBar(props: {
     <nav
       aria-label="Activity bar"
       data-testid="activity-bar"
-      className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2"
+      className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel pb-2 pt-1"
     >
       {/* The view list scrolls, so enough contributed views never push the
-          Cloud and Settings buttons off the rail. */}
-      <div inert={props.viewsDisabled || undefined} className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
+          Cloud and Settings buttons off the rail. It spans the rail and pads
+          its ends, so the clip keeps the active bar, a tile's count, and the
+          focus ring, and never scrolls sideways. */}
+      <div inert={props.viewsDisabled || undefined} className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1">
         {props.views.map((view) => (
           <RailButton
             key={view}

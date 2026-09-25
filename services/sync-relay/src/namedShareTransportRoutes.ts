@@ -105,7 +105,7 @@ export function createNamedShareTransportRoutes(
     // owner's bucket. Fail-closed gauntlet, in order:
     //   1. authorizeShareAction: membership, grant status, granter standing —
     //      every denial is the same byte-identical generic 404.
-    //   2. The selector must accept appends: a read-write chat-channel
+    //   2. The selector must accept appends: a read-write chat
     //      grant, or a file share at comment or edit. A
     //      read-only member and a VIEW file share are refused with an
     //      explicit 403 — the member legitimately knows the share exists,

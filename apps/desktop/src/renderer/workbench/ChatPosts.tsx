@@ -23,7 +23,7 @@ import {
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { SaveAsFileActions } from "./PostCard";
+import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 
@@ -463,7 +463,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = openingMessage.authorKind === "agent";
-  const hasExplicitTitle = nav.thread.title.trim() !== openingMessage.body.split("\n", 1)[0]?.trim();
+  const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
 
   // A comment: avatar column, then a bubble that holds the name and body,

@@ -293,12 +293,9 @@ export function useAutosavedTextDraft(props: {
     setSaveState("saved");
   }, [orphanedDrafts, saveState, props.contentRequestId]);
 
-  useEffect(() => {
-    if (props.switchReadPending) return;
-    if (staleBaseline.current) {
-      reconcileConflictSnapshot();
-      return;
-    }
+  // Takes the read this surface renders as its baseline, unless a draft or a
+  // write owns the document.
+  function acceptLandedRead() {
     if (
       verifyAfterRequestId.current !== null &&
       latestSnapshot.current.requestId <= verifyAfterRequestId.current
@@ -307,8 +304,17 @@ export function useAutosavedTextDraft(props: {
     }
     if (unsavedDraft.current) return;
     if (writersLive.current > 0) return;
-    if (props.contentRequestId <= acceptedRequestFloor.current) return;
+    if (latestSnapshot.current.requestId <= acceptedRequestFloor.current) return;
     acceptSnapshot(latestSnapshot.current, "saved");
+  }
+
+  useEffect(() => {
+    if (props.switchReadPending) return;
+    if (staleBaseline.current) {
+      reconcileConflictSnapshot();
+      return;
+    }
+    acceptLandedRead();
     // acceptSnapshot reads mutable write state and the exact body/hash pair
     // above. The dependencies name the authoritative snapshot identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -551,6 +557,30 @@ export function useAutosavedTextDraft(props: {
   }
 
   function scheduleSave(next: string) {
+    // A busy renderer can deliver an edit before the effect above accepts the
+    // read this surface already shows. Once the edit marks the draft unsaved,
+    // that effect never accepts it, and the draft has no baseline to save
+    // against. An edit of exactly that read's text accepts it first.
+    if (
+      !switchReadPendingRef.current &&
+      !staleBaseline.current &&
+      latestDraft.current === latestSnapshot.current.body
+    ) {
+      acceptLandedRead();
+      // The shared document can refuse that read because a later read or a
+      // peer draft already moved it on. Publishing then would save this edit
+      // under the newer content hash and overwrite the newer text, so the edit
+      // is set aside and the surface shows the document as it now stands.
+      const shared = props.localBuffer.getSnapshot();
+      if (shared.initialized && shared.body !== latestDraft.current) {
+        captureOrphanedDraft(props.workspaceId, props.path, next);
+        valueRevision.current += 1;
+        setDraft(shared.body);
+        latestDraft.current = shared.body;
+        setSaveState(shared.saveState);
+        return;
+      }
+    }
     setDraft(next);
     latestDraft.current = next;
     props.localBuffer.publishDraft(next, localSource.current);

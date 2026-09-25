@@ -14,11 +14,11 @@ import type {
 // manager owns it; `undefined` means even that could not be read.
 function storedSelectorKind(
   selectorJson: string,
-): { selectorKind: "chat-channel" | "group" } | Record<string, never> {
+): { selectorKind: "chat" | "group" } | Record<string, never> {
   try {
     const parsed: unknown = JSON.parse(selectorJson);
     const kind = (parsed as { kind?: unknown } | null)?.kind;
-    if (typeof parsed === "object" && parsed !== null && (kind === "chat-channel" || kind === "group")) {
+    if (typeof parsed === "object" && parsed !== null && (kind === "chat" || kind === "group")) {
       return { selectorKind: kind };
     }
   } catch {
@@ -67,7 +67,7 @@ export function createShareSummaries(
       generation: grant.generation,
       // The KIND survives the damage when it can be read at all. It is what
       // routes a row to the right manager, and losing it made a damaged
-      // chat-channel grant surface in the path/version lists as an unreadable
+      // chat grant surface in the path/version lists as an unreadable
       // path share. A kind that cannot be read is not invented.
       ...(selector
         ? {}

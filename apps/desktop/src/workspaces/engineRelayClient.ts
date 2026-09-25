@@ -1,5 +1,6 @@
 import { runInKeyedLane } from "../keyedLane";
 import {
+  RelayApiVersionError,
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
@@ -473,6 +474,10 @@ function pendingCursor(
 function translateRelayError(method: string, error: unknown): never {
   if (!(error instanceof DaemonRefusalError)) throw error;
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
+  if (error.wireCode === "PROTOCOL_VERSION_UNSUPPORTED") {
+    if (error.message === "relay-api-version-too-old") throw new RelayApiVersionError("app");
+    if (error.message === "relay-api-version-too-new") throw new RelayApiVersionError("server");
+  }
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }

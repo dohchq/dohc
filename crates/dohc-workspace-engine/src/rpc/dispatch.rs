@@ -973,6 +973,7 @@ mod tests {
             workspace: None,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: json!({}),
         };
         let discovery = service.configured_live_hosts(&ctx, &request).unwrap();
@@ -1121,6 +1122,7 @@ mod tests {
                     workspace: None,
                     deadline_ms: None,
                     idempotency_key: None,
+                    progress: false,
                     params: Value::Null,
                 },
             )
@@ -1302,6 +1304,7 @@ mod tests {
                         workspace: None,
                         deadline_ms: None,
                         idempotency_key: None,
+                        progress: false,
                         params: json!({}),
                     },
                 )

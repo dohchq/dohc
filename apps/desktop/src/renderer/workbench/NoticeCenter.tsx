@@ -10,6 +10,7 @@ import {
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
 import { SectionLabel } from "../ui/controls";
+import { RELAY_API_VERSION_CAUSE } from "@dohc/workspace-contracts/relay";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
@@ -21,6 +22,7 @@ import type {
   AgentNotification,
   AgentNotificationKind,
 } from "./agentNotifications";
+import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
 
 type NoticeAction = {
   label: string;
@@ -846,6 +848,19 @@ export function NoticeCenter(props: {
           "Both copies are safe. Review the differences to choose what stays.",
         actions: [{ label: "Review", onClick: props.onOpenConflicts }],
         Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.updateRequired) {
+      const update = props.syncStatus.updateRequired;
+      next.push({
+        id: "relay-update-required",
+        tone: "warning",
+        title: UPDATE_REQUIRED_LABEL[update],
+        body: `${RELAY_API_VERSION_CAUSE[update]} ${
+          update === "app"
+            ? "Update dohc to sync again."
+            : "Ask the person who runs it to update it. Then restart dohc."
+        } Your changes stay on this computer.`,
+        Icon: CloudOff,
       });
     } else if (state === "cloud-disconnected") {
       next.push({

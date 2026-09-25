@@ -61,7 +61,7 @@ use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::OwnedPermit;
@@ -176,13 +176,18 @@ impl WorkspaceActor {
     /// propagate synchronously. `spawn` is intentionally synchronous — a
     /// workspace open is an infrequent, off-hot-path operation the supervisor
     /// drives without holding its registry lock.
+    ///
+    /// `work`, when given, counts the store open's SQLite work and then each
+    /// command the actor serves, so a caller can tell a long open from a
+    /// stuck one.
     pub(crate) fn spawn(
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
         now_ms: i64,
+        work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, now_ms, false)
+        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, work)
     }
 
     /// Spawn an actor whose store connection is query-only and never runs the
@@ -191,8 +196,9 @@ impl WorkspaceActor {
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
+        work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, 0, true)
+        Self::spawn_with_mode(db_path, identity, generation, 0, true, work)
     }
 
     fn spawn_with_mode(
@@ -201,6 +207,7 @@ impl WorkspaceActor {
         generation: u64,
         now_ms: i64,
         read_only: bool,
+        work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if read_only {
             let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
@@ -236,6 +243,7 @@ impl WorkspaceActor {
                     worker_state,
                     startup_tx,
                     writer_lock,
+                    work,
                 )
             })
             .map_err(RuntimeError::ThreadSpawn)?;
@@ -437,6 +445,7 @@ fn debug_assert_sync_context() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
@@ -445,6 +454,7 @@ fn worker_main(
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
+    work_count: Option<Arc<AtomicU64>>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -462,9 +472,9 @@ fn worker_main(
     let _writer_lock = writer_lock;
 
     let mut store = match if read_only {
-        EngineStore::open_read_only(&db_path)
+        EngineStore::open_read_only_counting(&db_path, work_count.clone())
     } else {
-        EngineStore::open(&db_path, now_ms)
+        EngineStore::open_counting(&db_path, now_ms, work_count.clone())
     } {
         Ok(store) => store,
         Err(err) => {
@@ -473,6 +483,16 @@ fn worker_main(
         }
     };
     let store_freshly_created = store.was_freshly_created();
+    // The open that asked for counting owns the counter. The actor keeps only
+    // a weak reference, so counting ends with that open, whether it succeeds,
+    // fails, or is cancelled. Until then the connection counts its SQLite work
+    // too, which covers one long startup command. Counting is best effort: a
+    // failure to install the handler costs progress, not the open.
+    // Consumed, not shadowed: a shadowed strong reference would live on.
+    let mut work_count = work_count.map(|work| Arc::downgrade(&work));
+    if let Some(work) = &work_count {
+        let _ = store.count_work(Some(work.clone()));
+    }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the
     // store's authoritative freshness disposition; no caller infers it from
@@ -495,6 +515,19 @@ fn worker_main(
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
+        // Counted as each command starts, so its caller sees the count by the
+        // time its reply arrives.
+        if let Some(work) = &work_count {
+            match work.upgrade() {
+                Some(work) => {
+                    work.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {
+                    let _ = store.count_work(None);
+                    work_count = None;
+                }
+            }
+        }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::LiveApplication(request) => {
@@ -623,7 +656,7 @@ mod saturation_tests {
         std::fs::hard_link(&db, &alias).expect("hard link");
         let identity = EngineDbIdentity::of_existing(&alias).expect("identity");
         assert!(matches!(
-            WorkspaceActor::spawn_read_only(alias, identity, 1),
+            WorkspaceActor::spawn_read_only(alias, identity, 1, None),
             Err(RuntimeError::WorkspaceHardlinked)
         ));
     }
@@ -633,7 +666,7 @@ mod saturation_tests {
         let scratch = ScratchDir::new().expect("scratch");
         let db = engine_db_path(&scratch).expect("database path");
         let identity = EngineDbIdentity::resolve_or_create(&db).expect("identity");
-        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1).expect("spawn");
+        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1, None).expect("spawn");
         assert!(actor.close_permit.is_some());
         let handle = actor.handle();
         let (entered, entered_rx) = oneshot::channel();

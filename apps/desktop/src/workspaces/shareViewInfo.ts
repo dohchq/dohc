@@ -10,6 +10,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
+import { relayApiFetch } from "./sharedChannels";
 
 export interface ShareViewSelector {
   paths: string[];
@@ -62,7 +63,7 @@ async function shareFetch(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(shareUrl(relay, path), {
+  const response = await (relay.fetch ?? relayApiFetch())(shareUrl(relay, path), {
     ...init,
     headers,
   });
@@ -73,7 +74,7 @@ async function shareFetch(
 }
 
 // Strict, because this value becomes the pinned grant every later pull is
-// enforced against. `null` means "a chat-channel grant, no file selector";
+// enforced against. `null` means "a chat grant, no file selector";
 // anything unreadable throws rather than degrading into a wider grant.
 function parseSelector(
   value: unknown,
@@ -88,7 +89,7 @@ function parseSelector(
     paths?: unknown;
     versionId?: unknown;
   };
-  if (record.kind === "chat-channel") return null;
+  if (record.kind === "chat") return null;
   if (record.kind === "group") {
     // A group's folder half. The relay states one access for the whole
     // group: read-write edits the folder, read-only views it. The channel

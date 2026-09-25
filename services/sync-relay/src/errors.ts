@@ -3,6 +3,8 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
+  api_version_too_new: 400,
+  api_version_too_old: 400,
   authorship_mismatch: 403,
   automation_host_rate_limited: 429,
   bad_request: 400,
@@ -19,7 +21,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   identity_required: 409,
   internal_error: 500,
   invalid_access: 400,
-  invalid_channel: 400,
+  invalid_chat: 400,
   invalid_path: 400,
   invalid_version: 400,
   key_envelope_not_found: 404,
@@ -64,7 +66,9 @@ export const RELAY_ERRORS = Object.freeze(
 // deliberately says no more than its code: which op failed, which selector
 // kind, or which bound tripped would let a probing caller map the share.
 export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Object.freeze({
-  ambiguous_selector: "a chat-channel share must not also carry paths or versionId",
+  ambiguous_selector: "a chat share must not also carry paths or versionId",
+  api_version_too_new: "this relay is older than the dohc that sent the request",
+  api_version_too_old: "this relay needs a newer dohc",
   authorship_mismatch: "chat op author does not match the authenticated actor",
   automation_host_rate_limited: "too many automation host changes",
   bad_request: "bad request",
@@ -83,7 +87,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   identity_required: "this workspace requires replication identity",
   internal_error: "internal error",
   invalid_access: "access is invalid",
-  invalid_channel: "channel is not shareable",
+  invalid_chat: "chat is not shareable",
   invalid_path: "path is invalid",
   invalid_version: "versionId is invalid",
   key_envelope_not_found: "key envelope not found",

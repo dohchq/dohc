@@ -25,6 +25,7 @@ import type {
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
+  ShareAccess,
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
@@ -3750,7 +3751,7 @@ export function DesktopWorkspaceShell(props: {
           ]),
       {
         id: "quick-open",
-        label: "Go to file",
+        label: "Go to",
         run: () => setQuickOpenOpen(true),
       },
       {
@@ -4538,7 +4539,7 @@ export function DesktopWorkspaceShell(props: {
   } as const;
 
   // `openPath` is the file a notice named, inside the share.
-  function handleMountedShare(label: string, openPath?: string) {
+  function handleMountedShare(label: string, access: ShareAccess | null, openPath?: string) {
     setOpenShare(null);
     void reloadShareMounts();
     void refreshFiles()
@@ -4548,8 +4549,13 @@ export function DesktopWorkspaceShell(props: {
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    showShellNotice(
-      `Added ${label} to shared-with-me — read-only, kept up to date.`,
+    // A mount is read-only whatever the grant allows. Open a share defaults
+    // an Edit grant to Open separately; a person who chose Add is told how
+    // to reach the access they have.
+    showSuccessNotice(
+      access === "edit"
+        ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
+        : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
     );
   }
 
@@ -5645,7 +5651,7 @@ export function DesktopWorkspaceShell(props: {
                     onClick={() => setQuickOpenOpen(true)}
                     className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-panel hover:text-ink"
                   >
-                    Ctrl P · go to file
+                    Ctrl P · go to
                   </button>
                 </div>
               </div>
@@ -6296,7 +6302,7 @@ export function DesktopWorkspaceShell(props: {
               : {
                   mountInto: {
                     workspaceId,
-                    onMounted: (label: string) => handleMountedShare(label, openSharePath),
+                    onMounted: (label: string, access: ShareAccess | null) => handleMountedShare(label, access, openSharePath),
                   },
                 })}
           />

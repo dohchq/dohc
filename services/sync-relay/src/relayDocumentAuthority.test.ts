@@ -390,7 +390,7 @@ it.each(["revoked", "narrowed", "wrong-kind", "missing"] as const)("rechecks dep
 
 it.each([
   "{", JSON.stringify({ paths: ["docs"], versionId: "pinned" }), JSON.stringify({ paths: [], versionId: null }),
-  JSON.stringify({ kind: "chat-channel", channelWireId: "channel-1" }), JSON.stringify({ paths: ["docs-private"], versionId: null }),
+  JSON.stringify({ kind: "chat", channelWireId: "channel-1" }), JSON.stringify({ paths: ["docs-private"], versionId: null }),
   JSON.stringify({ paths: ["outside"], versionId: null }), JSON.stringify({ paths: ["../docs"], versionId: null }),
   JSON.stringify({ paths: ["docs//"], versionId: null }), JSON.stringify({ paths: ["docs", "docs"], versionId: null }),
   JSON.stringify({ paths: ["docs"], versionId: null, extra: true }),

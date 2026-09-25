@@ -29,6 +29,7 @@ fn request_with(params: Value) -> Envelope {
         workspace: None,
         deadline_ms: None,
         idempotency_key: None,
+        progress: false,
         params,
     })
 }
@@ -89,6 +90,7 @@ fn string_bytes_boundary() {
             workspace: None,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params: Value::Null,
         });
         let result = envelope.validate(&limits);

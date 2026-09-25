@@ -20,6 +20,7 @@ import {
   MAX_LOG_PAGES,
 } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
+import { RETRY_MAX_MS } from "./retry";
 
 const SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
@@ -1527,6 +1528,52 @@ describe("App", () => {
 
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it.each(["exchange", "current"] as const)("says which server part needs an update when its versions disagree at %s", async (step) => {
+    const message = "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.";
+    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_new", error: message }, 409);
+    history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") return step === "exchange" ? mismatch() : jsonResponse({ session: SESSION });
+      if (path === "/api/view/current") return mismatch();
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => container.querySelector("main.state")?.textContent === message);
+
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it.each(["log", "meta"] as const)("stops following an open page when the server's versions start to disagree at %s", async (step) => {
+    const message = "This server's share page needs an update to match its sync service. Ask the person who runs the server to update it.";
+    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_old", error: message }, 409);
+    vi.useFakeTimers();
+    history.replaceState(null, "", `/s/${SESSION}`);
+    let logRequests = 0;
+    let metaRequests = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([], 0);
+      if (path === "/api/view/log?since=0&limit=500") {
+        logRequests += 1;
+        return step === "log" && logRequests > 1 ? mismatch() : logOpsPage([], 0);
+      }
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return mismatch();
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp(() => container.querySelector("main.state")?.textContent === message);
+
+    // The follower stopped: past its longest retry delay, nothing reads again.
+    const reads = logRequests + metaRequests;
+    await act(async () => { await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * 2); });
+    expect(logRequests + metaRequests).toBe(reads);
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 

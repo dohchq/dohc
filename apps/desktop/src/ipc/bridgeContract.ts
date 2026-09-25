@@ -249,7 +249,7 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 // The level a recipient holds on a path/version share, from the same
 // one place the relay and the engine read it. All three levels read the same
 // files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
-// The chat-channel grant's own binary access is a different field.
+// The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
 
@@ -1231,6 +1231,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
+  // Sync stopped because the server does not serve this dohc's relay API
+  // version: "app" means update dohc, "server" means the server is older.
+  updateRequired: z.enum(["app", "server"]).optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
@@ -2141,7 +2144,7 @@ export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 const EMAIL_STRING = z.email().max(320);
 
 // Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
-// chat-channel grant per participant, riding the shared-channel lane. The
+// chat grant per participant, riding the shared-channel lane. The
 // whole surface is gated on collaboration (signed in + relay): a solo user
 // sees none of it. Identity is always main-derived — the renderer never
 // supplies who is sending or who a grant belongs to.
@@ -2154,7 +2157,7 @@ export const DmRecord = z.object({
   // is the owner's recipient list — often the participant's own address).
   peerLabel: z.string().min(1).max(320),
   role: z.enum(["owner", "participant"]),
-  // The chat-channel grant a PARTICIPANT joined this DM through — the presence
+  // The chat grant a PARTICIPANT joined this DM through — the presence
   // SHARE scope both sides converge on (the relay maps it to the granter's
   // workspace, where the owner publishes). Null for the OWNER (who publishes
   // into their own workspace scope) and until a participant's grant registers.
@@ -4083,7 +4086,7 @@ export type GetRelayReceivedShareResult = z.infer<
 
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
-  // Path/version shares addressed to this account (chat-channel grants are
+  // Path/version shares addressed to this account (chat grants are
   // listed through listChatChannelShares).
   received: z.array(RelayShareReceivedRow).max(1000).default([]),
 });
@@ -5002,7 +5005,7 @@ export type WithdrawShareChangesResult = z.infer<
 >;
 
 // ---- Shared channels (MU-C4) ----
-// A chat-channel grant: a whole channel (threads + messages + reactions)
+// A chat grant: a whole channel (threads + messages + reactions)
 // shared to another relay account, read-write by default, read-only as the
 // broadcast opt-in. Granted rows manage who a channel is shared with;
 // received rows are invitations addressed to this account; joined rows are
