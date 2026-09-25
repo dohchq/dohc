@@ -154,8 +154,8 @@ Other input and result fields remain excluded. Choose **Undo edit** to restore t
 
 Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
-The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) lists every action with its fields and result.
-It also shows how an app page calls an approved operation.
+Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
+The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) also lists each verb's result, and shows how an app page calls an approved operation.
 
 ## Change fields and rules
 
