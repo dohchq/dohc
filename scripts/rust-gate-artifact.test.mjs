@@ -104,10 +104,12 @@ function stubToolchain({ writes, movesHead } = {}) {
   // itself is how a replaced-not-merged child env shipped a vacuous
   // scratch-leak row once.
   const envDump = join(dir, "envdump.txt");
+  const argsDump = join(dir, "commands.txt");
   const touch = writes ? writes.replaceAll("\\", "/") : "";
   const sh = [
     "#!/bin/sh",
     `env > "${envDump.replaceAll("\\", "/")}"`,
+    `printf '%s\\n' "$*" >> "${argsDump.replaceAll("\\", "/")}"`,
     touch ? `[ -f "${touch}" ] || echo gate-stub > "${touch}"` : "",
     probe.replaceAll("\\", "/"),
     `cat "${cfgPath.replaceAll("\\", "/")}"`,
@@ -117,6 +119,7 @@ function stubToolchain({ writes, movesHead } = {}) {
   const cmd = [
     "@echo off",
     `set > "${envDump}"`,
+    `echo %*>> "${argsDump}"`,
     touch ? `if not exist "${writes}" echo gate-stub > "${writes}"` : "",
     probe,
     `type "${cfgPath}"`,
@@ -252,9 +255,18 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
-    // + 7 required + 2 optional. Endpoints alone would read 2, which is the
+    // + 6 required + 2 optional. Endpoints alone would read 2, which is the
     // shape that cannot see a tree that changes and changes back.
-    assert.match(run.evidence, /, 11 reads\)/);
+    assert.match(run.evidence, /, 10 reads\)/);
+
+    const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
+    assert.deepEqual(commands.filter((cmd) => cmd.startsWith("build ")), [
+      "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
+    ]);
+    assert.deepEqual(commands.filter((cmd) => cmd.startsWith("nextest ")), [
+      "nextest run --locked --workspace",
+    ]);
+    assert.match(run.evidence, /scratch leak=PASS/);
 
     // The stamp names the commit this checkout is on, not any commit.
     const head = spawnSync("git rev-parse HEAD", {

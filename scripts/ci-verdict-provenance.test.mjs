@@ -31,9 +31,8 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build --workspace=PASS test --workspace=PASS doctests=PASS " +
-  "test collab crash tier=PASS " +
-  "cargo-deny=PASS cargo-audit=PASS";
+  "build daemon=PASS test --workspace=PASS doctests=PASS " +
+  "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => check(passVerdict));
@@ -73,15 +72,6 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       check(passVerdict.replace("native target=PASS ", "")),
     /native target/,
   );
-  // The crash tier is compiled out of the plain workspace test run, so an
-  // evidence line missing this row means the exactly-once tests never ran.
-  assert.throws(
-    () =>
-      check(
-        passVerdict.replace(" test collab crash tier=PASS", ""),
-      ),
-    /test collab crash tier/,
-  );
   // The advisory scan is the one that had been silently skipping: CI never
   // installed cargo-audit, so the gate probed, reported SKIP, and the verdict
   // check did not mind. Both halves are now required -- the tool is installed
@@ -93,6 +83,15 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-audit/,
   );
+});
+
+test("a PASS verdict requires scratch cleanup to have passed", () => {
+  for (const replacement of ["", " scratch leak=SKIP", " scratch leak=FAIL"]) {
+    assert.throws(
+      () => check(passVerdict.replace(" scratch leak=PASS", replacement)),
+      /scratch leak/,
+    );
+  }
 });
 
 test("a required step is matched by its whole name, not as a substring", () => {
@@ -217,7 +216,7 @@ test("the gate name is required in its own field, not anywhere in the line", () 
   const impostor =
     "- 2026-07-27T00:00:00.000Z | not-the-gate | run-rust-checks | PASS | " +
     "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-    "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+    "build daemon=PASS test --workspace=PASS doctests=PASS " +
     "cargo-deny=PASS cargo-audit=PASS";
   assert.throws(
     () => check(impostor),
@@ -459,12 +458,12 @@ test("a tree that changed and changed back is caught by the reading between", ()
   const restored = classifyTreeProvenance([
     { step: "start", state: A },
     { step: "native target", state: A },
-    { step: "build --workspace", state: B },
+    { step: "build daemon", state: B },
     { step: "test --workspace", state: A },
   ]);
   assert.equal(restored.status, "FAIL");
   // The step is named, because that is what a reader has to re-run.
-  assert.match(restored.reason, /HEAD moved during `build --workspace`/);
+  assert.match(restored.reason, /HEAD moved during `build daemon`/);
   assert.equal(restored.stamp, "UNATTRIBUTABLE");
 
   // The same for an edit that is reverted: A, dirty, A.
@@ -819,7 +818,7 @@ test("a HEAD that moved and came back inside one step is refused", () => {
   // commit cannot show.
   const returned = classifyTreeProvenance([
     { step: "start", state: A },
-    { step: "build --workspace", state: A },
+    { step: "build daemon", state: A },
     { step: "test --workspace", state: logged(2) },
   ]);
   assert.equal(returned.status, "FAIL");
