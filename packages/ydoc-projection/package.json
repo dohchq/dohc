@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./body-fragment": "./src/body-fragment.ts",
     "./browser-editor": "./src/browser-editor.ts",
+    "./frontmatter-comments": "./src/frontmatter-comments.ts",
     "./live-journal-validation": "./src/live-journal-validation.ts",
     "./image-src": "./src/image-src.ts",
     "./restore-proof": "./src/liveRestoreProof.ts",

@@ -53,6 +53,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { FrontmatterComments } from "./FrontmatterComments";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -2008,6 +2009,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} />
               </Suspense>
             )}
+            <FrontmatterComments ydoc={engine.doc} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2230,6 +2232,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
               </Suspense>
             ) : null}
+            <FrontmatterComments markdown={draft} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2316,6 +2319,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
               </Suspense>
             ) : null}
+            <FrontmatterComments markdown={draft} />
           </div>
           <div
             ref={readDocumentRef}
