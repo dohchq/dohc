@@ -5315,3 +5315,53 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
             .is_some()
     );
 }
+
+#[test]
+fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let op = |origin: &str, seq: i64| {
+        let mut op =
+            version_create_with_shipped_snapshots(origin, &format!("{origin}-{seq}"), Vec::new());
+        op.origin_seq = seq;
+        op
+    };
+    let mut retained = Vec::new();
+    for origin in ["a-held", "b-held"] {
+        retained.extend((0..500).map(|seq| op(origin, seq)));
+    }
+    retained.push(op("c-released", 0));
+    crate::deferred::retain(
+        &mut engine,
+        &identity,
+        &retained.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+    for (turn, expected) in ["a-held", "b-held", "c-released"].into_iter().enumerate() {
+        let (queued, _) = crate::deferred::read(&engine, "ws", &identity).unwrap();
+        assert_eq!(
+            queued[0].origin_id, expected,
+            "new suffixes and newly admitted origins cannot overtake an origin waiting for replay"
+        );
+        if expected == "c-released" {
+            break;
+        }
+        let mut report = None;
+        crate::deferred::claim_report(&mut engine, "ws", &queued, &[], &mut report, &NoFaults)
+            .unwrap();
+        let suffixes = [
+            op("a-held", 500 + turn as i64),
+            op("b-held", 500 + turn as i64),
+            op(&format!("0-new-{turn}"), 0),
+        ];
+        crate::deferred::retain(
+            &mut engine,
+            &identity,
+            &suffixes.iter().collect::<Vec<_>>(),
+            &NoFaults,
+        )
+        .unwrap();
+    }
+}
