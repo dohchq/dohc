@@ -791,12 +791,17 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const contents = await readFile(absolute, "utf8").catch(async (error) => {
-          console.error("Locked-save recovery read failed", {
+          const diagnostic = {
             path: absolute,
             states: [...states],
             errors: [...errors],
-            directory: await readdir(root).catch((listingError: NodeJS.ErrnoException) => listingError.code),
-          });
+            directory: await readdir(root).catch(
+              (listingError: NodeJS.ErrnoException) => listingError.code,
+            ),
+          };
+          if (error instanceof Error) {
+            error.message += `\nLocked-save recovery: ${JSON.stringify(diagnostic)}`;
+          }
           throw error;
         });
         if (

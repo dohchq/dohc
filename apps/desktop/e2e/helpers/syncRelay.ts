@@ -62,6 +62,9 @@ export async function spawnSyncRelay(input: {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const startupStatus = () =>
+    `after ${Math.round(performance.now() - started)}ms ` +
+    `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})`;
 
   let stdout = "";
   let stderr = "";
@@ -69,7 +72,9 @@ export async function spawnSyncRelay(input: {
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
       reject(
-        new Error(`sync relay did not report a port after ${Math.round(performance.now() - started)}ms (pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`),
+        new Error(
+          `sync relay did not report a port ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+        ),
       );
     }, 20_000);
     child.stdout?.on("data", (chunk) => {
@@ -83,11 +88,11 @@ export async function spawnSyncRelay(input: {
     child.stderr?.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    child.on("exit", (code, signal) => {
+    child.on("exit", () => {
       clearTimeout(timeout);
       reject(
         new Error(
-          `sync relay exited before listening after ${Math.round(performance.now() - started)}ms (pid=${child.pid}, exit=${code}, signal=${signal})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          `sync relay exited before listening ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
         ),
       );
     });
