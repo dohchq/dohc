@@ -268,10 +268,12 @@ export class CollectionAutomations {
   /** Collections that hold an automations.yaml, with what it says. */
   private readonly files = new Map<string, IndexedFile>();
   /**
-   * The field names of each Collection an automation names, or null when
-   * its collection.yaml cannot be read.
+   * The field names of each Collection with a collection.yaml that an
+   * automation names, or "unreadable" when that file is not YAML dohc can
+   * read as a schema. A Collection without one, such as a dataset, is not
+   * listed.
    */
-  private readonly schemaFields = new Map<string, ReadonlySet<string> | null>();
+  private readonly schemaFields = new Map<string, ReadonlySet<string> | "unreadable">();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -779,10 +781,15 @@ export class CollectionAutomations {
         for (const { collection } of fieldsNamedBy(entry.automation, collectionPath)) {
           if (this.schemaFields.has(collection)) continue;
           const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
-          const parsed = read === null || read.truncated ? null : parseCollectionSchema(read.text);
+          if (read === null) continue;
+          const parsed = read.truncated ? null : parseCollectionSchema(read.text);
+          // A degraded schema still lists the fields it could read; a file
+          // that is not a schema at all lists none.
+          const unreadable = parsed === null ||
+            parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping");
           this.schemaFields.set(
             collection,
-            parsed?.status === "valid" ? new Set(parsed.schema.fields.map((field) => field.name)) : null,
+            unreadable ? "unreadable" : new Set(parsed.schema.fields.map((field) => field.name)),
           );
         }
       }
@@ -799,6 +806,9 @@ export class CollectionAutomations {
     if (unsupported !== null) return unsupported;
     for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
       const fields = this.schemaFields.get(collection);
+      if (fields === "unreadable") {
+        return `dohc cannot read the fields of ${collectionNamed(collection).name}. Fix ${collection}/${COLLECTION_SCHEMA_FILENAME} to run this automation.`;
+      }
       if (fields && !fields.has(field)) return `${field} is not a field in ${collectionNamed(collection).name}.`;
     }
     return null;

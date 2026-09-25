@@ -1094,6 +1094,23 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task)["Done on"]).toBe(localIsoTime(claim.createdAtMs).slice(0, 10));
   });
 
+  it("checks fields against a schema with one bad key, and keeps an automation off while its schema is not YAML", async () => {
+    const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Done on: '=today()'}}]\n" } });
+    // One key dohc does not know degrades the schema; its fields still count.
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), `${SCHEMA}colour: blue\n`);
+    await w.executor.open();
+    const degraded = await w.executor.automationsIn("Tasks");
+    expect(degraded.status === "read" && degraded.automations[0]).toMatchObject({ cannotRun: "Done on is not a field in Tasks." });
+
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), "fields: [unclosed\n");
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/collection.yaml" }]);
+    const broken = await w.executor.automationsIn("Tasks");
+    expect(broken.status === "read" && broken.automations[0]).toMatchObject({
+      cannotRun: "dohc cannot read the fields of Tasks. Fix Tasks/collection.yaml to run this automation.",
+    });
+    expect(w.subscriptions.has("collection:Tasks#done")).toBe(false);
+  });
+
   it("keeps counting timeouts across a restart", async () => {
     const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
       formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));

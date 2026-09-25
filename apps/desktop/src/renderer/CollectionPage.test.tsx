@@ -356,7 +356,7 @@ describe("CollectionPage", () => {
     Object.assign(bridge, {
       listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), automations: [{
         valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
-        unsupported: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
+        cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
       }] })),
       listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [] })),
       onAutomationFailuresChanged: () => () => undefined,
