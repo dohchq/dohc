@@ -213,6 +213,41 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("refuses SQL with no statement, which would crash the worker process",async()=>{
+    await fixture(async({open})=>{
+      // node:sqlite in Node 24.16 crashes the process after it prepares text with no statement between failed prepares.
+      let exited!:(status:[number|null,NodeJS.Signals|null])=>void;
+      const exit=new Promise<[number|null,NodeJS.Signals|null]>(resolve=>{exited=resolve;});
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",options.onMessage);child.on("error",options.onError);
+        child.on("close",(code,signal)=>{exited([code,signal]);options.onExit(code);});
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({},launch);
+      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1",
+        "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"];
+      // Each input's own outcome, so one that reaches SQLite shows. Five rounds of 24 queries stay under the 128-statement limit.
+      const source=`globalThis.operations={run(ctx){
+        const inputs=${JSON.stringify(empty)}, outcomes=inputs.map(()=>[]);
+        for(let round=0;round<5;round++) inputs.forEach((sql,index)=>{
+          try { (round%2 ? ctx.db.execute : ctx.db.query)(sql); outcomes[index].push('prepared'); }
+          catch (error) { outcomes[index].push(error.message); }
+          try { ctx.db.query('SELECT missing FROM items'); } catch {}
+        });
+        return outcomes;
+      }}`;
+      const results=[];
+      for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
+      await worker.close();
+      const [code,signal]=await exit;
+      // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
+      expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
+      const refused=Array.from({length:5},()=>"SQL statement is empty.");
+      expect(results).toEqual(Array.from({length:4},()=>empty.map(()=>refused)));
+    });
+  });
+
   it("replays captured trigger effects exactly once",async()=>{
     await fixture(async({open})=>{
       const config={schemaSql:schemaSql+`CREATE TABLE audit(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id));
