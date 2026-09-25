@@ -715,6 +715,20 @@ function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
 }
 
+// Whether `doc` already holds every change `update` makes: applying it
+// to a copy moves neither its state vector nor its delete set.
+function holdsUpdate(doc: Y.Doc, update: Uint8Array): boolean {
+  const probe = new Y.Doc();
+  try {
+    Y.applyUpdate(probe, Y.encodeStateAsUpdate(doc));
+    const held = Y.snapshot(probe);
+    Y.applyUpdate(probe, update);
+    return Y.equalSnapshots(held, Y.snapshot(probe));
+  } finally {
+    probe.destroy();
+  }
+}
+
 function isLineageChangedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(
     error,
@@ -2134,12 +2148,14 @@ export function createWorkspaceEngineCapture(
       );
     };
 
-    // A keyed update enters the canonical doc only once the engine recorded
-    // it under its key. A recovery replay carries no key, so it must never
-    // carry this update: a failed attempt restores the canonical doc,
-    // rebuilds the generation without the update, and sends it once more
-    // under its key, so the engine's key ledger decides. A second failure,
-    // or the ledger's refusal, rejects: the caller can retry with the key.
+    // A recovery replay carries no idempotency key, so it must never carry a
+    // keyed update. A failed attempt therefore restores the canonical doc to
+    // its state before the update, when the generation shares that doc, and
+    // rebuilds the generation from the engine's durable state. If that state
+    // holds the update, the engine recorded it. If not, the update goes once
+    // more under its key and the engine's key ledger decides. The caller
+    // hears "not recorded" only when a rebuilt generation shows the update
+    // absent; any other failure after a send may have recorded it.
     const applyKeyedUpdate = async (
       update: Uint8Array,
       applyOptions: Parameters<
@@ -2147,13 +2163,14 @@ export function createWorkspaceEngineCapture(
       >[2],
       armed: () => void,
     ): Promise<void> => {
+      let sent = false;
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
         try {
           if (current === null) await reviveDeadSession(doc);
         } catch (error) {
-          throw keyedWriteNotRecorded(error);
+          throw sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
         }
         if (current === null) throw closedError();
         const generation = current;
@@ -2162,6 +2179,7 @@ export function createWorkspaceEngineCapture(
         const before =
           generation.doc === doc ? Y.encodeStateAsUpdate(doc) : null;
         try {
+          sent = true;
           const journaled = generation.applyLocalUpdate(update, applyOptions);
           armed();
           await journaled;
@@ -2182,18 +2200,25 @@ export function createWorkspaceEngineCapture(
           // The failed generation still holds this doc, and keeps it until
           // something replaces the generation.
           if (isLineageChangedCause(error)) throw error;
+          const refused = isIdempotencyKeyReuseRefusal(error);
           const retired = canonicalDoc === doc ? null : doc;
           try {
             await rebind(generation, {
               releaseBeforeOpen: !isEngineSessionReconnectError(error),
             });
           } catch (rebindError) {
+            // The session's own failure, reported as one. The write's result
+            // is still the engine's answer when it gave one.
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
-            throw keyedWriteNotRecorded(error);
+            throw refused ? error : keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
-          if (isIdempotencyKeyReuseRefusal(error)) throw error;
+          if (refused) throw error;
+          if (current === null || current === generation) {
+            throw keyedWriteUncertain(error);
+          }
+          if (canonicalDoc !== null && holdsUpdate(canonicalDoc, update)) return;
           if (attempt > 0) throw keyedWriteNotRecorded(error);
         }
       }
@@ -2202,6 +2227,12 @@ export function createWorkspaceEngineCapture(
     const keyedWriteNotRecorded = (cause: unknown): Error =>
       new Error(
         `The engine did not record this write to ${input.path}, and nothing of it was kept. Retry it with the same idempotency key.`,
+        { cause },
+      );
+
+    const keyedWriteUncertain = (cause: unknown): Error =>
+      new Error(
+        `The write to ${input.path} may have been recorded. Retry it with the same idempotency key to find out; the key keeps a recorded write from applying twice.`,
         { cause },
       );
 

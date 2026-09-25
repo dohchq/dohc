@@ -1714,7 +1714,7 @@ async function daemonDeathCapture(
     lineage: "present" | "absent";
     durableUpdates: Uint8Array[];
     journalKeys: Array<string | null>;
-    dropNextApply: boolean;
+    applyFaults: Array<"drop" | "commit-then-drop" | "commit-then-die">;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1737,9 +1737,11 @@ async function daemonDeathCapture(
     durableUpdates: [] as Uint8Array[],
     // The idempotency key each journal write carried, null for none.
     journalKeys: [] as Array<string | null>,
-    // The next journal write meets a daemon that died after the generation
-    // opened; the supervisor has already relaunched it for the rebind.
-    dropNextApply: false,
+    // What the next journal writes meet, one fault per write. "drop": the
+    // daemon died before recording, and is already back for the rebind.
+    // "commit-then-drop": it recorded, then the response was lost the same
+    // way. "commit-then-die": it recorded, then died and stays down.
+    applyFaults: [] as Array<"drop" | "commit-then-drop" | "commit-then-die">,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1853,10 +1855,8 @@ async function daemonDeathCapture(
       evict: async () => undefined,
       async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
-        if (state.dropNextApply) {
-          state.dropNextApply = false;
-          throw transportDeath();
-        }
+        const fault = state.applyFaults.shift();
+        if (fault === "drop") throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
         const key = applyOptions?.idempotencyKey;
         const bytes = Buffer.from(update).toString("base64");
@@ -1876,6 +1876,8 @@ async function daemonDeathCapture(
         Y.applyUpdate(doc, update);
         state.durableUpdates.push(update);
         state.journalKeys.push(key ?? null);
+        if (fault === "commit-then-die") state.daemonAlive = false;
+        if (fault !== undefined) throw transportDeath();
       },
       async settleNow() {
         if (!state.daemonAlive) throw transportDeath();
@@ -2059,7 +2061,7 @@ it("sends a keyed write again under its key after its daemon died, so the key st
     idempotencyKey: "claim/1/0",
   });
 
-  state.dropNextApply = true;
+  state.applyFaults.push("drop");
   await expect(
     session.applyLocalUpdate(keyedUpdate(session.doc, "CHANGED "), undefined, {
       idempotencyKey: "claim/1/0",
@@ -2068,13 +2070,88 @@ it("sends a keyed write again under its key after its daemon died, so the key st
   expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
 
   // A fresh key that meets a dead daemon lands once, under that key.
-  state.dropNextApply = true;
+  state.applyFaults.push("drop");
   await session.applyLocalUpdate(keyedUpdate(session.doc, "NEXT"), undefined, {
     idempotencyKey: "claim/1/1",
   });
   expect(state.journalKeys).toEqual(["claim/1/0", "claim/1/1"]);
   expect((await session.settleNow()).content).toBe("FIRST NEXT");
   await session.close({ settle: false });
+  await capture.stop();
+});
+
+async function keyedFaultCapture(prefix: string) {
+  const fixture = await daemonDeathCapture(prefix, prefix.replace(/-+$/, ""));
+  const errors: string[] = [];
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: prefix.replace(/-+$/, ""),
+    rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions,
+    openRustYDocProviderSession: fixture.openProvider,
+    onError: (context) => errors.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  return { ...fixture, capture, session, errors };
+}
+
+it("answers success when the retry of a keyed write committed but its response was lost", async () => {
+  const { capture, session, state } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-lost-response-",
+  );
+  // The first send never records. The retry records, and its answer is lost.
+  state.applyFaults.push("drop", "commit-then-drop");
+  await session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect(session.doc.getText("plainText").toString()).toBe("KEYED");
+  expect((await session.settleNow()).content).toBe("KEYED");
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("says a keyed write may have been recorded when its retry's answer is lost with the daemon", async () => {
+  const { capture, session, state, errors } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-uncertain-",
+  );
+  state.applyFaults.push("drop", "commit-then-die");
+  await expect(
+    session.applyLocalUpdate(keyedUpdate(session.doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("may have been recorded");
+  expect(errors).toContain("Y.Doc rebind of note.md");
+
+  // It was: the daemon's lineage holds it once the daemon is back.
+  state.daemonAlive = true;
+  expect((await session.settleNow()).content).toBe("KEYED");
+  expect(state.journalKeys).toEqual(["claim/1/0"]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("keeps the key's refusal as the answer when the session then fails to release", async () => {
+  const { capture, session, state, errors } = await keyedFaultCapture(
+    "dohc-ydoc-keyed-refusal-release-",
+  );
+  await session.applyLocalUpdate(keyedUpdate(session.doc, "FIRST "), undefined, {
+    idempotencyKey: "claim/1/0",
+  });
+
+  state.failRelease = true;
+  await expect(
+    session.applyLocalUpdate(keyedUpdate(session.doc, "CHANGED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("idempotency-key-reuse-mismatch");
+  expect(errors).toContain("Y.Doc rebind of note.md");
+  expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
+  state.failRelease = false;
+  await session.close({ settle: false }).catch(() => undefined);
   await capture.stop();
 });
 
