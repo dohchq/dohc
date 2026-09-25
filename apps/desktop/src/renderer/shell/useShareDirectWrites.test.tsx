@@ -32,13 +32,13 @@ afterEach(() => {
   delete window.dohcDesktop;
 });
 
-async function setup(enabled = true) {
+async function setup(enabled = true, workspaceId = "share-view") {
   const notices: DirectWriteNotice[] = [];
   const refreshShareView = vi.fn(async () => undefined);
   const sendShareChanges = vi.fn(async () => undefined);
   const hook = renderHook(() =>
     useShareDirectWrites({
-      workspaceId: "share-view",
+      workspaceId,
       enabled,
       ownerName: "ana@example.com",
       refreshShareView,
@@ -58,9 +58,9 @@ async function settle(): Promise<void> {
   });
 }
 
-async function saved(result: PushShareDirectWritesResult) {
+async function saved(result: PushShareDirectWritesResult, workspaceId = "share-view") {
   pushShareDirectWrites.mockResolvedValueOnce(result);
-  act(() => edited?.({ workspaceId: "share-view" }));
+  act(() => edited?.({ workspaceId }));
   await settle();
 }
 
@@ -125,7 +125,7 @@ it("refreshes after a stale write and offers each unsent write as a proposal, wi
     {
       kind: "direct-write-refused",
       message:
-        "ana@example.com's server didn't take your change to packing/automations.yaml: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
+        "ana@example.com's server didn't take your change: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
       retry: null,
       label: "Send as proposal",
     },
@@ -174,10 +174,39 @@ it("offers Send as proposal for a lasting refusal, such as a grant that is not E
   })]);
 });
 
-it("says once that the server takes no direct changes, and offers Send changes", async () => {
-  const { notices, sendShareChanges } = await setup();
-  await saved({ status: "unavailable" });
-  await saved({ status: "unavailable" });
+it("counts several refused writes and gives the first reason", async () => {
+  const { notices } = await setup();
+  await saved({
+    status: "pushed",
+    writes: [
+      { result: "refused", paths: ["trip/a/collection.yaml"], reason: "trip/a/collection.yaml is not a valid collection.yaml" },
+      { result: "refused", paths: ["trip/b/collection.yaml"], reason: "trip/b/collection.yaml is not a valid collection.yaml" },
+    ],
+  });
+  expect(notices[0]!.message).toBe(
+    "ana@example.com's server didn't take 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
+  );
+});
+
+it("says once that the server takes no direct changes, offers Send changes, and stops asking", async () => {
+  const { notices, sendShareChanges, hook } = await setup(true, "lane-off-view");
+  await saved({ status: "unavailable" }, "lane-off-view");
+  expect(pushShareDirectWrites).toHaveBeenCalledTimes(1);
+  act(() => edited?.({ workspaceId: "lane-off-view" }));
+  await settle();
+  hook.unmount();
+  pushShareDirectWrites.mockClear();
+  // Opening the view again pushes nothing, on open or after a save.
+  renderHook(() =>
+    useShareDirectWrites({
+      workspaceId: "lane-off-view", enabled: true, ownerName: "ana@example.com",
+      refreshShareView: vi.fn(), sendShareChanges: vi.fn(), showNotice: vi.fn(),
+    }),
+  );
+  await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  act(() => edited?.({ workspaceId: "lane-off-view" }));
+  await settle();
+  expect(pushShareDirectWrites).not.toHaveBeenCalled();
   expect(notices).toEqual([expect.objectContaining({
     kind: "direct-write-unavailable",
     message: "ana@example.com's server doesn't take Collection changes directly. Send your changes for ana@example.com to review.",

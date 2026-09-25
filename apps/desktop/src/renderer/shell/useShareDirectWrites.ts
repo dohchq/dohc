@@ -5,6 +5,11 @@ import { bridge } from "../bridge";
 // How long saves settle before a push. A burst of saves makes one push.
 export const DIRECT_WRITE_PUSH_DELAY_MS = 800;
 
+// Share views whose relay answered that it takes no direct writes. The lane is
+// a deployment setting, so the view stops asking until the app restarts; its
+// changes wait for Send changes.
+const unavailableViews = new Set<string>();
+
 export type DirectWriteNoticeKind =
   | "direct-write-stale"
   | "direct-write-refused"
@@ -46,10 +51,9 @@ export function useShareDirectWrites(input: {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let running = false;
     let again = false;
-    // The relay's lasting answer is shown once while the view is open.
-    let unavailableShown = false;
 
     const push = async (): Promise<void> => {
+      if (unavailableViews.has(workspaceId)) return;
       if (running) {
         again = true;
         return;
@@ -80,8 +84,7 @@ export function useShareDirectWrites(input: {
       const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
       const sendAsProposal = { label: "Send as proposal", run: () => void sendShareChanges() };
       if (result.status === "unavailable") {
-        if (unavailableShown) return;
-        unavailableShown = true;
+        unavailableViews.add(workspaceId);
         showNotice({
           kind: "direct-write-unavailable",
           message: `${ownerName}'s server doesn't take Collection changes directly. Send your changes for ${ownerName} to review.`,
@@ -105,10 +108,14 @@ export function useShareDirectWrites(input: {
         });
       }
       if (refused.length > 0) {
+        // The relay's reason starts with the file's path, so it stands alone.
         const reason = refused[0]!.reason.trim().replace(/[.\s]+$/u, "");
+        const changes = refused.length === 1 ? "your change" : `${refused.length} of your changes`;
         showNotice({
           kind: "direct-write-refused",
-          message: `${ownerName}'s server didn't take your change to ${writesLabel(refused)}${reason ? `: ${reason}` : ""}. Send it as a proposal.`,
+          message: reason
+            ? `${ownerName}'s server didn't take ${changes}: ${reason}. Send ${refused.length === 1 ? "it" : "them"} as a proposal.`
+            : `${ownerName}'s server didn't take your change to ${writesLabel(refused)}. Send it as a proposal.`,
           retry: null,
           send: sendAsProposal,
         });
