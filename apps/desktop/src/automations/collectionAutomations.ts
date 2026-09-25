@@ -552,7 +552,11 @@ export class CollectionAutomations {
     const runs: CollectionAutomationRun[] = [];
     // Only the runs shown are read.
     for (const claim of listed.claims.slice(0, limit)) {
-      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs.filter((run) => !run.superseded);
+      // Oldest first. A run a person started over under a newer definition
+      // still changed records, so its writes stay in the list.
+      const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+        .sort((left, right) => left.startedAtMs - right.startedAtMs);
+      const live = stored.filter((run) => !run.superseded);
       runs.push({
         claimId: claim.claimId,
         state: claim.state,
@@ -560,10 +564,10 @@ export class CollectionAutomations {
         createdAtMs: claim.createdAtMs,
         updatedAtMs: claim.updatedAtMs,
         writes: stored.flatMap((run) => run.applied.flatMap((effect) => effect.writes)),
-        definitionChanged: hash !== null && stored.some((run) => run.definitionHash !== hash),
+        definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
         // The engine's rule: a chain stop is inserted failed and never served.
         chainStopped: claim.state === "failed" && claim.attempts === 0,
-        undone: stored.length > 0 && stored.every((run) => run.undone),
+        undone: stored.length > 0 && stored.every((run) => run.undo === "done"),
       });
     }
     return runs;
@@ -600,7 +604,7 @@ export class CollectionAutomations {
       const runs = await runsForClaim(this.options.store, input, automation);
       if (runs.unreadable) return { status: "refused", reason: UNREADABLE_RUN_ERROR };
       // An undone run's keys and record ids are spent, so it cannot run again.
-      if (runs.current?.undone || runs.changedSince?.undone) return { status: "refused", reason: UNDONE_RUN_ERROR };
+      if (runs.undo) return { status: "refused", reason: UNDONE_RUN_ERROR };
       const progressGone = runs.done === null && runs.current?.compacted === true;
       const startsOver = progressGone || (runs.current === null && runs.changedSince !== null);
       if (startsOver && !input.startOver) return { status: progressGone ? "progress-gone" : "definition-changed" };
@@ -646,16 +650,24 @@ export class CollectionAutomations {
       if (unreadable) {
         return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/automations, so it undid nothing." };
       }
-      const shown = runs.filter((run) => !run.superseded);
-      if (shown.length > 0 && shown.every((run) => run.undone)) {
+      if (runs.length > 0 && runs.every((run) => run.undo === "done")) {
         return { status: "refused", reason: "You already undid this run." };
+      }
+      // Every run of the claim changed records, one a person started over
+      // under a newer definition too. One whose Undo stopped part way is
+      // undone again: what is already back stays as it is.
+      const pending = runs.filter((run) => run.undo !== "done");
+      // Saved before anything is reversed, so no run resumes over what this
+      // puts back, even if it stops part way.
+      for (const run of pending) {
+        if (run.undo === null) await this.options.store.save({ ...run, undo: "started", updatedAtMs: this.nowMs() });
       }
       const undone = await undoCollectionAutomationRuns({
         withReads: (work) => this.withLiveEngine(work),
         withRecordWrites: this.options.withRecordWrites,
         trash,
-      }, shown, this.runAbort.signal);
-      for (const run of shown) await this.options.store.save({ ...run, undone: true, updatedAtMs: this.nowMs() });
+      }, pending, this.runAbort.signal);
+      for (const run of pending) await this.options.store.save({ ...run, undo: "done", updatedAtMs: this.nowMs() });
       return { status: "undone", ...undone };
     } finally {
       this.changing.delete(input.claimId);

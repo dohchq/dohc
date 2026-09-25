@@ -938,6 +938,64 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Count).toBe(2);
   });
 
+  it("marks an Undo started before it reverses anything, so nothing resumes over it, and resumes it next time", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The run sets its fields, then cannot add its record, so its plan could resume.
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("failed");
+
+    // Undo stops before it puts anything back: the record cannot be opened.
+    w.failures.openSession = 1;
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
+      .rejects.toThrow("The record is open in a live session elsewhere.");
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
+    const [stopped] = await w.executor.runs("collection:Tasks#stamp");
+    expect(stopped).toMatchObject({ undone: false });
+    await expect(w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: UNDONE_RUN_ERROR });
+    // A requeue from the engine's recovery does not resume the plan either.
+    claim.state = "pending";
+    w.requeue(claim);
+    w.executor.notifyClaimed();
+    await w.until(() => claim.state === "failed" && claim.error === UNDONE_RUN_ERROR);
+    expect([...w.records.values()].filter((record) => record.collection === "Log")).toEqual([]);
+
+    await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined))
+      .resolves.toEqual({ status: "undone", reverted: 2, removed: 0, changedSince: 0, missing: 0 });
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+    const [finished] = await w.executor.runs("collection:Tasks#stamp");
+    expect(finished).toMatchObject({ undone: true });
+  });
+
+  it("undoes what a run did under the definition a person started it over from", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    // The first version sets its fields, then cannot add its record.
+    w.failures.authoredWrite = 1;
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 3, Note: "done" });
+
+    await w.writeAutomations("Tasks", STAMP.replace("record.Count + 1", "record.Count + 10"));
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+    await w.until(() => w.idleDrains() >= 2);
+    await w.executor.retry({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, startOver: true });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Count).toBe(13);
+    const [run] = await w.executor.runs("collection:Tasks#stamp");
+    expect(run!.writes.filter((write) => write.kind === "field" && write.field === "Count")
+      .map((write) => write.kind === "field" && [write.before, write.after])).toEqual([[2, 3], [3, 13]]);
+
+    await w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId }, async () => undefined);
+    // Back to before the first version ran, not only before the second.
+    expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
+  });
+
   it("lets only one of an Undo and a Try again started together change a run", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });

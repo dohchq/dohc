@@ -84,9 +84,10 @@ async function locate(
 }
 
 /**
- * Undoes what these runs of one claim changed. Safe to run again after it
- * stops part way: a field already back where it was is left alone, and an
- * added record already in the trash is not found again.
+ * Undoes what these runs of one claim changed, oldest first, so each field
+ * goes back to what it held before the first run. Safe to run again after
+ * it stops part way: a field already back where it was is left alone, and
+ * an added record already in the trash is not found again.
  */
 export async function undoCollectionAutomationRuns(
   dependencies: CollectionAutomationUndoDependencies,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AutomationFailureNotice } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useRequestSequence } from "../useRequestSequence";
 
 export function useAutomationFailures(
   workspaceId: string,
@@ -59,13 +60,19 @@ export function useAutomationFailures(
       void reloadAutomationFailures().catch(() => undefined);
     });
   }, [workspaceId, workspaceIsReady, reloadAutomationFailures]);
+  // Rises when the workspace changes: a dismiss that answers after that
+  // neither reloads nor reports anything in the next workspace.
+  const workspace = useRequestSequence([workspaceId]);
   const dismissAutomationFailure = useCallback(
     (automationId: string, generation: number) => {
+      const epoch = workspace.current();
       void bridge()
         .dismissAutomationFailure({ workspaceId, automationId, generation })
-        .then(async () => await reloadAutomationFailures())
+        .then(async () => {
+          if (workspace.isCurrent(epoch)) await reloadAutomationFailures();
+        })
         .catch((error: unknown) => {
-          reportShellError("Couldn't dismiss that notice.", error);
+          if (workspace.isCurrent(epoch)) reportShellError("Couldn't dismiss that notice.", error);
         });
     },
     [workspaceId, reloadAutomationFailures, reportShellError],
