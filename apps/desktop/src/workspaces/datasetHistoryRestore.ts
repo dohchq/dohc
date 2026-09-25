@@ -36,7 +36,11 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
       // Only a button can be missing: the columns matched above. The change
       // removed it, so the reversal puts it back unless it is back already.
       if (!then) {
-        if (now.fields.some(item => item.fieldId === field.fieldId)) continue;
+        const present = now.fields.find(item => item.fieldId === field.fieldId);
+        if (present) {
+          if (present.type !== "button") throw new Error(`${present.name} is no longer a button. Review a source migration that changes it.`);
+          continue;
+        }
         if (now.fields.some(item => item.name === field.name)) throw new Error(`Another field in ${now.name} is now named ${field.name}. Rename it in Fields and names, then reverse this change.`);
         now.fields.push(structuredClone(field));
         continue;
@@ -46,8 +50,12 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
       if (!present || fieldShape(present) !== fieldShape(then)) throw new Error(`The field ${field.name} changed type or constraints. Use Fields and names to review its conversion.`);
       present.name = restoreLabel(field.name, then.name, present.name, field.name);
     }
-    // The buttons the change added go, wherever they are named now.
+    // The buttons the change added go, wherever they are named now. One a
+    // later source migration made into a column keeps its SQL column, so its
+    // descriptor must stay too.
     const added = new Set(selected.fields.filter(field => !table.fields.some(item => item.fieldId === field.fieldId)).map(field => field.fieldId));
+    const changed = now.fields.find(field => added.has(field.fieldId) && field.type !== "button");
+    if (changed) throw new Error(`${changed.name} is no longer a button. Review a source migration that changes it.`);
     now.fields = now.fields.filter(field => !added.has(field.fieldId));
     now.name = restoreLabel(table.name, selected.name, now.name, table.name);
   }

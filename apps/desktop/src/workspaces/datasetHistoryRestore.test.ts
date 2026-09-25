@@ -99,11 +99,13 @@ it("prepares a forward reversal from History, keeps newer records, and saves the
   const history = await f.handler("owner", { action: "historyRevision", workspaceId: "w", datasetId: id(1), revisionSha256: f.revision.revisionSha256 });
   expect(history.kind).toBe("history-revision");
 });
-it("reverses an added button without SQL, then puts it back, keeping later records, actions, and access", async () => {
+it("reverses an added button without SQL, then puts it back, keeping later edits, actions, and access", async () => {
   const f = await fixture();
+  const created = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "before-button"));
+  const recordId = (created.result as { id: string }).id;
   const added = await approve(f, await f.prepare({ kind: "addButton", tableId: id(2), name: "Send receipt" }));
   const button = added.revision.definition.tables[0]!.fields.at(-1)!;
-  const later = await f.host.action(call(added.revision, id(6), { values: { [id(4)]: "Ada" } }, "after-button"));
+  await f.host.action(call(added.revision, id(7), { id: recordId, expectedVersion: 1, values: { [id(4)]: "Ada Lovelace" } }, "after-button"));
   const review = await restore(f);
   expect(review.migrationSql).toBe("SELECT 1;");
   expect(review.revision.definition.tables).toEqual(f.revision.definition.tables);
@@ -111,15 +113,15 @@ it("reverses an added button without SQL, then puts it back, keeping later recor
   expect(datasetRevisionsPreserveAccess(added.revision, review.revision)).toBe(true);
   const reversed = await approve(f, review);
   const rows = (await f.host.query(call(reversed.revision, id(5)))).result as { rows: Array<{ id: string; values: Record<string, unknown> }> };
-  expect(rows.rows).toMatchObject([{ id: (later.result as { id: string }).id, values: { [id(4)]: "Ada" } }]);
+  expect(rows.rows).toMatchObject([{ id: recordId, values: { [id(4)]: "Ada Lovelace" } }]);
   // App bindings and grants pin the first approval; a call pinned to it still runs.
-  expect((await f.host.query(call(f.revision, id(5)))).result).toMatchObject({ rows: [{ values: { [id(4)]: "Ada" } }] });
+  expect((await f.host.query(call(f.revision, id(5)))).result).toMatchObject({ rows: [{ values: { [id(4)]: "Ada Lovelace" } }] });
   const again = await restore(f, added.revision.revisionSha256);
   expect(again.migrationSql).toBe("SELECT 1;");
   expect(again.revision.definition.tables[0]!.fields.at(-1)).toEqual(button);
   const restored = await approve(f, again);
   expect(f.host.describe(id(1)).tables[0]!.fields.at(-1)).toEqual(button);
-  expect((await f.host.query(call(restored.revision, id(5)))).result).toMatchObject({ rows: [{ values: { [id(4)]: "Ada" } }] });
+  expect((await f.host.query(call(restored.revision, id(5)))).result).toMatchObject({ rows: [{ values: { [id(4)]: "Ada Lovelace" } }] });
 });
 it("reverses an earlier change across a later button, and keeps the button", async () => {
   const f = await fixture();
@@ -132,6 +134,18 @@ it("reverses an earlier change across a later button, and keeps the button", asy
   expect(result.revision.definition.tables[0]!.fields.map(field => field.name)).toEqual(["ID", "Name", "Send receipt"]);
   const final = await approve(f, result);
   expect(final.revision.definition.tables[0]!.fields.at(-1)).toEqual(added.revision.definition.tables[0]!.fields.at(-1));
+});
+it("refuses to reverse a button that a later source migration made into a column", () => {
+  const generated = generateDatasetSources(definition), schemaSql = generated.files[definition.schemaPath]!, operationSource = generated.files[definition.operationsPath]!;
+  const artifact = (d: DatasetDefinition, n: number, schema = schemaSql) => ({ schemaSql: schema, operationSource, revision: describeDatasetRevision({ definition: d, revision: n, schemaSql: schema, operationSource }) });
+  const withButton = structuredClone(generated.definition); withButton.tables[0]!.fields.push({ fieldId: id(20), name: "Send receipt", type: "button" });
+  const column = structuredClone(generated.definition);
+  column.tables[0]!.fields.push({ fieldId: id(20), name: "Receipt sent", sqlColumn: "receipt_sent", type: "checkbox", required: false, unique: false });
+  const migrated = artifact(column, 3, schemaSql + "\nALTER TABLE people ADD COLUMN receipt_sent INTEGER;\n");
+  // Reversing the button's addition would drop the column's descriptor and leave its SQL column.
+  expect(() => generateDatasetHistoryRestore(migrated, artifact(generated.definition, 1), artifact(withButton, 2))).toThrow("Receipt sent is no longer a button.");
+  // Reversing its removal would put a button over the column.
+  expect(() => generateDatasetHistoryRestore(migrated, artifact(withButton, 1), artifact(generated.definition, 2))).toThrow("Receipt sent is no longer a button.");
 });
 it("refuses to put a button back over a later field with its name", () => {
   const generated = generateDatasetSources(definition), schemaSql = generated.files[definition.schemaPath]!, operationSource = generated.files[definition.operationsPath]!;
