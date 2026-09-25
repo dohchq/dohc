@@ -159,7 +159,26 @@ impl WorkspaceActor {
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, work)
+        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, None, work)
+    }
+
+    pub(crate) fn spawn_root_bound(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+        now_ms: i64,
+        root_token: String,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, RuntimeError> {
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            false,
+            Some(root_token),
+            work,
+        )
     }
 
     /// Spawn an actor whose store connection is query-only and never runs the
@@ -170,7 +189,7 @@ impl WorkspaceActor {
         generation: u64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, 0, true, work)
+        Self::spawn_with_mode(db_path, identity, generation, 0, true, None, work)
     }
 
     fn spawn_with_mode(
@@ -179,6 +198,7 @@ impl WorkspaceActor {
         generation: u64,
         now_ms: i64,
         read_only: bool,
+        root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if read_only {
@@ -211,6 +231,7 @@ impl WorkspaceActor {
                     db_path,
                     now_ms,
                     read_only,
+                    root_token,
                     rx,
                     worker_state,
                     startup_tx,
@@ -404,11 +425,15 @@ fn debug_assert_sync_context() {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
+)]
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
     read_only: bool,
+    root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
@@ -432,6 +457,8 @@ fn worker_main(
 
     let mut store = match if read_only {
         EngineStore::open_read_only_counting(&db_path, work_count.clone())
+    } else if let Some(token) = &root_token {
+        EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
         EngineStore::open_counting(&db_path, now_ms, work_count.clone())
     } {
