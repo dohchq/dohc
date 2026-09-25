@@ -652,10 +652,10 @@ describe("CLI socket server", () => {
       changes: [{
         id: "moment_primary",
         path: "primary.md",
-        summary: "Updated primary",
         files: [{ path: "primary.md", operation: "write" }],
       }],
     });
+    expect(moments.changes[0]).not.toHaveProperty("summary");
     const moment = await invoke("moment", {
       cwd: workspaceRoot,
       actor: "agent",

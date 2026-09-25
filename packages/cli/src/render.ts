@@ -126,8 +126,7 @@ function renderExport(result: ExportResult): string {
 function renderMoments(result: CliResultByVerb["moments"]): string {
   const lines = result.changes.map((change) => {
     const author = change.author?.kind === "agent" ? ` · agent ${change.author.agentId}` : "";
-    const summary = change.summary ? ` · ${lineSafe(change.summary)}` : "";
-    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${author}${summary}`;
+    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${author}`;
   });
   if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
   return lines.join("\n");

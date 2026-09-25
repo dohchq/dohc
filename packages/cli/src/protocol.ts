@@ -522,7 +522,6 @@ const rawMomentSummarySchema = z
     operation: rawMomentOperationSchema,
     path: z.string().min(1),
     versionId: z.string().min(1),
-    summary: z.string().optional(),
     author: rawMomentAuthorSchema.optional(),
     fileCount: z.literal(1),
     files: z.array(rawMomentFileSchema).optional(),

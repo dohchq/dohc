@@ -212,6 +212,8 @@ describe("desktop CLI workspace context", () => {
         id, versionId: "main", objectId: `object-${id}`, path, recordedAtMs: 20, operation: "write",
         metadata: { origin: "local-file" }, momentOrder: 1, protected: false, contentKind: "text", byteLength: 4,
       });
+      // The summary desktop capture records for a rename (workspaceEngineCapture.ts, beginFileRename).
+      const renamed = "Renamed private/moved.md to notes/moved.md";
       const snapshot = (path: string, text: string) => ({ path, contentKind: "text" as const, sha256: "sha", byteLength: text.length, text });
       const detail = (id: string, operation: VersionedTextMoment["operation"], payload: VersionedTextMoment["payload"]): VersionedTextMoment => ({
         id, workspaceId: "workspace", versionId: "main", objectId: `object-${id}`, path: payload.after.path,
@@ -219,12 +221,13 @@ describe("desktop CLI workspace context", () => {
       });
       const details: Record<string, VersionedTextMoment> = {
         journal: detail("journal", "write", { before: null, after: snapshot("private/journal.md", "dear diary") }),
-        moved: detail("moved", "rename", { before: snapshot("private/moved.md", "was private"), after: snapshot("notes/moved.md", "was private") }),
+        moved: { ...detail("moved", "rename", { before: snapshot("private/moved.md", "was private"), after: snapshot("notes/moved.md", "was private") }),
+          metadata: { origin: "local-file", summary: renamed } },
         notes: detail("notes", "write", { before: null, after: snapshot("notes.md", "plain") }),
       };
       f.capture.listMoments.mockResolvedValue({
         moments: [summary("notes", "notes.md"), summary("journal", "private/journal.md"),
-          { ...summary("moved", "notes/moved.md"), operation: "rename" }],
+          { ...summary("moved", "notes/moved.md"), operation: "rename", metadata: { origin: "local-file", summary: renamed } }],
         nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
       });
       f.capture.readMoment.mockImplementation(async (id) => ({ protected: false, moment: details[id]! }));
@@ -256,6 +259,10 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("moment", { id: "journal" })).toEqual({ ok: false, reason: "change not found: journal" });
       expect(await mcp("moment", { id: "moved" })).toEqual({ ok: false, reason: "change not found: moved" });
       expect(await mcp("moments", {})).toMatchObject({ changes: [{ id: "moved" }, { id: "notes" }], count: 2 });
+      // Neither door sends the rename's summary, which names the excluded path.
+      expect(JSON.stringify(await mcp("moments", { includeFiles: true }))).not.toContain("private/");
+      expect((await cli("history", "list", "--json")).stdout).not.toContain("private/");
+      expect((await cli("history", "list")).stdout).not.toContain("private/");
 
       // A policy file dohc cannot read hides all history, as it blocks search.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");

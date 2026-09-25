@@ -426,6 +426,9 @@ function rawChatMessage(
   };
 }
 
+// A history row carries only facts the path admission checked. The moment's
+// free-form summary is not sent: a rename's reads "Renamed <before> to <after>",
+// and its before path may be one current policy no longer admits.
 function rawMomentSummary(
   moment: Pick<
     VersionedTextMomentSummary,
@@ -440,7 +443,6 @@ function rawMomentSummary(
     operation: moment.operation,
     path: moment.path,
     versionId: moment.versionId,
-    ...(moment.metadata.summary ? { summary: moment.metadata.summary } : {}),
     ...(moment.author ? { author: moment.author } : {}),
     fileCount: 1 as const,
     ...(includeFiles
