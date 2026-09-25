@@ -114,7 +114,7 @@ const groupsFullArgsSchema = z.object(argsBase).strict();
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
 // request line over 1 MiB, which JSON escaping of both sides can reach.
-export const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
+const MAX_DOCUMENT_EDIT_BYTES = 256 * 1024;
 function fitsUtf8Bytes(value: string, limit: number): boolean {
   if (value.length > limit) return false;
   return value.length * 3 <= limit || new TextEncoder().encode(value).length <= limit;
