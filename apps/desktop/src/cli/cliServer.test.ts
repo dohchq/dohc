@@ -1435,6 +1435,7 @@ describe("CLI socket server", () => {
     const started = await invoke("fileChatStart", {
       cwd: workspaceRoot,
       actor: "agent",
+      agent: "claude-code",
       path: "tracked.md",
       title: "Budget",
       body: "Is 400 enough for food?",
@@ -1442,8 +1443,8 @@ describe("CLI socket server", () => {
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
 
-    // The comment is the file's chat, authored as the agent on behalf of
-    // the person, exactly as the agent's chat replies are.
+    // The comment is the file's chat, authored as the agent under the name
+    // it gave, on behalf of the person.
     await expect(invoke("fileChats", {
       cwd: workspaceRoot, actor: "agent", path: "tracked.md",
     })).resolves.toMatchObject({
@@ -1454,7 +1455,7 @@ describe("CLI socket server", () => {
     expect(messages).toMatchObject([{
       id: started.messageId,
       body: "Is 400 enough for food?",
-      author: { kind: "agent", displayName: "Nova" },
+      author: { kind: "agent", displayName: "claude-code" },
       authorOwnerDisplayName: "Sam",
     }]);
 
@@ -1484,6 +1485,9 @@ describe("CLI socket server", () => {
     const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
     if (!chats.ok) throw new Error(chats.reason);
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
+    // An agent that gave no name carries the agent name from the person's settings.
+    await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
+      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
 
     // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };

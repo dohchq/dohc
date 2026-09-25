@@ -1603,6 +1603,7 @@ interface FileChatStart {
   title: string;
   body: string;
   runId?: string;
+  agent?: string;
 }
 
 // A comment on a file takes the path a person's does: a chat linked to the
@@ -1633,7 +1634,7 @@ async function startFileChat(
   let message: ChatMessage;
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: { via: "cli", actor: "agent" },
+      writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
       threadId: thread.id,
       body: input.body,
       resolveAttachments: async () => [],
@@ -2217,6 +2218,7 @@ async function dispatch(
         title: request.args.title,
         body: request.args.body,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
+        ...(request.args.agent ? { agent: request.args.agent } : {}),
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
@@ -2224,7 +2226,7 @@ async function dispatch(
         context,
         options,
         requestId,
-        [input.path, input.title, input.body, input.runId ?? null],
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
         async () => {
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };

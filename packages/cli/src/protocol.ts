@@ -159,6 +159,7 @@ const documentCreateArgsSchema = z
 const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
+    agent: documentAgentNameSchema.optional(),
     requestId: requestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,

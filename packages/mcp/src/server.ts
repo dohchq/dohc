@@ -445,7 +445,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         runId: chatWriteInput.runId,
       },
     },
-    async (args) => text(await startFileChat(ctx, args)),
+    async (args) => text(await startFileChat(ctx, args, agentName())),
   );
 
   registerWrite(

@@ -2650,10 +2650,15 @@ export async function createDocument(
 export async function startFileChat(
   ctx: ToolContext,
   args: { path: string; title: string; body: string; requestId?: string; runId?: string },
+  agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "fileChatStart", { ...args, path: resolved.normalized });
+  return requestCli(ctx, "fileChatStart", {
+    ...args,
+    path: resolved.normalized,
+    ...(agent === undefined ? {} : { agent }),
+  });
 }
 
 export { safeResolve };

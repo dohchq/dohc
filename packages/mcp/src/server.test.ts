@@ -270,11 +270,11 @@ describe("MCP tool results", () => {
       request: async (request) => {
         expect(request).toMatchObject({
           verb: "fileChatStart",
-          args: { cwd: root, actor: "agent", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+          args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
         });
         return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
       },
-    });
+    }, "claude-code");
     const result = await client.callTool({
       name: "dohc_start_file_chat",
       arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
