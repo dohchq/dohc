@@ -2145,7 +2145,14 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
     };
     assert!(!cursor.bootstrap_complete);
     client
-        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_201)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_201,
+        )
         .expect("commit first batch");
     assert_eq!(
         engine
@@ -2184,7 +2191,14 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
             "the edit must be journaled before the join finishes"
         );
         client
-            .push_workspace(&mut engine, "ws", &NoFaults, 1_204, 100_000_000)
+            .push_workspace(
+                &mut engine,
+                "ws",
+                &NoFaults,
+                &crate::NoLiveLeases,
+                1_204,
+                100_000_000,
+            )
             .expect("a resumed push-first pass can publish the edit");
         assert!(
             !dohc_engine_collab::read_marker(&engine, &key)
@@ -2216,7 +2230,14 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
     };
     assert!(cursor.bootstrap_complete);
     client
-        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_301)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_301,
+        )
         .expect("finish bootstrap");
     client
         .commit_pull_cursor(
@@ -2228,6 +2249,7 @@ fn assert_join_pull_recovers_offline_edits(sparse: bool, edit_between_batches: b
                 ..cursor
             },
             &NoFaults,
+            &crate::NoLiveLeases,
             1_302,
         )
         .expect("later partial batches retain enrollment");
@@ -2312,7 +2334,14 @@ fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
 
     if creator {
         client
-            .push_workspace(&mut engine, "ws", &NoFaults, 999, 100_000_000)
+            .push_workspace(
+                &mut engine,
+                "ws",
+                &NoFaults,
+                &crate::NoLiveLeases,
+                999,
+                100_000_000,
+            )
             .expect("creator pushes before its first pull");
     }
     let first = client
@@ -2338,7 +2367,14 @@ fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
     assert_eq!(pending.cursor, resume_cursor);
     assert_eq!(pending.bootstrap_complete, creator);
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults, 1_001)
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &pending,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            1_001,
+        )
         .expect("persist partial pull");
     assert_eq!(
         engine

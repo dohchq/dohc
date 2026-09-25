@@ -1575,6 +1575,7 @@ mod tests {
 
         drop(lease);
         let cursor = crate::RelayCursor {
+            bootstrap_complete: true,
             cursor: 1,
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),

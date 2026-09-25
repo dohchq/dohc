@@ -502,7 +502,14 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     assert!(cursor.bootstrap_complete);
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     client
-        .push_workspace(&mut f.store, "ws", &NoFaults, 203, 100_000_000)
+        .push_workspace(
+            &mut f.store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            203,
+            100_000_000,
+        )
         .expect("pending exports must survive origin recovery without another pull");
     assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
