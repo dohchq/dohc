@@ -38,7 +38,8 @@ it.each([false, true])("reports temporary cleanup failure without replacing the 
   });
   try {
     await lifecycle.start();
-    await vi.waitFor(() => expect(failures).toHaveLength(unhealthy ? 2 : 1));
+    // The smoke works in a real temporary directory, which a loaded gate host can slow.
+    await vi.waitFor(() => expect(failures).toHaveLength(unhealthy ? 2 : 1), { timeout: 10_000 });
     expect(failures.some((error) => error.cause === cleanupError &&
       error.message === "Could not delete the engine startup smoke directory.")).toBe(true);
     if (unhealthy) {

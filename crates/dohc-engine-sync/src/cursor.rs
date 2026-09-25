@@ -16,6 +16,8 @@ pub struct RelayCursor {
     pub cursor: i64,
     pub replication_epoch: String,
     pub stream_identity: String,
+    /// Local bases may originate after the initial pull drains or an earlier local push.
+    pub bootstrap_complete: bool,
     /// Local-only ownership token for refusal rows surfaced with this pending
     /// cursor. Persisted relay positions never carry one.
     pub refusal_report_id: Option<String>,
@@ -44,24 +46,26 @@ pub fn read_relay_cursor(
     store.read_with(|conn| {
         let value = conn
             .query_row(
-            "SELECT cursor, replication_epoch, stream_identity FROM sync_relay_cursors WHERE workspace_id = ?1",
+            "SELECT cursor, replication_epoch, stream_identity, bootstrap_complete FROM sync_relay_cursors WHERE workspace_id = ?1",
             [workspace_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(SyncError::corrupt)?;
         value
-            .map(|(cursor, replication_epoch, stream_identity)| {
+            .map(|(cursor, replication_epoch, stream_identity, bootstrap_complete)| {
                 Ok(RelayCursor {
                     cursor: parse_relay_cursor(&cursor)?,
                     replication_epoch,
                     stream_identity,
+                    bootstrap_complete,
                     refusal_report_id: None,
                     settlement_report_id: None,
                 })
@@ -96,9 +100,14 @@ pub fn commit_relay_cursor(
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
-                "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
-                 VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
-                 cursor=excluded.cursor,replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity \
+                "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity,bootstrap_complete) \
+                 VALUES (?1,?2,?3,?4,?5) ON CONFLICT(workspace_id) DO UPDATE SET \
+                 cursor=excluded.cursor,bootstrap_complete=CASE \
+                   WHEN sync_relay_cursors.replication_epoch=excluded.replication_epoch \
+                    AND sync_relay_cursors.stream_identity=excluded.stream_identity \
+                   THEN MAX(sync_relay_cursors.bootstrap_complete,excluded.bootstrap_complete) \
+                   ELSE excluded.bootstrap_complete END, \
+                 replication_epoch=excluded.replication_epoch,stream_identity=excluded.stream_identity \
                  WHERE sync_relay_cursors.replication_epoch != excluded.replication_epoch \
                     OR sync_relay_cursors.stream_identity != excluded.stream_identity \
                     OR CAST(sync_relay_cursors.cursor AS INTEGER) <= CAST(excluded.cursor AS INTEGER)",
@@ -106,7 +115,8 @@ pub fn commit_relay_cursor(
                     workspace_id,
                     cursor.cursor.to_string(),
                     cursor.replication_epoch,
-                    cursor.stream_identity
+                    cursor.stream_identity,
+                    cursor.bootstrap_complete,
                 ],
             )
             .map_err(SyncError::persist)?;

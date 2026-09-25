@@ -34,6 +34,7 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { ipcErrorMessage } from "../ipcError";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
@@ -48,7 +49,6 @@ import {
   SETTINGS_SECTIONS,
   type SettingsSectionId,
 } from "./settingsRegistry";
-import { ipcErrorMessage } from "../ipcError";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -85,6 +85,8 @@ function StatusPill(props: { state: SaveState }) {
 
 export function SettingsDialog(props: {
   onError?: (message: string, cause?: unknown) => void;
+  /** Each workspace settings answer, so the shell can say what the file ignored. */
+  onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
   workspacePath: string;
   /**
@@ -123,6 +125,7 @@ export function SettingsDialog(props: {
     folderLeftShareId?: string;
   }) => void;
 }) {
+  const { onWorkspaceSettingsRead } = props;
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const userSaveRequestRef = useRequestSequence();
@@ -153,6 +156,7 @@ export function SettingsDialog(props: {
   const { updateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed(() => setUpdateError(null));
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [settingsFilePath, setSettingsFilePath] = useState<string | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
     if (saveStateTimerRef.current) {
@@ -180,6 +184,27 @@ export function SettingsDialog(props: {
   }, []);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
+
+  useEffect(() => {
+    let active = true;
+    void bridge()
+      .getUserSettingsFilePath()
+      .then((path) => {
+        if (active) setSettingsFilePath(path);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const openSettingsFile = useCallback(async () => {
+    try {
+      await bridge().openUserSettingsFile();
+    } catch (cause) {
+      props.onError?.(ipcErrorMessage(cause, "dohc could not open the settings file."));
+    }
+  }, [props.onError]);
 
   useEffect(
     () =>
@@ -219,6 +244,7 @@ export function SettingsDialog(props: {
         applyAppearanceSettings(nextUser.settings.appearance);
         if (!workspaceTokenRef.isCurrent(token)) return;
         setWorkspaceResult(nextWorkspace);
+        onWorkspaceSettingsRead?.(nextWorkspace);
       })
       .catch((cause) => {
         if (!cancelled) {
@@ -261,7 +287,7 @@ export function SettingsDialog(props: {
     markSaving();
     setError(null);
     try {
-      const saved = await bridge().setUserSettings({ settings });
+      const saved = await bridge().setUserSettings({ settings, base: previous.settings });
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setUserResult(saved);
       markSaved();
@@ -315,6 +341,7 @@ export function SettingsDialog(props: {
         // could not read. Take main's answer — the controls snap back to what
         // is really on disk — and never say "Saved".
         setWorkspaceResult(saved);
+        onWorkspaceSettingsRead?.(saved);
         if (saved.refusal) setSaveState("error");
         else markSaved();
       } catch (cause) {
@@ -330,7 +357,7 @@ export function SettingsDialog(props: {
         props.onError?.(ipcErrorMessage(cause, "dohc could not save this workspace's settings."), cause);
       }
     },
-    [markSaved, markSaving, props.onError, props.workspaceId, workspaceResult],
+    [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
   );
 
   // Zoom goes through main's one serialized mutation instead of a full-file
@@ -349,13 +376,8 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      // The refusal carries the reason; this surface owns the next step —
-      // "open Settings" would name the dialog the user is already in.
-      setError(
-        `${
-          ipcErrorMessage(cause)
-        } Use Reset user settings in the Advanced section, or repair the file.`,
-      );
+      // The refusal names the file and the way out.
+      setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
 
@@ -393,6 +415,7 @@ export function SettingsDialog(props: {
         return;
       }
       setWorkspaceResult(next);
+      onWorkspaceSettingsRead?.(next);
       markSaved();
     } catch (cause) {
       if (
@@ -405,7 +428,7 @@ export function SettingsDialog(props: {
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not reset this workspace's settings."), cause);
     }
-  }, [markSaved, markSaving, props.onError, props.workspaceId]);
+  }, [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateBusy("check");
@@ -824,6 +847,28 @@ export function SettingsDialog(props: {
       case "advanced":
         return (
           <div data-testid="settings-section-advanced">
+            <SettingRow
+              title="Settings file"
+              description="Changes apply when you save the file."
+              testId="settings-row-settings-file"
+            >
+              {settingsFilePath ? (
+                <code
+                  title={settingsFilePath}
+                  className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
+                >
+                  {settingsFilePath}
+                </code>
+              ) : null}
+              <button
+                type="button"
+                aria-label="Open settings file"
+                onClick={() => void openSettingsFile()}
+                className="shrink-0 rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+              >
+                Open
+              </button>
+            </SettingRow>
             <SettingRow
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."

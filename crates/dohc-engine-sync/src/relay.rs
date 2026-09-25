@@ -1203,6 +1203,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
+        let bootstrap_complete = store
+            .read_with(|conn| {
+                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+            })
+            .map_err(local)?;
         let mut cursor = current.map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
@@ -1378,6 +1383,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
         let pending_cursor = RelayCursor {
             cursor,
+            bootstrap_complete: bootstrap_complete || !has_more,
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,
@@ -1553,6 +1559,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let old_origin_id = identity.origin_id;
         let result = store
             .write_with(faults, |tx| {
+                let bootstrap_complete =
+                    crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)?;
                 let collision: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM replication_log \
@@ -1673,8 +1681,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute(
-                    "DELETE FROM sync_relay_cursors WHERE workspace_id=?1",
-                    [workspace_id],
+                    "INSERT INTO sync_relay_cursors \
+                     (workspace_id,cursor,replication_epoch,stream_identity,bootstrap_complete) \
+                     VALUES (?1,'0',?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
+                     cursor='0',replication_epoch=excluded.replication_epoch, \
+                     stream_identity=excluded.stream_identity,bootstrap_complete=excluded.bootstrap_complete",
+                    params![workspace_id, identity.replication_epoch, identity.stream_identity, bootstrap_complete],
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute(

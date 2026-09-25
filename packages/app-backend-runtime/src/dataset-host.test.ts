@@ -10,7 +10,6 @@ import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
 import { createDatasetAttempts, assertDatasetAttemptsCommitted } from "./dataset-attempts.ts";
 
-vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;

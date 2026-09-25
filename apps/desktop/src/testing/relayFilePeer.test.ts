@@ -1,8 +1,8 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import {
+import type {
   EngineDaemonLifecycle,
-  type EngineWorkspaceSessions,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { claimRelayWorkspace } from "../../e2e/helpers/relayPeer";
@@ -16,7 +16,11 @@ import {
   RelayTransportRouteGuard,
 } from "../workspaces/engineRelayClient";
 import { requireEngineBinaryOrSkip } from "./engineBinary";
-import { createRealDaemonWorkspaceSessions } from "./realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+} from "./realDaemonWorkspaceSessions";
 import { RelayFilePeer } from "./relayFilePeer";
 import { createTestScratch } from "../workspaces/testTemp";
 
@@ -321,9 +325,8 @@ describe("RelayFilePeer receiver contract", () => {
           },
         });
 
-        lifecycle = new EngineDaemonLifecycle({
+        lifecycle = createRealDaemonLifecycle({
           command: engine.require(),
-          requestTimeoutMs: 15_000,
         });
         await lifecycle.start();
         const routes = new RelayTransportRouteGuard();
@@ -334,7 +337,7 @@ describe("RelayFilePeer receiver contract", () => {
           sessions,
           routes,
           allowInsecureLoopbackForTests: true,
-          requestDeadlineMs: 15_000,
+          requestDeadlineMs: REAL_DAEMON_DEADLINE_MS,
         }).bind({
           workspaceId,
           rootPath,

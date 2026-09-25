@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
-type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
+export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
+type ShellErrorKind =
+  | "singleton-tab-split"
+  | "tab-limit"
+  | "workspace-search"
+  | SettingsFileKind;
 
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
@@ -19,6 +24,8 @@ export interface ShellError {
   // The error as it arrived, for Copy details. A person reads `message`.
   cause?: string;
   retry: (() => void) | null;
+  // A step that fixes the cause, offered beside Try again.
+  action?: { label: string; run: () => void };
   kind?: ShellErrorKind;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
@@ -152,6 +159,31 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // One row per settings file: a newer read replaces it, and a read with
+  // nothing to report clears it. Try again reads the file again; the action
+  // opens it.
+  const showSettingsFileNotice = useCallback(
+    (
+      kind: SettingsFileKind,
+      message: string | null,
+      steps: { retry: () => void; open: () => void },
+    ) => {
+      if (message === null) clearKind(kind);
+      else {
+        push({
+          message,
+          retry: steps.retry,
+          action: { label: "Open settings file", run: steps.open },
+          kind,
+        });
+      }
+    },
+    [clearKind, push],
+  );
+  // The row stays: the file is still wrong until the person saves it.
+  const runShellErrorAction = useCallback((id: string) => {
+    shellErrorsRef.current.find((error) => error.id === id)?.action?.run();
+  }, []);
   const showSuccessNotice = useCallback(
     (message: string) => push({ message, retry: null, tone: "success" }),
     [push],
@@ -185,9 +217,11 @@ export function useShellError(workspaceId: string) {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSettingsFileNotice,
     showSuccessNotice,
     hideShellError,
     dismissShellError,
     retryShellError,
+    runShellErrorAction,
   };
 }

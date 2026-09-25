@@ -85,7 +85,7 @@ async function loadGraphDocuments(
   // inside and outside mounts.
   const visiblePaths = listed.files
     .map((file) => file.path)
-    .filter((path) => classifyEngineFilePathForRead(path).kind === "tracked");
+    .filter((path) => classifyEngineFilePathForRead(path, process.platform).kind === "tracked");
   const graphPaths = visiblePaths.slice(0, MAX_GRAPH_FILES);
   const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
   const docs: MarkdownGraphDocument[] = [];

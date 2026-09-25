@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import type { RosterListing, ShareRoster } from "../automations/shareRoster";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
 
@@ -309,6 +310,9 @@ export interface RegistryEntry extends CreatedWorkspace {
   // after the render has a higher generation, so a stale click cannot hide
   // it, and an acknowledgment never moves backwards.
   automationFailureAcks?: Record<string, number>;
+  // The grants the owner gave on this workspace, as the relay last listed
+  // them. Absent until the first listing. See automations/shareRoster.ts.
+  shareRoster?: ShareRoster;
 }
 
 /**
@@ -600,6 +604,31 @@ export function createRegistryStore(registryFile: string) {
             [automationId]: next,
           },
         };
+      });
+    },
+
+    /**
+     * Store a new listing of the workspace's grants. It replaces the last
+     * listing's pull mark. The version rises only when the listing differs.
+     */
+    setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const stored = entry.shareRoster;
+        // JSON drops the undefined fields, leaving only the listing to compare.
+        const unchanged = stored !== undefined &&
+          JSON.stringify({ ...stored, version: undefined, pulledAfter: undefined }) === JSON.stringify(listing);
+        if (unchanged && (stored.pulledAfter === true) === pulledAfter) return undefined;
+        const version = (stored?.version ?? 0) + (unchanged ? 0 : 1);
+        return { ...entry, shareRoster: { ...listing, version, ...(pulledAfter ? { pulledAfter: true } : {}) } };
+      });
+    },
+
+    /** Record that a pull from the relay started after the stored listing. */
+    markShareRosterPulled(workspaceId: string): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const stored = entry.shareRoster;
+        if (!stored || stored.pulledAfter) return undefined;
+        return { ...entry, shareRoster: { ...stored, pulledAfter: true } };
       });
     },
 

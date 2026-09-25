@@ -147,7 +147,7 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
  * families here rather than to the browser default.
  */
 export const fonts = {
-  "--font-sans": '"InterVariable", system-ui, "Segoe UI", sans-serif',
+  "--font-sans": '"Inter Variable", system-ui, "Segoe UI", sans-serif',
   "--font-mono":
     '"IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace',
 } as const;

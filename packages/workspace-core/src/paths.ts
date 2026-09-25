@@ -186,17 +186,17 @@ export function validateUserWritePath(
 // does writeFile/mkdir/rename/create of a user-controlled path. Check B is
 // gated to Windows (it protects the LOCAL disk), so a name that cannot be
 // written here (`nul.md`, `a:b`, `report~1.pdf`) is refused with
-// `unsupported-name`; `platform` is injectable for tests. Reserved violations
-// still win (Check A runs first).
+// `unsupported-name`. The caller names the platform whose disk it writes; the
+// renderer has no `process` to read one from. Reserved violations still win
+// (Check A runs first).
 export function validateUserMaterializePath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
+  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
 ): WritePathValidation {
-  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isReservedPath,
-    rejectHostUnsafeNames: platform === "win32",
+    rejectHostUnsafeNames: options.platform === "win32",
   });
 }
 
@@ -209,17 +209,16 @@ export function validateUserMaterializePath(
 // workspace-RELATIVE read path is always an NTFS Alternate Data Stream
 // reference (relative paths carry no drive letters), which dohc never reads —
 // so it is refused on Windows. Off Windows a colon is a legal filename byte and
-// reads accept it. `platform` is injectable for tests.
+// reads accept it. The caller names the platform whose disk it reads.
 export function validateUserReadPath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
+  options: { allowIgnoredSegments?: boolean; platform: NodeJS.Platform },
 ): WritePathValidation {
-  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
     allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isDohcMetadataPath,
     rejectHostUnsafeNames: false,
-    rejectAdsColon: platform === "win32",
+    rejectAdsColon: options.platform === "win32",
   });
 }
 
