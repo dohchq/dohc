@@ -629,9 +629,29 @@ describe("automations wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
     ).toEqual(summary);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary),
+    ).toEqual(summary);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
     ).toThrow(ProtocolShapeError);
+  });
+
+  it("decodes a removed record's claim keyed by its moment", () => {
+    const removed = {
+      ...claim,
+      trigger: { momentOrder: 42 },
+      change: {
+        ...claim.change,
+        kind: "removed",
+        fields: [
+          { field: "status", historyId: null, previous: { value: "done" }, next: null },
+        ],
+      },
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, removed),
+    ).toEqual(removed);
   });
 
   it("decodes the claim history", () => {

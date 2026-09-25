@@ -344,7 +344,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         served_facts.fields,
         vec![AutomationFieldFact {
             field_name: "status".to_owned(),
-            history_id: facts.fields[0].history_id,
+            history_id: Some(facts.fields[0].history_id),
             previous: Some(AutomationFactValue::Whole {
                 value: serde_json::json!("open"),
             }),
@@ -569,6 +569,229 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
 // ---------------------------------------------------------------------------
 
 const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
+
+/// A record created in a document session is its creator's change: the
+/// settle that creates its file names the author of the lineage's first
+/// update, which compaction cannot fold away, whoever edited it after.
+/// Reconcile then adds the record for every automation but an automation
+/// that created it, at the creator's chain depth; a creation at the depth
+/// cap stops the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_created_in_a_document_session_is_added_as_its_creators_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = EngineStore::open(&db, 9_130).expect("open store");
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "collection-schema-object".to_owned(),
+                    path: "tasks/collection.yaml".to_owned(),
+                    text: "fields:\n  status:\n    type: text\n".to_owned(),
+                    moment_id: "collection-schema-moment".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed collection schema");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let mut handle = supervisor.open(&db, 10).expect("open actor").actor;
+    for automation_id in [AUTOMATION, "collection:tasks#other"] {
+        handle
+            .automation_subscribe(
+                WS.to_owned(),
+                subscription(automation_id, None),
+                50,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("subscribe");
+    }
+    let automation = |depth| {
+        Some(ChangeAttribution {
+            actor_kind: ChangeActorKind::Automation,
+            on_behalf_of: Some("user:ice".to_owned()),
+            depth,
+        })
+    };
+
+    let cap = dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP;
+    // (name, record, creator's depth or a person, editor's depth or a
+    // person or nobody, compact before settling, who claims, at what depth)
+    struct Case {
+        name: &'static str,
+        record_id: &'static str,
+        creator: Option<u32>,
+        editor: Option<Option<u32>>,
+        compact: bool,
+        claimers: &'static [&'static str],
+        depth: u32,
+    }
+    for case in [
+        Case {
+            name: "beta",
+            record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            creator: Some(1),
+            editor: Some(None),
+            compact: true,
+            claimers: &["collection:tasks#other"],
+            depth: 1,
+        },
+        Case {
+            name: "gamma",
+            record_id: "rec_cccccccccccccccccccccccccc",
+            creator: Some(cap),
+            editor: None,
+            compact: false,
+            claimers: &["collection:tasks#other"],
+            depth: cap,
+        },
+        Case {
+            name: "delta",
+            record_id: "rec_dddddddddddddddddddddddddd",
+            creator: None,
+            editor: Some(Some(1)),
+            compact: false,
+            claimers: &["collection:tasks#other", AUTOMATION],
+            depth: 0,
+        },
+    ] {
+        let path = format!("tasks/{}.md", case.name);
+        let key = DocKey::new(WS, "main", format!("{}-object", case.name)).expect("key");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {}\nstatus: open\n---\n\nBody", case.record_id),
+        )
+        .expect("record document");
+        let created = handle
+            .ydoc_record_update(
+                key.clone(),
+                path.clone(),
+                ContentKind::Richdoc,
+                Regime::LocalOnly,
+                doc.encode_full_state(),
+                case.creator.map(|_| AUTOMATION.to_owned()),
+                case.creator.and_then(automation),
+                None,
+                true,
+                None,
+                None,
+                100,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("create the record");
+        if let Some(editor) = case.editor {
+            handle
+                .ydoc_record_update(
+                    key.clone(),
+                    path.clone(),
+                    ContentKind::Richdoc,
+                    Regime::LocalOnly,
+                    doc.frontmatter_set("status", "doing"),
+                    editor.map(|_| AUTOMATION.to_owned()),
+                    editor.and_then(automation),
+                    created.lineage_claim_id.clone(),
+                    false,
+                    None,
+                    None,
+                    101,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("edit the record");
+        }
+        if case.compact {
+            supervisor.close(&db).expect("close actor");
+            let mut store = EngineStore::open(&db, 9_131).expect("open store");
+            dohc_engine_collab::maybe_compact(&mut store, &key, 0, &NoFaults, 105)
+                .expect("compact");
+            let updates: i64 = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_updates WHERE object_id = ?1",
+                        [&key.object_id],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("count updates");
+            assert_eq!(updates, 0, "compaction folded every update");
+            drop(store);
+            handle = supervisor.open(&db, 11).expect("reopen actor").actor;
+        }
+        handle
+            .ydoc_settle(
+                scratch.path().to_path_buf(),
+                key,
+                path,
+                ContentKind::Richdoc,
+                None,
+                None,
+                format!("{}-session", case.name),
+                Arc::new(()),
+                110,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("settle the record");
+        let claims = handle
+            .reconcile_collections(
+                WS.to_owned(),
+                "main".to_owned(),
+                scratch.path().to_path_buf(),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(()),
+                120,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("reconcile")
+            .automation_claims;
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.automation_id.as_str())
+                .collect::<Vec<_>>(),
+            case.claimers,
+            "{}: an automation does not claim a record it created",
+            case.name
+        );
+        for claim in &claims {
+            assert_eq!(claim.record_id, case.record_id);
+            assert_eq!(claim.change.kind, AutomationChangeKind::Added);
+            assert_eq!(
+                claim.change.author_origin_id.as_deref(),
+                case.creator.map(|_| AUTOMATION),
+                "{}: the creator is the author",
+                case.name
+            );
+            assert_eq!(claim.depth, case.depth, "{}", case.name);
+            assert_eq!(claim.chain_stopped(), case.depth == cap);
+        }
+    }
+    supervisor.close(&db).expect("close actor");
+}
 
 /// A pending claim seeded straight into the ledger (History trigger shape),
 /// so the crash tests exercise the claim/settle/reclaim transitions alone.

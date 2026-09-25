@@ -2338,6 +2338,8 @@ struct CaptureThreadOutcome {
     result: CaptureApplyResult,
     policy_held: bool,
     collections: Option<Result<Vec<String>, RuntimeError>>,
+    /// Automation claims the captures and the reconciliation committed.
+    automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
@@ -2454,7 +2456,10 @@ async fn apply_bound_run_with_handle(
                                     self_writes: collection_self_writes,
                                     provenance: collection_provenance,
                                 });
-                                let _ = done_tx.send(sink.reconcile_collections());
+                                let reconciled = sink.reconcile_collections();
+                                let _ = done_tx.send(
+                                    reconciled.map(|paths| (paths, sink.take_automation_claims())),
+                                );
                             });
                         match thread {
                             Ok(joiner) => {
@@ -2468,11 +2473,14 @@ async fn apply_bound_run_with_handle(
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok(Vec::new()),
+                    )) => Ok((Vec::new(), Vec::new())),
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok(paths) => paths,
+                    Ok((paths, claims)) => {
+                        crate::events::emit_automation_claimed(&events, workspace_id, &claims);
+                        paths
+                    }
                     Err(_) => {
                         status.request_collection_reconcile();
                         status.mark_degraded();
@@ -2616,6 +2624,7 @@ async fn apply_bound_run_with_handle(
                 result,
                 policy_held: sink.policy_held(),
                 collections,
+                automation_claims: sink.take_automation_claims(),
             });
         });
     let applied: Option<CaptureThreadOutcome> = match apply_thread {
@@ -2631,6 +2640,7 @@ async fn apply_bound_run_with_handle(
         mut result,
         policy_held: sink_policy_held,
         collections: collection_result,
+        automation_claims,
     }) = applied
     else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
@@ -2641,6 +2651,9 @@ async fn apply_bound_run_with_handle(
         ack_all_failed(files, plan, status).await;
         return false;
     };
+    // Claims are committed whatever else this pass decides: wake the
+    // executors now.
+    crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
     let collection_paths = match collection_result {
         Some(Ok(paths)) => paths,
         Some(Err(_)) => {
