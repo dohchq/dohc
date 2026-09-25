@@ -2578,7 +2578,6 @@ describe("markdown editor unmount flush", () => {
     });
     const toggles: Array<(() => void) | null> = [null, null];
     const flushes: DraftFlush[] = [];
-    const user = userEvent.setup();
     render(
       <>
         {[0, 1].map((index) => (
@@ -2599,21 +2598,27 @@ describe("markdown editor unmount flush", () => {
     const editors = await screen.findAllByTestId("markdown-editor");
     await waitFor(() => expect(flushes).toHaveLength(2));
     await toggleSourceOnce(() => toggles[1]);
-    const sourceEditor = screen
-      .getAllByTestId("markdown-editor")
-      .find((editor) => editor.classList.contains("dohc-code-editor"));
-    expect(sourceEditor).toBeDefined();
+    const sourceEditor = await waitFor(() => {
+      const source = screen.getAllByTestId("markdown-editor")
+        .find((editor) => editor.classList.contains("dohc-code-editor"));
+      expect(source).toBeDefined();
+      return source!;
+    });
     const sourceContent = await textEditorContent(sourceEditor!);
 
-    await user.click(editors[0]!);
-    await user.type(editors[0]!, "Body A");
+    // Keep the body pending throughout the handoff, even on a busy renderer.
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await settleUserEventAction(user.click(editors[0]!));
+    await settleUserEventAction(user.type(editors[0]!, "Body A"));
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-    await user.click(sourceContent);
+    await settleUserEventAction(user.click(sourceContent));
     codeEditorView(sourceEditor!).dispatch({
       selection: { anchor: codeEditorText(sourceEditor!).length },
     });
-    await user.keyboard("Source B");
+    await settleUserEventAction(user.keyboard("Source B"));
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -3160,9 +3165,7 @@ describe("markdown editor unmount flush", () => {
         }
         const surface = markdown
           ? screen.getByTestId("markdown-editor")
-          : (await screen.findByTestId("view-text-editor")).querySelector(
-              ".cm-content",
-            )!;
+          : await findTextEditorContent();
 
         if (markdown) {
           appendCodeEditorText(surface as HTMLElement, " first");
