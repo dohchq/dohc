@@ -2060,7 +2060,7 @@ async function dispatch(
     case "documentRead": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const validated = validateUserReadPath(request.args.path);
+      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
       try {
         return { ok: true as const, ...(await documents.read(validated.normalized)) };
