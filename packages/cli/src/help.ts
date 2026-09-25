@@ -1,4 +1,4 @@
-import { CLI_COMMANDS, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliHelpRequest, type CliVerb } from "./args";
+import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliHelpRequest, type CliVerb } from "./args";
 
 const WIDTH = 80;
 const where = "Run dohc inside a workspace folder while the dohc app is open.";
@@ -90,7 +90,7 @@ function commandHelp(name: string, command: CliCommandSpec): string[] {
 
 function verbHelp(commandName: string, command: CliCommandSpec, name: string, verb: CliVerb): string[] {
   const usage = ["dohc", commandName, name, verb.operands, "[options]"].filter(Boolean).join(" ");
-  const details = [...fieldLines(verb), ...(verb.notes ?? [])];
+  const details = [...fieldLines(verb), ...(verb.notes ?? []), ...(verb.freeText ? [`Put ${DASH_RULE}.`] : [])];
   return [
     `Usage: ${usage}`,
     "",

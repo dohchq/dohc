@@ -264,11 +264,18 @@ describe("parseCliArguments", () => {
       body: "Use -h for help",
     });
     expect(() => parseCliArguments(["chat", "post", "general", "--help", "me"], {})).toThrow(
-      "unknown post option '--help'; put -- before text that starts with a dash",
+      "unknown chat post option '--help'; put options first, then --, then text that starts with a dash",
     );
     expect(() => parseCliArguments(["chat", "reply", "th_a", "---", "Report"], {})).toThrow(
-      "unknown reply option '---'; put -- before text that starts with a dash",
+      "unknown chat reply option '---'; put options first, then --, then text that starts with a dash",
     );
+    expect(parseCliArguments(["chat", "reply", "th_a", "--needs-decision", "--as-agent", "--", "--- Report"], {})).toMatchObject({
+      actor: "agent",
+      verb: "reply",
+      needsDecision: true,
+      body: "--- Report",
+    });
+    expect(() => parseCliArguments(["dataset", "list", "--foo"], {})).toThrow(/^unknown dataset list option '--foo'$/);
     expect(() => parseCliArguments(["app", "prepare", "-h", "{}"], {})).toThrow("app prepare does not accept '{}'");
   });
 

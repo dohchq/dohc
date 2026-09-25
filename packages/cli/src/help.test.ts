@@ -48,7 +48,10 @@ describe("CLI help", () => {
     expect(flat(await help("app", "--help"))).toContain("Find workspaceId in .dohc/manifest.json");
     expect(await help("chat", "--help")).toContain("DOHC_CHAT_ACTOR=agent");
     expect(await help("chat", "reply", "--help")).toMatch(/^ {2}--resolve <message> +Resolve this open decision/m);
-    expect(await help("chat", "reply", "--help")).toContain("Put -- before text that starts with a dash.");
+    const dashRule = "Put options first, then --, then text that starts with a dash.";
+    for (const verb of ["post", "reply", "grep"]) expect(flat(await help("chat", verb, "--help"))).toContain(dashRule);
+    for (const verb of ["show", "export"]) expect(flat(await help("chat", verb, "--help"))).not.toContain(dashRule);
+    expect(flat(await help("dataset", "list", "--help"))).not.toContain(dashRule);
   });
 
   it("refuses with exit 1 instead of showing help once a verb has input", async () => {
@@ -59,7 +62,7 @@ describe("CLI help", () => {
       [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
       [
         ["chat", "post", "general", "--help", "me"],
-        "dohc: unknown post option '--help'; put -- before text that starts with a dash\n",
+        "dohc: unknown chat post option '--help'; put options first, then --, then text that starts with a dash\n",
       ],
     ] as const) {
       const send = vi.fn();

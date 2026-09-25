@@ -87,6 +87,8 @@ export interface CliVerb {
   fields?: Readonly<Record<string, z.ZodType>>;
   /** Fields the CLI requires even though the request schema leaves them optional. */
   required?: readonly string[];
+  /** The verb takes text that can start with a dash, so help and errors explain --. */
+  freeText?: boolean;
   parse(input: VerbInput): CliCommandBody;
 }
 
@@ -147,7 +149,7 @@ function readVerbInput(name: string, verb: CliVerb, tokens: readonly string[]): 
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(`unknown ${name} option '${token}'${verb.operands ? `; put -- before text that starts with a dash` : ""}`);
+      fail(`unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
     } else {
       operands.push(token);
     }
@@ -168,7 +170,8 @@ const decisionFlags: readonly CliFlag[] = [
     text: "Offer a choice. Repeat for more choices. Implies --needs-decision.",
   },
 ];
-const bodyNotes = ["Use - as the body to read it from stdin.", "Put -- before text that starts with a dash."];
+export const DASH_RULE = "options first, then --, then text that starts with a dash";
+const stdinNote = "Use - as the body to read it from stdin.";
 
 function decisionFields(input: VerbInput): { needsDecision: boolean; options?: string[] } {
   const options = allValues(input, "--option");
@@ -221,7 +224,8 @@ const CHAT_VERBS = {
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
     flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
-    notes: [...bodyNotes, "In a direct message, use reply instead."],
+    freeText: true,
+    notes: [stdinNote, "In a direct message, use reply instead."],
     parse: (input) => {
       const [group, ...bodyParts] = input.operands;
       if (!group) fail("post requires a group");
@@ -248,7 +252,8 @@ const CHAT_VERBS = {
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
     ],
-    notes: bodyNotes,
+    freeText: true,
+    notes: [stdinNote],
     parse: (input) => {
       const [thread, ...bodyParts] = input.operands;
       if (!thread) fail("reply requires a thread id");
@@ -294,7 +299,7 @@ const CHAT_VERBS = {
       { name: "--limit", value: "count", text: "Print at most this many results. The default is 100." },
       { name: "--regex", text: "Read the pattern as a regular expression." },
     ],
-    notes: ["Put -- before a pattern that starts with a dash."],
+    freeText: true,
     parse: (input) => {
       const [pattern, ...extra] = input.operands;
       if (!pattern) fail("grep requires a pattern");
@@ -674,6 +679,6 @@ export function parseCliArguments(
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
   const agent = global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
-  const body = verb.parse(readVerbInput(verbName, verb, tokens));
+  const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }
