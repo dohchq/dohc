@@ -1413,12 +1413,18 @@ export function DesktopWorkspaceShell(props: {
   // surface and, below, the versions surface and collections, from the same
   // fact.
   const isShareView = Boolean(props.workspace.shareView);
+  // An Edit share view reads and makes document Collections (ADR 0013).
+  const shareViewEditsCollections =
+    props.workspace.shareView?.access === "edit" &&
+    !props.workspace.shareView.damaged &&
+    !props.workspace.shareView.ended;
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !isShareView && workspaceSynced;
   const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     isShareView,
+    shareViewEditsCollections,
   );
   useEffect(() => {
     if (!workspaceIsReady) return;
@@ -3430,8 +3436,8 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
+      if (!isShareView || shareViewEditsCollections) void refreshCollections();
       if (!isShareView) {
-        void refreshCollections();
         void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
       }
     });
@@ -3579,7 +3585,7 @@ export function DesktopWorkspaceShell(props: {
       // Creating a collection writes collection.yaml and immediately opens
       // an engine-backed surface. Shared views therefore get neither the
       // application-menu action nor the palette entry.
-      ...(props.workspace.shareView
+      ...(props.workspace.shareView && !shareViewEditsCollections
         ? []
         : [
             {
@@ -5874,9 +5880,10 @@ export function DesktopWorkspaceShell(props: {
             });
           }} />
       ) : null}
-      {newCollectionFolder !== null && !isShareView ? (
+      {newCollectionFolder !== null && (!isShareView || shareViewEditsCollections) ? (
         <NewCollectionDialog
           workspaceId={props.workspace.workspaceId}
+          documentsOnly={isShareView}
           {...(newCollectionFolder !== ""
             ? { initialFolder: newCollectionFolder }
             : {})}

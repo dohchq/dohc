@@ -27,13 +27,13 @@ describe("useShellError", () => {
     const send = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.showDirectWriteNotice({
-      kind: "direct-write-stale", message: "stale", retry: null, sendAsProposal: send,
+      kind: "direct-write-stale", message: "stale", retry: null, send: { label: "Send as proposal", run: send },
     }));
     act(() => result.current.showDirectWriteNotice({
-      kind: "direct-write-refused", message: "refused", retry: null, sendAsProposal: send,
+      kind: "direct-write-refused", message: "refused", retry: null, send: { label: "Send as proposal", run: send },
     }));
     act(() => result.current.showDirectWriteNotice({
-      kind: "direct-write-failed", message: "failed", retry: vi.fn(), sendAsProposal: null,
+      kind: "direct-write-failed", message: "failed", retry: vi.fn(), send: null,
     }));
     expect(result.current.shellErrors.map((error) => [error.kind, error.action?.label])).toEqual([
       ["direct-write-stale", "Send as proposal"],

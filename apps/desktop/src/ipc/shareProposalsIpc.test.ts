@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
-import { ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
+import { SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
 import { registerShareProposalsIpcHandlers } from "./shareProposalsIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -221,7 +221,7 @@ describe("registered share proposal handlers", () => {
         morePending: false,
       });
     await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toEqual({
-      ok: true,
+      status: "pushed",
       writes: [
         { paths: ["docs/packing/collection.yaml"], result: "written" },
         { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas" },
@@ -235,12 +235,32 @@ describe("registered share proposal handlers", () => {
     });
   });
 
-  it("reports a failed direct push, and nothing when the relay does not take direct writes", async () => {
+  it("reports a failed push with the writes answered before it, and whether trying again can help", async () => {
     const h = await harness(); h.recipient();
-    h.pushDirect.mockRejectedValueOnce(new Error("offline"));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ ok: false, errorMessage: "offline" });
+    h.pushDirect
+      .mockResolvedValueOnce({
+        writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+        morePending: true,
+      })
+      .mockRejectedValueOnce(new Error("offline"));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({
+      status: "failed",
+      writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
+      errorMessage: "offline",
+      lasting: false,
+    });
+    h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("too large"), { wireCode: "PAYLOAD_TOO_LARGE" }));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("busy"), { wireCode: "OVERLOADED" }));
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: false });
+  });
+
+  it("says when the relay does not take direct writes", async () => {
+    const h = await harness(); h.recipient();
     h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ ok: true, writes: [] });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
   });
 
   it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {

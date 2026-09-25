@@ -175,21 +175,21 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
-  // One row per kind of direct-write answer. Send as proposal sends every
-  // waiting change and then clears the rows it answers.
+  // One row per kind of direct-write answer. Sending the waiting changes
+  // answers every row that offered it, so it clears them.
   const showDirectWriteNotice = useCallback(
     (notice: DirectWriteNotice) => {
-      const { sendAsProposal } = notice;
+      const { send } = notice;
       push({
         message: notice.message,
         retry: notice.retry,
-        ...(sendAsProposal
+        ...(send
           ? {
               action: {
-                label: "Send as proposal",
+                label: send.label,
                 run: () => {
-                  clearKind("direct-write-stale", "direct-write-refused");
-                  sendAsProposal();
+                  clearKind("direct-write-stale", "direct-write-refused", "direct-write-unavailable");
+                  send.run();
                 },
               },
             }

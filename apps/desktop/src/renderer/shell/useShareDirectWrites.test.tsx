@@ -10,12 +10,13 @@ import {
 
 let edited: ((event: { workspaceId: string }) => void) | null = null;
 const pushShareDirectWrites = vi.fn<(payload: { workspaceId: string }) => Promise<PushShareDirectWritesResult>>();
+const NOTHING: PushShareDirectWritesResult = { status: "pushed", writes: [] };
 
 beforeEach(() => {
   vi.useFakeTimers();
   edited = null;
   pushShareDirectWrites.mockReset();
-  pushShareDirectWrites.mockResolvedValue({ ok: true, writes: [] });
+  pushShareDirectWrites.mockResolvedValue(NOTHING);
   window.dohcDesktop = {
     pushShareDirectWrites,
     onShareViewEdited: (listener: (event: { workspaceId: string }) => void) => {
@@ -31,7 +32,7 @@ afterEach(() => {
   delete window.dohcDesktop;
 });
 
-function setup(enabled = true) {
+async function setup(enabled = true) {
   const notices: DirectWriteNotice[] = [];
   const refreshShareView = vi.fn(async () => undefined);
   const sendShareChanges = vi.fn(async () => undefined);
@@ -45,6 +46,9 @@ function setup(enabled = true) {
       showNotice: (notice) => notices.push(notice),
     }),
   );
+  // The push on open.
+  await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  pushShareDirectWrites.mockClear();
   return { notices, refreshShareView, sendShareChanges, hook };
 }
 
@@ -54,8 +58,25 @@ async function settle(): Promise<void> {
   });
 }
 
+async function saved(result: PushShareDirectWritesResult) {
+  pushShareDirectWrites.mockResolvedValueOnce(result);
+  act(() => edited?.({ workspaceId: "share-view" }));
+  await settle();
+}
+
+it("pushes when the view opens, so a save a workspace switch cut off goes", async () => {
+  renderHook(() =>
+    useShareDirectWrites({
+      workspaceId: "share-view", enabled: true, ownerName: "ana@example.com",
+      refreshShareView: vi.fn(), sendShareChanges: vi.fn(), showNotice: vi.fn(),
+    }),
+  );
+  await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  expect(pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "share-view" });
+});
+
 it("pushes once after a burst of saves in its own share view", async () => {
-  setup();
+  await setup();
   act(() => {
     edited?.({ workspaceId: "share-view" });
     edited?.({ workspaceId: "other" });
@@ -63,124 +84,134 @@ it("pushes once after a burst of saves in its own share view", async () => {
   });
   await settle();
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(1);
-  expect(pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "share-view" });
 });
 
-it("listens to nothing when the share view cannot write", async () => {
-  setup(false);
+it("listens to nothing and pushes nothing when the share view cannot write", async () => {
+  await setup(false);
   expect(edited).toBeNull();
-  await settle();
   expect(pushShareDirectWrites).not.toHaveBeenCalled();
 });
 
 it("stays quiet when every write went", async () => {
-  pushShareDirectWrites.mockResolvedValue({
-    ok: true,
-    writes: [{ result: "written", paths: ["trip/packing/collection.yaml"] }],
-  });
-  const { notices, refreshShareView } = setup();
-  act(() => edited?.({ workspaceId: "share-view" }));
-  await settle();
+  const { notices, refreshShareView } = await setup();
+  await saved({ status: "pushed", writes: [{ result: "written", paths: ["trip/packing/collection.yaml"] }] });
   expect(notices).toEqual([]);
   expect(refreshShareView).not.toHaveBeenCalled();
 });
 
-it("refreshes after a stale write and offers each unsent write as a proposal", async () => {
-  pushShareDirectWrites.mockResolvedValue({
-    ok: true,
+it("refreshes after a stale write and offers each unsent write as a proposal, with the relay's reason", async () => {
+  const { notices, refreshShareView, sendShareChanges } = await setup();
+  await saved({
+    status: "pushed",
     writes: [
       { result: "stale", paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml" },
+      { result: "stale", paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"], stalePath: "trip/ideas" },
       {
-        result: "stale",
-        paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"],
-        stalePath: "trip/ideas",
+        result: "refused",
+        paths: ["trip/packing/automations.yaml"],
+        reason: "trip/packing/automations.yaml changes an automation with a personal step.",
       },
-      { result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" },
     ],
   });
-  const { notices, refreshShareView, sendShareChanges } = setup();
-  act(() => edited?.({ workspaceId: "share-view" }));
-  await settle();
   expect(refreshShareView).toHaveBeenCalledTimes(1);
-  expect(notices.map(({ kind, message, retry }) => ({ kind, message, retry }))).toEqual([
+  expect(notices.map(({ kind, message, retry, send }) => ({ kind, message, retry, label: send?.label }))).toEqual([
     {
       kind: "direct-write-stale",
       message:
         "packing/collection.yaml and 1 more changed before your change reached ana@example.com. Check the new version, or send yours as a proposal.",
       retry: null,
+      label: "Send as proposal",
     },
     {
       kind: "direct-write-refused",
       message:
-        "dohc could not save your change to packing/automations.yaml directly. Send it to ana@example.com as a proposal.",
+        "ana@example.com's server didn't take your change to packing/automations.yaml: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
       retry: null,
+      label: "Send as proposal",
     },
   ]);
-  notices[1]!.sendAsProposal?.();
+  notices[1]!.send?.run();
   expect(sendShareChanges).toHaveBeenCalledTimes(1);
 });
 
 it("names a new Collection by its folder", async () => {
-  pushShareDirectWrites.mockResolvedValue({
-    ok: true,
+  const { notices } = await setup();
+  await saved({
+    status: "pushed",
     writes: [{ result: "refused", paths: ["trip/ideas/collection.yaml", "trip/ideas/a.md"], reason: "" }],
   });
-  const { notices } = setup();
-  act(() => edited?.({ workspaceId: "share-view" }));
-  await settle();
-  expect(notices[0]!.message).toBe(
-    "dohc could not save your change to ideas directly. Send it to ana@example.com as a proposal.",
-  );
+  expect(notices[0]!.message).toBe("ana@example.com's server didn't take your change to ideas. Send it as a proposal.");
 });
 
-it("reports a failed push with Try again", async () => {
-  pushShareDirectWrites.mockResolvedValueOnce({ ok: false, errorMessage: "The relay did not answer." });
-  const { notices } = setup();
-  act(() => edited?.({ workspaceId: "share-view" }));
-  await settle();
-  expect(notices).toEqual([
-    expect.objectContaining({
-      kind: "direct-write-failed",
-      message: "dohc could not send your Collection changes to ana@example.com. The relay did not answer.",
-      sendAsProposal: null,
-    }),
+it("offers Try again for a failure that may pass, and keeps the writes answered before it", async () => {
+  const { notices } = await setup();
+  await saved({
+    status: "failed",
+    writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
+    errorMessage: "The relay did not answer.",
+    lasting: false,
+  });
+  expect(notices.map(({ kind, send }) => ({ kind, label: send?.label }))).toEqual([
+    { kind: "direct-write-refused", label: "Send as proposal" },
+    { kind: "direct-write-failed", label: undefined },
   ]);
+  expect(notices[1]!.message).toBe("dohc could not send your Collection changes to ana@example.com. The relay did not answer.");
   await act(async () => {
-    notices[0]!.retry?.();
+    notices[1]!.retry?.();
     await vi.runOnlyPendingTimersAsync();
   });
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
 });
 
+it("offers Send as proposal for a lasting refusal, such as a grant that is not Edit", async () => {
+  const { notices } = await setup();
+  await saved({ status: "failed", writes: [], errorMessage: "read only", lasting: true });
+  expect(notices).toEqual([expect.objectContaining({
+    kind: "direct-write-refused",
+    message: "ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
+    retry: null,
+    send: expect.objectContaining({ label: "Send as proposal" }),
+  })]);
+});
+
+it("says once that the server takes no direct changes, and offers Send changes", async () => {
+  const { notices, sendShareChanges } = await setup();
+  await saved({ status: "unavailable" });
+  await saved({ status: "unavailable" });
+  expect(notices).toEqual([expect.objectContaining({
+    kind: "direct-write-unavailable",
+    message: "ana@example.com's server doesn't take Collection changes directly. Send your changes for ana@example.com to review.",
+    send: expect.objectContaining({ label: "Send changes" }),
+  })]);
+  notices[0]!.send?.run();
+  expect(sendShareChanges).toHaveBeenCalledTimes(1);
+});
+
 it("pushes again after a push that was running when another save came", async () => {
+  await setup();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  pushShareDirectWrites.mockImplementationOnce(
-    () => new Promise((resolve) => { finish = resolve; }),
-  );
-  setup();
+  pushShareDirectWrites.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   act(() => edited?.({ workspaceId: "share-view" }));
   await settle();
   act(() => edited?.({ workspaceId: "share-view" }));
   await settle();
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(1);
   await act(async () => {
-    finish({ ok: true, writes: [] });
+    finish(NOTHING);
     await vi.runOnlyPendingTimersAsync();
   });
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
 });
 
 it("ignores an answer that arrives after the view closed", async () => {
+  const { notices, hook } = await setup();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  pushShareDirectWrites.mockImplementationOnce(
-    () => new Promise((resolve) => { finish = resolve; }),
-  );
-  const { notices, hook } = setup();
+  pushShareDirectWrites.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   act(() => edited?.({ workspaceId: "share-view" }));
   await settle();
   hook.unmount();
   await act(async () => {
-    finish({ ok: false, errorMessage: "late" });
+    finish({ status: "failed", writes: [], errorMessage: "late", lasting: false });
   });
   expect(notices).toEqual([]);
 });

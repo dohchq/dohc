@@ -625,7 +625,7 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pushShareDirectWrites: vi.fn(
-      async (): Promise<PushShareDirectWritesResult> => ({ ok: true, writes: [] }),
+      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
     ),
     emitShareViewEdited: (event: { workspaceId: string }) => {
       for (const callback of [...shareViewEditedCallbacks]) callback(event);
@@ -8888,7 +8888,7 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.pushShareDirectWrites.mockResolvedValue({
-      ok: true,
+      status: "pushed",
       writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
     });
     renderShell(bridge, EDIT_SHARE);
@@ -8898,7 +8898,7 @@ describe("shared view send changes", () => {
     const toast = await screen.findByTestId("workspace-shell-error", {}, { timeout: 3_000 });
     expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId });
     expect(toast.textContent).toContain(
-      "dohc could not save your change to packing/automations.yaml directly. Send it to sam@dohc.test as a proposal.",
+      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
     );
     await user.click(screen.getByTestId("workspace-shell-error-action"));
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));

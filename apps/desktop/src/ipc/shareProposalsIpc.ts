@@ -20,7 +20,7 @@ import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
 import { relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
-import { ShareUnavailableError, type ShareProposal, type ShareProposalOp, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import { SharedFileReadOnlyError, ShareUnavailableError, type ShareProposal, type ShareProposalOp, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewSelector } from "../workspaces/shareViewInfo";
@@ -33,6 +33,19 @@ import type {
 } from "../workspaces/shareProposalRelay";
 
 const DIRECT_PUSH_PASSES = 4;
+
+// Engine refusals that trying again will not change: the grant, the request,
+// or the relay's decision.
+const LASTING_DIRECT_PUSH_CODES = new Set([
+  "FORBIDDEN", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED", "PAYLOAD_TOO_LARGE",
+  "QUOTA_EXCEEDED", "INVALID_PARAMS", "RELAY_METHOD_NOT_ALLOWED", "CONFLICT",
+]);
+
+function lastingDirectPushError(error: unknown): boolean {
+  if (error instanceof SharedFileReadOnlyError) return true;
+  const code = typeof error === "object" && error !== null && "wireCode" in error ? error.wireCode : undefined;
+  return typeof code === "string" && LASTING_DIRECT_PUSH_CODES.has(code);
+}
 
 export function registerShareProposalsIpcHandlers<
   Sender,
@@ -529,14 +542,17 @@ export function registerShareProposalsIpcHandlers<
             if (!result.morePending) break;
           }
         } catch (error) {
-          if (!(error instanceof ShareUnavailableError)) {
-            return PushShareDirectWritesResult.parse({
-              ok: false,
-              errorMessage: error instanceof Error ? error.message : String(error),
-            });
+          if (error instanceof ShareUnavailableError && writes.length === 0) {
+            return PushShareDirectWritesResult.parse({ status: "unavailable" });
           }
+          return PushShareDirectWritesResult.parse({
+            status: "failed",
+            writes,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
+          });
         }
-        return PushShareDirectWritesResult.parse({ ok: true, writes });
+        return PushShareDirectWritesResult.parse({ status: "pushed", writes });
       },
     );
   });

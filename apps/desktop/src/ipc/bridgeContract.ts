@@ -4878,13 +4878,22 @@ export const DirectWriteRow = z.discriminatedUnion("result", [
 ]);
 export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
 
-// A push that fails in transit is an ordinary result, for the reason a failed
+const DirectWriteRows = z.array(DirectWriteRow).max(MAX_SHARE_PROPOSAL_OPS);
+
+// What one push did. A failure is an ordinary result, for the reason a failed
 // submit is one: Electron does not carry custom Error properties across IPC.
-// A relay that does not take direct writes answers with no writes; the
-// changes stay for Send changes.
-export const PushShareDirectWritesResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), writes: z.array(DirectWriteRow).max(MAX_SHARE_PROPOSAL_OPS) }),
-  z.object({ ok: z.literal(false), errorMessage: z.string() }),
+// `unavailable`: the relay does not take direct writes, so every change
+// waits for Send changes. `failed` keeps the writes answered before it;
+// `lasting` says trying again will not help, as when the grant is not Edit.
+export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
+  z.object({ status: z.literal("unavailable") }),
+  z.object({
+    status: z.literal("failed"),
+    writes: DirectWriteRows,
+    errorMessage: z.string(),
+    lasting: z.boolean(),
+  }),
 ]);
 export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
 
