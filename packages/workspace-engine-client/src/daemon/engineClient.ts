@@ -527,15 +527,17 @@ export class FrameDecoder {
 
 export { FrameCodecError as EngineFrameError };
 
-type EngineClientErrorCode =
-  | "closed"
-  | "connect-timeout"
-  | "handshake-incomplete"
-  | "handshake-failed"
-  | "protocol-error"
-  | "request-too-large"
-  | "transport-error"
-  | "wire-error";
+export const ENGINE_CLIENT_ERROR_CODES = [
+  "closed",
+  "connect-timeout",
+  "handshake-incomplete",
+  "handshake-failed",
+  "protocol-error",
+  "request-too-large",
+  "transport-error",
+  "wire-error",
+] as const;
+type EngineClientErrorCode = (typeof ENGINE_CLIENT_ERROR_CODES)[number];
 
 /**
  * The envelope a caller’s request becomes on the wire.

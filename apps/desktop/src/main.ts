@@ -88,7 +88,7 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { release as osRelease, type as osType } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -385,6 +385,7 @@ import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
+import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
 import {
   createShareHandoffIntentSlot,
@@ -425,6 +426,12 @@ const crashReports = createCrashReportStore({
     }
   },
 });
+// A preview left by a dohc that ended while its dialog was open goes now.
+const crashReportPreview = createCrashReportPreview({
+  path: join(stateDir(), "crash-report-to-send.txt"),
+  openPath: (path) => shell.openPath(path),
+});
+void crashReportPreview.remove();
 installCrashCapture({
   process,
   app,
@@ -4682,21 +4689,26 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),
-    dismissCrashReport: ({ through }) => crashReports.dismiss(through),
+    dismissCrashReport: async ({ through }) => {
+      crashReports.dismiss(through);
+      await crashReportPreview.remove();
+    },
     // The renderer only opens the dialog. The answer comes from the person.
     sendCrashReport: async (_input, { event }) => ({
-      sent: await crashReports.send((request) => confirmCrashReportSend({
-        showMessageBox: async (options) => {
-          const window = BrowserWindow.fromWebContents(event.sender);
-          return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
-        },
-        openText: async (text) => {
-          const path = join(stateDir(), "crash-report-to-send.txt");
-          await writeFile(path, text, { mode: 0o600 });
-          const failure = await shell.openPath(path);
-          if (failure) throw new Error(`dohc could not open the report: ${failure}`);
-        },
-      }, request)),
+      sent: await crashReports.send(async (request) => {
+        try {
+          return await confirmCrashReportSend({
+            showMessageBox: async (options) => {
+              const window = BrowserWindow.fromWebContents(event.sender);
+              return window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+            },
+            openText: async (text) => await crashReportPreview.show(text),
+          }, request);
+        } finally {
+          // The preview goes when the dialog ends, whatever the answer.
+          await crashReportPreview.remove();
+        }
+      }),
     }),
   });
 

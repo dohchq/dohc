@@ -95,9 +95,39 @@ describe("crash report messages", () => {
     expect(mainError(error)).toContain("Error: Error: <message withheld> (code ENOENT, syscall open)");
   });
 
+  it("withholds a name, code, engine code, or system call that is not on a known list", () => {
+    const error = Object.assign(new Error("x"), {
+      name: "AcquisitionPlan", code: "sk_live_abc123", wireCode: "Acme_Merger", syscall: "open_acme_plans",
+    });
+    const text = mainError(error);
+    expect(text).toContain("Error: <withheld>: <message withheld> (code <withheld>, code <withheld>, syscall <withheld>)");
+    for (const secret of ["AcquisitionPlan", "sk_live_abc123", "Acme_Merger", "open_acme_plans"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  it("writes an engine message again from its template, never from the error's own words", () => {
+    const engineError = (message: string) => Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" });
+    expect(mainError(engineError(
+      "The Rust engine crashed again after 10 restarts in the last Acme merger plans. The limit is 10 restarts per Acme merger plans. dohc stopped restarting it.",
+    ))).toContain(
+      "The Rust engine crashed again after 10 restarts in the last a window. The limit is 10 restarts per a window. dohc stopped restarting it.",
+    );
+    expect(mainError(engineError("Rust engine daemon exited unexpectedly with signal ACMEPLANS.")))
+      .toContain("Rust engine daemon exited unexpectedly with signal <withheld>.");
+    expect(mainError(engineError("Rust engine acme.merger.plans timed out after 5000ms.")))
+      .toContain("EngineDaemonUnavailableError: Rust engine request timed out after 5000ms.");
+    expect(mainError(engineError(
+      "The Rust engine crashed again after 3 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
+    ))).toContain("in the last 10 minutes. The limit is 10 restarts per 10 minutes.");
+    // A class that is not the supervisor's keeps no message, even a template.
+    expect(mainError(Object.assign(new Error("Rust engine restart limit exceeded after 3 attempts."), { name: "TypeError" })))
+      .toContain("TypeError: <message withheld>");
+  });
+
   it("keeps an engine refusal's code", () => {
-    const error = Object.assign(new Error("The file notes/plan.md is open"), { name: "DaemonRefusalError", wireCode: "stale_settle" });
-    expect(mainError(error)).toContain("Error: DaemonRefusalError: <message withheld> (code stale_settle)");
+    const error = Object.assign(new Error("The file notes/plan.md is open"), { name: "DaemonRefusalError", wireCode: "SHARE_READ_ONLY" });
+    expect(mainError(error)).toContain("Error: DaemonRefusalError: <message withheld> (code SHARE_READ_ONLY)");
   });
 
   it("keeps the engine supervisor's messages, which are fixed templates", () => {
@@ -137,11 +167,11 @@ describe("crash report messages", () => {
     ].join("\n"));
   });
 
-  it("never spells out a thrown value, and keeps only a safe class name", () => {
+  it("never spells out a thrown value, and keeps only a known class name", () => {
     expect(mainError("lost C:\\Users\\sam\\notes.md")).toContain("Error: a value of type string");
     expect(mainError({ secret: "x" })).toContain("Error: a value of type object");
     const named = Object.assign(new Error("x"), { name: "Plans for Acme" });
-    expect(mainError(named)).toContain("Error: Error: <message withheld>");
+    expect(mainError(named)).toContain("Error: <withheld>: <message withheld>");
   });
 
   it("names a process that ended, keeping only Chromium's own words", () => {

@@ -320,7 +320,8 @@ export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
   );
 }
 
-const ERROR_CODES: readonly DaemonErrorCode[] = [
+// Every code the engine answers with. A crash report keeps only these.
+export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "AUTH_FAILED",
   "PROTOCOL_VERSION_UNSUPPORTED",
   "MALFORMED_FRAME",
@@ -376,7 +377,7 @@ function wireErrorFrom(error: unknown): DaemonWireError | null {
   const candidate = error.wireError;
   if (
     typeof candidate.code !== "string" ||
-    !ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
+    !DAEMON_ERROR_CODES.includes(candidate.code as DaemonErrorCode) ||
     typeof candidate.message !== "string" ||
     typeof candidate.retry !== "string" ||
     !RETRYABILITIES.includes(candidate.retry as Retryability)

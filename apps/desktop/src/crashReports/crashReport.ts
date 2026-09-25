@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CrashReportSource } from "../ipc/bridgeContract";
+import { ERROR_CODES, ERROR_NAMES, SIGNALS, SYSCALLS, WIRE_CODES } from "./crashReportValues";
 
 // One problem the desktop saw. A report keeps only what dohc itself wrote:
 // fixed facts, error classes and codes, messages that match a known
@@ -48,21 +49,52 @@ const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], str
   startup: "The workspace engine did not start.",
 };
 
-// The engine supervisor's messages (engineDaemonLifecycle.ts). Each is a
-// fixed sentence with numbers or a method name in it, never a path or a
-// person's words. A message the list does not match is withheld.
-const ENGINE_MESSAGES = [
-  /^Rust engine daemon exited unexpectedly with (?:code -?\d+|code unknown|signal [A-Z0-9]+)\.$/,
-  /^Rust engine restart limit exceeded after \d+ attempts\.$/,
-  /^The Rust engine crashed again after \d+ restarts in the last [\w ]+\. The limit is \d+ restarts per [\w ]+\. dohc stopped restarting it\.$/,
-  /^The Rust engine went silent on \d+ launches: \d+ probes in a row expired after \d+ms each with no frame of any kind from the engine\. The limit is \d+ wedges with no traffic in between\. dohc stopped restarting it\.$/,
-  /^The Rust engine is running but sent nothing: \d+ probes in a row expired after \d+ms each with no frame of any kind from the engine\. The limit is \d+ probes with no traffic\. dohc is restarting it\.$/,
-  /^Rust engine [a-z][\w.]{0,63} (?:returned an invalid result|timed out after \d+ms)\.$/,
-  /^Rust engine (?:failed its startup handshake|exited during its startup handshake|exited during its startup health check|exited while retiring the previous generation's work|daemon is not available|lifecycle is already stopping|workspace\.open returned no workspace handle)\.$/,
-  /^Electron resources path is unavailable for the packaged Rust engine\.$/,
+export const VALUE_WITHHELD = "<withheld>";
+
+// The engine supervisor's messages (engineDaemonLifecycle.ts). A matching
+// message is written again from this list, with only its numbers, a
+// window in minutes or milliseconds, and a known signal name carried over.
+// Nothing else from the error's own text reaches the report, whoever
+// threw it.
+const n = (value: string | undefined) => String(Number(value));
+const windowText = (value: string | undefined) => {
+  const match = /^(\d+)(ms| minutes?)$/.exec(value ?? "");
+  return match ? `${n(match[1])}${match[2]}` : "a window";
+};
+const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) => string]> = [
+  [/^Rust engine daemon exited unexpectedly with (?:code (-?\d+)|code unknown|signal (\w+))\.$/, (m) =>
+    `Rust engine daemon exited unexpectedly with ${
+      m[1] !== undefined ? `code ${n(m[1])}` : m[2] !== undefined ? `signal ${SIGNALS.has(m[2]) ? m[2] : VALUE_WITHHELD}` : "code unknown"
+    }.`],
+  [/^Rust engine restart limit exceeded after (\d+) attempts\.$/, (m) =>
+    `Rust engine restart limit exceeded after ${n(m[1])} attempts.`],
+  [/^The Rust engine crashed again after (\d+) restarts in the last ([\w ]+)\. The limit is (\d+) restarts per [\w ]+\. dohc stopped restarting it\.$/, (m) =>
+    `The Rust engine crashed again after ${n(m[1])} restarts in the last ${windowText(m[2])}. The limit is ${n(m[3])} restarts per ${windowText(m[2])}. dohc stopped restarting it.`],
+  [/^The Rust engine went silent on (\d+) launches: (\d+) probes in a row expired after (\d+)ms each with no frame of any kind from the engine\. The limit is (\d+) wedges with no traffic in between\. dohc stopped restarting it\.$/, (m) =>
+    `The Rust engine went silent on ${n(m[1])} launches: ${n(m[2])} probes in a row expired after ${n(m[3])}ms each with no frame of any kind from the engine. The limit is ${n(m[4])} wedges with no traffic in between. dohc stopped restarting it.`],
+  [/^The Rust engine is running but sent nothing: (\d+) probes in a row expired after (\d+)ms each with no frame of any kind from the engine\. The limit is (\d+) probes with no traffic\. dohc is restarting it\.$/, (m) =>
+    `The Rust engine is running but sent nothing: ${n(m[1])} probes in a row expired after ${n(m[2])}ms each with no frame of any kind from the engine. The limit is ${n(m[3])} probes with no traffic. dohc is restarting it.`],
+  [/^Rust engine \S+ returned an invalid result\.$/, () => "Rust engine request returned an invalid result."],
+  [/^Rust engine \S+ timed out after (\d+)ms\.$/, (m) => `Rust engine request timed out after ${n(m[1])}ms.`],
+  ...[
+    "Rust engine failed its startup handshake.",
+    "Rust engine exited during its startup handshake.",
+    "Rust engine exited during its startup health check.",
+    "Rust engine exited while retiring the previous generation's work.",
+    "Rust engine daemon is not available.",
+    "Rust engine lifecycle is already stopping.",
+    "Rust engine workspace.open returned no workspace handle.",
+    "Electron resources path is unavailable for the packaged Rust engine.",
+  ].map((sentence) => [new RegExp(`^${sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), () => sentence] as const),
 ];
-const IDENTIFIER = /^[A-Za-z_$][\w$]{0,63}$/;
-const CODE = /^[A-Za-z][\w.-]{0,63}$/;
+
+function engineMessage(message: string): string | null {
+  for (const [pattern, render] of ENGINE_MESSAGES) {
+    const match = pattern.exec(message);
+    if (match) return render(match);
+  }
+  return null;
+}
 
 /** The event as report lines: facts first, then errors and their stacks. */
 export function formatCrashEvent(
@@ -135,18 +167,18 @@ function errorLines(error: unknown, codeFrame: (frame: string) => string, withSt
   return lines;
 }
 
-// The class, the message only when it matches a known template, and the
-// codes Node and the engine attach.
+// The class, the message rebuilt from a known template, and the codes Node
+// and the engine attach, each only when it is on a known list.
 function errorSummary(error: Error): string {
-  const name = IDENTIFIER.test(error.name) ? error.name : "Error";
-  const message = name === "EngineDaemonUnavailableError" && ENGINE_MESSAGES.some((template) => template.test(error.message))
-    ? error.message
-    : MESSAGE_WITHHELD;
+  const name = ERROR_NAMES.has(error.name) ? error.name : VALUE_WITHHELD;
+  const message = (name === "EngineDaemonUnavailableError" ? engineMessage(error.message) : null) ?? MESSAGE_WITHHELD;
   const fields = error as Error & { code?: unknown; wireCode?: unknown; syscall?: unknown };
+  const known = (value: unknown, values: ReadonlySet<string>) =>
+    typeof value === "string" && values.has(value) ? value : VALUE_WITHHELD;
   const codes = [
-    ...[fields.code, fields.wireCode].filter((code): code is string => typeof code === "string" && CODE.test(code))
-      .map((code) => `code ${code}`),
-    ...(typeof fields.syscall === "string" && /^[a-z_]{1,40}$/.test(fields.syscall) ? [`syscall ${fields.syscall}`] : []),
+    ...(fields.code !== undefined ? [`code ${known(fields.code, ERROR_CODES)}`] : []),
+    ...(fields.wireCode !== undefined ? [`code ${known(fields.wireCode, WIRE_CODES)}`] : []),
+    ...(fields.syscall !== undefined ? [`syscall ${known(fields.syscall, SYSCALLS)}`] : []),
   ];
   return `${name}: ${message}${codes.length > 0 ? ` (${codes.join(", ")})` : ""}`;
 }
