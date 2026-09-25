@@ -185,7 +185,9 @@ describe("registered received-view handlers", () => {
 
   it("retains the registered view and reports the recovery path if rollback cleanup fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("pull failed")); h.cleanup.mockRejectedValue(new Error("folder busy"));
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("Files remain in");
+    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    await expect(result).rejects.toThrow("Files remain in");
+    await expect(result).rejects.toThrow("choose Forget from its menu before opening the share again");
     expect(h.registry.size).toBe(2); expect(h.open).not.toHaveBeenCalled();
   });
 

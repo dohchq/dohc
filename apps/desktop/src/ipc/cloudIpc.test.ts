@@ -351,6 +351,18 @@ describe("registered cloud handlers", () => {
     expect(h.bindRelay.mock.calls[0]?.[0]).not.toHaveProperty("attachmentId");
   });
 
+  it("keeps a failed-cleanup registration and directs recovery through Forget before rejoining", async () => {
+    const h = await harness();
+    h.enable.mockRejectedValue(new Error("download interrupted"));
+    h.cleanup.mockRejectedValue(new Error("relay still in use"));
+    const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose Forget from its menu before joining again");
+    expect(h.registry.has("joined")).toBe(true);
+    await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow("already on this machine");
+    expect(h.bootstrap).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["Passphrase required to unlock synced secrets.", "download interrupted"])("preserves the failed join folder and explains retry after %s", async (message) => {
     const h = await harness();
     h.bootstrap.mockRejectedValue(new Error(message));

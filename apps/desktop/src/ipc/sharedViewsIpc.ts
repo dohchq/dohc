@@ -210,7 +210,7 @@ export function registerSharedViewsIpcHandlers<
       },
       rollbackLabel: "open-share",
       cleanupFailureMessage:
-        `dohc could not close the failed share download. Files remain in ${rootPath}. Restart dohc, then choose another empty folder.`,
+        `dohc could not close the failed share download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before opening the share again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof ShareUnavailableError) {
           return new Error(
