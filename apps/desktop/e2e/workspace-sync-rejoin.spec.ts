@@ -959,7 +959,9 @@ test("typing continues while enabling sync replaces the open document", async ()
     // The marker was unsaved when the document was replaced. It must be on
     // disk or in a stored set-aside draft, and the notice must offer it.
     const setAsideDrafts = () =>
-      page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts") ?? "");
+      page.evaluate(() => Object.keys(localStorage)
+        .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+        .map(key => localStorage.getItem(key) ?? "").join("\n"));
     await expect
       .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
         timeout: 30_000,
@@ -996,7 +998,9 @@ test("typing continues while enabling sync replaces the open document", async ()
       await openWorkspaceFromFirstRun(restarted, temp);
       expect(
         await restarted.evaluate(
-          () => localStorage.getItem("dohc-set-aside-drafts") ?? "",
+          () => Object.keys(localStorage)
+            .filter(key => key.startsWith("dohc-set-aside-drafts:"))
+            .map(key => localStorage.getItem(key) ?? "").join("\n"),
         ),
       ).toContain("pending-marker");
       await restarted.getByTestId("notice-center-toggle").click();
