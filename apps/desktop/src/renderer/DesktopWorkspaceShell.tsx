@@ -2415,14 +2415,42 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
-  // Open automation, from a notice: the automation's Collection opens.
+  // Open automation, from a notice: the automation's Collection opens with
+  // the ⚡ panel on its runs. The page takes the ask once and clears it; the
+  // counter keeps rising after a clear, so each ask is new to the panel.
+  const [automationFocus, setAutomationFocus] = useState<
+    { collectionPath: string; automationId: string; seq: number } | null
+  >(null);
+  const automationFocusSeq = useRef(0);
   const openAutomation = useCallback(
     (automationId: string) => {
       const target = collectionAutomationOf(automationId);
-      if (target) openCollectionTab(target.collection);
+      if (!target) return;
+      openCollectionTab(target.collection);
+      automationFocusSeq.current += 1;
+      setAutomationFocus({
+        collectionPath: target.collection,
+        automationId,
+        seq: automationFocusSeq.current,
+      });
     },
     [openCollectionTab],
   );
+  const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
+  // A Collection page's errors and notices, which can answer after this
+  // window has left their workspace. Those are dropped, never shown in the
+  // next workspace.
+  const collectionReports = useMemo(() => {
+    const owner = workspaceId;
+    return {
+      onError: (fallback: string, error: unknown, retry?: (() => void) | null) => {
+        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null);
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (workspaceIdRef.current === owner) showSuccessNotice(message, undo);
+      },
+    };
+  }, [workspaceId, reportShellError, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetId: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
@@ -5521,6 +5549,13 @@ export function DesktopWorkspaceShell(props: {
                     }
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
+                    onOpenFile={(path) => openFile(path)}
+                    onError={collectionReports.onError}
+                    onNotice={collectionReports.onNotice}
+                    automationFocus={
+                      automationFocus?.collectionPath === groupCollectionPath ? automationFocus : null
+                    }
+                    onAutomationFocused={clearAutomationFocus}
                   />
                 </Suspense>
               ) : (
