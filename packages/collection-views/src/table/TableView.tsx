@@ -123,11 +123,12 @@ export function TableView({
         fields.map((field) => {
           // Relation editing needs query access to the related collection;
           // without an executor the cell stays read-only. Checkboxes commit
-          // through onChange and never open an editor.
+          // through onChange and never open an editor. Buttons store no value.
           const editable =
             !editingDisabled &&
             onCellChange !== undefined &&
             field.type !== "checkbox" &&
+            field.type !== "button" &&
             (field.type !== "relation" || relationExecutor !== undefined);
           return helper.accessor(
             (record) => record.values.find((entry) => entry.field === field.name),
@@ -231,6 +232,19 @@ export function TableView({
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
         ) : null}
         {fields.map((field) => {
+          // A button stores no value to sort by, so its header is a label.
+          if (field.type === "button") {
+            return (
+              <div
+                key={field.name}
+                role="columnheader"
+                className="flex h-7 items-center px-2 text-[12px] font-medium text-muted"
+                style={{ width: COLUMN_WIDTH }}
+              >
+                <span className="truncate">{field.name}</span>
+              </div>
+            );
+          }
           const sorted = primarySort?.field === field.name ? primarySort.direction : null;
           return (
             <div
