@@ -13,8 +13,9 @@ export function armBudget(state:BigInt64Array, kind:bigint, origin:bigint, budge
   Atomics.store(state,1,kind);Atomics.store(state,2,origin);Atomics.store(state,3,budget);
   return Atomics.add(state,0,1n)+1n;
 }
-/** Ends a budgeted step. False means the watch condemned it: its result must never reach the host. */
-export function disarmBudget(state:BigInt64Array, section:bigint):boolean {
+/** Ends a step within budget. Otherwise it stays armed until the watch ends the worker. */
+export function disarmBudget(state:BigInt64Array, section:bigint, cpuMicros:bigint):boolean {
+  if(cpuMicros-Atomics.load(state,2)>Atomics.load(state,3)) return false;
   return Atomics.compareExchange(state,0,section,section+1n)===section;
 }
 

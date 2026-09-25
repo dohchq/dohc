@@ -11,7 +11,7 @@ import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
-import { armBudget, BUDGET_STATE_SLOTS, CONDEMNED, disarmBudget, watchBudget } from "./budget-watch.js";
+import { armBudget, BUDGET_STATE_SLOTS, disarmBudget, watchBudget } from "./budget-watch.js";
 import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
 import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentProgress, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
@@ -99,9 +99,10 @@ function budgeted<T>(kind:bigint, budget:bigint, run:()=>T):T {
   const start=cpuMicros();
   const section=armBudget(budgetState,kind,start-(kind===APP_CODE ? appCharged : 0n),budget);
   const disarm=()=>{
-    // The watch condemned this step and is ending the worker. Its result must never reach the host.
-    if(!disarmBudget(budgetState,section)) for(;;) Atomics.wait(budgetState,0,CONDEMNED);
-    if(kind===APP_CODE) appCharged+=cpuMicros()-start;
+    const end=cpuMicros();
+    // Check completed work too: the watch may not have polled before this step ended.
+    if(!disarmBudget(budgetState,section,end)) for(;;) Atomics.wait(budgetState,0,Atomics.load(budgetState,0));
+    if(kind===APP_CODE) appCharged+=end-start;
     else {checkBudgetMs=undefined;progress(step);}
   };
   let result:T;

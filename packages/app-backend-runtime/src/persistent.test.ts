@@ -10,6 +10,7 @@ import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
+import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const initial={revision:0,digest:hash("initial")};
@@ -42,6 +43,12 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
 }
 
 describe("persistent dataset worker",()=>{
+  it("keeps an over-budget step armed when it finishes before the watch polls",()=>{
+    const state=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8));
+    const section=armBudget(state,1n,10_000n,1_000n);
+    expect(disarmBudget(state,section,12_000n)).toBe(false);
+    expect(Atomics.load(state,0)).toBe(section);
+  });
   it("releases its private directory before the closed worker process exits",async()=>{
     await fixture(async({root,open})=>{
       const directory=join(root,"removable");await mkdir(directory);
@@ -421,16 +428,18 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  // Short SQLite work can register zero CPU ticks on a loaded Windows host.
+  // Compute a costly index per row so replay and integrity checks exceed that granularity.
+  const cpuBudgetSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.200000c',value)));";
+
   it("charges a journal replay's app work to the CPU budget",async()=>{
     await fixture(async({open})=>{
-      const writer=await open();
-      // One statement that inserts many rows, so replaying it rebuilds the table's rows and index.
-      const prepared=await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
-        ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200000) SELECT x FROM n)");return 1}}`});
+      const writer=await open({schemaSql:cpuBudgetSchema});
+      const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
       const committed=event(prepared);
-      await expect((await open({limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+      await expect((await open({schemaSql:cpuBudgetSchema,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
         message:"The app's code ran too long: it used more than 1 ms of CPU time while replaying the journal event. Try again."});
-      await expect((await open()).apply(committed)).resolves.toMatchObject({revision:1});
+      await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
     });
   },60_000);
 
@@ -441,13 +450,13 @@ describe("persistent dataset worker",()=>{
 
   it("ends a dataset check at its own CPU budget and names it",async()=>{
     await fixture(async({root,open})=>{
-      const writer=await open({schemaSql:heavySchema});
+      const writer=await open({schemaSql:cpuBudgetSchema});
       const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,20_000)})));
       const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
       // The integrity check at open computes the index for every row.
-      await expect(open({schemaSql:heavySchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
         message:expect.stringMatching(/^The dataset's checks ran too long: they used more than \d+ ms of CPU time while checking the schema\. Try again\.$/)});
-      await expect(open({schemaSql:heavySchema,checkpointPath,cursor})).resolves.toBeDefined();
+      await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor})).resolves.toBeDefined();
     });
   },60_000);
 

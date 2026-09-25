@@ -10,7 +10,7 @@ it("ends a step over its budget without waiting for a blocked marker write, and 
   try {
     cpu = 2_000n;
     await vi.waitFor(() => expect(killed).toBe(true), { timeout: 10_000 });
-    expect(disarmBudget(state, section)).toBe(false);
+    expect(disarmBudget(state, section, cpu)).toBe(false);
   } finally { stop(); }
 });
 
