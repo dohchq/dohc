@@ -59,6 +59,7 @@ impl Daemon {
             workspace: Some(workspace),
             deadline_ms: Some(30_000),
             idempotency_key: None,
+            progress: false,
             params,
         }));
         for (stream, bytes) in streams {
@@ -131,6 +132,7 @@ impl Daemon {
             workspace,
             deadline_ms: None,
             idempotency_key: None,
+            progress: false,
             params,
         }));
         loop {

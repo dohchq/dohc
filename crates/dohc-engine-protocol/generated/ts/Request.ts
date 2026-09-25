@@ -29,4 +29,11 @@ idempotencyKey?: string | null,
  * Method-specific parameters; validated per-method behind the envelope
  * layer, bounded here as a JSON tree.
  */
-params: JsonValue, };
+params: JsonValue, 
+/**
+ * Ask for `progress` envelopes while this request works. The engine
+ * honors it only on a session that negotiated [`PROGRESS_CAPABILITY`].
+ * Omitted when false, so a request that does not ask is unchanged on
+ * the wire.
+ */
+progress?: boolean, };

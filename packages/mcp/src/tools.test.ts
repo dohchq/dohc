@@ -36,6 +36,7 @@ import {
 } from "./tools";
 import {
   DOHC_METADATA_GUARD,
+  discoverSites,
   entryCharBudget,
   nameUnitFor,
   notARealFolderRefusal,
@@ -1497,6 +1498,20 @@ describe("mcp tools operate on allowed paths", () => {
       expect(result.sites.find((site) => site.root === "vitey")).toMatchObject({
         scripts: { dev: "vite", build: "vite build" },
       });
+    });
+  });
+
+  it("detect_sites finds an app declared only by app.publish.json, as workspace-core does", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "trip/trip-poll"), { recursive: true });
+      await writeFile(join(ctx.root, "trip/trip-poll/app.publish.json"), JSON.stringify({ entryPath: "main.tsx", inputs: ["main.tsx"], packageMap: {} }));
+      await writeFile(join(ctx.root, "trip/trip-poll/main.tsx"), "document.body.textContent = 'Poll';");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.sites[0]).toMatchObject({ root: "trip/trip-poll", kind: "configured", confidence: "high" });
+      expect(result.sites[0]).toMatchObject(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx"])[0]!);
     });
   });
 

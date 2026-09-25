@@ -6414,7 +6414,7 @@ describe("shared view refresh", () => {
     ["a cased access", { paths: ["docs"], versionId: null, access: "View" }],
     ["a padded access", { paths: ["docs"], versionId: null, access: "edit " }],
     [
-      "a chat-channel access value",
+      "a chat access value",
       { paths: ["docs"], versionId: null, access: "read-write" },
     ],
   ];

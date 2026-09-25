@@ -166,8 +166,9 @@ export function createWorkspaceActivity(
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and
-      // prompts re-login, instead of spinning on a dead token.
-      cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
+      // prompts re-login, instead of spinning on a dead token. An engine
+      // stopped on the relay API version reads the same way.
+      cloudConnected: cloud.connected && !(snap?.authExpired ?? false) && !snap?.updateRequired,
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -178,6 +179,7 @@ export function createWorkspaceActivity(
     const baseStatus = {
       ...status,
       conflictCount,
+      ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],

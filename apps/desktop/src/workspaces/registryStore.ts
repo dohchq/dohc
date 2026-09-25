@@ -243,7 +243,7 @@ export interface ShareViewIdentity {
   relayUrl?: string;
 }
 
-// A shared CHANNEL this workspace joined through a chat-channel grant
+// A shared CHANNEL this workspace joined through a chat grant
 // (MU-C4): bidirectional — pulled into the local chat store and (when
 // read-write) pushed back through the member append route. `ended` marks a
 // revoked grant: the locally replayed copy stays readable but stops syncing.

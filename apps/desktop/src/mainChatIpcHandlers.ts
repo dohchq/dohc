@@ -337,7 +337,7 @@ function mapRelayShareListing(
     const kind = selector?.kind;
     if (
       !selector ||
-      (kind !== "chat-channel" && kind !== "group") ||
+      (kind !== "chat" && kind !== "group") ||
       typeof selector.channelWireId !== "string"
     ) {
       return null;

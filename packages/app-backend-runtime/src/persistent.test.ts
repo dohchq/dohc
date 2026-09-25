@@ -163,6 +163,15 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("stops an operation at its memory limit and keeps serving the dataset",async()=>{
+    await fixture(async({open})=>{
+      const worker=await open();
+      const hoard="globalThis.operations={run(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}";
+      await expect(worker.prepare({...operation(),source:hoard})).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
+      expect((await worker.prepare(operation(initial,{id:1,value:"after"}))).result).toEqual([{id:1,value:"after"}]);
+    });
+  });
+
   it("replays committed changesets without evaluating source and refuses out-of-order events",async()=>{
     await fixture(async({open})=>{
       const writer=await open(),recovered=await open();
@@ -218,6 +227,41 @@ describe("persistent dataset worker",()=>{
         } finally {session.close();}
       } finally {untrusted.close();}
       expect((await worker.prepare({...operation(),readOnly:true})).result).toEqual([]);
+    });
+  });
+
+  it("refuses SQL with no statement, which would crash the worker process",async()=>{
+    await fixture(async({open})=>{
+      // node:sqlite in Node 24.16 crashes the process after it prepares text with no statement between failed prepares.
+      let exited!:(status:[number|null,NodeJS.Signals|null])=>void;
+      const exit=new Promise<[number|null,NodeJS.Signals|null]>(resolve=>{exited=resolve;});
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",options.onMessage);child.on("error",options.onError);
+        child.on("close",(code,signal)=>{exited([code,signal]);options.onExit(code);});
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({},launch);
+      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1",
+        "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"];
+      // Each input's own outcome, so one that reaches SQLite shows. Five rounds of 24 queries stay under the 128-statement limit.
+      const source=`globalThis.operations={run(ctx){
+        const inputs=${JSON.stringify(empty)}, outcomes=inputs.map(()=>[]);
+        for(let round=0;round<5;round++) inputs.forEach((sql,index)=>{
+          try { (round%2 ? ctx.db.execute : ctx.db.query)(sql); outcomes[index].push('prepared'); }
+          catch (error) { outcomes[index].push(error.message); }
+          try { ctx.db.query('SELECT missing FROM items'); } catch {}
+        });
+        return outcomes;
+      }}`;
+      const results=[];
+      for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
+      await worker.close();
+      const [code,signal]=await exit;
+      // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
+      expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
+      const refused=Array.from({length:5},()=>"SQL statement is empty.");
+      expect(results).toEqual(Array.from({length:4},()=>empty.map(()=>refused)));
     });
   });
 

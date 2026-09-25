@@ -7,6 +7,7 @@ import {
   ShareUnavailableError,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { relayApiFetch } from "./sharedChannels";
 
 export interface SharedChannelInfo {
   shareId: string;
@@ -15,7 +16,7 @@ export interface SharedChannelInfo {
   channelWireId: string;
   access: ChatShareAccess;
   // A group grant carries the channel's folder too; joining one mounts it.
-  kind: "chat-channel" | "group";
+  kind: "chat" | "group";
   createdAtMs: number;
 }
 
@@ -30,7 +31,7 @@ async function shareFetch(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(shareUrl(relay, path), {
+  const response = await (relay.fetch ?? relayApiFetch())(shareUrl(relay, path), {
     ...init,
     headers,
   });
@@ -54,7 +55,7 @@ export async function fetchSharedChannelInfo(input: {
       ? (body.selector as Record<string, unknown>)
       : {};
   if (
-    (selector.kind !== "chat-channel" && selector.kind !== "group") ||
+    (selector.kind !== "chat" && selector.kind !== "group") ||
     typeof selector.channelWireId !== "string" ||
     selector.channelWireId.length === 0 ||
     !isChatShareAccessValue(body.access)
