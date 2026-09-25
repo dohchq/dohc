@@ -528,3 +528,82 @@ export interface RelayNoticePage {
 // POST /sync/notices/marks. Read and dismissed are one-way: marking a row
 // again, or a row the relay no longer holds, changes nothing.
 export type NoticeMark = "read" | "dismissed";
+
+// The computer that runs a workspace's schedules and Group-message
+// automations (ADR 0012). Request bodies are at most
+// AUTOMATION_HOST_MAX_BODY_BYTES, and each owner's changes are rate limited. The relay records one host per workspace. Only the
+// owner's computers read or change it, so a collaborator's computer never
+// runs these automations. A computer runs them while the last state it read
+// names it as `host.installId` and `host.handoverFrom` is null.
+//
+// An install id names one computer's dohc install. It is the computer's own
+// claim and grants nothing: every route acts only for the workspace owner.
+export const AUTOMATION_INSTALL_ID_MAX_CHARS = 256;
+// The computer's host name, as the owner's settings show it.
+export const AUTOMATION_COMPUTER_LABEL_MAX_CHARS = 64;
+// Past this, a new computer's check-in forgets the owner's computer seen
+// longest ago, unless it is the host or handing over.
+export const AUTOMATION_COMPUTERS_PER_WORKSPACE = 32;
+export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
+
+export interface RelayAutomationHost {
+  installId: string;
+  // Rises on every change. A request that changes the host names the
+  // generation it read, and a stale one is refused with `conflict`.
+  generation: number;
+  // The computer that ran these automations before the owner chose another.
+  // It stops and releases them; the new host starts after it does.
+  handoverFrom: string | null;
+  // The latest time a computer that handed over reported when it stopped:
+  // every due time at or before it ran on an earlier host. It stays through
+  // later handovers and never goes back. Null until a first release.
+  releasedThroughMs: number | null;
+}
+
+export interface RelayAutomationComputer {
+  installId: string;
+  label: string;
+  lastSeenMs: number;
+}
+
+// GET /sync/<workspaceId>/automation-host, and the answer to every POST.
+// `computers` lists the owner's computers, most recently seen first.
+export interface RelayAutomationHostState {
+  host: RelayAutomationHost | null;
+  computers: RelayAutomationComputer[];
+}
+
+// POST /sync/<workspaceId>/automation-host/check-in. Records the computer as
+// seen now under its label. With `claim`, the computer also becomes the host
+// when none is recorded: the owner's first computer to save an automation
+// claims it.
+export interface AutomationHostCheckInRequest {
+  installId: string;
+  label: string;
+  claim: boolean;
+}
+
+// POST .../automation-host/choose. The owner picks another of their checked-in
+// computers. The computer that was running hands over; choosing it back
+// cancels the handover. With no host, the chosen computer starts at once.
+// `generation` is 0 when the state had no host.
+export interface AutomationHostChooseRequest {
+  installId: string;
+  generation: number;
+}
+
+// POST .../automation-host/release. The computer handing over has stopped,
+// and every due time at or before `releasedThroughMs` ran there or on an
+// earlier host. A release older than the recorded progress leaves it.
+export interface AutomationHostReleaseRequest {
+  installId: string;
+  generation: number;
+  releasedThroughMs: number;
+}
+
+// POST .../automation-host/take-over. The owner ends a handover without the
+// old computer's release. If that computer is still running, a run can
+// repeat; the settings say so and ask first.
+export interface AutomationHostTakeOverRequest {
+  generation: number;
+}

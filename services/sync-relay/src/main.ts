@@ -20,6 +20,8 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
+import { isAutomationHostPath } from "./automationHostRoutes";
+import { AUTOMATION_HOST_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
@@ -420,6 +422,7 @@ const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
+    isAutomationHostPath(url.pathname) ? AUTOMATION_HOST_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
