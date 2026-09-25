@@ -62,6 +62,9 @@ import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from ".
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
+import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
+import { dirnameOf } from "./path";
+import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -857,6 +860,14 @@ export function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  // A record's properties show the ⚡ of the automations that set them. An
+  // editable file in a folder asks; main answers none for a folder that is
+  // not a document Collection. A shared file's automations run on its
+  // owner's computer.
+  const parentFolder = dirnameOf(props.path);
+  const fieldMarks = useCollectionFieldMarks(
+    readOnly || parentFolder === "" || isSharedWithMePath(props.path) ? null : parentFolder,
+  );
   const switchReadPendingRef = useRef(props.switchReadPending);
   switchReadPendingRef.current = props.switchReadPending;
   // The single question all three write paths ask. Both refs, because they
@@ -2005,7 +2016,7 @@ export function MarkdownView(props: {
             />
             {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={engine.doc} />
+                <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
           </div>
@@ -2227,7 +2238,7 @@ export function MarkdownView(props: {
             />
             {!readOnly ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
           </div>
@@ -2313,7 +2324,7 @@ export function MarkdownView(props: {
             />
             {!readOnly && !opening ? (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
             ) : null}
           </div>

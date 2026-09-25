@@ -344,6 +344,10 @@ impl ApplicationOwner {
                 live: false,
             };
             insert_application(tx, &application_held, &event, sequence)?;
+            // The restore arrived from the computer that asked for it. A
+            // saved receipt above returns before this, so a replay counts
+            // nothing.
+            dohc_engine_storage::count_remote_change_in_tx(tx, &b.workspace_id)?;
             let receipt = NativeRestoreApplicationReceipt {
                 fence: input.preparation.fence.clone(),
                 candidate_digest: input.candidate_digest.clone(),

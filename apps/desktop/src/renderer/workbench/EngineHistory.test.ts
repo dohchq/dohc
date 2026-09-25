@@ -78,6 +78,12 @@ describe("engineMomentSourceLabel", () => {
     );
   });
 
+  it("names an automation-authored moment by the automation's name and Collection", () => {
+    expect(
+      engineMomentSourceLabel(moment({ id: "m1", origin: "api", automationAuthor: { name: "Stamp the finish date", collection: "Tasks" } })),
+    ).toBe("Stamp the finish date in Tasks");
+  });
+
   it("keeps unattributed moments on their actor-neutral origin label", () => {
     expect(engineMomentSourceLabel(moment({ id: "m1" }))).toBe("Local file edit");
     expect(

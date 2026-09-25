@@ -64,10 +64,18 @@ export type AgentAuthor = JsonObject & {
   agentRunId?: string;
 };
 
+/**
+ * Who a file write names on its moment: an agent run, or an automation with
+ * its chain depth, so the claims the write causes carry the automation on.
+ */
+export type WriteAuthor =
+  | AgentAuthor
+  | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf: string; depth: number });
+
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
-  author?: AgentAuthor;
+  author?: WriteAuthor;
   requestId?: string;
   nowMs?: number;
   summary?: string;
@@ -612,9 +620,21 @@ const NamedAuthorSchema = mutableStruct({
   grantId: Schema.String,
   grantGeneration: Schema.Int,
 });
+const AutomationAuthorSchema = mutableStruct({
+  kind: Schema.Literal("automation"),
+  automationId: Schema.String,
+  onBehalfOf: Schema.String,
+  depth: Schema.Int,
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([AgentAuthorSchema, PublicAuthorSchema, NamedAuthorSchema, CorruptAuthorSchema]),
+  Schema.Union([
+    AgentAuthorSchema,
+    PublicAuthorSchema,
+    NamedAuthorSchema,
+    AutomationAuthorSchema,
+    CorruptAuthorSchema,
+  ]),
 );
 
 const MomentRecordSchema = mutableStruct({

@@ -12,6 +12,18 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
+import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type {
+  CollectionAutomationHolds,
+  CollectionAutomationRetry,
+  CollectionAutomationRun,
+  CollectionAutomationShareStop,
+  CollectionAutomationsFile,
+  CollectionAutomationStop,
+  CollectionFieldMark,
+  CollectionAutomationTarget,
+  CollectionAutomationUndo,
+} from "../automations/collectionAutomations";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import {
   NOTICE_BODY_MAX_CHARS,
@@ -64,6 +76,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  APP_VIEW_ID_PREFIX,
+  parseAppViewId,
   parsePluginViewId,
   PLUGIN_VIEW_ID_PREFIX,
   VIEW_IDS,
@@ -518,7 +532,7 @@ const COLLECTION_NAME = z.string().min(1).max(200);
 
 const ScalarFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
-  type: z.enum(["text", "number", "checkbox", "date", "person", "url"]),
+  type: z.enum(["text", "number", "checkbox", "date", "person", "url", "button"]),
 });
 const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
@@ -781,7 +795,8 @@ export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
 
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  context: z.enum(["tab", "editor", "status"]),
+  // A pinned app's menu names the app's folder as its path.
+  context: z.enum(["tab", "editor", "status", "pinned-app"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
   canCloseEditorGroup: z.boolean().optional(),
@@ -1364,6 +1379,9 @@ export const EngineMomentRecord = z.object({
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
+  // Present when a Collection automation authored the moment: its name as
+  // this computer's automations.yaml has it, and the Collection it belongs to.
+  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096) }).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -1520,10 +1538,19 @@ export const ChatFileReferenceInput = z.object({
 });
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
+// Messages and their authors as the renderer shows them. Only the automation
+// executor in main writes an automation's message; the renderer never sends one.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// Which automation wrote a message, when it ran on this computer.
+const CHAT_MESSAGE_AUTOMATION = z.object({
+  automationId: z.string().min(1).max(1024),
+  collectionPath: SAFE_RELATIVE_PATH,
+});
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
-  authorKind: z.enum(["human", "agent"]),
+  authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
@@ -1531,6 +1558,7 @@ export const ChatMessageRecord = z.object({
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
   createdAtMs: z.number(),
+  automation: CHAT_MESSAGE_AUTOMATION.optional(),
   // Optional on the wire so pre-phase-4 fixture objects and stored messages
   // remain compatible. Main includes the engine's authoritative array.
   attachments: z.array(ChatAttachmentRecord).optional(),
@@ -1890,12 +1918,13 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
-      authorKind: z.enum(["human", "agent"]),
+      authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
+      automation: CHAT_MESSAGE_AUTOMATION.optional(),
       reactions: z.array(ChatReactionRecord),
     })
     .nullable()
@@ -2875,10 +2904,17 @@ export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 export const SitePackageResult = SitePackageInfo.nullable();
 export type SitePackageResult = z.infer<typeof SitePackageResult>;
 
+// One surface showing an app's preview: a tab or a pinned panel.
+const SITE_PREVIEW_HOLDER_ID = z.string().min(1).max(100);
+
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  // True when the person asked for this start, which starts the preview
+  // again even when it is running. Otherwise the surface shares it.
+  restart: z.boolean(),
 });
 export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
@@ -2919,6 +2955,9 @@ export const StartSitePreviewResult = z.object({
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
   exited: z.boolean(),
+  // Which start of the app's preview this is. Every surface showing the app
+  // shows the newest one it has heard of.
+  generation: z.number().int().nonnegative(),
   build: z
     .object({
       ok: z.boolean(),
@@ -2930,6 +2969,26 @@ export const StartSitePreviewResult = z.object({
     .optional(),
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+// What a start answers: the preview, or that another surface replaced this
+// start with a newer one before it finished. The newer start's preview then
+// arrives as a SitePreviewReplacedEvent.
+export const StartSitePreviewAnswer = z.union([
+  StartSitePreviewResult,
+  z.object({ replaced: z.literal(true) }).strict(),
+]);
+export type StartSitePreviewAnswer = z.infer<typeof StartSitePreviewAnswer>;
+
+// Another surface started the app's preview again. The surface named here
+// shows `preview` from now on, or nothing when no preview runs.
+export const SitePreviewReplacedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
+  generation: z.number().int().nonnegative(),
+  preview: StartSitePreviewResult.nullable(),
+});
+export type SitePreviewReplacedEvent = z.infer<typeof SitePreviewReplacedEvent>;
 
 export const GetSitePreviewLogsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2947,9 +3006,12 @@ export type GetSitePreviewLogsResult = z.infer<
   typeof GetSitePreviewLogsResult
 >;
 
+// The surface stops showing the preview. The preview stops when no surface
+// shows it.
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
+  holderId: SITE_PREVIEW_HOLDER_ID,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 const StopSitePreviewResult = z.void();
@@ -4861,6 +4923,54 @@ export async function resolveSubmitShareChangesResult(
   }
 }
 
+export const PushShareDirectWritesPayload = z.object({
+  // The SHARE VIEW, resolved to its share and pinned grant in main, like
+  // SubmitShareChangesPayload.
+  workspaceId: WORKSPACE_ID,
+});
+export type PushShareDirectWritesPayload = z.infer<typeof PushShareDirectWritesPayload>;
+
+// A new Collection's batch is the largest write: its schema, an automations
+// file, and 500 records.
+const DirectWritePaths = z.array(z.string().min(1)).min(1).max(502);
+
+// How one direct write to a Collection's own files ended (ADR 0013). A stale
+// or refused write stays for Send changes.
+export const DirectWriteRow = z.discriminatedUnion("result", [
+  z.object({ result: z.literal("written"), paths: DirectWritePaths }),
+  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1) }),
+  z.object({ result: z.literal("refused"), paths: DirectWritePaths, reason: z.string() }),
+]);
+export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
+
+// One push's answer carries at most this many rows, over all its passes.
+export const MAX_DIRECT_WRITE_ROWS = MAX_SHARE_PROPOSAL_OPS;
+const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
+
+// What one push did. A failure is an ordinary result, for the reason a failed
+// submit is one: Electron does not carry custom Error properties across IPC.
+// `unavailable`: the relay does not take direct writes, so every change
+// waits for Send changes. `failed` keeps the writes answered before it;
+// `lasting` says trying again will not help, as when the grant is not Edit.
+export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
+  z.object({ status: z.literal("unavailable") }),
+  z.object({
+    status: z.literal("failed"),
+    writes: DirectWriteRows,
+    errorMessage: z.string(),
+    lasting: z.boolean(),
+  }),
+]);
+export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;
+
+// A direct push main ran after a save in this share view finished.
+export const ShareDirectWritesPushedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  result: PushShareDirectWritesResult,
+});
+export type ShareDirectWritesPushedEvent = z.infer<typeof ShareDirectWritesPushedEvent>;
+
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -5136,6 +5246,8 @@ export const AutomationFailureNotice = z.object({
   claimId: z.string().min(1),
   // A chain stop never ran, and no Try again can run it.
   chainStopped: z.boolean(),
+  // The automation's name in its automations.yaml, when dohc can read it.
+  name: z.string().nullable(),
   error: z.string(),
   updatedAtMs: z.number().int(),
   generation: z.number().int().nonnegative(),
@@ -5160,6 +5272,155 @@ export const DismissAutomationFailurePayload = z.object({
 export type DismissAutomationFailurePayload = z.infer<
   typeof DismissAutomationFailurePayload
 >;
+
+// ---- Collection automations (the ⚡ panel) ----
+// Main parses and writes automations.yaml, so the renderer never loads the
+// file contract. A shared view holds no executor, so it answers
+// "unavailable": its automations run on the owner's computer.
+const COLLECTION_AUTOMATION_ID = z.string().min(1).max(4096);
+
+export const ListCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
+export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
+
+export const ListCollectionAutomationRunsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+});
+export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionAutomationRunsPayload>;
+// A shared view keeps no runs: its automations run on the owner's computer.
+export type ListCollectionAutomationRunsResult =
+  | { status: "listed"; runs: CollectionAutomationRun[] }
+  | { status: "unavailable" };
+
+// Try again for a failed run. `startOver` confirms running an automation
+// that changed since the run began from its first step.
+export const RetryCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+  startOver: z.boolean(),
+});
+export type RetryCollectionAutomationPayload = z.infer<typeof RetryCollectionAutomationPayload>;
+export type RetryCollectionAutomationResult = CollectionAutomationRetry;
+
+// The builder's Collection picker: every Collection, with why a step in
+// this Collection's automations cannot reach it, or null.
+export const ListAutomationTargetsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListAutomationTargetsPayload = z.infer<typeof ListAutomationTargetsPayload>;
+export type ListAutomationTargetsResult = { collections: CollectionAutomationTarget[] } | { status: "unavailable" };
+
+// The builder checks a draft the way saving would: what the file contract
+// refuses, and each formula's syntax error or null. Formulas are one
+// expression each, as the file stores them; only their syntax is checked.
+export const CheckCollectionAutomationPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automation: z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value)),
+  formulas: z.array(z.string().max(2_000)).max(500),
+});
+export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAutomationPayload>;
+export type CheckCollectionAutomationResult = {
+  diagnostics: AutomationDiagnostic[];
+  formulaProblems: Array<string | null>;
+};
+
+// Undo for a finished run, as the person who clicked it.
+export const UndoCollectionAutomationRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  claimId: z.string().min(1).max(256),
+});
+export type UndoCollectionAutomationRunPayload = z.infer<typeof UndoCollectionAutomationRunPayload>;
+export type UndoCollectionAutomationRunResult = CollectionAutomationUndo;
+
+// A current editor allows a step that became reachable only because an
+// editor left. `seq` names the hold the person saw.
+export const ConfirmCollectionAutomationStepPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: COLLECTION_AUTOMATION_ID,
+  definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+  step: z.number().int().nonnegative().max(10_000),
+  seq: z.number().int().nonnegative(),
+});
+export type ConfirmCollectionAutomationStepPayload = z.infer<typeof ConfirmCollectionAutomationStepPayload>;
+export type ConfirmCollectionAutomationStepResult = { status: "confirmed" | "changed" };
+
+// Steps waiting for a current editor to allow them, one notice each, and
+// steps a narrower share stopped, one notice for all of them.
+export const ListAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ListAutomationHoldsPayload = z.infer<typeof ListAutomationHoldsPayload>;
+export type ListAutomationHoldsResult = CollectionAutomationHolds;
+
+// After the saved verdicts could not be read, hold every step the roster
+// allows now. "roster-unknown" means dohc cannot check who can edit yet.
+export const ResetAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type ResetAutomationHoldsPayload = z.infer<typeof ResetAutomationHoldsPayload>;
+export type ResetAutomationHoldsResult = { status: "reset" | "roster-unknown" };
+export const RevealAutomationHoldsPayload = z.object({ workspaceId: WORKSPACE_ID });
+export type RevealAutomationHoldsPayload = z.infer<typeof RevealAutomationHoldsPayload>;
+// Dismisses the stopped-steps notice. `seq` names each step's verdict the
+// person saw, so a step that stopped again since keeps its notice.
+export const DismissAutomationStopsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  stops: z.array(z.object({
+    automationId: COLLECTION_AUTOMATION_ID,
+    definitionHash: z.string().regex(/^[a-f0-9]{16}$/),
+    step: z.number().int().nonnegative().max(10_000),
+    seq: z.number().int().nonnegative(),
+  })).max(1_000),
+});
+export type DismissAutomationStopsPayload = z.infer<typeof DismissAutomationStopsPayload>;
+
+// The automation steps a share with these paths and access would stop,
+// asked before the share is made. `recipientEmail` is null for a link,
+// which makes an editor of whoever opens it.
+export const AutomationShareImpactPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  recipientEmail: EMAIL_STRING.nullable(),
+  paths: z.array(PATH_STRING).min(1).max(100),
+  access: SHARE_ACCESS,
+});
+export type AutomationShareImpactPayload = z.infer<typeof AutomationShareImpactPayload>;
+export type AutomationShareImpactResult = { stops: CollectionAutomationShareStop[] };
+
+// The fields in one Collection that switched-on automations set, for the
+// ⚡ marks on the table and the record's properties.
+export const ListCollectionFieldMarksPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type ListCollectionFieldMarksPayload = z.infer<typeof ListCollectionFieldMarksPayload>;
+export type ListCollectionFieldMarksResult = { marks: CollectionFieldMark[] };
+
+// Replaces the file's automations with these, over the content the panel
+// read (null when the file did not exist). `reformat` is the person's
+// agreement to lose the file's comments and hand formatting.
+export const WriteCollectionAutomationsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH.nullable(),
+  // The shape is only checked here; main's writer reads its own text back
+  // and refuses anything the file contract would not produce.
+  automations: z.array(z.custom<Automation>((value) => typeof value === "object" && value !== null && !Array.isArray(value))).max(50),
+  reformat: z.boolean(),
+});
+export type WriteCollectionAutomationsPayload = z.infer<typeof WriteCollectionAutomationsPayload>;
+export type WriteCollectionAutomationsResult =
+  | { status: "written"; contentHash: string }
+  | { status: "conflict" }
+  // The file has entries dohc cannot read; it has to be fixed by hand.
+  | { status: "unreadable" }
+  // The writer would lose the file's comments or hand formatting, and the
+  // person has not agreed to that. Nothing was written.
+  | { status: "reformats" }
+  | { status: "refused"; diagnostics: AutomationDiagnostic[] }
+  | { status: "unavailable" };
 
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
@@ -5471,6 +5732,14 @@ export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
 
 // `base` is the settings the caller changed. Main writes only the difference,
 // so a caller that has not yet seen an edit made in the file cannot undo it.
+// Pins or unpins one app in one workspace's sidebar.
+export const SetAppPinnedPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: SITE_ROOT_STRING,
+  pinned: z.boolean(),
+}).strict();
+export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
+
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
   base: DesktopUserSettingsSchema,
@@ -5642,11 +5911,17 @@ const PLUGIN_VIEW_ID = z
     );
   });
 
+// A pinned app's view: its folder, where each character can encode to nine.
+const APP_VIEW_ID = z
+  .string()
+  .max(APP_VIEW_ID_PREFIX.length + 4096 * 9)
+  .refine((value) => parseAppViewId(value) !== null);
+
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  // dohc's own views, or a view a plugin contributes. The catch keeps a
-  // stored id that names neither from failing the whole file.
-  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID]).catch("explorer"),
+  // dohc's own views, a view a plugin contributes, or a pinned app. The
+  // catch keeps a stored id that names none of them from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID, APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
@@ -5892,7 +6167,23 @@ export const NoticeRef = z.object({
   noticeId: codePoints(1, NOTICE_ID_MAX_CHARS),
 });
 export type NoticeRef = z.infer<typeof NoticeRef>;
-export const ListNoticesResult = z.object({ notices: z.array(NoticeRow) });
+// The signed-in account a list shows, the same key cloudSessionChanged
+// carries, or null when nobody is signed in.
+const NoticeAccountKey = z.string().min(1).max(8_192).nullable();
+export const ListNoticesResult = z.object({
+  account: NoticeAccountKey,
+  notices: z.array(NoticeRow),
+});
+export const NOTICE_MARK_BATCH_MAX = 500;
+// One notice as it opens or is dismissed, or every unread one for "Mark all
+// read", in batches. Account rows are marked only while the account the
+// list showed is still signed in.
+export const MarkNoticesPayload = z.object({
+  account: NoticeAccountKey,
+  mark: z.enum(["read", "dismissed"]),
+  notices: z.array(NoticeRef).min(1).max(NOTICE_MARK_BATCH_MAX),
+});
+export type MarkNoticesPayload = z.infer<typeof MarkNoticesPayload>;
 export const NoticesChangedEvent = z.undefined();
 
 export const noticeOperations = {
@@ -5900,13 +6191,9 @@ export const noticeOperations = {
     channel: "desktop:list-notices",
     payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
   },
-  readNotice: {
-    channel: "desktop:read-notice",
-    payload: NoticeRef, guard: "trusted-sender",
-  },
-  dismissNotice: {
-    channel: "desktop:dismiss-notice",
-    payload: NoticeRef, guard: "trusted-sender",
+  markNotices: {
+    channel: "desktop:mark-notices",
+    payload: MarkNoticesPayload, guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6279,11 +6566,14 @@ export interface DohcDesktopBridge
   ): Promise<ImportToDatabaseResult>;
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
-  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewAnswer>;
   getSitePreviewLogs(
     payload: GetSitePreviewLogsPayload,
   ): Promise<GetSitePreviewLogsResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
+  onSitePreviewReplaced(
+    listener: (event: SitePreviewReplacedEvent) => void,
+  ): () => void;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(
     listener: (event: PluginPanelOpenedEvent) => void,
@@ -6423,6 +6713,21 @@ export interface DohcDesktopBridge
   dismissAutomationFailure(
     payload: DismissAutomationFailurePayload,
   ): Promise<void>;
+  // Collection automations, for the ⚡ panel.
+  listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
+  listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
+  retryCollectionAutomation(payload: RetryCollectionAutomationPayload): Promise<RetryCollectionAutomationResult>;
+  undoCollectionAutomationRun(payload: UndoCollectionAutomationRunPayload): Promise<UndoCollectionAutomationRunResult>;
+  listAutomationTargets(payload: ListAutomationTargetsPayload): Promise<ListAutomationTargetsResult>;
+  checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
+  confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
+  listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
+  resetAutomationHolds(payload: ResetAutomationHoldsPayload): Promise<ResetAutomationHoldsResult>;
+  revealAutomationHolds(payload: RevealAutomationHoldsPayload): Promise<void>;
+  dismissAutomationStops(payload: DismissAutomationStopsPayload): Promise<void>;
+  automationShareImpact(payload: AutomationShareImpactPayload): Promise<AutomationShareImpactResult>;
+  listCollectionFieldMarks(payload: ListCollectionFieldMarksPayload): Promise<ListCollectionFieldMarksResult>;
+  writeCollectionAutomations(payload: WriteCollectionAutomationsPayload): Promise<WriteCollectionAutomationsResult>;
   // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
@@ -6440,6 +6745,12 @@ export interface DohcDesktopBridge
   submitShareChanges(
     payload: SubmitShareChangesPayload,
   ): Promise<SubmitShareChangesResult>;
+  // Writes the share view's changes to a Collection's own files straight
+  // into the owner's workspace. Every other change waits for Send changes.
+  pushShareDirectWrites(
+    payload: PushShareDirectWritesPayload,
+  ): Promise<PushShareDirectWritesResult>;
+  onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent) => void): () => void;
   listMyShareChanges(
     payload: ListMyShareChangesPayload,
   ): Promise<ListMyShareChangesResult>;
@@ -6556,6 +6867,7 @@ export interface DohcDesktopBridge
   resetUserSettings(): Promise<DesktopUserSettingsResult>;
   // Reads the settings file again, applies it, and answers what is in effect.
   reloadUserSettings(): Promise<DesktopUserSettingsResult>;
+  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
   getUserSettingsFilePath(): Promise<string>;
   // Opens the settings file in the system's editor, creating it first when
   // there is none.
@@ -6603,6 +6915,15 @@ export interface DohcDesktopBridge
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;
+  // A step started or stopped waiting for a current editor, or a share
+  // stopped a step: re-list holds and stops.
+  onAutomationHoldsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
+  // The automations main read from the workspace changed: re-read field marks.
+  onCollectionAutomationsChanged(
+    listener: (event: { workspaceId: string }) => void,
+  ): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;
