@@ -272,7 +272,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
@@ -297,6 +297,10 @@ test("verification prepares the engine after Rust without changing gate scope", 
           if(command==='pnpm' && args[1]==='@dohc/app-backend-runtime') {
             assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
             return {stdout:'compiled runtime'};
+          }
+          if(command==='pnpm' && args[1]==='@dohc/sdk') {
+            assert.deepEqual(args,['--filter','@dohc/sdk','build']);
+            return {stdout:'compiled sdk'};
           }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
@@ -420,9 +424,15 @@ test("verification prepares the engine after Rust without changing gate scope", 
           ...(mode === "pr" ? ["install"] : []),
           "app-backend-runtime",
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
-          ...(js ? ["typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
+          ...(js ? ["sdk", "typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
         ]);
         assert.equal(report.verdict, "PASS");
+        assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
+        assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));
+        assert.ok(report.timings.every(phase => phase.startedAt && phase.finishedAt && phase.seconds >= 0));
+        assert.equal(report.timings.some(phase => phase.name === "prepare"), job !== "rust");
+        assert.equal(report.timings.some(phase => phase.name === "postgres-start"), js);
+        assert.equal(report.timings.some(phase => phase.name === "postgres-stop"), js);
         assert.equal(report.provenance.status, "PASS");
         assert.equal(Boolean(report.build), job !== "rust");
         assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
@@ -776,7 +786,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
@@ -824,6 +834,8 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.dirty, false);
     assert.deepEqual(report.gates, { rust: false, js: false });
     assert.deepEqual(report.steps, []);
+    assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
+    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "source-check:finish"]);
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);

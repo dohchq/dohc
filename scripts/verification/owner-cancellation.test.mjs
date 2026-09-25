@@ -24,6 +24,13 @@ for (const kind of ["prepare", "verify"]) for (const signal of ["SIGINT", "SIGTE
         if (kind === "prepare") assert.deepEqual(result.commands, [{ command: "pnpm", args: ["install", "--frozen-lockfile"] }]);
         else {
           assert.equal(result.report.verdict, "FAIL");
+          assert.ok(result.report.seconds >= 0 && result.report.startedAt && result.report.finishedAt);
+          assert.ok(result.report.timings.every(phase => phase.seconds >= 0 && phase.finishedAt));
+          assert.equal(result.report.timings.find(phase => phase.name === "source-check:typecheck").verdict, "FAIL");
+          assert.equal(result.report.timings.find(phase => phase.name === "postgres-stop").verdict, cleanupFails ? "FAIL" : "PASS");
+          const cleanup = result.report.timings.find(phase => phase.name === "postgres-stop");
+          assert.ok(result.report.seconds >= cleanup.seconds);
+          assert.ok(Date.parse(result.report.finishedAt) >= Date.parse(cleanup.finishedAt));
           assert.match(result.report.error, new RegExp(`interrupted by ${signal}`));
           assert.deepEqual(result.commands.at(-1), { command: "docker", args: ["rm", "--force", "a".repeat(64)] });
           assert.equal(result.commands.some(({ args }) => args.includes("test")), false);

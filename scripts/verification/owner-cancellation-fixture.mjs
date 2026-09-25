@@ -8,7 +8,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "cancellation.mjs"]) {
+  for (const file of ["build.mjs", "verify.mjs", "cancellation.mjs", "timing.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
