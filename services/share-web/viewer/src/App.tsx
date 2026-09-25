@@ -61,7 +61,7 @@ const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const VIEW_LOG_HOLD_MS = 30_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
-export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
+export const TEXT_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
   | { status: "loading" }
@@ -149,8 +149,8 @@ export const dohcNavigation = {
   },
 };
 
-type MarkdownPreview =
-  | { status: "ready"; markdown: string }
+type TextPreview =
+  | { status: "ready"; text: string }
   | { status: "too-large" };
 
 async function api(
@@ -222,8 +222,8 @@ async function withBoundedRetry(
   }
 }
 
-async function readMarkdownPreview(response: Response): Promise<MarkdownPreview> {
-  if (!response.body) return { status: "ready", markdown: "" };
+async function readTextPreview(response: Response): Promise<TextPreview> {
+  if (!response.body) return { status: "ready", text: "" };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const textChunks: string[] = [];
@@ -233,10 +233,10 @@ async function readMarkdownPreview(response: Response): Promise<MarkdownPreview>
       const { done, value } = await reader.read();
       if (done) {
         textChunks.push(decoder.decode());
-        return { status: "ready", markdown: textChunks.join("") };
+        return { status: "ready", text: textChunks.join("") };
       }
       bytesRead += value.byteLength;
-      if (bytesRead > MARKDOWN_PREVIEW_BYTE_CAP) {
+      if (bytesRead > TEXT_PREVIEW_BYTE_CAP) {
         try {
           await reader.cancel();
         } catch {
@@ -626,7 +626,13 @@ function FileView(props: {
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const rendersExcalidraw =
     props.file.contentKind === "text" && isExcalidraw(props.file.path);
-  const rendersTextPreview = rendersMarkdown || rendersExcalidraw;
+  // Any other text file shows its source as plain text, never as markup.
+  const rendersSourceText =
+    props.file.contentKind === "text" &&
+    !rendersMarkdown &&
+    !rendersExcalidraw &&
+    !isRasterImage(props.file.path);
+  const rendersTextPreview = rendersMarkdown || rendersExcalidraw || rendersSourceText;
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
     [props.files],
@@ -645,12 +651,12 @@ function FileView(props: {
     )
       .then(async (response) => {
         if (!response.ok) throw new ViewResponseError(response.status);
-        const preview = await readMarkdownPreview(response);
+        const preview = await readTextPreview(response);
         if (!current) return;
         if (preview.status === "too-large") {
           setPreviewTooLarge(true);
         } else {
-          setPreviewText(preview.markdown);
+          setPreviewText(preview.text);
         }
       })
       .catch(async (error: unknown) => {
@@ -723,6 +729,17 @@ function FileView(props: {
           <ExcalidrawView scene={scene} />
         </Suspense>
       </ExcalidrawRenderBoundary>
+    );
+  }
+  if (rendersSourceText) {
+    if (previewTooLarge) {
+      return <DownloadCard file={props.file} session={props.session} />;
+    }
+    if (previewText === null) return <p className="muted">Loading file</p>;
+    return (
+      <pre className="source-text">
+        <code>{previewText}</code>
+      </pre>
     );
   }
   if (isRasterImage(props.file.path)) {

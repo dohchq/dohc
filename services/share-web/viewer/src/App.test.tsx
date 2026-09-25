@@ -16,7 +16,7 @@ import {
   fileTree,
   loadCurrentState,
   loadLog,
-  MARKDOWN_PREVIEW_BYTE_CAP,
+  TEXT_PREVIEW_BYTE_CAP,
   MAX_LOG_PAGES,
 } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
@@ -2031,8 +2031,8 @@ describe("App", () => {
     expect(requests.sources).toHaveLength(12);
   });
 
-  it("pins the Markdown preview byte cap", () => {
-    expect(MARKDOWN_PREVIEW_BYTE_CAP).toBe(2 * 1024 * 1024);
+  it("pins the text preview byte cap", () => {
+    expect(TEXT_PREVIEW_BYTE_CAP).toBe(2 * 1024 * 1024);
   });
 
   it("offers oversized Markdown files as downloads without rendering them", async () => {
@@ -2044,13 +2044,13 @@ describe("App", () => {
     const encoder = new TextEncoder();
     const markdownChunks = [
       encoder.encode("# Oversized Markdown\n\n"),
-      new Uint8Array(MARKDOWN_PREVIEW_BYTE_CAP),
+      new Uint8Array(TEXT_PREVIEW_BYTE_CAP),
       encoder.encode("# Must not render"),
     ];
     expect(
       markdownChunks.reduce((size, chunk) => size + chunk.byteLength, 0),
     ).toBeGreaterThan(
-      MARKDOWN_PREVIEW_BYTE_CAP,
+      TEXT_PREVIEW_BYTE_CAP,
     );
     let nextChunk = 0;
     let streamCancelled = false;
@@ -2104,7 +2104,7 @@ describe("App", () => {
     };
     const markdown = "# Previewed Markdown\n\nStill rendered.";
     expect(new TextEncoder().encode(markdown).byteLength).toBeLessThanOrEqual(
-      MARKDOWN_PREVIEW_BYTE_CAP,
+      TEXT_PREVIEW_BYTE_CAP,
     );
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -2127,6 +2127,63 @@ describe("App", () => {
       "Still rendered.",
     );
     expect(container.querySelector(".download-card")).toBeNull();
+  });
+
+  it("shows an app's source file as plain text without running it", async () => {
+    const file: SharedFile = {
+      path: "reading-list/index.html",
+      blobSha256: "3".repeat(64),
+      contentKind: "text",
+    };
+    const source = [
+      "<!doctype html>",
+      "<script>window.__sharedSourceRan = true;</script>",
+      '<img src="x" onerror="window.__sharedSourceRan = true">',
+      '<p id="shared-source-marker">Reading list</p>',
+    ].join("\n");
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response(source);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const content = container.querySelector("main.content");
+    expect(content?.querySelector("pre.source-text")?.textContent).toBe(source);
+    expect(content?.querySelector("script, img, #shared-source-marker")).toBeNull();
+    expect(content?.querySelector(".download-card")).toBeNull();
+    expect(Reflect.has(window, "__sharedSourceRan")).toBe(false);
+  });
+
+  it("offers oversized source files as downloads without rendering them", async () => {
+    const file: SharedFile = {
+      path: "bundle.js",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response(new Uint8Array(TEXT_PREVIEW_BYTE_CAP + 1));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.querySelector("pre.source-text")).toBeNull();
+    expect(container.querySelector(".download-card a[download]")?.textContent).toBe(
+      "Download file",
+    );
   });
 
   it("refreshes the last-settled age every minute", async () => {
