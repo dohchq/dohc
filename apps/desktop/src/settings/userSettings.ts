@@ -5,6 +5,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
+import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
 
 const PreferredNameForIpc = z
@@ -61,6 +62,33 @@ export const DEFAULT_RUNNER_SETTINGS: RunnerSettings = {
   timeoutMinutes: 30,
 };
 
+// Pins are kept per workspace, by workspace id, because an app is a folder in
+// one workspace. They live in this file, not the workspace, because a pin is
+// one person's choice on one computer: a collaborator never sees it.
+export const MAX_PINNED_APPS = 20;
+const MAX_PINNED_WORKSPACES = 200;
+const PinnedAppsWorkspaceId = z.string().max(200).regex(/^[a-z0-9][a-z0-9-]*$/);
+
+export const SidebarSettings = z.object({
+  // dohc's own views in the order the sidebar shows them. A view the list
+  // leaves out follows in dohc's order, so a new view still appears.
+  order: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
+  hidden: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
+  // Each workspace's pinned apps, by the app's folder in that workspace.
+  pinnedApps: z
+    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(4096)).max(MAX_PINNED_APPS))
+    .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
+      message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+    }),
+}).strict();
+export type SidebarSettings = z.infer<typeof SidebarSettings>;
+
+export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
+  order: [],
+  hidden: [],
+  pinnedApps: {},
+};
+
 export const DesktopUserSettings = z.object({
   version: z.literal(1),
   // Added after the original v1 settings shipped. The default makes old v1
@@ -83,6 +111,7 @@ export const DesktopUserSettings = z.object({
     spellcheck: z.boolean(),
   }).strict(),
   runner: RunnerSettings.default(DEFAULT_RUNNER_SETTINGS),
+  sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
 }).strict().refine((settings) => !settings.runner.enabled || Boolean(settings.profile.agentName), {
   message: "Enter an agent name before enabling dispatch.",
   path: ["profile", "agentName"],
@@ -102,6 +131,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
     spellcheck: true,
   },
   runner: DEFAULT_RUNNER_SETTINGS,
+  sidebar: DEFAULT_SIDEBAR_SETTINGS,
 };
 
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;

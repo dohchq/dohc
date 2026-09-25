@@ -34,6 +34,7 @@ import type {
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
   OwnerLiveRefusalsResult,
@@ -248,6 +249,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getSitePreviewLogs, payload),
   stopSitePreview: (payload: StopSitePreviewPayload) =>
     ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
+  onSitePreviewReplaced: (listener) =>
+    onEvent(CHANNELS.sitePreviewReplaced, SitePreviewReplacedEvent, listener),
   openPluginPanel: async (payload: OpenPluginPanelPayload) => {
     const result = OpenPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
@@ -625,6 +628,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
   reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
+  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
   getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
   openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
   openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>
