@@ -3,11 +3,15 @@ import { MessageChannel as NodeMessageChannel, type MessagePort as NodeMessagePo
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { executeCli } from "@dohc/cli";
+import { CLI_COMMANDS } from "@dohc/cli/args";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import { createDohcClient } from "@dohc/sdk";
 import {
   APP_CHANNEL_REQUESTS,
-  CLI_VERBS,
+  APP_RESPONSE_RESULTS,
+  APP_RESULTS,
+  CHAT_EXAMPLES,
+  DATASET_RESULTS,
   MCP_RETURNS,
   REFERENCE_PATH,
   SDK_METHODS,
@@ -29,14 +33,26 @@ describe("CLI, MCP, and SDK reference", () => {
     expect(Object.keys(MCP_RETURNS).sort()).toEqual((await mcpToolNames()).sort());
   });
 
-  it("places every CLI socket verb", () => {
-    expect(Object.keys(CLI_VERBS).sort()).toEqual(Object.keys(cliResultSchemas).sort());
+  it("gives every dataset and app verb in CLI_COMMANDS a result, and no other verb", () => {
+    expect(Object.keys(DATASET_RESULTS).sort()).toEqual(Object.keys(CLI_COMMANDS.dataset!.verbs).sort());
+    expect([...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)].sort())
+      .toEqual(Object.keys(CLI_COMMANDS.app!.verbs).sort());
   });
 
-  it("documents chat commands the CLI parses, with every documented flag", async () => {
-    for (const [verb, entry] of Object.entries(CLI_VERBS)) {
-      if (typeof entry === "string") continue;
-      for (const argv of entry.examples) {
+  it("documents every CLI socket verb, as a command or through an MCP tool", () => {
+    const documented = new Set<string>([
+      ...Object.keys(CLI_COMMANDS.chat!.verbs),
+      "dataset", "appPublication", "ownerAppResponses",
+      ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
+    ]);
+    expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);
+  });
+
+  it("parses an example of every chat verb, using every flag the verb declares", async () => {
+    expect(Object.keys(CHAT_EXAMPLES).sort()).toEqual(Object.keys(CLI_COMMANDS.chat!.verbs).sort());
+    for (const [verb, spec] of Object.entries(CLI_COMMANDS.chat!.verbs)) {
+      const examples = CHAT_EXAMPLES[verb]!;
+      for (const argv of examples) {
         let sent: unknown;
         const result = await executeCli({
           argv,
@@ -49,9 +65,8 @@ describe("CLI, MCP, and SDK reference", () => {
         });
         expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb });
       }
-      for (const flag of Object.keys(entry.flags ?? {})) {
-        expect(entry.usage, `${verb} usage`).toContain(flag);
-        expect(entry.examples.flat(), `${verb} examples`).toContain(flag);
+      for (const flag of spec.flags ?? []) {
+        expect(examples.flat(), `${verb} examples`).toContain(flag.name);
       }
     }
   });

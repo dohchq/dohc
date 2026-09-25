@@ -1,15 +1,19 @@
-// Renders docs/reference/cli-mcp-sdk.md. Names and arguments come from the
-// live MCP server and the CLI's zod schemas, so they cannot drift from the
-// page. The prose next to them is written here, one entry per tool, action,
-// verb, or method, and reference.test.ts fails when an entry is missing.
+// Renders docs/reference/cli-mcp-sdk.md. MCP tool names, arguments, and
+// descriptions come from the running desktop MCP server. CLI verbs, flags,
+// summaries, and fields come from CLI_COMMANDS, the table `dohc --help`
+// prints. Result shapes come from the CLI's zod schemas. This file adds only
+// what those lack: which result each verb returns, what each MCP tool
+// returns, the app channel, and the SDK. reference.test.ts fails when any of
+// them drifts.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
-import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
-import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "@dohc/cli/app-responses";
-import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, type CliVerb } from "@dohc/cli/protocol";
+import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliVerbSpec } from "@dohc/cli/args";
+import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
+import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
+import { OwnerAppResponsesResult, type OwnerAppResponsesRequest } from "@dohc/cli/app-responses";
+import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
 import type { DohcClient } from "@dohc/sdk";
 import { createDohcMcpServer } from "./server";
 
@@ -36,151 +40,93 @@ type DatasetKind = DatasetResult["kind"];
 type AppAction = OwnerAppPublicationRequest["action"];
 type AppKind = OwnerAppPublicationResult["kind"];
 
-// Each action's purpose and the result kinds the desktop answers it with
-// (apps/desktop/src/ipc/datasetIpc.ts). `required` names fields the CLI and
-// MCP refuse to go without, though the desktop's own dialogs may omit them.
-export const DATASET_ACTIONS: Record<DatasetAction, { does: string; returns: DatasetKind[]; required?: string[] }> = {
-  list: { does: "Lists the workspace's transactional Collections.", returns: ["list"] },
-  describe: { does: "Describes one Collection: its tables, fields, and approved operations with their ids.", returns: ["description"] },
-  history: { does: "Lists saved record operations and rule revisions, newest first, with prior values for reversible edits.", returns: ["history"] },
-  historyRevision: { does: "Reads the schema and operation source saved with one past revision.", returns: ["history-revision"] },
-  lifecycle: { does: "Shows whether the Collection is archived and which apps bind to it.", returns: ["lifecycle"] },
-  archive: { does: "Stops the Collection's operations and keeps its records.", returns: ["lifecycle-updated"] },
-  restore: { does: "Resumes an archived Collection under its existing rules.", returns: ["lifecycle-updated"] },
-  deletePreview: { does: "Starts a permanent deletion: lists affected apps and returns the cursor and review token that `delete` needs.", returns: ["delete-preview"] },
-  delete: { does: "Permanently removes the Collection's private data and history. It needs `acknowledge: true`. Export first if you need a recovery copy.", returns: ["deleted"] },
-  pendingAttempts: { does: "Lists saved form responses whose retry is pending. Each is committed or unconfirmed.", returns: ["pending-attempts"] },
-  reconcileAttempt: { does: "Clears the saved retry of a committed response. It needs `acknowledge: true`.", returns: ["attempt-reconciled"] },
-  cancelAttempt: { does: "Cancels an unconfirmed response. It needs `acknowledge: true`.", returns: ["attempt-cancelled"] },
-  permissions: { does: "Lists the Collection's app bindings and explicit data grants.", returns: ["permissions"] },
-  setGrant: { does: "Sets the data grant for one share grant: the approved revision and the operations it may call.", returns: ["grant-updated"] },
-  removeGrant: { does: "Removes an explicit data grant. `principalKey` comes from `permissions`.", returns: ["grant-updated"] },
-  create: { does: "Creates a Collection from a definition. It writes generated source and approves it.", returns: ["approved"] },
-  prepare: { does: "Captures the dataset source at `descriptorPath` for review.", returns: ["prepared"] },
-  approve: { does: "Approves a reviewed preparation by its `revisionSha256`.", returns: ["approved"] },
-  discard: { does: "Discards a preparation. The source files stay in place.", returns: ["discarded"] },
-  invoke: { does: "Calls one approved operation. Retry an uncertain write with the same `input` and `idempotencyKey`.", returns: ["invoked", "refused"] },
-  upload: { does: "Uploads one file for a file field, for a later operation to attach.", returns: ["uploaded"] },
-  file: { does: "Reads an uploaded file, through a read operation when `read` is given.", returns: ["file"] },
-  createForm: { does: "Writes a form app into `appRoot` for one create operation and the chosen fields.", returns: ["form-created"] },
-  prepareRelationChoices: { does: "Prepares a read operation that returns each target record's key and one label field, for a relation picker. Approve it with `approveMigration`.", returns: ["migration-prepared"] },
-  prepareSchemaChange: { does: "Prepares a field or name change on a generated Collection. Approve it with `approveMigration`.", returns: ["migration-prepared"] },
-  prepareMigration: { does: "Runs a migration SQL file against a saved copy and prepares the new descriptor. Approve it with `approveMigration`.", returns: ["migration-prepared"] },
-  prepareHistoryRestore: { does: "Prepares a forward change that reverses one saved change against the current records. Approve it with `approveMigration`.", returns: ["migration-prepared"] },
-  migrationPreviewPage: { does: "Reads the next page of changed rows in a prepared migration.", returns: ["migration-preview-page"] },
-  approveMigration: { does: "Applies the reviewed migration checkpoint. It does not run the SQL again.", returns: ["migrated"] },
-  discardMigration: { does: "Discards a prepared migration.", returns: ["migration-discarded"] },
-  export: { does: "Writes a private recovery archive to `savePath`, an absolute path ending in `.dohc-recovery`. The archive holds private records, files, history, and retry credentials.", returns: ["exported"], required: ["savePath"] },
-  prepareRecovery: { does: "Checks a recovery archive at `sourcePath`, an absolute path ending in `.dohc-recovery`. Review the result before `claimRecovery`.", returns: ["recovery-prepared"], required: ["sourcePath"] },
-  claimRecovery: { does: "Installs a prepared recovery. Stop the old host first, then pass `oldHostStopped: true`.", returns: ["recovery-claimed"] },
-  discardRecovery: { does: "Cancels a prepared recovery before it is claimed.", returns: ["recovery-discarded"] },
+// The result kinds the desktop answers each `dohc dataset` verb with
+// (apps/desktop/src/ipc/datasetIpc.ts). A new action fails typecheck here.
+export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
+  list: ["list"],
+  describe: ["description"],
+  history: ["history"],
+  historyRevision: ["history-revision"],
+  prepareHistoryRestore: ["migration-prepared"],
+  permissions: ["permissions"],
+  setGrant: ["grant-updated"],
+  removeGrant: ["grant-updated"],
+  lifecycle: ["lifecycle"],
+  archive: ["lifecycle-updated"],
+  restore: ["lifecycle-updated"],
+  deletePreview: ["delete-preview"],
+  delete: ["deleted"],
+  pendingAttempts: ["pending-attempts"],
+  reconcileAttempt: ["attempt-reconciled"],
+  cancelAttempt: ["attempt-cancelled"],
+  export: ["exported"],
+  prepareRecovery: ["recovery-prepared"],
+  claimRecovery: ["recovery-claimed"],
+  discardRecovery: ["recovery-discarded"],
+  upload: ["uploaded"],
+  file: ["file"],
+  createForm: ["form-created"],
+  prepareRelationChoices: ["migration-prepared"],
+  create: ["approved"],
+  prepare: ["prepared"],
+  approve: ["approved"],
+  discard: ["discarded"],
+  prepareMigration: ["migration-prepared"],
+  migrationPreviewPage: ["migration-preview-page"],
+  prepareSchemaChange: ["migration-prepared"],
+  approveMigration: ["migrated"],
+  discardMigration: ["migration-discarded"],
+  invoke: ["invoked", "refused"],
 };
 
-// apps/desktop/src/ipc/ownerAppPublicationIpc.ts and localOwnerAppPublication.ts.
-export const APP_ACTIONS: Record<AppAction, { does: string; returns: AppKind[] }> = {
-  prepareLocal: { does: "Prepares the app at `appRoot` to run on this computer. Review the result, then `approve` it.", returns: ["prepared"] },
-  listLocal: { does: "Lists this computer's approved local publications of the app at `appRoot`.", returns: ["localListed"] },
-  launchLocal: { does: "Opens an approved local app and returns its `127.0.0.1` URL. Keep dohc open while you use it.", returns: ["localLaunched"] },
-  prepare: { does: "Prepares the app at `appRoot` for people who open a share link. Review the result, then `approve` it.", returns: ["prepared"] },
-  list: { does: "Lists the shared publications of the app at `appRoot`.", returns: ["listed"] },
-  approve: { does: "Publishes a prepared app. `approvalId` and `candidateDigest` come from `prepare` or `prepareLocal`.", returns: ["published"] },
-  cancel: { does: "Cancels a preparation.", returns: ["cancelled"] },
-  withdraw: { does: "Ends a publication. Its Collection keeps its records.", returns: ["withdrawn"] },
-  revokeCollection: { does: "Removes a publication's access to its Collection.", returns: ["collectionRevoked"] },
-  reviewReactivation: { does: "Prepares an ended publication to publish again. Review the result, then `approve` it.", returns: ["prepared"] },
+// `dohc app` verbs that publish apps, keyed by verb, with the result kinds
+// apps/desktop/src/ipc/ownerAppPublicationIpc.ts and
+// localOwnerAppPublication.ts answer with.
+export const APP_RESULTS: Record<AppAction, AppKind[]> = {
+  listLocal: ["localListed"],
+  prepareLocal: ["prepared"],
+  launchLocal: ["localLaunched"],
+  list: ["listed"],
+  prepare: ["prepared"],
+  approve: ["published"],
+  cancel: ["cancelled"],
+  withdraw: ["withdrawn"],
+  revokeCollection: ["collectionRevoked"],
+  reviewReactivation: ["prepared"],
 };
 
-// `dohc app responses` and `dohc app undo-responses` map to these actions.
-export const APP_RESPONSE_VERBS: Record<OwnerAppResponsesRequest["action"], { verb: string; does: string }> = {
-  list: { verb: "responses", does: "Lists the responses that link holders submitted through an app on one link grant." },
-  undo: { verb: "undo-responses", does: "Deletes one page of those responses, optionally only one link holder's. `operationId` is an id you choose for this undo." },
+// `dohc app` verbs that read link holders' responses, keyed by verb, with
+// the response action each one sends.
+export const APP_RESPONSE_RESULTS: Record<string, OwnerAppResponsesRequest["action"]> = {
+  responses: "list",
+  "undo-responses": "undo",
 };
 
-// Every CLI socket verb is either a command a person types or one the MCP
-// tools use. A new verb fails typecheck here until it is placed.
-type ChatVerb = { usage: string; does: string; flags?: Record<string, string>; examples: string[][] };
-export const CLI_VERBS: Record<CliVerb, ChatVerb | "dataset" | "app" | "mcp"> = {
-  dataset: "dataset",
-  appPublication: "app",
-  ownerAppResponses: "app",
-  groups: { usage: "dohc chat groups", does: "Lists the workspace's groups.", examples: [["chat", "groups"]] },
-  threads: { usage: "dohc chat threads <group>", does: "Lists a group's threads. `<group>` is a name, `#slug`, or id.", examples: [["chat", "threads", "general"]] },
-  inbox: { usage: "dohc chat inbox", does: "Lists threads with unread messages, and messages that mention you.", examples: [["chat", "inbox"]] },
-  show: {
-    usage: "dohc chat show <thread-or-message> [--peek]",
-    does: "Prints a thread, or the thread around one message, and marks it read.",
-    flags: { "--peek": "Leaves the thread unread. A read-only workspace requires it." },
-    examples: [["chat", "show", "th_1", "--peek"]],
-  },
-  post: {
-    usage: "dohc chat post <group> [--title <title>] [--attach <path>]... [--needs-decision] [--option <choice>]... <body>",
-    does: "Starts a thread in a group. A `<body>` of `-` reads the body from stdin.",
-    flags: {
-      "--title": "Titles the thread. Without it, the thread shows its first message.",
-      "--attach": "Attaches a tracked workspace file. Repeat it for more files.",
-      "--needs-decision": "Asks the readers for a decision.",
-      "--option": "Adds a poll choice and implies `--needs-decision`. Repeat it for each choice.",
-    },
-    examples: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
-  },
-  reply: {
-    usage: "dohc chat reply <thread> [--to <message>] [--attach <path>]... [--needs-decision] [--option <choice>]... [--resolve <message> [--choose <choice>]] <body>",
-    does: "Replies in a thread. A `<body>` of `-` reads the body from stdin.",
-    flags: {
-      "--to": "Replies under one message.",
-      "--attach": "Attaches a tracked workspace file. Repeat it for more files.",
-      "--needs-decision": "Asks the readers for a decision.",
-      "--option": "Adds a poll choice and implies `--needs-decision`. Repeat it for each choice.",
-      "--resolve": "Closes that message's open decision with this reply.",
-      "--choose": "Names the poll choice picked. It needs `--resolve`.",
-    },
-    examples: [
-      ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
-      ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "Done"],
-    ],
-  },
-  react: { usage: "dohc chat react <message> <emoji>", does: "Adds your reaction to a message, or removes it if it is there.", examples: [["chat", "react", "msg_1", "👍"]] },
-  grep: {
-    usage: "dohc chat grep <pattern> [--group <group>] [--thread <thread>] [--from <author>] [--since <when>] [-i] [-l] [-C <lines>] [--limit <count>] [--regex]",
-    does: "Searches thread titles and message text.",
-    flags: {
-      "--group": "Searches one group.",
-      "--thread": "Searches one thread.",
-      "--from": "Keeps messages whose author kind is `<author>`, or whose author name contains it.",
-      "--since": "Keeps messages newer than a date, or than `<days>d` ago.",
-      "-i": "Ignores case. Without `--regex`, a pattern with no capital letters ignores case anyway.",
-      "-l": "Prints only the matching thread ids.",
-      "-C": "Prints that many messages around each match.",
-      "--limit": "Stops after that many matches. The default is 100.",
-      "--regex": "Reads `<pattern>` as a regular expression.",
-    },
-    examples: [["chat", "grep", "launch", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex"]],
-  },
-  export: {
-    usage: "dohc chat export [--all | --group <group> | --thread <thread>] --out <dir>",
-    does: "Writes threads as Markdown files into `<dir>`. Without a scope, it writes every thread.",
-    flags: { "--all": "Writes every thread.", "--group": "Writes one group's threads.", "--thread": "Writes one thread.", "--out": "The folder to write into. Required." },
-    examples: [
-      ["chat", "export", "--all", "--out", "exports"],
-      ["chat", "export", "--group", "general", "--out", "exports"],
-      ["chat", "export", "--thread", "th_1", "--out", "exports"],
-    ],
-  },
-  moments: "mcp",
-  moment: "mcp",
-  fileChats: "mcp",
-  chat: "mcp",
-  groupsFull: "mcp",
-  collectionQuery: "mcp",
-  collectionRecord: "mcp",
-  collectionSetFields: "mcp",
-  collectionCreateRecord: "mcp",
+// Command lines for every `dohc chat` verb. reference.test.ts parses each one
+// and requires every flag the verb declares to appear in its examples.
+export const CHAT_EXAMPLES: Record<string, string[][]> = {
+  groups: [["chat", "groups"]],
+  threads: [["chat", "threads", "general"]],
+  inbox: [["chat", "inbox"]],
+  show: [["chat", "show", "th_1", "--peek"]],
+  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
+  reply: [
+    ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
+    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "Done"],
+  ],
+  react: [["chat", "react", "msg_1", "👍"]],
+  grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
+  export: [
+    ["chat", "export", "--all", "--out", "exports"],
+    ["chat", "export", "--group", "general", "--out", "exports"],
+    ["chat", "export", "--thread", "th_1", "--out", "exports"],
+  ],
 };
 
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
-export const MCP_RETURNS: Record<string, { cli: CliVerb } | string> = {
-  dohc_dataset: "the result of the requested action, listed under [Dataset actions](#dataset-actions).",
+export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `\"local\"` or `\"cloud\"`.",
   dohc_list_changes: { cli: "moments" },
@@ -412,7 +358,7 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
       ? `Returns ${returns.replace(/\.?$/, ".")}`
       : returnsLine([shapeText(jsonSchema(cliResultSchemas[returns.cli], "output"))]);
     const args = tool.name === "dohc_dataset"
-      ? "- `request`: one of the [dataset actions](#dataset-actions), with its `action`. Required."
+      ? "- `request`: the JSON object of one [`dohc dataset`](#dohc-dataset) verb, with the verb's name as `action`. Required."
       : argumentList(tool.inputSchema);
     return [
       `### \`${tool.name}\``,
@@ -425,72 +371,75 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
   return { text: parts.join("\n\n"), version };
 }
 
-// The request schema's action branches, in the table's reading order. Vitest
-// does not typecheck, so a branch the table lacks throws here as well.
-function actionBranches<Action extends string>(requests: JsonSchema, table: Record<Action, unknown>): [Action, JsonSchema][] {
-  const byAction = new Map((branches(requests) ?? []).map((branch) => [String(branch.properties?.action?.const), branch]));
-  const order = Object.keys(table) as Action[];
-  const missing = [...byAction.keys()].filter((action) => !order.includes(action as Action));
-  if (missing.length > 0 || order.length !== byAction.size) throw new Error(`The reference table and schema differ: ${missing.join(", ")}`);
-  return order.map((action) => [action, byAction.get(action)!]);
+function resultShapes(results: JsonSchema, key: string, values: readonly string[]): string[] {
+  return values.map((value) => shapeText(kindBranch(results, key, value)));
 }
 
-function datasetSection(): string {
-  const requests = jsonSchema(DatasetRequest, "input");
-  const results = jsonSchema(DatasetResult, "output");
-  return actionBranches(requests, DATASET_ACTIONS).map(([action, branch]) => {
-    const entry = DATASET_ACTIONS[action];
-    return [
-      `### \`${action}\``,
-      entry.does,
-      argumentList(branch, ["action"], entry.required),
-      returnsLine(entry.returns.map((kind) => shapeText(kindBranch(results, "kind", kind)))),
-    ].join("\n\n");
-  }).join("\n\n");
+function checkCovered(command: string, verbs: readonly string[], documented: readonly string[]): void {
+  const missing = verbs.filter((verb) => !documented.includes(verb));
+  const extra = documented.filter((verb) => !verbs.includes(verb));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(`dohc ${command}: no result for ${missing.join(", ") || "none"}; no verb for ${extra.join(", ") || "none"}.`);
+  }
 }
 
-function appSection(): string {
-  const requests = jsonSchema(OwnerAppPublicationRequest, "input");
-  const results = jsonSchema(OwnerAppPublicationResult, "output");
-  const publications = actionBranches(requests, APP_ACTIONS).map(([action, branch]) => {
-    const entry = APP_ACTIONS[action];
-    return [
-      `#### \`dohc app ${action}\``,
-      entry.does,
-      argumentList(branch, ["action"]),
-      returnsLine(entry.returns.map((kind) => shapeText(kindBranch(results, "kind", kind)))),
-    ].join("\n\n");
-  });
-  const responseRequests = jsonSchema(OwnerAppResponsesRequest, "input");
-  const responseResults = jsonSchema(OwnerAppResponsesResult, "output");
-  const responses = actionBranches(responseRequests, APP_RESPONSE_VERBS).map(([action, branch]) => {
-    const entry = APP_RESPONSE_VERBS[action];
-    return [
-      `#### \`dohc app ${entry.verb}\``,
-      entry.does,
-      argumentList(branch, ["action"]),
-      returnsLine([shapeText(kindBranch(responseResults, "action", action))]),
-    ].join("\n\n");
-  });
-  return [...publications, ...responses].join("\n\n");
+function flagList(flags: readonly CliFlag[]): string {
+  return flags.map((flag) => `- \`${flag.value ? `${flag.name} <${flag.value}>` : flag.name}\`: ${flag.text}`).join("\n");
 }
 
-function chatSection(): string {
-  return Object.entries(CLI_VERBS).flatMap(([verb, entry]) => {
-    if (typeof entry === "string") return [];
-    const result = jsonSchema(cliResultSchemas[verb as CliVerb], "output");
-    const flags = entry.flags
-      ? Object.entries(entry.flags).map(([flag, meaning]) => `- \`${flag}\`: ${meaning}`).join("\n")
-      : "";
+function shellBlock(line: string): string {
+  return "```sh\n" + line + "\n```";
+}
+
+// What a verb returns. Chat verbs print their socket verb's result; the
+// JSON verbs of `dataset` and `app` return the result kinds listed above.
+function verbReturns(command: string, name: string): string {
+  if (command === "chat") {
+    if (!Object.hasOwn(cliResultSchemas, name)) throw new Error(`dohc chat ${name} has no result schema.`);
+    const result = jsonSchema(cliResultSchemas[name as CliSocketVerb], "output");
     const shapes = (branches(result) ?? [result]).map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
-    return [[
-      `#### \`${entry.usage.split(" ").slice(0, 3).join(" ")}\``,
-      "```sh\n" + entry.usage + "\n```",
-      entry.does,
-      flags,
-      `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.`,
-    ].filter(Boolean).join("\n\n")];
-  }).join("\n\n");
+    return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.`;
+  }
+  if (command === "dataset") {
+    return returnsLine(resultShapes(jsonSchema(DatasetResult, "output"), "kind", DATASET_RESULTS[name as DatasetAction]));
+  }
+  if (command === "app") {
+    const responses = APP_RESPONSE_RESULTS[name];
+    if (responses) return returnsLine(resultShapes(jsonSchema(OwnerAppResponsesResult, "output"), "action", [responses]));
+    return returnsLine(resultShapes(jsonSchema(OwnerAppPublicationResult, "output"), "kind", APP_RESULTS[name as AppAction]));
+  }
+  throw new Error(`The reference has no results for dohc ${command}.`);
+}
+
+function verbSection(command: string, name: string, verb: CliVerbSpec): string {
+  const details = [...(verb.notes ?? []), ...(verb.freeText ? [`Put ${DASH_RULE}.`] : [])];
+  return [
+    `#### \`dohc ${command} ${name}\``,
+    verb.fields ? "" : shellBlock(["dohc", command, name, verb.operands, "[options]"].filter(Boolean).join(" ")),
+    verb.summary,
+    details.join(" "),
+    verb.flags ? flagList(verb.flags) : "",
+    verb.fields ? argumentList(jsonSchema(z.object(verb.fields), "input"), ["action"], verb.required) : "",
+    verbReturns(command, name),
+  ].filter(Boolean).join("\n\n");
+}
+
+function commandSection(name: string, command: CliCommandSpec): string {
+  const verbs = Object.entries(command.verbs);
+  if (name === "dataset") checkCovered(name, Object.keys(command.verbs), Object.keys(DATASET_RESULTS));
+  if (name === "app") checkCovered(name, Object.keys(command.verbs), [...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)]);
+  const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
+  return [
+    `### \`dohc ${name}\``,
+    jsonOperands.length > 0 ? shellBlock(`dohc ${name} <verb> ${jsonOperands.join(" | ")}`) : "",
+    command.summary,
+    command.notes.join(" "),
+    ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
+  ].filter(Boolean).join("\n\n");
+}
+
+function cliSection(): string {
+  return Object.entries(CLI_COMMANDS).map(([name, command]) => commandSection(name, command)).join("\n\n");
 }
 
 function appChannelSection(): string {
@@ -519,68 +468,44 @@ export async function renderReference(): Promise<string> {
 <!-- Generated by packages/mcp/src/reference.ts. Change that file or the definitions it reads, then run:
 pnpm --filter @dohc/mcp exec vitest run src/reference.test.ts -u -->
 
-Agents and developers use this page to work with dohc from outside the app. It lists every MCP tool, \`dohc\` command, app channel request, and \`@dohc/sdk\` method, with its arguments and what it returns.
+Agents and developers use this page to work with dohc from outside the app. It lists every tool of the desktop MCP server, every \`dohc\` command, and every app channel request and \`@dohc/sdk\` method, with its arguments and what it returns.
 
 ## Connect
 
 - **MCP.** In dohc, open **Settings**, then **Agents & MCP**. Choose **Enable MCP**, then copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The \`dohc\` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their \`PATH\`.
-- **Share links.** A share link has its own MCP endpoint with fewer tools. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
+- **Share links.** A share link has its own MCP server, \`dohc-share\`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
 
 ## Versions and changes
 
 Agent prompts and scripts depend on these names. Before launch, a rename replaces the old name outright, with no alias.
 
-- The MCP server reports its version as \`${mcp.version}\`. A rename or removal of a tool, argument, or result field raises it.
+- The desktop MCP server reports its version as \`${mcp.version}\`. A rename or removal of a tool, argument, or result field raises it.
 - \`--json\` output carries \`schemaVersion: ${CLI_JSON_SCHEMA_VERSION}\`. A change to the shape of that output raises it.
 - The CLI and the app must be the same build. Otherwise the CLI stops with \`CLI/app version mismatch — restart the app\`.
 
 A tool or command that cannot do what was asked returns \`{ ok: false, reason }\`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
 
-## MCP tools
+## Desktop MCP tools
 
 ${mcp.text}
 
 ## CLI
 
 \`\`\`sh
-dohc [--as-agent] [--json] <chat | dataset | app> <verb> [arguments]
+dohc <command> <verb> [arguments] [options]
 \`\`\`
 
-- \`--as-agent\` acts as the agent instead of the person. Setting \`DOHC_CHAT_ACTOR=agent\` does the same for \`dohc chat\`.
-- \`--json\` prints the result as JSON instead of text.
+\`dohc --help\`, \`dohc <command> --help\`, and \`dohc <command> <verb> --help\` print the same summaries, flags, and fields as this section. These options work with every verb:
+
+${flagList(GLOBAL_FLAGS)}
+
+Two environment variables also change what the CLI does:
+
 - \`DOHC_RUN_ID\` links the messages that \`post\` and \`reply\` write to a local agent run.
 - \`DOHC_STATE_DIR\` names the app's state folder when the CLI cannot find the running app in its default place.
 
-### \`dohc chat\`
-
-Reads and writes the workspace's chats.
-
-${chatSection()}
-
-### \`dohc dataset\`
-
-\`\`\`sh
-dohc dataset <action> '<JSON>'
-\`\`\`
-
-Takes one of the [dataset actions](#dataset-actions). The JSON holds the action's arguments. It can leave out \`action\`, because the command names it. \`dohc dataset --help\` prints a summary.
-
-### \`dohc app\`
-
-\`\`\`sh
-dohc app <action> '<JSON>'
-\`\`\`
-
-The JSON holds the action's arguments.
-
-${appSection()}
-
-## Dataset actions
-
-\`dohc dataset <action>\` and the \`dohc_dataset\` tool take the same actions and return the same results. Every action names the \`workspaceId\` that owns the Collection. Run \`describe\` to find table, field, and operation ids.
-
-${datasetSection()}
+${cliSection()}
 
 ## App channel
 
