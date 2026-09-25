@@ -78,7 +78,7 @@ interface VerbInput {
   flags: ReadonlyMap<string, readonly string[]>;
 }
 
-export interface CliVerb {
+export interface CliVerbSpec {
   summary: string;
   operands: string;
   flags?: readonly CliFlag[];
@@ -95,7 +95,7 @@ export interface CliVerb {
 export interface CliCommandSpec {
   summary: string;
   notes: readonly string[];
-  verbs: Readonly<Record<string, CliVerb>>;
+  verbs: Readonly<Record<string, CliVerbSpec>>;
 }
 
 function fail(message: string): never {
@@ -134,7 +134,7 @@ function allValues(input: VerbInput, flag: string): string[] {
 }
 
 /** Splits a verb's tokens into operands and the flags the verb declares. */
-function readVerbInput(name: string, verb: CliVerb, tokens: readonly string[]): VerbInput {
+function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[]): VerbInput {
   const flags = verb.flags ?? [];
   const operands: string[] = [];
   const values = new Map<string, string[]>();
@@ -211,8 +211,9 @@ const CHAT_VERBS = {
   show: {
     summary: "Show a thread or message and mark the thread read.",
     operands: "<thread-or-message>",
-    flags: [{ name: "--peek", text: "Show it without marking it read." }],
-    notes: ["In a read-only shared view, add --peek."],
+    flags: [
+      { name: "--peek", text: "Show it without changing what is marked read. A read-only shared view requires it." },
+    ],
     parse: (input) => {
       const [target, ...extra] = input.operands;
       if (!target) fail("show requires a thread or message id");
@@ -348,7 +349,7 @@ const CHAT_VERBS = {
       return { verb: "export", scope: scopes[0] ?? { kind: "all" }, outDir };
     },
   },
-} satisfies Record<string, CliVerb>;
+} satisfies Record<string, CliVerbSpec>;
 
 interface JsonVerbHelp {
   summary: string;
@@ -363,7 +364,7 @@ function jsonVerb(
   fields: Readonly<Record<string, z.ZodType>>,
   help: JsonVerbHelp,
   build: (value: object) => CliCommandBody,
-): CliVerb {
+): CliVerbSpec {
   const label = `${command} ${name}`;
   const invalid = `invalid ${label} arguments; run dohc ${label} --help`;
   return {
@@ -552,7 +553,7 @@ const APP_RESPONSE_VERBS: Record<OwnerAppResponsesRequest["action"], { name: str
 };
 
 const datasetHelpOrder = Object.keys(DATASET_HELP);
-const DATASET_VERBS: Record<string, CliVerb> = Object.fromEntries(
+const DATASET_VERBS: Record<string, CliVerbSpec> = Object.fromEntries(
   DatasetRequest.options
     .map((option) => {
       const action = option.shape.action.value;
@@ -567,7 +568,7 @@ const DATASET_VERBS: Record<string, CliVerb> = Object.fromEntries(
     .sort(([left], [right]) => datasetHelpOrder.indexOf(left) - datasetHelpOrder.indexOf(right)),
 );
 
-const APP_VERBS: Record<string, CliVerb> = Object.fromEntries([
+const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
   ...OwnerAppPublicationRequest.options.map((option) => {
     const action = option.shape.action.value;
     return [
@@ -620,7 +621,7 @@ export const GLOBAL_FLAGS: readonly CliFlag[] = [
 ];
 
 const VALUE_FLAGS = new Set(
-  Object.values(CHAT_VERBS).flatMap((verb: CliVerb) =>
+  Object.values(CHAT_VERBS).flatMap((verb: CliVerbSpec) =>
     (verb.flags ?? []).filter((flag) => flag.value).map((flag) => flag.name),
   ),
 );

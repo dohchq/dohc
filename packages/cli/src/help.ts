@@ -1,4 +1,4 @@
-import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliHelpRequest, type CliVerb } from "./args";
+import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliHelpRequest, type CliVerbSpec } from "./args";
 
 const WIDTH = 80;
 const where = "Run dohc inside a workspace folder while the dohc app is open.";
@@ -34,7 +34,7 @@ function paragraph(lines: readonly string[]): string[] {
   return lines.flatMap((line) => wrap(line));
 }
 
-function fieldLines(verb: CliVerb): string[] {
+function fieldLines(verb: CliVerbSpec): string[] {
   if (!verb.fields) return [];
   const required: string[] = [];
   const optional: string[] = [];
@@ -88,7 +88,7 @@ function commandHelp(name: string, command: CliCommandSpec): string[] {
   ];
 }
 
-function verbHelp(commandName: string, command: CliCommandSpec, name: string, verb: CliVerb): string[] {
+function verbHelp(commandName: string, command: CliCommandSpec, name: string, verb: CliVerbSpec): string[] {
   const usage = ["dohc", commandName, name, verb.operands, "[options]"].filter(Boolean).join(" ");
   const details = [...fieldLines(verb), ...(verb.notes ?? []), ...(verb.freeText ? [`Put ${DASH_RULE}.`] : [])];
   return [
