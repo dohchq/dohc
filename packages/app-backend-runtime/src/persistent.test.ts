@@ -213,6 +213,36 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("refuses SQL with no statement, which would crash the worker process",async()=>{
+    await fixture(async({open})=>{
+      // node:sqlite in Node 24.16 crashes the process after it prepares text with no statement between failed prepares.
+      let exited!:(status:[number|null,NodeJS.Signals|null])=>void;
+      const exit=new Promise<[number|null,NodeJS.Signals|null]>(resolve=>{exited=resolve;});
+      const launch:AppRuntimeLauncher=options=>{
+        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+        child.on("message",options.onMessage);child.on("error",options.onError);
+        child.on("close",(code,signal)=>{exited([code,signal]);options.onExit(code);});
+        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
+      };
+      const worker=await open({},launch);
+      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1"];
+      const source=`globalThis.operations={run(ctx){
+        const refused=new Set();
+        for(let round=0;round<12;round++) for(const sql of ${JSON.stringify(empty)}.concat(['SELECT missing FROM items'])) {
+          try { ctx.db.query(sql); } catch (error) { if(sql.startsWith('SELECT')) continue; refused.add(error.message); }
+        }
+        return [...refused];
+      }}`;
+      const results=[];
+      for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
+      await worker.close();
+      const [code,signal]=await exit;
+      // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
+      expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
+      expect(results).toEqual(Array.from({length:4},()=>["SQL statement is empty."]));
+    });
+  });
+
   it("replays captured trigger effects exactly once",async()=>{
     await fixture(async({open})=>{
       const config={schemaSql:schemaSql+`CREATE TABLE audit(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id));

@@ -29,6 +29,22 @@ export function sqlTokens(sql:string):Array<{value:string;quoted:boolean;literal
   }
   return tokens;
 }
+/**
+ * Whether SQLite would prepare a statement from `sql`. SQLite skips whitespace, comments, and semicolons, and
+ * Node's binding passes the text up to its first NUL. Node 24.16's `node:sqlite` can crash the process after
+ * preparing text with no statement, so a caller refuses such text before `prepare`.
+ */
+export function hasStatement(sql:string):boolean {
+  for(let index=0;index<sql.length;) {
+    const char=sql[index];
+    if(char==="\0") return false;
+    if(char===";" || " \t\n\v\f\r".includes(char)) index++;
+    else if(sql.startsWith("--",index)) { const end=sql.indexOf("\n",index); if(end<0) return false; index=end+1; }
+    else if(sql.startsWith("/*",index)) { const end=sql.indexOf("*/",index+2); if(end<0) return false; index=end+2; }
+    else return true;
+  }
+  return false;
+}
 export function insertsImplicitRowid(sql:string, capturedTables:ReadonlySet<string>):boolean {
   // SQLite's authorizer reports INSERT at table granularity, without its column list.
   const tokens=sqlTokens(sql);
@@ -120,6 +136,7 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
       if (++statements > request.limits.statements || performance.now() >= deadline) throw new Error("App database operation limit exceeded.");
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
+      if (!hasStatement(sql)) throw new Error("SQL statement is empty.");
       if(options.persistentConnection && write && insertsImplicitRowid(sql,persistentRowidTables.get(db)!)) throw new Error("Implicit rowid access is unavailable for journaled datasets.");
       const paramsJson = boundedText(vm.getString(paramsValue), request.limits.inputBytes, "SQL parameters");
       const params: unknown = JSON.parse(paramsJson);

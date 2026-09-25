@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { evaluate } from "./guest.ts";
+import { evaluate, hasStatement } from "./guest.ts";
 import type { GuestRequest } from "./guest.ts";
 import { DEFAULT_LIMITS } from "./protocol.ts";
 
@@ -54,6 +54,29 @@ describe("reusable guest evaluator", () => {
     await withDatabase(async db => {
       const result = await evaluate(db, request("return ctx.db.query('SELECT last_insert_rowid() AS id');"));
       expect(JSON.parse(result.resultJson)).toEqual([{ id: 42 }]);
+    });
+  });
+
+  it("finds a statement only where SQLite would prepare one", () => {
+    for (const sql of ["", " \t\v\f\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1", " \0SELECT 1"]) {
+      expect(hasStatement(sql), JSON.stringify(sql)).toBe(false);
+    }
+    for (const sql of ["SELECT 1", "-- note\nSELECT 1", "/* note */SELECT 1", ";SELECT 1", "SELECT 1\0", "x"]) {
+      expect(hasStatement(sql), JSON.stringify(sql)).toBe(true);
+    }
+  });
+
+  it("refuses SQL with no statement before SQLite prepares it", async () => {
+    await withDatabase(async db => {
+      const result = await evaluate(db, request(`
+        const messages = [];
+        for (const sql of ['', '  ', ';', '-- note', '/* note */']) {
+          try { ctx.db.query(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
+          try { ctx.db.execute(sql); messages.push('prepared'); } catch (error) { messages.push(error.message); }
+        }
+        return messages;
+      `), { persistentConnection: true });
+      expect(JSON.parse(result.resultJson)).toEqual(Array.from({ length: 10 }, () => "SQL statement is empty."));
     });
   });
 
