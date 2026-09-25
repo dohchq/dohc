@@ -68,6 +68,7 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
   WorkbenchMenuCommand,
+  WorkspaceIdPayload,
   WorkspaceSummary,
   noticeOperations,
   workspaceSearchOperations,
@@ -477,6 +478,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.resetAutomationHolds, payload),
   revealAutomationHolds: (payload) =>
     ipcRenderer.invoke(CHANNELS.revealAutomationHolds, payload),
+  listCollectionFieldMarks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listCollectionFieldMarks, payload),
+  onCollectionAutomationsChanged: (listener) =>
+    onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationFailuresChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
