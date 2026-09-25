@@ -1517,10 +1517,19 @@ export const ChatFileReferenceInput = z.object({
 });
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
+// Messages and their authors as the renderer shows them. Only the automation
+// executor in main writes an automation's message; the renderer never sends one.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// Which automation wrote a message, when it ran on this computer.
+const CHAT_MESSAGE_AUTOMATION = z.object({
+  automationId: z.string().min(1).max(1024),
+  collectionPath: SAFE_RELATIVE_PATH,
+});
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
-  authorKind: z.enum(["human", "agent"]),
+  authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
@@ -1528,6 +1537,7 @@ export const ChatMessageRecord = z.object({
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
   createdAtMs: z.number(),
+  automation: CHAT_MESSAGE_AUTOMATION.optional(),
   // Optional on the wire so pre-phase-4 fixture objects and stored messages
   // remain compatible. Main includes the engine's authoritative array.
   attachments: z.array(ChatAttachmentRecord).optional(),
@@ -1887,12 +1897,13 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
-      authorKind: z.enum(["human", "agent"]),
+      authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
+      automation: CHAT_MESSAGE_AUTOMATION.optional(),
       reactions: z.array(ChatReactionRecord),
     })
     .nullable()

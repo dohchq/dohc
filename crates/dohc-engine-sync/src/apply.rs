@@ -673,6 +673,10 @@ struct MessageAppend {
     parent_message_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     origin: Option<String>,
+    /// An automation message's chain depth, so a chain of automations stops
+    /// at the cap across computers. Nothing else carries one.
+    #[serde(default)]
+    chain_depth: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1409,7 +1413,8 @@ fn apply_message(
     if payload.message_id.is_empty()
         || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
-        || !matches!(payload.author_kind.as_str(), "human" | "agent")
+        // Another computer's automation posts as an automation, without its local provenance.
+        || !matches!(payload.author_kind.as_str(), "human" | "agent" | "automation")
         || payload
             .parent_message_id
             .as_ref()
@@ -1424,8 +1429,16 @@ fn apply_message(
             reason: "chat message payload is invalid",
         });
     }
+    if payload.chain_depth.is_some_and(|depth| {
+        payload.author_kind != "automation"
+            || !(1..=dohc_engine_domain::collections::MAX_CHANGE_ATTRIBUTION_DEPTH).contains(&depth)
+    }) {
+        return Err(SyncError::InvalidInput {
+            reason: "chat message chain depth is invalid",
+        });
+    }
     let owner_name = normalize_agent_owner_name(
-        payload.author_kind == "agent",
+        payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
     )
     .map_err(|_| SyncError::InvalidInput {
@@ -1546,7 +1559,7 @@ fn apply_message(
         &payload.thread_id,
         &payload.message_id,
         &author_display_name,
-        payload.author_kind == "agent",
+        &payload.author_kind,
         &body,
     )
     .map_err(|error| map_chat_rule(error, "replicated chat search index maintenance failed"))?;

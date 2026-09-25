@@ -2208,6 +2208,71 @@ ALTER TABLE ydoc_docs ADD COLUMN creator_author_json TEXT
     CHECK (creator_author_json IS NULL OR json_valid(creator_author_json));
 ";
 
+/// Collection automations post in chat under a third author kind. SQLite
+/// cannot change a CHECK in place, so the message and mention tables are
+/// rebuilt with every row kept; no trigger or foreign key points at either.
+/// A message this computer's automation wrote also records which automation
+/// wrote it and its chain depth. Both stay on this computer: rows from other
+/// computers leave them empty, and only automation rows may carry them.
+const V2_CHAT_AUTOMATION_AUTHOR_DDL: &str = "\
+CREATE TABLE chat_messages_next (
+    workspace_id              TEXT    NOT NULL,
+    thread_id                 TEXT    NOT NULL,
+    message_order             INTEGER NOT NULL,
+    message_id                TEXT    NOT NULL,
+    author_kind               TEXT    NOT NULL
+                              CHECK (author_kind IN ('human', 'agent', 'automation')),
+    author_display_name       TEXT    NOT NULL,
+    author_user_id            TEXT,
+    parent_message_id         TEXT,
+    origin                    TEXT,
+    body                      TEXT    NOT NULL,
+    created_at_ms             INTEGER NOT NULL,
+    author_owner_display_name TEXT,
+    automation_id             TEXT,
+    chain_depth               INTEGER CHECK (chain_depth IS NULL OR chain_depth >= 1),
+    PRIMARY KEY (workspace_id, message_id),
+    UNIQUE (workspace_id, thread_id, message_order),
+    FOREIGN KEY (workspace_id, thread_id)
+      REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE,
+    CHECK ((automation_id IS NULL) = (chain_depth IS NULL)),
+    CHECK (automation_id IS NULL OR author_kind = 'automation')
+) STRICT;
+INSERT INTO chat_messages_next
+    (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name,
+     author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name)
+SELECT workspace_id, thread_id, message_order, message_id, author_kind, author_display_name,
+       author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name
+FROM chat_messages;
+DROP TABLE chat_messages;
+ALTER TABLE chat_messages_next RENAME TO chat_messages;
+CREATE INDEX idx_chat_messages_thread_order
+    ON chat_messages(workspace_id, thread_id, message_order);
+CREATE INDEX idx_chat_messages_thread_created
+    ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_workspace_created
+    ON chat_messages(workspace_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_author_feed
+    ON chat_messages(workspace_id, author_user_id, author_kind, created_at_ms DESC, message_id DESC);
+CREATE TABLE chat_mentions_next (
+    workspace_id  TEXT    NOT NULL,
+    thread_id     TEXT    NOT NULL,
+    message_id    TEXT    NOT NULL,
+    handle        TEXT    NOT NULL,
+    author_kind   TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent', 'automation')),
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, handle)
+) STRICT;
+INSERT INTO chat_mentions_next
+    (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms)
+SELECT workspace_id, thread_id, message_id, handle, author_kind, created_at_ms
+FROM chat_mentions;
+DROP TABLE chat_mentions;
+ALTER TABLE chat_mentions_next RENAME TO chat_mentions;
+CREATE INDEX idx_chat_mentions_handle
+    ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2256,6 +2321,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 7,
         id: "v2-automation-record-lifecycle",
         sql: V2_AUTOMATION_RECORD_LIFECYCLE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 8,
+        id: "v2-chat-automation-author",
+        sql: V2_CHAT_AUTOMATION_AUTHOR_DDL,
         sets_user_version: None,
     },
 ];
@@ -2506,6 +2577,10 @@ mod tests {
                 "v2-automation-record-lifecycle",
                 "6415d033148cd23041a34cb07b6520e03718c6b0c9f6b4c1d13bd4d6612002ba",
             ),
+            (
+                "v2-chat-automation-author",
+                "d5589dd027faf792b65857b27897731a0da25379df7b421c2c8749985ac1e947",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2560,6 +2635,145 @@ mod tests {
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
+    }
+
+    /// Messages and mentions written before automations could post keep every
+    /// column, and the rebuilt tables take the automation kind with its local
+    /// provenance on automation rows only.
+    #[test]
+    fn chat_rows_from_before_automation_authors_upgrade_unchanged() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-chat-automation-author")
+            .expect("the chat automation author migration ships");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("store before automation authors");
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', NULL, NULL, 'Hi @ana', 2, NULL), \
+                        ('ws', 'thread-1', 1, 'message-2', 'agent', 'Helper', 'user-ice', 'message-1', 'cli', 'Done', 3, 'Ice'); \
+             INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 'message-1', 'ana', 'human', 2);",
+        )
+        .expect("seed pre-upgrade chat rows");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade");
+
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT message_id, author_kind, author_display_name, author_user_id, parent_message_id, \
+                        origin, body, created_at_ms, author_owner_display_name, automation_id, chain_depth \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .expect("message query")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?))
+            })
+            .expect("messages")
+            .collect::<Result<_, _>>()
+            .expect("message rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "message-1".into(),
+                    "human".into(),
+                    "Ice".into(),
+                    Some("user-ice".into()),
+                    None,
+                    None,
+                    "Hi @ana".into(),
+                    2,
+                    None,
+                    None,
+                    None
+                ),
+                (
+                    "message-2".into(),
+                    "agent".into(),
+                    "Helper".into(),
+                    Some("user-ice".into()),
+                    Some("message-1".into()),
+                    Some("cli".into()),
+                    "Done".into(),
+                    3,
+                    Some("Ice".into()),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let mention: (String, String) = conn
+            .query_row(
+                "SELECT handle, author_kind FROM chat_mentions WHERE message_id = 'message-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mention");
+        assert_eq!(mention, ("ana".to_owned(), "human".to_owned()));
+
+        let insert = |kind: &str, automation_id: Option<&str>, depth: Option<i64>, order: i64| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      body, created_at_ms, automation_id, chain_depth) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Stamp the finish date', 'Done', 4, ?4, ?5)",
+                rusqlite::params![order, format!("message-{order}"), kind, automation_id, depth],
+            )
+        };
+        insert(
+            "automation",
+            Some("collection:Trip/Tasks#stamp"),
+            Some(1),
+            10,
+        )
+        .expect("a local automation message");
+        insert("automation", None, None, 11).expect("an automation message from another computer");
+        assert!(
+            insert("human", Some("collection:Trip/Tasks#stamp"), Some(1), 12).is_err(),
+            "only automation rows name an automation"
+        );
+        assert!(
+            insert("automation", Some("collection:Trip/Tasks#stamp"), None, 13).is_err(),
+            "an automation id comes with its depth"
+        );
+        assert!(
+            insert(
+                "automation",
+                Some("collection:Trip/Tasks#stamp"),
+                Some(0),
+                14
+            )
+            .is_err(),
+            "an automation write is at depth 1 or more"
+        );
+        conn.execute(
+            "INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws', 'thread-1', 'message-10', 'ana', 'automation', 4)",
+            [],
+        )
+        .expect("an automation mention");
     }
 
     /// Plugin subscriptions and claims written before the automation facts

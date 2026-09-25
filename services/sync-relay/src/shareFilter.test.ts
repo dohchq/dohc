@@ -844,6 +844,19 @@ describe("chat-channel share op filter", () => {
     if (message.allowed) expect(message.blobSha256s).toEqual([]);
   });
 
+  it("serves an automation's chain depth but never its automation", () => {
+    const result = decide("chat.message.append", {
+      messageId: "m-automation", threadId: "thread-in", authorKind: "automation",
+      authorDisplayName: "Stamp", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Done", createdAtMs: 2, chainDepth: 2,
+      automationId: "collection:PRIVATE-Tasks#stamp",
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ authorKind: "automation", chainDepth: 2 });
+    expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
+  });
+
   it("shares the agent owner while stripping local runner configuration", () => {
     const result = decide("chat.message.append", {
       messageId: "m-agent", threadId: "thread-in", authorKind: "agent",

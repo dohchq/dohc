@@ -138,6 +138,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
     LinkedChatStore::new(&mut source)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 channel_id: "decision-channel".to_owned(),
                 thread_id: "decision-thread".to_owned(),
@@ -162,6 +163,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
     LinkedChatStore::new(&mut source)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 thread_id: "decision-thread".to_owned(),
                 message_id: "local-resolver".to_owned(),
@@ -1287,6 +1289,140 @@ fn ready_pending_replay_bumps_every_conversation_it_materializes() {
 }
 
 #[test]
+fn another_computers_automation_message_applies_without_its_automation() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let message = envelope(
+        "peer",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "automation-message",
+            "threadId": "thread-imported",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "authorOwnerDisplayName": "Ana",
+            "authorUserId": "ana",
+            "body": "Done @ice",
+            "createdAtMs": 30,
+            "chainDepth": 2
+        }),
+    );
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("automation message");
+    // Only an automation message carries a chain depth, within the depth
+    // bound.
+    for (seq, author_kind, owner, depth) in [
+        (10, "human", None, json!(1)),
+        (11, "automation", Some("Ana"), json!(0)),
+        (12, "automation", Some("Ana"), json!(65)),
+        (13, "automation", Some("Ana"), json!("2")),
+    ] {
+        let mut payload = json!({
+            "messageId": format!("bad-depth-{seq}"),
+            "threadId": "thread-imported",
+            "authorKind": author_kind,
+            "authorDisplayName": "Ana",
+            "body": "Hi",
+            "createdAtMs": 31,
+            "chainDepth": depth,
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        let refused = envelope(
+            &format!("bad-depth-peer-{seq}"),
+            0,
+            "chat.message.append",
+            payload,
+        );
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &refused, &NoFaults));
+    }
+    let stored: (String, String, Option<String>, Option<i64>, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT m.author_kind, m.author_owner_display_name, m.automation_id, m.chain_depth, \
+                        (SELECT author_kind FROM chat_mentions WHERE message_id = m.message_id AND handle = 'ice') \
+                 FROM chat_messages m WHERE m.message_id = 'automation-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored automation message");
+    assert_eq!(
+        stored,
+        (
+            "automation".to_owned(),
+            "Ana".to_owned(),
+            None,
+            None,
+            "automation".to_owned()
+        )
+    );
+
+    let reaction = envelope(
+        "peer",
+        4,
+        "chat.reaction.set",
+        json!({
+            "reactionId": "reaction-automation",
+            "messageId": "automation-message",
+            "threadId": "thread-imported",
+            "emoji": "👍",
+            "authorId": "ana",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "atMs": 40,
+            "state": "added",
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &reaction, &NoFaults));
+
+    // An automation message that arrives before its thread is parked, then replays with its person.
+    let early = envelope(
+        "early-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "early-automation-message",
+            "threadId": "late-thread",
+            "authorKind": "automation",
+            "authorDisplayName": "Stamp the finish date",
+            "authorOwnerDisplayName": "Ana",
+            "authorUserId": "ana",
+            "body": "Done",
+            "createdAtMs": 50
+        }),
+    );
+    apply_chat_envelope(&mut engine, &early, &NoFaults).expect("parked automation message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 40,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, author_owner_display_name FROM chat_messages                  WHERE message_id = 'early-automation-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed automation message");
+    assert_eq!(replayed, ("automation".to_owned(), "Ana".to_owned()));
+}
+
+#[test]
 fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     let (_scratch, _path, mut engine) = open_store();
     let message = envelope(
@@ -2243,6 +2379,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
     LinkedChatStore::new(&mut engine)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 thread_id: "default-thread".to_owned(),
                 message_id: "default-message".to_owned(),
@@ -2467,6 +2604,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
     LinkedChatStore::new(&mut first_peer)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 channel_id: placeholder_channel_id,
                 thread_id: "long-wire-local-thread".to_owned(),
@@ -3047,6 +3185,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
     LinkedChatStore::new(&mut engine)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 thread_id: "thread-imported".to_owned(),
                 message_id: "refused-message-id".to_owned(),
@@ -3087,6 +3226,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
     LinkedChatStore::new(&mut engine)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 thread_id: "thread-imported".to_owned(),
                 message_id: "authored-child".to_owned(),
@@ -3236,6 +3376,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
     LinkedChatStore::new(&mut first_peer)
         .start_channel_thread(
             &StartChannelThread {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 channel_id: "channel-imported".to_owned(),
                 thread_id: "refused-thread-id".to_owned(),
@@ -3260,6 +3401,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
     LinkedChatStore::new(&mut first_peer)
         .send_message(
             &SendMessage {
+                automation: None,
                 workspace_id: "ws".to_owned(),
                 thread_id: "refused-thread-id".to_owned(),
                 message_id: "second-message-after-refused-thread".to_owned(),
