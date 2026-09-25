@@ -643,6 +643,9 @@ struct PagedShareRelay {
     /// end is written.
     collection_write_answers:
         Mutex<std::collections::VecDeque<Result<ShareCollectionWriteResponse, RelayError>>>,
+    /// What the relay answers each blob upload, in order. An upload past the
+    /// end is stored.
+    blob_upload_errors: Mutex<std::collections::VecDeque<RelayError>>,
 }
 
 impl PagedShareRelay {
@@ -664,6 +667,7 @@ impl PagedShareRelay {
             proposal_submits: Mutex::new(Vec::new()),
             collection_writes: Mutex::new(Vec::new()),
             collection_write_answers: Mutex::new(std::collections::VecDeque::new()),
+            blob_upload_errors: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -794,6 +798,9 @@ impl RelayTransport for PagedShareRelay {
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
+        if let Some(error) = self.blob_upload_errors.lock().expect("upload errors").pop_front() {
+            return Err(error);
+        }
         self.proposal_calls
             .lock()
             .expect("proposal calls")

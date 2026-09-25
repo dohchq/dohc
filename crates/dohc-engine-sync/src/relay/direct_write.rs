@@ -169,13 +169,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut uploaded = BTreeMap::new();
         for write in plan.writes.iter().filter(|write| write.result.is_none()) {
             let mut changes = write.request.changes.clone();
-            self.upload_proposed_blobs(store, share_id, &mut changes, &mut uploaded)?;
-            let response = match self.transport.share_collection_write(write.request.clone()) {
+            let sent = self
+                .upload_proposed_blobs(store, share_id, &mut changes, &mut uploaded)
+                .and_then(|()| self.transport.share_collection_write(write.request.clone()));
+            let response = match sent {
                 Ok(response) => response,
                 Err(error) => {
                     // A relay that does not take these writes, or no longer
                     // takes them from this grant, will not answer later
-                    // either. Dropping the plan lets Send changes offer the
+                    // either, whether it says so to the upload or to the
+                    // write. Dropping the plan lets Send changes offer the
                     // files it still carries.
                     if relay_refuses_the_lane(&error) {
                         abandon_direct_write_plan(store, workspace_id, share_id, faults)?;

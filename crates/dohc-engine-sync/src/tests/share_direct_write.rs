@@ -521,6 +521,40 @@ fn a_relay_that_does_not_take_direct_writes_leaves_the_change_to_send_changes() 
 }
 
 #[test]
+fn an_upload_the_grant_can_no_longer_make_leaves_the_change_to_send_changes() {
+    for (error, dropped) in [
+        (RelayError::ShareReadOnly, true),
+        (RelayError::Forbidden, true),
+        (RelayError::Partitioned, false),
+    ] {
+        let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
+        let schema = "shared/docs/packing/collection.yaml";
+        journal_local_moment(
+            &mut engine,
+            &edit_moment("m-1", "object-schema", schema, "v1", "v2"),
+            1_001,
+        );
+        let relay = PagedShareRelay::new([], []);
+        relay
+            .blob_upload_errors
+            .lock()
+            .expect("upload errors")
+            .push_back(error.clone());
+        let client = RelaySyncClient::new(relay);
+
+        assert_eq!(
+            client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+            Err(error.clone()),
+        );
+        assert!(written_paths(&client).is_empty(), "{error:?}");
+        // A lasting no drops the plan, so Send changes offers the change. A
+        // failure that may pass keeps it, and Send changes waits.
+        let proposed = propose(&client, &mut engine, "submit-1").submitted;
+        assert_eq!(proposed, usize::from(dropped), "{error:?}");
+    }
+}
+
+#[test]
 fn a_refused_edit_after_a_delivered_create_keeps_the_create_delivered() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["rules", "rules two"]);
     hold_schema(&mut engine, "shared/docs/packing");
